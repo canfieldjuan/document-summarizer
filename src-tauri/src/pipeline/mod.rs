@@ -1,6 +1,7 @@
 pub mod contracts;
 pub mod db;
 pub mod ingest;
+pub mod normalize;
 pub mod parser;
 mod schema;
 pub mod state;

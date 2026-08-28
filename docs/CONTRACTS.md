@@ -114,8 +114,11 @@ per-run sequence and SQLite triggers reject update or deletion.
 - Parser implementations implement `DocumentParser::parse(&IngestedDocument)`
   and return either `ParsedDocument` or structured `PipelineFailure`. No
   PDF-library type crosses or is persisted at this boundary.
-- `NormalizedDocument` is deliberately deferred. Future PDF, DOCX, OCR, and
-  vision paths will converge there after parsing or visual extraction.
+- `DocumentNormalizer` accepts only parser-neutral `ParsedDocument` and emits
+  the canonical `NormalizedDocument` consumed by future downstream stages.
+  PDF-library types are not part of either normalization contract. Future DOCX,
+  OCR, and vision paths must converge into this canonical representation with
+  an appropriate `SourceType`.
 - `ModelRuntime` is deliberately deferred. Generic run state and SQLite schema
   contain no llama.cpp, ONNX, model, prompt, or inference-runtime assumptions.
 
@@ -148,3 +151,57 @@ Parsed artifacts are stored by pipeline run, preserving the run-to-document
 relationship and parser identity/version. Artifact insertion, the transition
 to `PARSED`, state-version increment, and `PARSED` event append share one SQLite
 transaction.
+
+## `NormalizedDocument` (Slice 3)
+
+```rust
+pub struct NormalizedDocument {
+    pub document_id: String,
+    pub normalization_version: String,
+    pub pages: Vec<NormalizedPage>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
+pub struct NormalizedPage {
+    pub page_number: u32,
+    pub content: Vec<NormalizedBlock>,
+    pub warnings: Vec<PipelineWarning>,
+    pub requires_visual_processing: bool,
+}
+
+pub struct NormalizedBlock {
+    pub block_id: String,
+    pub kind: NormalizedBlockKind,
+    pub text: String,
+    pub source: SourceSpan,
+}
+
+pub struct SourceSpan {
+    pub page_start: u32,
+    pub page_end: u32,
+    pub section_id: Option<String>,
+    pub source_type: SourceType,
+}
+```
+
+Normalization version `1.0.0` creates one `Text` block for each non-empty
+native-text page. Empty pages remain in position with no blocks and retain their
+warnings and visual-processing marker. Block IDs are deterministic SHA-256
+identities derived from document ID, normalization version, page number, and
+block order. Current spans are page-local with `source_type = NativeText` and no
+section ID.
+
+Permitted cleaning is limited to normalizing CRLF/CR line endings to LF and
+removing NUL while preserving all other controls, tabs, spaces, blank lines,
+Unicode, punctuation, and substantive source text. Any cleanup adds
+`REPRESENTATION_CLEANUP_APPLIED`; no repeated header/footer removal or structural
+interpretation occurs.
+
+Validation requires matching document identity and normalization version,
+unchanged page count/order/numbers, preserved warnings and visual-routing
+markers, exact text after the permitted cleanup, deterministic unique block
+IDs, and page-local source spans that reference existing pages. The schema-v3
+normalized artifact stores its version, document/run association, serialized
+artifact JSON, and SHA-256 integrity hash. Artifact insertion, `NORMALIZING ->
+NORMALIZED`, state-version increment, and event append commit in one SQLite
+transaction; retrieval verifies the stored hash, artifact metadata, and run-to-document association.

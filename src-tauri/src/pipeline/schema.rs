@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -73,6 +73,22 @@ BEFORE DELETE ON pipeline_events
 BEGIN
     SELECT RAISE(ABORT, 'pipeline_events are immutable');
 END;
+"#;
+
+const V2_TO_V3: &str = r#"
+CREATE TABLE normalized_documents (
+    run_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    normalization_version TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    normalized_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX normalized_documents_document_id_idx
+ON normalized_documents(document_id);
 "#;
 
 const LEGACY_TO_V2: &str = r#"
@@ -232,25 +248,33 @@ pub enum MigrationError {
 }
 
 pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
-    let version = version(conn)?;
-    if version > CURRENT_SCHEMA_VERSION {
+    let mut current_version = version(conn)?;
+    if current_version > CURRENT_SCHEMA_VERSION {
         return Err(MigrationError::UnsupportedVersion {
-            found: version,
+            found: current_version,
             supported: CURRENT_SCHEMA_VERSION,
         });
     }
-    if version == CURRENT_SCHEMA_VERSION {
+    if current_version == CURRENT_SCHEMA_VERSION {
         return validate(conn);
     }
 
     let has_legacy_schema = table_exists(conn, "pipeline_runs")?;
-    if version == 0 && !has_legacy_schema {
+    if current_version == 0 && !has_legacy_schema {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA_V2)?;
+        tx.execute_batch(V2_TO_V3)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
-    } else {
-        migrate_legacy(conn)?;
+        return validate(conn);
+    }
+
+    if current_version < 2 {
+        migrate_legacy_to_v2(conn)?;
+        current_version = 2;
+    }
+    if current_version == 2 {
+        migrate_v2_to_v3(conn)?;
     }
     validate(conn)
 }
@@ -259,12 +283,12 @@ pub fn version(conn: &Connection) -> Result<u32, MigrationError> {
     Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
 }
 
-fn migrate_legacy(conn: &mut Connection) -> Result<(), MigrationError> {
+fn migrate_legacy_to_v2(conn: &mut Connection) -> Result<(), MigrationError> {
     conn.pragma_update(None, "foreign_keys", "OFF")?;
     let migration_result = (|| -> Result<(), MigrationError> {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(LEGACY_TO_V2)?;
-        tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", 2)?;
         tx.commit()?;
         Ok(())
     })();
@@ -273,6 +297,14 @@ fn migrate_legacy(conn: &mut Connection) -> Result<(), MigrationError> {
         .map_err(MigrationError::from);
     migration_result?;
     enable_result?;
+    Ok(())
+}
+
+fn migrate_v2_to_v3(conn: &mut Connection) -> Result<(), MigrationError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(V2_TO_V3)?;
+    tx.pragma_update(None, "user_version", 3)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -295,6 +327,18 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         ));
     }
 
+    let normalized_columns: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('normalized_documents')
+         WHERE name IN ('normalization_version', 'artifact_hash', 'normalized_artifact')",
+        [],
+        |row| row.get(0),
+    )?;
+    if normalized_columns != 3 {
+        return Err(MigrationError::Invariant(
+            "normalized_documents artifact columns are missing".to_string(),
+        ));
+    }
+
     let foreign_key_violation: Option<String> = conn
         .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
         .optional()?;
@@ -313,4 +357,95 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool, MigrationError> 
         |row| row.get(0),
     )?;
     Ok(count == 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    struct TestDatabase(PathBuf);
+
+    impl TestDatabase {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!("doc-sum-schema-{}.db", Uuid::new_v4())))
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn schema_v2_upgrades_to_v3_without_rewriting_slice2_artifacts() {
+        let database = TestDatabase::new();
+        {
+            let conn = Connection::open(&database.0).expect("v2 database should open");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            conn.execute_batch(SCHEMA_V2)
+                .expect("v2 schema should initialize");
+            conn.pragma_update(None, "user_version", 2)
+                .expect("v2 version should persist");
+            conn.execute_batch(
+                r#"
+                INSERT INTO documents VALUES (
+                    'slice2-document', 'slice2.pdf', 'pdf', 12, 'slice2-hash',
+                    '/slice2.pdf', '2026-08-28T00:00:00+00:00'
+                );
+                INSERT INTO pipeline_runs VALUES (
+                    'slice2-run', 'slice2-document', '"Parsed"', 5, '1.0',
+                    '2026-08-28T00:00:00+00:00', '2026-08-28T00:00:01+00:00',
+                    '2026-08-28T00:00:02+00:00', NULL, '"Parse"',
+                    '{"total_units":0,"completed_units":0,"failed_units":0}',
+                    '[]', NULL, 0, 1
+                );
+                INSERT INTO pipeline_events VALUES (
+                    'slice2-event', 'slice2-run', 0, NULL, '"Parsed"',
+                    '2026-08-28T00:00:02+00:00', '"Parse"', NULL, NULL
+                );
+                INSERT INTO parsed_documents VALUES (
+                    'slice2-run', 'slice2-document', 'fixture-parser', 'test',
+                    '{"slice":2}', '2026-08-28T00:00:02+00:00'
+                );
+                "#,
+            )
+            .expect("Slice 2 rows should persist");
+        }
+
+        {
+            let mut conn = Connection::open(&database.0).expect("database should reopen");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            migrate(&mut conn).expect("v2 schema should migrate");
+            assert_eq!(version(&conn).expect("version should load"), 3);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT parsed_artifact FROM parsed_documents WHERE run_id = 'slice2-run'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("parsed artifact should survive"),
+                r#"{"slice":2}"#
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM normalized_documents", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("normalized table should exist"),
+                0
+            );
+        }
+
+        let mut reopened = Connection::open(&database.0).expect("migrated database should reopen");
+        reopened
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        migrate(&mut reopened).expect("repeated v3 initialization should be deterministic");
+        assert_eq!(version(&reopened).expect("version should load"), 3);
+    }
 }

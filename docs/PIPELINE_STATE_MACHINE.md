@@ -75,6 +75,16 @@ transaction as `PARSING -> PARSED`. If that success transaction fails and the
 database remains writable, the run is moved to `FAILED`; if SQLite itself can no
 longer persist anything, `PARSING` remains truthful evidence of interrupted work.
 
+For normalization, the persisted parsed artifact is loaded before `PARSED ->
+NORMALIZING` commits. Normalization is deterministic and parser-independent.
+Success validates document identity, version, page preservation, exact permitted
+text cleanup, deterministic block IDs, visual markers, and source provenance.
+The normalized artifact and integrity hash commit in the same transaction as
+`NORMALIZING -> NORMALIZED` and its event. Invalid parsed input, invalid
+normalized output, or a normalizer failure persists `NORMALIZING -> FAILED`
+without a normalized artifact. If the success transaction fails while SQLite
+remains writable, the run is likewise moved to `FAILED`.
+
 ### Ingestion transaction behavior
 
 Extension/signature validation and source reading occur before durable run

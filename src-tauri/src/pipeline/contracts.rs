@@ -138,11 +138,61 @@ pub struct ParsedDocument {
     pub warnings: Vec<PipelineWarning>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceType {
+    NativeText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSpan {
+    pub page_start: u32,
+    pub page_end: u32,
+    pub section_id: Option<String>,
+    pub source_type: SourceType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NormalizedBlockKind {
+    Text,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedBlock {
+    pub block_id: String,
+    pub kind: NormalizedBlockKind,
+    pub text: String,
+    pub source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedPage {
+    pub page_number: u32,
+    pub content: Vec<NormalizedBlock>,
+    pub warnings: Vec<PipelineWarning>,
+    pub requires_visual_processing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedDocument {
+    pub document_id: String,
+    pub normalization_version: String,
+    pub pages: Vec<NormalizedPage>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
 /// Replaceable boundary between an ingested source and a parser-specific
 /// implementation. Downstream stages depend on `ParsedDocument`, never on a
 /// PDF crate's types.
 pub trait DocumentParser {
     fn parse(&self, document: &IngestedDocument) -> Result<ParsedDocument, PipelineFailure>;
     fn id(&self) -> &'static str;
+    fn version(&self) -> &'static str;
+}
+
+/// Parser-independent boundary between persisted parser output and every
+/// downstream pipeline stage.
+pub trait DocumentNormalizer {
+    fn normalize(&self, parsed: &ParsedDocument) -> Result<NormalizedDocument, PipelineFailure>;
     fn version(&self) -> &'static str;
 }

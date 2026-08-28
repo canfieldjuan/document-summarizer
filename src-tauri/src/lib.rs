@@ -1,8 +1,11 @@
 pub mod pipeline;
 
-use pipeline::contracts::{IngestedDocument, ParsedDocument, PipelineRun};
+use pipeline::contracts::{IngestedDocument, NormalizedDocument, ParsedDocument, PipelineRun};
 use pipeline::db::init_db;
 use pipeline::ingest::{ingest_pdf, IngestError};
+use pipeline::normalize::{
+    normalize_document as normalize_pipeline_document, CanonicalNormalizer, NormalizePipelineError,
+};
 use pipeline::parser::{
     parse_document as parse_pipeline_document, ParsePipelineError, PdfExtractParser,
 };
@@ -45,6 +48,13 @@ impl From<ParsePipelineError> for CommandError {
     }
 }
 
+impl From<NormalizePipelineError> for CommandError {
+    fn from(error: NormalizePipelineError) -> Self {
+        let code = error.code().to_string();
+        Self::new(code, error.to_string())
+    }
+}
+
 #[tauri::command]
 fn ingest_document(
     state: State<'_, AppState>,
@@ -74,6 +84,21 @@ fn parse_document(
         .map_err(CommandError::from)
 }
 
+#[tauri::command]
+fn normalize_document(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<NormalizedDocument, CommandError> {
+    let mut conn = state.db.lock().map_err(|_| {
+        CommandError::new(
+            "DATABASE_LOCK_UNAVAILABLE",
+            "The local database lock is unavailable",
+        )
+    })?;
+    normalize_pipeline_document(&mut conn, &CanonicalNormalizer::new(), &run_id)
+        .map_err(CommandError::from)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn Error>> {
     tauri::Builder::default()
@@ -90,7 +115,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![ingest_document, parse_document])
+        .invoke_handler(tauri::generate_handler![
+            ingest_document,
+            parse_document,
+            normalize_document
+        ])
         .run(tauri::generate_context!())?;
     Ok(())
 }

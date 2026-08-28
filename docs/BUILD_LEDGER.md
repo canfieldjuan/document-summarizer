@@ -158,7 +158,49 @@ deterministically; password handling is deferred.
 - An automated test closes the SQLite connection, reopens the database independently, and compares the complete parsed artifact and ordered event history. This is not labeled a full desktop-process restart.
 
 **Deferred**:
-- Normalization, semantic blocks, OCR, vision, chunking, citations, models, and summarization.
+- Semantic structure, OCR, vision, chunking, citations, models, and summarization.
 - Password entry/decryption for encrypted PDFs.
 - Automatic recovery for process interruption while `PARSING`.
 - Parser resource caps and broader real-world corpus evaluation.
+
+## Slice 3: Canonical Document Normalization
+
+**Status**: Implemented
+
+**Git baseline**:
+- Initialized the repository before Slice 3 and committed the verified Slice 2 tree as `91dce3cb9039cea7f3e08ac7cbb3060d2f730821` (`chore: establish verified Slice 2 baseline`).
+
+**Normalization contract**:
+- `DocumentNormalizer` accepts parser-neutral `ParsedDocument` and returns `NormalizedDocument` or structured `PipelineFailure`.
+- Normalization version `1.0.0` preserves page count, order, numbering, warnings, visual-routing markers, and exact substantive text.
+- Each non-empty page becomes one conservative `Text` block. Empty pages remain present with no blocks.
+- Every block has a deterministic identity and a page-local `NativeText` source span. No PDF-library type crosses this boundary.
+
+**Cleaning rules**:
+- CRLF and CR line endings become LF.
+- NUL is removed and recorded with `REPRESENTATION_CLEANUP_APPLIED`; other control characters are preserved until corpus evidence proves broader cleanup safe.
+- Tabs, repeated spaces, blank lines, Unicode, punctuation, dates, numbers, identifiers, names, email addresses, and negation remain unchanged.
+- Repeated headers/footers are neither detected nor removed because current parser output has no reliable layout boundary for that decision.
+
+**Validation and failure behavior**:
+- Validation rejects mismatched document/version identity, changed page topology, lost warnings or visual markers, changed text, nondeterministic/duplicate block IDs, nonexistent source pages, cross-page spans, and unsupported section provenance.
+- Semantically inconsistent persisted parser output transitions `NORMALIZING -> FAILED`; no normalized artifact or false `NORMALIZED` event is written.
+- A fixture parser proves normalization does not depend on `pdf-extract` output types.
+
+**Persistence and migration**:
+- Explicit schema version 3 adds `normalized_documents` keyed by run with document association, normalization version, serialized artifact JSON, creation time, and SHA-256 integrity hash.
+- Fresh databases create schema v3 atomically. Existing schema-v2 databases migrate additively without rewriting Slice 2 artifacts; legacy databases traverse the existing v2 migration before v3.
+- Artifact insertion, state/version update, and immutable event append share one transaction. Retrieval verifies the artifact hash, stored identity/version metadata, and the run-to-document association.
+
+**Tests/proof**:
+- Focused normalization suite: 9 passed, 0 failed.
+- Combined Rust suite after Slice 3 implementation: 37 passed, 0 failed.
+- Tests cover factual fidelity, Unicode, conservative whitespace, determinism, multi-page provenance, empty-page preservation, invalid/mixed boundary inputs, lifecycle, atomic rollback, integrity and run-association tampering, independent reopen, stale two-connection CAS, and v2-to-v3 migration.
+- `git diff --check`, `cargo fmt --check`, strict Clippy, the TypeScript/Vite production build, and the no-bundle Tauri release build passed.
+- A bounded launch of the exact release executable migrated the existing AppData database from schema version 2 to 3 while SQLite `quick_check` remained `ok`; the normalized artifact columns were present afterward. No interactive normalization command was exercised in this process smoke.
+
+**Known limitations and deferred cleanup**:
+- Version `1.0.0` deliberately emits at most one block per non-empty page; paragraph, heading, list, table, and section interpretation belongs to Slice 4.
+- No repeated header/footer annotation is attempted without reliable layout metadata.
+- Automatic recovery for a process interrupted in `NORMALIZING` is not implemented.
+- OCR, vision, chunking, models, summaries, citations, embeddings, RAG, and chat remain deferred.

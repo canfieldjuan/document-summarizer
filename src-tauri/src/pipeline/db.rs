@@ -1,6 +1,6 @@
 use crate::pipeline::contracts::{
-    IngestedDocument, ParsedDocument, PipelineEvent, PipelineFailure, PipelineRun, PipelineStage,
-    PipelineState, PipelineWarning,
+    IngestedDocument, NormalizedDocument, ParsedDocument, PipelineEvent, PipelineFailure,
+    PipelineRun, PipelineStage, PipelineState, PipelineWarning,
 };
 use crate::pipeline::schema::{self, MigrationError};
 use crate::pipeline::state::{StateMachine, TransitionError};
@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
@@ -29,6 +30,8 @@ pub enum StoreError {
     RunNotFound(String),
     #[error("Document not found: {0}")]
     DocumentNotFound(String),
+    #[error("Parsed artifact not found for pipeline run: {0}")]
+    ParsedArtifactNotFound(String),
     #[error("Invalid new ingestion: {0}")]
     InvalidIngestion(String),
     #[error("Parsed artifact document {artifact_document_id} does not match run document {run_document_id}")]
@@ -36,6 +39,15 @@ pub enum StoreError {
         artifact_document_id: String,
         run_document_id: String,
     },
+    #[error("Normalized artifact document {artifact_document_id} does not match run document {run_document_id}")]
+    NormalizedArtifactDocumentMismatch {
+        artifact_document_id: String,
+        run_document_id: String,
+    },
+    #[error("Normalized artifact metadata does not match its storage record for run {run_id}")]
+    NormalizedArtifactMetadataMismatch { run_id: String },
+    #[error("Normalized artifact integrity hash does not match for run {run_id}")]
+    NormalizedArtifactIntegrityMismatch { run_id: String },
     #[error("Persisted transition lost its expected state/version for run {run_id}")]
     StaleWrite { run_id: String },
     #[error(transparent)]
@@ -68,6 +80,10 @@ fn to_json<T: Serialize>(value: &T) -> Result<String, StoreError> {
 
 fn from_json<T: DeserializeOwned>(value: &str) -> Result<T, StoreError> {
     Ok(serde_json::from_str(value)?)
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(value))
 }
 
 fn parse_timestamp(value: String) -> Result<DateTime<Utc>, StoreError> {
@@ -336,6 +352,52 @@ pub fn get_parsed_document(
     artifact.as_deref().map(from_json).transpose()
 }
 
+pub fn get_normalized_document(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<NormalizedDocument>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT normalized_documents.document_id, normalization_version, artifact_hash,
+                    normalized_artifact, pipeline_runs.document_id
+             FROM normalized_documents
+             JOIN pipeline_runs USING (run_id)
+             WHERE normalized_documents.run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    row.map(
+        |(document_id, normalization_version, artifact_hash, artifact_json, run_document_id)| {
+            if sha256_hex(artifact_json.as_bytes()) != artifact_hash {
+                return Err(StoreError::NormalizedArtifactIntegrityMismatch {
+                    run_id: run_id.to_string(),
+                });
+            }
+            let artifact: NormalizedDocument = from_json(&artifact_json)?;
+            if artifact.document_id != document_id
+                || artifact.normalization_version != normalization_version
+                || document_id != run_document_id
+            {
+                return Err(StoreError::NormalizedArtifactMetadataMismatch {
+                    run_id: run_id.to_string(),
+                });
+            }
+            Ok(artifact)
+        },
+    )
+    .transpose()
+}
+
 pub(super) fn persist_ingestion(
     conn: &mut Connection,
     document: &IngestedDocument,
@@ -501,6 +563,88 @@ pub(super) fn fail_parsing(
     Ok(failed_run)
 }
 
+pub(super) fn start_normalizing(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+) -> Result<(PipelineRun, ParsedDocument), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let parsed = get_parsed_document(&tx, run_id)?
+        .ok_or_else(|| StoreError::ParsedArtifactNotFound(run_id.to_string()))?;
+    let normalizing_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Parsed,
+        expected_version,
+        PipelineState::Normalizing,
+        Some(PipelineStage::Normalize),
+        None,
+        TransitionPatch::default(),
+    )?;
+    tx.commit()?;
+    Ok((normalizing_run, parsed))
+}
+
+pub(super) fn complete_normalization(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    normalized: &NormalizedDocument,
+    warnings: Vec<PipelineWarning>,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let run = get_pipeline_run(&tx, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    if run.document_id != normalized.document_id {
+        return Err(StoreError::NormalizedArtifactDocumentMismatch {
+            artifact_document_id: normalized.document_id.clone(),
+            run_document_id: run.document_id,
+        });
+    }
+
+    insert_normalized_document(&tx, run_id, normalized)?;
+    let normalized_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Normalizing,
+        expected_version,
+        PipelineState::Normalized,
+        Some(PipelineStage::Normalize),
+        None,
+        TransitionPatch {
+            warnings: Some(warnings),
+            failure: None,
+        },
+    )?;
+    tx.commit()?;
+    Ok(normalized_run)
+}
+
+pub(super) fn fail_normalization(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    failure: PipelineFailure,
+) -> Result<PipelineRun, StoreError> {
+    let reason = Some(failure.code.clone());
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let failed_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Normalizing,
+        expected_version,
+        PipelineState::Failed,
+        Some(PipelineStage::Normalize),
+        reason,
+        TransitionPatch {
+            warnings: None,
+            failure: Some(failure),
+        },
+    )?;
+    tx.commit()?;
+    Ok(failed_run)
+}
+
 fn insert_parsed_document(
     conn: &Connection,
     run_id: &str,
@@ -516,6 +660,30 @@ fn insert_parsed_document(
             parsed.parser_id,
             parsed.parser_version,
             to_json(parsed)?,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_normalized_document(
+    conn: &Connection,
+    run_id: &str,
+    normalized: &NormalizedDocument,
+) -> Result<(), StoreError> {
+    let artifact_json = to_json(normalized)?;
+    let artifact_hash = sha256_hex(artifact_json.as_bytes());
+    conn.execute(
+        "INSERT INTO normalized_documents (
+            run_id, document_id, normalization_version, artifact_hash,
+            normalized_artifact, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            run_id,
+            normalized.document_id,
+            normalized.normalization_version,
+            artifact_hash,
+            artifact_json,
             Utc::now().to_rfc3339(),
         ],
     )?;
@@ -889,7 +1057,7 @@ mod tests {
 
         {
             let migrated = init_db(&database.0).expect("legacy DB should migrate");
-            assert_eq!(schema_version(&migrated).expect("version should load"), 2);
+            assert_eq!(schema_version(&migrated).expect("version should load"), 3);
             let run = get_pipeline_run(&migrated, "legacy-run")
                 .expect("run should load")
                 .expect("run should exist");
@@ -902,7 +1070,7 @@ mod tests {
         }
 
         let reopened = init_db(&database.0).expect("migrated DB should reopen");
-        assert_eq!(schema_version(&reopened).expect("version should load"), 2);
+        assert_eq!(schema_version(&reopened).expect("version should load"), 3);
         assert_eq!(
             list_pipeline_events(&reopened, "legacy-run")
                 .expect("events should load")
