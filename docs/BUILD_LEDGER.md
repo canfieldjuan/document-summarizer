@@ -204,3 +204,41 @@ deterministically; password handling is deferred.
 - No repeated header/footer annotation is attempted without reliable layout metadata.
 - Automatic recovery for a process interrupted in `NORMALIZING` is not implemented.
 - OCR, vision, chunking, models, summaries, citations, embeddings, RAG, and chat remain deferred.
+
+## Slice 4: Structural Interpretation
+
+**Status**: Implemented
+
+**Structure contract**:
+- `StructureInterpreter` accepts only canonical `NormalizedDocument` and returns parser-independent `StructuredDocument` or structured `PipelineFailure`.
+- Structure version `1.0.0` uses an empty `Document` root with conservative `Section`, `Subsection`, and `Unstructured` descendants.
+- Nodes reference normalized block IDs plus exact source spans. They contain no rewritten source-body text, and every block has one canonical owner.
+- `StructurePage` preserves every page's number, warnings, and visual-routing marker, including pages with no native-text blocks.
+
+**Deterministic detection rules**:
+- Only the first non-empty line of a block is considered, using numeric forms such as `1`, `1. Introduction`, `1 Introduction`, `1) Introduction`, and `1.1 Purpose`.
+- Heading lines are capped at 120 characters, titles at 12 words, hierarchy at six levels, and numbering components at `1..=999`; a title must start uppercase and not end like a sentence.
+- Nested headings require their complete active parent prefix. Duplicate, orphaned, malformed, year-like, lowercase-sentence, all-caps-only, short-line, and other ambiguous signals remain ordinary content.
+- Document-title, repeated-header/footer, table, list, clause, figure, footnote, appendix, and semantic-role inference are not implemented.
+
+**Coverage, provenance, and persistence**:
+- Validation compares canonical normalized block order with depth-first structural ownership; missing, duplicate, foreign, or reordered references fail, so successful coverage is exactly 100%.
+- Section titles, levels, unique numbering, and subsection parent prefixes are re-derived from the owning normalized heading block; fabricated labels cannot pass validation.
+- Each node's ordered source spans must exactly equal those of its referenced blocks. Page-local spans remain discrete rather than becoming a falsely continuous page range.
+- Explicit schema version 4 adds `structured_documents` with run/document association, structure version, artifact JSON, SHA-256 integrity hash, and creation time.
+- Fresh databases create through v4 atomically. Existing v3 databases migrate additively without rewriting normalized artifacts; older databases traverse the existing migrations in order.
+- Artifact insertion, state/version update, and immutable event append commit together. Retrieval verifies the hash, stored metadata, and run-to-document association.
+
+**Focused proof completed**:
+- The focused structural suite passed 16 tests covering simple and nested numbering, plain/ambiguous text, multi-page continuity, visual pages, deterministic output, immutable normalized input, exact coverage/provenance, malformed inputs/outputs, invalid completion-state bypass, atomic rollback, integrity/association tampering, independent reopen, stale two-connection CAS, and the real PDF path.
+- Both migration tests passed, including v3-to-v4 preservation of the exact normalized artifact and deterministic reopen.
+- A committed six-page realistic PDF was rendered and visually inspected. The real pipeline classified the unnumbered cover as `Unstructured`, detected `Introduction`, retained its continuation across pages 2-3, nested `Purpose`, detected `Findings`, and retained the visual-only page 5 through page metadata. The unnumbered `Operating context` line was intentionally not promoted and remained Section 1 content; no document title was inferred.
+- The final combined Rust suite passed 54 tests with no failures. `cargo fmt --check`, strict Clippy, the TypeScript/Vite production build, and the no-bundle Tauri release build passed.
+- Bounded launches of the exact release executable migrated the existing AppData database from schema version 3 to 4 and then reopened it at version 4. Direct SQLite verification returned `quick_check = ok`, one `structured_documents` table, and all three structured-artifact columns. No interactive structure command was exercised in this process smoke.
+
+**Known limitations and deferred work**:
+- Current normalization emits at most one block per non-empty page, so a page containing multiple headings cannot receive finer ownership until a later normalization version provides reliable finer-grained blocks.
+- Detection deliberately misses unnumbered, lowercase, long, deeply nested, or orphaned headings and does not infer a document title from appearance or filename.
+- Repeated header/footer classification remains deferred because current one-block-per-page input lacks reliable layout boundaries.
+- Automatic recovery for a process interrupted in `STRUCTURING` is not implemented.
+- Semantic chunking, tokenization, models, summaries, evidence extraction, verification, citations, OCR, vision, embeddings, RAG, and chat remain deferred.

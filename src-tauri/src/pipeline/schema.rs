@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -89,6 +89,22 @@ CREATE TABLE normalized_documents (
 
 CREATE INDEX normalized_documents_document_id_idx
 ON normalized_documents(document_id);
+"#;
+
+const V3_TO_V4: &str = r#"
+CREATE TABLE structured_documents (
+    run_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    structure_version TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    structured_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX structured_documents_document_id_idx
+ON structured_documents(document_id);
 "#;
 
 const LEGACY_TO_V2: &str = r#"
@@ -264,6 +280,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA_V2)?;
         tx.execute_batch(V2_TO_V3)?;
+        tx.execute_batch(V3_TO_V4)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -275,6 +292,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 2 {
         migrate_v2_to_v3(conn)?;
+        current_version = 3;
+    }
+    if current_version == 3 {
+        migrate_v3_to_v4(conn)?;
     }
     validate(conn)
 }
@@ -308,6 +329,14 @@ fn migrate_v2_to_v3(conn: &mut Connection) -> Result<(), MigrationError> {
     Ok(())
 }
 
+fn migrate_v3_to_v4(conn: &mut Connection) -> Result<(), MigrationError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(V3_TO_V4)?;
+    tx.pragma_update(None, "user_version", 4)?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn validate(conn: &Connection) -> Result<(), MigrationError> {
     let quick_check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if quick_check != "ok" {
@@ -336,6 +365,18 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
     if normalized_columns != 3 {
         return Err(MigrationError::Invariant(
             "normalized_documents artifact columns are missing".to_string(),
+        ));
+    }
+
+    let structured_columns: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('structured_documents')
+         WHERE name IN ('structure_version', 'artifact_hash', 'structured_artifact')",
+        [],
+        |row| row.get(0),
+    )?;
+    if structured_columns != 3 {
+        return Err(MigrationError::Invariant(
+            "structured_documents artifact columns are missing".to_string(),
         ));
     }
 
@@ -381,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v2_upgrades_to_v3_without_rewriting_slice2_artifacts() {
+    fn schema_v2_upgrades_to_current_without_rewriting_slice2_artifacts() {
         let database = TestDatabase::new();
         {
             let conn = Connection::open(&database.0).expect("v2 database should open");
@@ -422,7 +463,7 @@ mod tests {
             conn.pragma_update(None, "foreign_keys", "ON")
                 .expect("foreign keys should enable");
             migrate(&mut conn).expect("v2 schema should migrate");
-            assert_eq!(version(&conn).expect("version should load"), 3);
+            assert_eq!(version(&conn).expect("version should load"), 4);
             assert_eq!(
                 conn.query_row(
                     "SELECT parsed_artifact FROM parsed_documents WHERE run_id = 'slice2-run'",
@@ -439,13 +480,92 @@ mod tests {
                 .expect("normalized table should exist"),
                 0
             );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM structured_documents", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("structured table should exist"),
+                0
+            );
         }
 
         let mut reopened = Connection::open(&database.0).expect("migrated database should reopen");
         reopened
             .pragma_update(None, "foreign_keys", "ON")
             .expect("foreign keys should enable");
-        migrate(&mut reopened).expect("repeated v3 initialization should be deterministic");
-        assert_eq!(version(&reopened).expect("version should load"), 3);
+        migrate(&mut reopened).expect("repeated v4 initialization should be deterministic");
+        assert_eq!(version(&reopened).expect("version should load"), 4);
+    }
+
+    #[test]
+    fn schema_v3_upgrades_to_v4_without_rewriting_slice3_artifacts() {
+        let database = TestDatabase::new();
+        {
+            let conn = Connection::open(&database.0).expect("v3 database should open");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            conn.execute_batch(SCHEMA_V2)
+                .expect("v2 schema should initialize");
+            conn.execute_batch(V2_TO_V3)
+                .expect("v3 schema should initialize");
+            conn.pragma_update(None, "user_version", 3)
+                .expect("v3 version should persist");
+            conn.execute_batch(
+                r#"
+                INSERT INTO documents VALUES (
+                    'slice3-document', 'slice3.pdf', 'pdf', 12, 'slice3-hash',
+                    '/slice3.pdf', '2026-08-28T00:00:00+00:00'
+                );
+                INSERT INTO pipeline_runs VALUES (
+                    'slice3-run', 'slice3-document', '"Normalized"', 7, '1.0',
+                    '2026-08-28T00:00:00+00:00', '2026-08-28T00:00:01+00:00',
+                    '2026-08-28T00:00:02+00:00', NULL, '"Normalize"',
+                    '{"total_units":0,"completed_units":0,"failed_units":0}',
+                    '[]', NULL, 0, 1
+                );
+                INSERT INTO pipeline_events VALUES (
+                    'slice3-event', 'slice3-run', 0, NULL, '"Normalized"',
+                    '2026-08-28T00:00:02+00:00', '"Normalize"', NULL, NULL
+                );
+                INSERT INTO normalized_documents VALUES (
+                    'slice3-run', 'slice3-document', '1.0.0', 'slice3-artifact-hash',
+                    '{"slice":3}', '2026-08-28T00:00:02+00:00'
+                );
+                "#,
+            )
+            .expect("Slice 3 rows should persist");
+        }
+
+        {
+            let mut conn = Connection::open(&database.0).expect("database should reopen");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            migrate(&mut conn).expect("v3 schema should migrate");
+            assert_eq!(version(&conn).expect("version should load"), 4);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT normalized_artifact FROM normalized_documents
+                     WHERE run_id = 'slice3-run'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("normalized artifact should survive"),
+                r#"{"slice":3}"#
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM structured_documents", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("structured table should exist"),
+                0
+            );
+        }
+
+        let mut reopened = Connection::open(&database.0).expect("migrated database should reopen");
+        reopened
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        migrate(&mut reopened).expect("repeated v4 initialization should be deterministic");
+        assert_eq!(version(&reopened).expect("version should load"), 4);
     }
 }

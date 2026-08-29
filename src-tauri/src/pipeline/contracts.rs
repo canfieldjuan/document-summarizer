@@ -181,6 +181,41 @@ pub struct NormalizedDocument {
     pub warnings: Vec<PipelineWarning>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructurePage {
+    pub page_number: u32,
+    pub warnings: Vec<PipelineWarning>,
+    pub requires_visual_processing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StructureNodeKind {
+    Document,
+    Section,
+    Subsection,
+    Unstructured,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructureNode {
+    pub node_id: String,
+    pub kind: StructureNodeKind,
+    pub title: Option<String>,
+    pub level: u32,
+    pub block_ids: Vec<String>,
+    pub source_spans: Vec<SourceSpan>,
+    pub children: Vec<StructureNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredDocument {
+    pub document_id: String,
+    pub structure_version: String,
+    pub pages: Vec<StructurePage>,
+    pub nodes: Vec<StructureNode>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
 /// Replaceable boundary between an ingested source and a parser-specific
 /// implementation. Downstream stages depend on `ParsedDocument`, never on a
 /// PDF crate's types.
@@ -194,5 +229,15 @@ pub trait DocumentParser {
 /// downstream pipeline stage.
 pub trait DocumentNormalizer {
     fn normalize(&self, parsed: &ParsedDocument) -> Result<NormalizedDocument, PipelineFailure>;
+    fn version(&self) -> &'static str;
+}
+
+/// Parser-independent boundary between canonical normalized content and the
+/// deterministic structural representation consumed by later stages.
+pub trait StructureInterpreter {
+    fn interpret(
+        &self,
+        normalized: &NormalizedDocument,
+    ) -> Result<StructuredDocument, PipelineFailure>;
     fn version(&self) -> &'static str;
 }

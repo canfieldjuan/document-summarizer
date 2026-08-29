@@ -1,6 +1,6 @@
 use crate::pipeline::contracts::{
     IngestedDocument, NormalizedDocument, ParsedDocument, PipelineEvent, PipelineFailure,
-    PipelineRun, PipelineStage, PipelineState, PipelineWarning,
+    PipelineRun, PipelineStage, PipelineState, PipelineWarning, StructuredDocument,
 };
 use crate::pipeline::schema::{self, MigrationError};
 use crate::pipeline::state::{StateMachine, TransitionError};
@@ -32,6 +32,8 @@ pub enum StoreError {
     DocumentNotFound(String),
     #[error("Parsed artifact not found for pipeline run: {0}")]
     ParsedArtifactNotFound(String),
+    #[error("Normalized artifact not found for pipeline run: {0}")]
+    NormalizedArtifactNotFound(String),
     #[error("Invalid new ingestion: {0}")]
     InvalidIngestion(String),
     #[error("Parsed artifact document {artifact_document_id} does not match run document {run_document_id}")]
@@ -48,6 +50,15 @@ pub enum StoreError {
     NormalizedArtifactMetadataMismatch { run_id: String },
     #[error("Normalized artifact integrity hash does not match for run {run_id}")]
     NormalizedArtifactIntegrityMismatch { run_id: String },
+    #[error("Structured artifact document {artifact_document_id} does not match run document {run_document_id}")]
+    StructuredArtifactDocumentMismatch {
+        artifact_document_id: String,
+        run_document_id: String,
+    },
+    #[error("Structured artifact metadata does not match its storage record for run {run_id}")]
+    StructuredArtifactMetadataMismatch { run_id: String },
+    #[error("Structured artifact integrity hash does not match for run {run_id}")]
+    StructuredArtifactIntegrityMismatch { run_id: String },
     #[error("Persisted transition lost its expected state/version for run {run_id}")]
     StaleWrite { run_id: String },
     #[error(transparent)]
@@ -398,6 +409,52 @@ pub fn get_normalized_document(
     .transpose()
 }
 
+pub fn get_structured_document(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<StructuredDocument>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT structured_documents.document_id, structure_version, artifact_hash,
+                    structured_artifact, pipeline_runs.document_id
+             FROM structured_documents
+             JOIN pipeline_runs USING (run_id)
+             WHERE structured_documents.run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    row.map(
+        |(document_id, structure_version, artifact_hash, artifact_json, run_document_id)| {
+            if sha256_hex(artifact_json.as_bytes()) != artifact_hash {
+                return Err(StoreError::StructuredArtifactIntegrityMismatch {
+                    run_id: run_id.to_string(),
+                });
+            }
+            let artifact: StructuredDocument = from_json(&artifact_json)?;
+            if artifact.document_id != document_id
+                || artifact.structure_version != structure_version
+                || document_id != run_document_id
+            {
+                return Err(StoreError::StructuredArtifactMetadataMismatch {
+                    run_id: run_id.to_string(),
+                });
+            }
+            Ok(artifact)
+        },
+    )
+    .transpose()
+}
+
 pub(super) fn persist_ingestion(
     conn: &mut Connection,
     document: &IngestedDocument,
@@ -645,6 +702,88 @@ pub(super) fn fail_normalization(
     Ok(failed_run)
 }
 
+pub(super) fn start_structuring(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+) -> Result<(PipelineRun, NormalizedDocument), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let normalized = get_normalized_document(&tx, run_id)?
+        .ok_or_else(|| StoreError::NormalizedArtifactNotFound(run_id.to_string()))?;
+    let structuring_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Normalized,
+        expected_version,
+        PipelineState::Structuring,
+        Some(PipelineStage::Structure),
+        None,
+        TransitionPatch::default(),
+    )?;
+    tx.commit()?;
+    Ok((structuring_run, normalized))
+}
+
+pub(super) fn complete_structuring(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    structured: &StructuredDocument,
+    warnings: Vec<PipelineWarning>,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let run = get_pipeline_run(&tx, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    if run.document_id != structured.document_id {
+        return Err(StoreError::StructuredArtifactDocumentMismatch {
+            artifact_document_id: structured.document_id.clone(),
+            run_document_id: run.document_id,
+        });
+    }
+
+    insert_structured_document(&tx, run_id, structured)?;
+    let structured_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Structuring,
+        expected_version,
+        PipelineState::Structured,
+        Some(PipelineStage::Structure),
+        None,
+        TransitionPatch {
+            warnings: Some(warnings),
+            failure: None,
+        },
+    )?;
+    tx.commit()?;
+    Ok(structured_run)
+}
+
+pub(super) fn fail_structuring(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    failure: PipelineFailure,
+) -> Result<PipelineRun, StoreError> {
+    let reason = Some(failure.code.clone());
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let failed_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Structuring,
+        expected_version,
+        PipelineState::Failed,
+        Some(PipelineStage::Structure),
+        reason,
+        TransitionPatch {
+            warnings: None,
+            failure: Some(failure),
+        },
+    )?;
+    tx.commit()?;
+    Ok(failed_run)
+}
+
 fn insert_parsed_document(
     conn: &Connection,
     run_id: &str,
@@ -682,6 +821,30 @@ fn insert_normalized_document(
             run_id,
             normalized.document_id,
             normalized.normalization_version,
+            artifact_hash,
+            artifact_json,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_structured_document(
+    conn: &Connection,
+    run_id: &str,
+    structured: &StructuredDocument,
+) -> Result<(), StoreError> {
+    let artifact_json = to_json(structured)?;
+    let artifact_hash = sha256_hex(artifact_json.as_bytes());
+    conn.execute(
+        "INSERT INTO structured_documents (
+            run_id, document_id, structure_version, artifact_hash,
+            structured_artifact, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            run_id,
+            structured.document_id,
+            structured.structure_version,
             artifact_hash,
             artifact_json,
             Utc::now().to_rfc3339(),
@@ -1057,7 +1220,7 @@ mod tests {
 
         {
             let migrated = init_db(&database.0).expect("legacy DB should migrate");
-            assert_eq!(schema_version(&migrated).expect("version should load"), 3);
+            assert_eq!(schema_version(&migrated).expect("version should load"), 4);
             let run = get_pipeline_run(&migrated, "legacy-run")
                 .expect("run should load")
                 .expect("run should exist");
@@ -1070,7 +1233,7 @@ mod tests {
         }
 
         let reopened = init_db(&database.0).expect("migrated DB should reopen");
-        assert_eq!(schema_version(&reopened).expect("version should load"), 3);
+        assert_eq!(schema_version(&reopened).expect("version should load"), 4);
         assert_eq!(
             list_pipeline_events(&reopened, "legacy-run")
                 .expect("events should load")

@@ -205,3 +205,58 @@ normalized artifact stores its version, document/run association, serialized
 artifact JSON, and SHA-256 integrity hash. Artifact insertion, `NORMALIZING ->
 NORMALIZED`, state-version increment, and event append commit in one SQLite
 transaction; retrieval verifies the stored hash, artifact metadata, and run-to-document association.
+
+## `StructuredDocument` (Slice 4)
+
+```rust
+pub struct StructuredDocument {
+    pub document_id: String,
+    pub structure_version: String,
+    pub pages: Vec<StructurePage>,
+    pub nodes: Vec<StructureNode>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
+pub struct StructureNode {
+    pub node_id: String,
+    pub kind: StructureNodeKind,
+    pub title: Option<String>,
+    pub level: u32,
+    pub block_ids: Vec<String>,
+    pub source_spans: Vec<SourceSpan>,
+    pub children: Vec<StructureNode>,
+}
+```
+
+`StructureInterpreter` accepts only `NormalizedDocument`; no parser or PDF type
+crosses the boundary. Structure version `1.0.0` emits one empty `Document` root
+whose ordered children are `Section`, `Subsection`, or `Unstructured` nodes.
+Each normalized block has exactly one canonical owning node. Nodes store block
+IDs and their unchanged `SourceSpan` values, not rewritten source text.
+
+Version 1 recognizes only a numeric prefix on the first non-empty block line.
+Supported forms include `1`, `1. Introduction`, `1 Introduction`, `1) Introduction`,
+and nested forms such as `1.1 Purpose`. A titled signal must begin with an
+uppercase character, remain within 12 words and 120 characters, and not end as
+a sentence. Components are `1..=999` and hierarchy depth is capped at six. A
+nested signal is accepted only while its complete parent prefix is active;
+duplicate, orphaned, malformed, year-like, lowercase-sentence, and other
+ambiguous signals remain ordinary content. All-caps, short-line, filename, and
+layout-based title guessing are not implemented.
+
+Unnumbered blocks before the first accepted section are grouped as
+`Unstructured`. After a section begins, ordinary blocks remain owned by the
+active deepest section until another accepted heading changes the hierarchy.
+This permits deterministic multi-page continuation. Page metadata is copied to
+`StructurePage`, so empty/visual pages retain their order, warnings, and visual
+routing without invented nodes.
+
+Validation requires matching document/version identity, exact page metadata,
+one deterministic root, valid parent/level relationships, deterministic unique
+node IDs, heading labels and levels re-derived from their first source block,
+exact source spans, and depth-first block references equal to every normalized
+block exactly once in canonical order. The owned recursive value
+representation cannot encode reference cycles. Schema v4 persists the artifact,
+document/run association, structure version, serialized JSON, and SHA-256
+integrity hash. Artifact insertion, `STRUCTURING -> STRUCTURED`, state-version
+increment, and immutable event append share one transaction.

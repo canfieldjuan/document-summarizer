@@ -85,6 +85,17 @@ normalized output, or a normalizer failure persists `NORMALIZING -> FAILED`
 without a normalized artifact. If the success transaction fails while SQLite
 remains writable, the run is likewise moved to `FAILED`.
 
+For structural interpretation, the persisted normalized artifact and its
+integrity metadata are verified before `NORMALIZED -> STRUCTURING` commits. The
+deterministic interpreter references normalized block IDs and source spans; it
+does not modify normalized text. Success requires exact page/routing
+preservation, valid hierarchy and node identities, and 100% unique normalized
+block coverage in source order. The structured artifact and integrity hash
+commit in the same transaction as `STRUCTURING -> STRUCTURED`, its state-version
+increment, and its event. Invalid normalized input or interpreter output
+persists `STRUCTURING -> FAILED` without a structured artifact. Finding no
+headings is valid and produces an `Unstructured` node rather than failure.
+
 ### Ingestion transaction behavior
 
 Extension/signature validation and source reading occur before durable run

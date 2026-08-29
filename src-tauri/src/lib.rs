@@ -1,6 +1,8 @@
 pub mod pipeline;
 
-use pipeline::contracts::{IngestedDocument, NormalizedDocument, ParsedDocument, PipelineRun};
+use pipeline::contracts::{
+    IngestedDocument, NormalizedDocument, ParsedDocument, PipelineRun, StructuredDocument,
+};
 use pipeline::db::init_db;
 use pipeline::ingest::{ingest_pdf, IngestError};
 use pipeline::normalize::{
@@ -8,6 +10,10 @@ use pipeline::normalize::{
 };
 use pipeline::parser::{
     parse_document as parse_pipeline_document, ParsePipelineError, PdfExtractParser,
+};
+use pipeline::structure::{
+    structure_document as structure_pipeline_document, DeterministicStructureInterpreter,
+    StructurePipelineError,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -50,6 +56,13 @@ impl From<ParsePipelineError> for CommandError {
 
 impl From<NormalizePipelineError> for CommandError {
     fn from(error: NormalizePipelineError) -> Self {
+        let code = error.code().to_string();
+        Self::new(code, error.to_string())
+    }
+}
+
+impl From<StructurePipelineError> for CommandError {
+    fn from(error: StructurePipelineError) -> Self {
         let code = error.code().to_string();
         Self::new(code, error.to_string())
     }
@@ -99,6 +112,25 @@ fn normalize_document(
         .map_err(CommandError::from)
 }
 
+#[tauri::command]
+fn structure_document(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<StructuredDocument, CommandError> {
+    let mut conn = state.db.lock().map_err(|_| {
+        CommandError::new(
+            "DATABASE_LOCK_UNAVAILABLE",
+            "The local database lock is unavailable",
+        )
+    })?;
+    structure_pipeline_document(
+        &mut conn,
+        &DeterministicStructureInterpreter::new(),
+        &run_id,
+    )
+    .map_err(CommandError::from)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn Error>> {
     tauri::Builder::default()
@@ -118,7 +150,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .invoke_handler(tauri::generate_handler![
             ingest_document,
             parse_document,
-            normalize_document
+            normalize_document,
+            structure_document
         ])
         .run(tauri::generate_context!())?;
     Ok(())
