@@ -106,23 +106,32 @@ event append share one transaction. Invalid inputs or chunker output persist
 may reach `CHUNKED` with zero chunks and `NO_TEXT_TO_CHUNK`; later summarization
 must fail truthfully unless a future OCR/vision stage supplies text.
 
-For summarization, the verified chunk artifact is loaded before `CHUNKED ->
-ANALYZING`. Model availability and each chunk response are checked before the
-analysis artifact commits with `ANALYZING -> ANALYZED`. Synthesis then loads
-that persisted artifact and commits its own artifact with `SYNTHESIZING ->
-SYNTHESIZED`. Verification is currently a deterministic mechanical check of
-non-empty output, runtime identity, ordered source-chunk coverage, and artifact
-integrity. It does not claim factual verification. Its artifact commits with
-`VERIFYING -> VERIFIED` and records `SEMANTIC_VERIFICATION_DEFERRED`.
+For summarization, the verified normalized and chunk artifacts are loaded
+before `CHUNKED -> ANALYZING`. Model availability and each structured chunk
+response are checked before the analysis artifact commits with `ANALYZING ->
+ANALYZED`. Unknown block IDs, non-contiguous quotations, malformed JSON, and
+mixed valid/invalid evidence fail the entire response. Evidence source spans
+and deterministic IDs come from authoritative Rust state, not model output.
 
-The final summary artifact and `VERIFIED -> COMPLETE_WITH_WARNINGS` transition,
-state-version increment, and event append share one transaction. A model,
-validation, or ordinary artifact-write failure persists `FAILED` from the
-active stage and cannot create the next checkpoint or a false completion
-event. If SQLite itself cannot record the failure, the active state remains
-truthful evidence of interrupted work. A zero-chunk visual-only document fails
-analysis with `NO_NATIVE_TEXT_FOR_SUMMARY`; OCR and visual analysis are not
-implicitly attempted.
+Synthesis loads the persisted analysis artifact, accepts only claims with known
+evidence IDs, and deterministically renders page labels from their exact source
+spans before committing `SYNTHESIZING -> SYNTHESIZED`. Verification checks the
+claim/evidence graph, exact quotations, normalized provenance, runtime identity,
+ordered source-chunk coverage, deterministic rendered text, and artifact
+integrity. It does not claim semantic entailment or factual correctness. Its
+artifact commits with `VERIFYING -> VERIFIED` and records
+`SEMANTIC_VERIFICATION_DEFERRED`.
+
+The final summary artifact, independently persisted citation artifact,
+`VERIFIED -> COMPLETE_WITH_WARNINGS` transition, state-version increment, and
+event append share one transaction. A failed summary insert, citation insert,
+transition, or event therefore rolls back both artifacts and cannot create a
+false completion event. A model, validation, or ordinary artifact-write failure
+persists `FAILED` from the active stage. If SQLite itself cannot record the
+failure, the active state remains truthful evidence of interrupted work. A
+zero-chunk visual-only document fails analysis with
+`NO_NATIVE_TEXT_FOR_SUMMARY`; OCR and visual analysis are not implicitly
+attempted.
 
 ### Connect job mapping
 

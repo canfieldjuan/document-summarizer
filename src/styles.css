@@ -488,6 +488,92 @@ h1 {
   white-space: pre-wrap;
 }
 
+.summary-claims {
+  display: grid;
+  gap: 12px;
+}
+
+.summary-claim {
+  padding: clamp(18px, 3vw, 28px);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--lake);
+  border-radius: 4px 14px 14px 4px;
+  background: #ffffff;
+}
+
+.claim-ordinal {
+  margin: 0 0 8px;
+  color: var(--lake);
+  font-family: "Arial Narrow", "Liberation Sans Narrow", sans-serif;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.claim-text {
+  margin: 0;
+  color: #203646;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1rem, 1.5vw, 1.14rem);
+  line-height: 1.7;
+}
+
+.citation-actions {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.citation-button {
+  padding: 5px 9px;
+  border: 1px solid rgba(42, 111, 107, 0.42);
+  border-radius: 999px;
+  color: var(--lake);
+  background: var(--lake-soft);
+  cursor: pointer;
+  font-size: 0.73rem;
+  font-weight: 800;
+}
+
+.citation-button:hover,
+.citation-button.is-active {
+  border-color: var(--lake);
+  color: #ffffff;
+  background: var(--lake);
+}
+
+.evidence-panel {
+  margin-top: 18px;
+  padding: 19px 21px;
+  display: grid;
+  grid-template-columns: minmax(100px, 150px) minmax(0, 1fr);
+  gap: 22px;
+  border: 1px solid rgba(193, 111, 72, 0.42);
+  border-radius: 10px;
+  background: #fffaf7;
+}
+
+.evidence-label {
+  margin: 7px 0 0;
+  color: var(--copper);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.evidence-quote {
+  margin: 0;
+  padding-left: 18px;
+  border-left: 2px solid var(--copper);
+  color: #5e3e30;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.95rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
 .warning-section {
   margin-top: 20px;
   padding: 17px 19px;
@@ -750,6 +836,11 @@ h1 {
 
   .summary-meta {
     white-space: normal;
+  }
+
+  .evidence-panel {
+    grid-template-columns: 1fr;
+    gap: 12px;
   }
 
   .app-footer {

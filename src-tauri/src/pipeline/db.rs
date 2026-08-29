@@ -1,7 +1,7 @@
 use crate::pipeline::contracts::{
-    AnalyzedDocument, ChunkedDocument, IngestedDocument, NormalizedDocument, ParsedDocument,
-    PipelineEvent, PipelineFailure, PipelineRun, PipelineStage, PipelineState, PipelineWarning,
-    StructuredDocument, SummaryArtifact, SynthesizedDocument, VerifiedDocument,
+    AnalyzedDocument, ChunkedDocument, CitationArtifact, IngestedDocument, NormalizedDocument,
+    ParsedDocument, PipelineEvent, PipelineFailure, PipelineRun, PipelineStage, PipelineState,
+    PipelineWarning, StructuredDocument, SummaryArtifact, SynthesizedDocument, VerifiedDocument,
 };
 use crate::pipeline::schema::{self, MigrationError};
 use crate::pipeline::state::{StateMachine, TransitionError};
@@ -731,6 +731,74 @@ pub fn get_summary_artifact(
     Ok(artifact)
 }
 
+pub fn get_citation_artifact(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<CitationArtifact>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT citation.document_id, citation.citation_version,
+                    citation.summary_integrity_hash, citation.artifact_hash,
+                    citation.citation_artifact, citation.created_at,
+                    pipeline_runs.document_id
+             FROM citation_artifacts AS citation
+             JOIN pipeline_runs USING (run_id)
+             WHERE citation.run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    row.map(
+        |(
+            document_id,
+            citation_version,
+            summary_integrity_hash,
+            artifact_hash,
+            artifact_json,
+            created_at,
+            run_document_id,
+        )| {
+            if sha256_hex(artifact_json.as_bytes()) != artifact_hash {
+                return Err(StoreError::DownstreamArtifactIntegrityMismatch {
+                    artifact_kind: "citation".to_string(),
+                    run_id: run_id.to_string(),
+                });
+            }
+            let artifact: CitationArtifact = from_json(&artifact_json)?;
+            if artifact.document_id != document_id
+                || artifact.citation_version != citation_version
+                || artifact.summary_integrity_hash != summary_integrity_hash
+                || artifact.created_at.to_rfc3339() != created_at
+                || document_id != run_document_id
+            {
+                return Err(StoreError::DownstreamArtifactMetadataMismatch {
+                    artifact_kind: "citation".to_string(),
+                    run_id: run_id.to_string(),
+                });
+            }
+            if artifact.calculate_integrity_hash()? != artifact.integrity_hash {
+                return Err(StoreError::DownstreamArtifactIntegrityMismatch {
+                    artifact_kind: "citation".to_string(),
+                    run_id: run_id.to_string(),
+                });
+            }
+            Ok(artifact)
+        },
+    )
+    .transpose()
+}
+
 pub fn summary_artifact_exists(conn: &Connection, run_id: &str) -> Result<bool, StoreError> {
     let count: u32 = conn.query_row(
         "SELECT COUNT(*) FROM summary_artifacts WHERE run_id = ?1",
@@ -1379,10 +1447,21 @@ pub(super) fn complete_summary(
     run_id: &str,
     expected_version: u32,
     summary: &SummaryArtifact,
+    citations: &CitationArtifact,
 ) -> Result<PipelineRun, StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     ensure_run_document_matches(&tx, run_id, "summary", &summary.document_id)?;
+    ensure_run_document_matches(&tx, run_id, "citation", &citations.document_id)?;
+    if citations.summary_integrity_hash != summary.integrity_hash
+        || citations.rendered_text != summary.text
+    {
+        return Err(StoreError::DownstreamArtifactMetadataMismatch {
+            artifact_kind: "citation".to_string(),
+            run_id: run_id.to_string(),
+        });
+    }
     insert_summary_artifact(&tx, run_id, summary)?;
+    insert_citation_artifact(&tx, run_id, citations)?;
     let completed_run = transition_in_tx(
         &tx,
         run_id,
@@ -1652,6 +1731,37 @@ fn insert_summary_artifact(
         summary,
         SUMMARY_ARTIFACT_TABLE,
     )
+}
+
+fn insert_citation_artifact(
+    conn: &Connection,
+    run_id: &str,
+    citations: &CitationArtifact,
+) -> Result<(), StoreError> {
+    if citations.calculate_integrity_hash()? != citations.integrity_hash {
+        return Err(StoreError::DownstreamArtifactIntegrityMismatch {
+            artifact_kind: "citation".to_string(),
+            run_id: run_id.to_string(),
+        });
+    }
+    let artifact_json = to_json(citations)?;
+    let artifact_hash = sha256_hex(artifact_json.as_bytes());
+    conn.execute(
+        "INSERT INTO citation_artifacts (
+            run_id, document_id, citation_version, summary_integrity_hash,
+            artifact_hash, citation_artifact, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            run_id,
+            citations.document_id,
+            citations.citation_version,
+            citations.summary_integrity_hash,
+            artifact_hash,
+            artifact_json,
+            citations.created_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

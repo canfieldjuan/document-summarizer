@@ -2,8 +2,9 @@
 
 A local-first Tauri desktop application that ingests native-text PDFs, preserves
 page provenance through a durable processing pipeline, and produces summaries
-with an Ollama-hosted model. The application also provides the optional local
-Connect `document.summarize` capability while remaining usable on its own.
+with page-linked exact source excerpts using an Ollama-hosted model. The
+application also provides the optional local Connect `document.summarize`
+capability while remaining usable on its own.
 
 ## Local runtime
 

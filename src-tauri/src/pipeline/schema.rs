@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -221,6 +221,23 @@ CREATE UNIQUE INDEX connect_jobs_single_active_idx ON connect_jobs((1))
 WHERE status IN ('accepted', 'processing');
 "#;
 
+const V10_TO_V11: &str = r#"
+CREATE TABLE citation_artifacts (
+    run_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    citation_version TEXT NOT NULL,
+    summary_integrity_hash TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    citation_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX citation_artifacts_document_id_idx
+ON citation_artifacts(document_id);
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -401,6 +418,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V7_TO_V8)?;
         tx.execute_batch(V8_TO_V9)?;
         tx.execute_batch(V9_TO_V10)?;
+        tx.execute_batch(V10_TO_V11)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -440,6 +458,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 9 {
         migrate_v9_to_v10(conn)?;
+        current_version = 10;
+    }
+    if current_version == 10 {
+        migrate_v10_to_v11(conn)?;
     }
     validate(conn)
 }
@@ -507,6 +529,10 @@ fn migrate_v8_to_v9(conn: &mut Connection) -> Result<(), MigrationError> {
 
 fn migrate_v9_to_v10(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V9_TO_V10, 10)
+}
+
+fn migrate_v10_to_v11(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V10_TO_V11, 11)
 }
 
 fn migrate_additive(
@@ -605,6 +631,24 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
                     "{table}.{column} is missing"
                 )));
             }
+        }
+    }
+
+    for column in [
+        "citation_version",
+        "summary_integrity_hash",
+        "artifact_hash",
+        "citation_artifact",
+    ] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('citation_artifacts') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!(
+                "citation_artifacts.{column} is missing"
+            )));
         }
     }
 
@@ -908,6 +952,7 @@ mod tests {
                 "synthesized_documents",
                 "verified_documents",
                 "summary_artifacts",
+                "citation_artifacts",
                 "connect_jobs",
             ] {
                 let present: u32 = conn
@@ -919,6 +964,82 @@ mod tests {
                     .expect("artifact table should be queryable");
                 assert_eq!(present, 1);
             }
+        }
+
+        let mut reopened = Connection::open(&database.0).expect("migrated database should reopen");
+        reopened
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        migrate(&mut reopened).expect("repeated initialization should be deterministic");
+        assert_eq!(
+            version(&reopened).expect("version should load"),
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn schema_v10_adds_citations_without_rewriting_existing_summary_artifacts() {
+        let database = TestDatabase::new();
+        {
+            let conn = Connection::open(&database.0).expect("v10 database should open");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            for migration in [
+                SCHEMA_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5, V5_TO_V6, V6_TO_V7, V7_TO_V8, V8_TO_V9,
+                V9_TO_V10,
+            ] {
+                conn.execute_batch(migration)
+                    .expect("schema through v10 should initialize");
+            }
+            conn.pragma_update(None, "user_version", 10)
+                .expect("v10 version should persist");
+            conn.execute_batch(
+                r#"
+                INSERT INTO documents VALUES (
+                    'legacy-document', 'legacy.pdf', 'pdf', 12, 'legacy-hash',
+                    '/legacy.pdf', '2026-08-29T00:00:00+00:00'
+                );
+                INSERT INTO pipeline_runs VALUES (
+                    'legacy-run', 'legacy-document', '"CompleteWithWarnings"', 18, '1.0',
+                    '2026-08-29T00:00:00+00:00', '2026-08-29T00:00:01+00:00',
+                    '2026-08-29T00:00:02+00:00', '2026-08-29T00:00:03+00:00', '"Verify"',
+                    '{"total_units":0,"completed_units":0,"failed_units":0}',
+                    '[]', NULL, 0, 1
+                );
+                INSERT INTO summary_artifacts VALUES (
+                    'legacy-run', 'legacy-document', '1.0.0', 'legacy-row-hash',
+                    '{"slice":6}', '2026-08-29T00:00:03+00:00'
+                );
+                "#,
+            )
+            .expect("legacy v10 summary row should persist");
+        }
+
+        {
+            let mut conn = Connection::open(&database.0).expect("database should reopen");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            migrate(&mut conn).expect("v10 schema should migrate");
+            assert_eq!(
+                conn.query_row(
+                    "SELECT summary_artifact FROM summary_artifacts WHERE run_id = 'legacy-run'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("legacy summary should survive"),
+                r#"{"slice":6}"#
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM citation_artifacts", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("citation table should exist"),
+                0
+            );
+            assert_eq!(
+                version(&conn).expect("version should load"),
+                CURRENT_SCHEMA_VERSION
+            );
         }
 
         let mut reopened = Connection::open(&database.0).expect("migrated database should reopen");

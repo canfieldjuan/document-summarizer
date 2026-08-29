@@ -197,7 +197,7 @@ fn summarize_document(
             "The local database lock is unavailable",
         )
     })?;
-    process_pdf_to_summary(
+    let completed = process_pdf_to_summary(
         &mut conn,
         &file_path,
         SummaryComponents {
@@ -208,8 +208,9 @@ fn summarize_document(
             runtime: &runtime,
         },
     )
-    .map(CompletedSummaryView::from)
-    .map_err(CommandError::from)
+    .map_err(CommandError::from)?;
+    let persisted = load_persisted_summary(&conn, &completed.run_id).map_err(CommandError::from)?;
+    Ok(CompletedSummaryView::from(persisted))
 }
 
 #[tauri::command]
