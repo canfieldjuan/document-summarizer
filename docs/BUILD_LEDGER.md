@@ -468,11 +468,12 @@ future work
 - The current prompt-level `ModelRequest` does not yet define the task-profile
   contract required for gateway routing. That contract, multi-model routing,
   and model promotion policy require a separate evidence-driven slice.
-- A pinned llama.cpp worker is the supported operational direction. LM Studio is
-  no longer a supported deployment target; compatibility with an
-  OpenAI-compatible protocol does not imply product support for every server
-  implementing that protocol. The llama.cpp model/runtime acceptance remains a
-  separately tested deployment concern, not behavior proved by this entry.
+- An Ollama runtime serving Qwen3 30B-A3B is the selected operational direction.
+  LM Studio and llama.cpp are not current deployment targets; compatibility with
+  an OpenAI-compatible protocol does not imply product support for every server
+  implementing that protocol. The operator's separate Email Watcher evaluation
+  informed this selection, but Document Summarizer acceptance remains a distinct
+  deployment proof rather than behavior proved by this entry.
 
 **Safety and ownership**:
 - Shared inference is infrastructure, not application discovery or workflow
@@ -492,7 +493,7 @@ future work
 
 ## Connect v1 Two-App Acceptance Checkpoint (2026-08-29)
 
-**Status**: Deterministic cross-process proof passed; llama.cpp acceptance pending
+**Status**: Deterministic cross-process proof passed; Ollama/Qwen document acceptance pending
 
 **Exact implementation heads exercised**:
 - Document Summarizer provider source: `3e7ff62`.
@@ -531,8 +532,9 @@ future work
 **Evidence boundary**:
 - The proof harness now supports an explicitly configured exact-loopback
   OpenAI-compatible endpoint in addition to its deterministic fixture default.
-  It has not yet been accepted against the selected llama.cpp model because that
-  evaluation is still in progress elsewhere.
+  It has not yet been accepted against the selected Ollama-hosted Qwen3 30B-A3B
+  model. The separate Email Watcher evaluation does not prove this document
+  pipeline path.
 - No live Gmail OAuth attachment fetch, human Tauri Summarize click, Debian
   package install/uninstall, cross-machine transport, or on-prem gateway was
   exercised. These are not claimed by this checkpoint.
