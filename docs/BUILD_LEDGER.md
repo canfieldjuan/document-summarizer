@@ -637,3 +637,108 @@ future work
   hardening.
 - No schema version, pipeline transition, prompt, summary semantics, Connect
   wire contract, OCR, citation, or semantic-verification behavior changed.
+
+## Slice 7 — Evidence-Linked Summaries and Citation Presentation
+
+**Status**: Implemented and locally accepted for native-text PDFs
+
+**Evidence and citation contract**:
+- `ModelRequest` now supports either plain text or a named, bounded JSON Schema
+  output contract without coupling the generic `ModelRuntime` boundary to
+  Ollama types.
+- Analysis, synthesis, verification, and summary versions are `2.0.0`.
+  Analysis accepts only bounded evidence whose block belongs to the current
+  chunk and whose quotation is a contiguous exact substring of the
+  authoritative normalized block. Rust derives the source span, chunk binding,
+  and deterministic evidence ID.
+- Synthesis accepts only bounded claims with known, unique evidence IDs. Rust
+  canonicalizes evidence references into source order, derives deterministic
+  claim IDs, and renders page labels from the validated source spans. Neither
+  model stage can supply page numbers or provenance.
+- Mechanical verification now validates the entire
+  claim-to-evidence-to-normalized-block chain and deterministic rendered text.
+  `SEMANTIC_VERIFICATION_DEFERRED` remains mandatory: citation traceability is
+  not a claim that a model-authored sentence is entailed by its excerpt or that
+  the source is factually correct.
+
+**Persistence and state integrity**:
+- Explicit schema v11 adds an independent `citation_artifacts` table with
+  document/run association, citation version `1.0.0`, summary-integrity binding,
+  creation time, serialized artifact, and SHA-256 row hash. The artifact also
+  carries its own integrity hash.
+- The final summary, citation artifact, `VERIFIED -> COMPLETE_WITH_WARNINGS`
+  transition, state-version increment, and immutable event append share one
+  SQLite transaction. Injecting failure at the citation insert rolls back both
+  artifact rows and prevents a completion event before the run transitions
+  truthfully to `FAILED`. A separate injected completion-event failure proves
+  the same rollback after both artifact inserts have already executed.
+- Citation retrieval checks row integrity, internal integrity, document/run
+  metadata, creation time, and summary binding. Current summaries fail closed
+  when citations are absent or malformed. Additive v10-to-v11 migration leaves
+  historical summary rows untouched; version `1.0.0` summaries remain readable
+  with an empty citation presentation rather than fabricated evidence.
+
+**Selected Ollama compatibility**:
+- The first configured-runtime proof exposed an HTTP 500 from Ollama 0.24.0:
+  `failed to load model vocabulary required for format`. A direct request to
+  the same `qwen3-30b-a3b:latest` model without grammar enforcement returned
+  valid contract JSON, isolating the incompatibility to Ollama's format layer
+  for this imported model rather than the task or Connect path.
+- The adapter still attempts JSON Schema first. Only that exact HTTP-500 body
+  activates a one-time process-local fallback; subsequent requests omit the
+  server grammar while retaining explicit JSON shapes in both prompts and all
+  strict Rust JSON, identity, quote, provenance, and size validation. Other
+  HTTP errors remain ordinary runtime failures.
+
+**Standalone and Connect presentation**:
+- The Rust workspace projection exposes only claim text, application-derived
+  page labels/ranges, and exact quotations. It withholds private source paths,
+  block IDs, chunk IDs, and artifact hashes. Its boundary rejects duplicate
+  references, invalid page spans, missing evidence, and inconsistent hashes.
+- The desktop renders claim cards and page buttons; selecting one displays its
+  exact excerpt. All model/source content is assigned with `textContent` rather
+  than HTML interpretation. Legacy summaries retain the previous plain-text
+  rendering.
+- Connect v1 remains wire-compatible. Its frozen JSON shape still receives the
+  summary text, now with deterministic page labels; structured citation output
+  is deferred to a future capability/output-media version rather than added to
+  v1 implicitly.
+
+**Automated and live proof**:
+- The standard Rust run executed 106 tests: 105 passed and the explicitly live
+  Ollama test was ignored by default. New probes cover exact valid evidence,
+  unknown block IDs, quote mismatch, mixed valid/invalid evidence, unknown and
+  duplicate evidence references, malformed model JSON, deterministic IDs,
+  normalized provenance, summary/citation lifecycle, citation-insert rollback,
+  dual-hash tamper detection, independent database reopen, missing-current-
+  citation failure, legacy-summary compatibility, presentation-field
+  narrowing, invalid presentation spans/references, schema bounds, and v10-to-
+  v11 migration/reopen.
+- The ignored live test was then run explicitly against the configured Ollama
+  runtime and selected Qwen model. It passed the real PDF path, asserted
+  non-empty claims/evidence, exact quotations against normalized blocks,
+  application-derived source spans, persisted model identity, both artifact
+  hashes, summary binding, SQLite `quick_check`, and
+  `COMPLETE_WITH_WARNINGS` after an independent database-connection reopen.
+  This is a connection-reopen proof, not a full process restart.
+- Strict Rust formatting and all-target/all-feature Clippy passed. The
+  TypeScript/Vite production build and no-bundle Tauri release build passed,
+  emitting `src-tauri/target/release/tauri-appdoc_sum` with the citation UI
+  embedded.
+- The rebuilt release provider was exercised by Email Watcher's cross-process
+  proof with synthetic Gmail attachment bytes, the realistic repository PDF,
+  and the configured Qwen model. Observed capability counts were 0 before
+  provider startup, 1 while live, 0 after stop, and 1 after restart. The job and
+  persisted caller job completed, the PDF hash and returned/persisted summary
+  matched, and Email Watcher's independently opened database returned
+  `quick_check = ok` at schema version 4.
+
+**Evidence boundary and deferred work**:
+- The new claim cards and exact-excerpt interaction are TypeScript-compiled and
+  exercised through the narrow Rust serialization tests, but a human or
+  automated click on a citation in a live Tauri window was not performed in
+  this checkpoint.
+- Semantic entailment/factual verification, PDF-viewer navigation, structured
+  Connect citation output, citations for future OCR/vision evidence, OCR,
+  vision, embeddings, RAG, chat, workflow automation, and cross-machine model
+  transport remain deferred.

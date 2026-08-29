@@ -1,12 +1,13 @@
 use crate::pipeline::contracts::{
-    CompletedSummary, ModelRuntime, ModelRuntimeFailure, PipelineFailure, PipelineRun,
-    PipelineState, PipelineWarning, SummaryArtifact,
+    CitationArtifact, CompletedSummary, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
+    PipelineRun, PipelineState, PipelineWarning, SummaryArtifact,
 };
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::model::OllamaRuntime;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
+use std::collections::HashMap;
 use thiserror::Error;
 
 pub const RECENT_RUN_LIMIT: u32 = 30;
@@ -53,6 +54,25 @@ pub struct SummaryView {
     pub text: String,
     pub warnings: Vec<PipelineWarning>,
     pub created_at: DateTime<Utc>,
+    pub claims: Vec<CitedClaimView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CitedClaimView {
+    pub claim_id: String,
+    pub text: String,
+    pub citations: Vec<CitationView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CitationView {
+    pub evidence_id: String,
+    pub label: String,
+    pub page_start: u32,
+    pub page_end: u32,
+    pub exact_quote: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -64,24 +84,17 @@ pub struct CompletedSummaryView {
     pub summary: SummaryView,
 }
 
-impl From<SummaryArtifact> for SummaryView {
-    fn from(summary: SummaryArtifact) -> Self {
-        Self {
-            text: summary.text,
-            warnings: summary.warnings,
-            created_at: summary.created_at,
-        }
-    }
-}
+impl TryFrom<CompletedSummary> for CompletedSummaryView {
+    type Error = WorkspaceError;
 
-impl From<CompletedSummary> for CompletedSummaryView {
-    fn from(completed: CompletedSummary) -> Self {
-        Self {
+    fn try_from(completed: CompletedSummary) -> Result<Self, Self::Error> {
+        let summary = summary_view(completed.summary, Some(completed.citations))?;
+        Ok(Self {
             run_id: completed.run_id,
             original_filename: completed.document.original_filename,
             byte_size: completed.document.byte_size,
-            summary: completed.summary.into(),
-        }
+            summary,
+        })
     }
 }
 
@@ -93,6 +106,8 @@ pub enum WorkspaceError {
     SummaryNotFound(String),
     #[error("Pipeline run {run_id} and its summary artifact have inconsistent completion state")]
     SummaryStateMismatch { run_id: String },
+    #[error("Citation artifact is missing or inconsistent for document: {0}")]
+    CitationMismatch(String),
 }
 
 impl WorkspaceError {
@@ -101,6 +116,7 @@ impl WorkspaceError {
             Self::Store(_) => "PIPELINE_STORE_ERROR",
             Self::SummaryNotFound(_) => "SUMMARY_NOT_FOUND",
             Self::SummaryStateMismatch { .. } => "SUMMARY_STATE_MISMATCH",
+            Self::CitationMismatch(_) => "CITATION_ARTIFACT_MISMATCH",
         }
     }
 }
@@ -148,7 +164,9 @@ pub fn get_persisted_summary(
         .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
     let summary = db::get_summary_artifact(conn, run_id)?
         .ok_or_else(|| WorkspaceError::SummaryNotFound(run_id.to_string()))?;
+    let citations = db::get_citation_artifact(conn, run_id)?;
     validate_summary_state(&run, true)?;
+    let summary = summary_view(summary, citations)?;
 
     Ok(PersistedSummary {
         run: RunHistoryItem {
@@ -165,8 +183,119 @@ pub fn get_persisted_summary(
             failure: run.failure,
             has_summary: true,
         },
-        summary: summary.into(),
+        summary,
     })
+}
+
+fn summary_view(
+    summary: SummaryArtifact,
+    citations: Option<CitationArtifact>,
+) -> Result<SummaryView, WorkspaceError> {
+    if summary.calculate_integrity_hash().ok().as_deref() != Some(summary.integrity_hash.as_str()) {
+        return Err(WorkspaceError::CitationMismatch(summary.document_id));
+    }
+    let claims = match citations {
+        Some(citations) => {
+            if citations.document_id != summary.document_id
+                || citations.citation_version != crate::pipeline::summary::CITATION_VERSION
+                || citations.summary_integrity_hash != summary.integrity_hash
+                || citations.rendered_text != summary.text
+                || citations.claims.is_empty()
+                || citations.evidence.is_empty()
+                || citations.calculate_integrity_hash().ok().as_deref()
+                    != Some(citations.integrity_hash.as_str())
+            {
+                return Err(WorkspaceError::CitationMismatch(summary.document_id));
+            }
+            let evidence_count = citations.evidence.len();
+            let evidence = citations
+                .evidence
+                .into_iter()
+                .map(|item| (item.evidence_id.clone(), item))
+                .collect::<HashMap<_, _>>();
+            if evidence.len() != evidence_count
+                || evidence.values().any(|item| {
+                    item.evidence_id.trim().is_empty()
+                        || item.exact_quote.trim().is_empty()
+                        || item.source_span.page_start == 0
+                        || item.source_span.page_end < item.source_span.page_start
+                })
+            {
+                return Err(WorkspaceError::CitationMismatch(summary.document_id));
+            }
+            let mut claim_ids = std::collections::HashSet::new();
+            let mut referenced_evidence = std::collections::HashSet::new();
+            let claims = citations
+                .claims
+                .into_iter()
+                .map(|claim| {
+                    let mut claim_evidence = std::collections::HashSet::new();
+                    if claim.claim_id.trim().is_empty()
+                        || claim.text.trim().is_empty()
+                        || !claim_ids.insert(claim.claim_id.clone())
+                        || claim
+                            .evidence_ids
+                            .iter()
+                            .any(|evidence_id| !claim_evidence.insert(evidence_id.clone()))
+                    {
+                        return Err(WorkspaceError::CitationMismatch(
+                            summary.document_id.clone(),
+                        ));
+                    }
+                    referenced_evidence.extend(claim.evidence_ids.iter().cloned());
+                    let citations = claim
+                        .evidence_ids
+                        .iter()
+                        .map(|evidence_id| {
+                            let item = evidence.get(evidence_id).ok_or_else(|| {
+                                WorkspaceError::CitationMismatch(summary.document_id.clone())
+                            })?;
+                            Ok(CitationView {
+                                evidence_id: item.evidence_id.clone(),
+                                label: source_label(
+                                    item.source_span.page_start,
+                                    item.source_span.page_end,
+                                ),
+                                page_start: item.source_span.page_start,
+                                page_end: item.source_span.page_end,
+                                exact_quote: item.exact_quote.clone(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, WorkspaceError>>()?;
+                    if citations.is_empty() {
+                        return Err(WorkspaceError::CitationMismatch(
+                            summary.document_id.clone(),
+                        ));
+                    }
+                    Ok(CitedClaimView {
+                        claim_id: claim.claim_id,
+                        text: claim.text,
+                        citations,
+                    })
+                })
+                .collect::<Result<Vec<_>, WorkspaceError>>()?;
+            if referenced_evidence != evidence.keys().cloned().collect() {
+                return Err(WorkspaceError::CitationMismatch(summary.document_id));
+            }
+            claims
+        }
+        None if summary.summary_version == "1.0.0" => Vec::new(),
+        None => return Err(WorkspaceError::CitationMismatch(summary.document_id)),
+    };
+    Ok(SummaryView {
+        text: summary.text,
+        warnings: summary.warnings,
+        created_at: summary.created_at,
+        claims,
+    })
+}
+
+fn source_label(page_start: u32, page_end: u32) -> String {
+    if page_start == page_end {
+        format!("p. {page_start}")
+    } else {
+        format!("pp. {page_start}–{page_end}")
+    }
 }
 
 fn assess_runtime(runtime: &dyn ModelRuntime) -> RuntimeStatus {
@@ -228,6 +357,8 @@ mod tests {
     use crate::pipeline::parser::PdfExtractParser;
     use crate::pipeline::service::{process_pdf_to_summary, SummaryComponents};
     use crate::pipeline::structure::DeterministicStructureInterpreter;
+    use rusqlite::params;
+    use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -250,13 +381,8 @@ mod tests {
 
     impl ModelRuntime for FixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
-            let text = if request.system_prompt.contains("synthesize chunk notes") {
-                "Persisted workspace summary."
-            } else {
-                "Persisted workspace source notes."
-            };
             Ok(ModelResponse {
-                text: text.to_string(),
+                text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
             })
@@ -413,6 +539,65 @@ mod tests {
     }
 
     #[test]
+    fn missing_citation_artifact_fails_closed_for_current_summaries() {
+        let mut conn = init_db(":memory:").expect("database should initialize");
+        let source = fixture_path();
+        let completed = complete_fixture_summary(
+            &mut conn,
+            source.to_str().expect("fixture path should be UTF-8"),
+        );
+        conn.execute(
+            "DELETE FROM citation_artifacts WHERE run_id = ?1",
+            [&completed.run_id],
+        )
+        .expect("test citation should be removed");
+
+        let error = get_persisted_summary(&conn, &completed.run_id)
+            .expect_err("a current summary without citations must fail closed");
+        assert_eq!(error.code(), "CITATION_ARTIFACT_MISMATCH");
+    }
+
+    #[test]
+    fn legacy_v1_summary_remains_readable_without_fabricated_citations() {
+        let mut conn = init_db(":memory:").expect("database should initialize");
+        let source = fixture_path();
+        let completed = complete_fixture_summary(
+            &mut conn,
+            source.to_str().expect("fixture path should be UTF-8"),
+        );
+        let mut legacy = completed.summary;
+        legacy.summary_version = "1.0.0".to_string();
+        legacy.integrity_hash = legacy
+            .calculate_integrity_hash()
+            .expect("legacy integrity hash should compute");
+        let artifact_json =
+            serde_json::to_string(&legacy).expect("legacy summary should serialize");
+        let row_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+        conn.execute(
+            "UPDATE summary_artifacts
+             SET summary_version = ?1, artifact_hash = ?2, summary_artifact = ?3
+             WHERE run_id = ?4",
+            params![
+                legacy.summary_version,
+                row_hash,
+                artifact_json,
+                completed.run_id
+            ],
+        )
+        .expect("legacy summary should replace the fixture artifact");
+        conn.execute(
+            "DELETE FROM citation_artifacts WHERE run_id = ?1",
+            [&completed.run_id],
+        )
+        .expect("legacy fixture should not retain a citation artifact");
+
+        let persisted = get_persisted_summary(&conn, &completed.run_id)
+            .expect("legacy summary should remain readable");
+        assert_eq!(persisted.summary.text, legacy.text);
+        assert!(persisted.summary.claims.is_empty());
+    }
+
+    #[test]
     fn incomplete_run_is_visible_but_cannot_masquerade_as_a_summary() {
         let mut conn = init_db(":memory:").expect("database should initialize");
         let source = fixture_path();
@@ -443,13 +628,67 @@ mod tests {
         let expected_filename = completed.document.original_filename.clone();
         let expected_summary = completed.summary.text.clone();
 
-        let serialized = serde_json::to_value(CompletedSummaryView::from(completed))
-            .expect("presentation result should serialize");
+        let serialized = serde_json::to_value(
+            CompletedSummaryView::try_from(completed)
+                .expect("completed result should pass citation validation"),
+        )
+        .expect("presentation result should serialize");
         assert_eq!(serialized["originalFilename"], expected_filename);
         assert_eq!(serialized["summary"]["text"], expected_summary);
+        assert!(serialized["summary"]["claims"]
+            .as_array()
+            .is_some_and(|claims| !claims.is_empty()));
+        assert_eq!(
+            serialized["summary"]["claims"][0]["citations"][0]["label"],
+            "p. 1"
+        );
+        assert!(
+            serialized["summary"]["claims"][0]["citations"][0]["exactQuote"]
+                .as_str()
+                .is_some_and(|quote| !quote.is_empty())
+        );
         assert!(serialized.get("document").is_none());
         assert!(serialized.get("localSourcePath").is_none());
         assert!(serialized["summary"].get("integrityHash").is_none());
         assert!(serialized["summary"].get("documentId").is_none());
+        assert!(serialized["summary"]["claims"][0]["citations"][0]
+            .get("blockId")
+            .is_none());
+        assert!(serialized["summary"]["claims"][0]["citations"][0]
+            .get("chunkId")
+            .is_none());
+    }
+
+    #[test]
+    fn presentation_boundary_rejects_invalid_spans_and_duplicate_claim_references() {
+        let mut conn = init_db(":memory:").expect("database should initialize");
+        let source = fixture_path();
+        let completed = complete_fixture_summary(
+            &mut conn,
+            source.to_str().expect("fixture path should be UTF-8"),
+        );
+
+        let mut invalid_span = completed.clone();
+        invalid_span.citations.evidence[0].source_span.page_start = 0;
+        invalid_span.citations.integrity_hash = invalid_span
+            .citations
+            .calculate_integrity_hash()
+            .expect("modified citation hash should compute");
+        let error = CompletedSummaryView::try_from(invalid_span)
+            .expect_err("page zero must fail the presentation boundary");
+        assert_eq!(error.code(), "CITATION_ARTIFACT_MISMATCH");
+
+        let mut duplicate_reference = completed;
+        let evidence_id = duplicate_reference.citations.claims[0].evidence_ids[0].clone();
+        duplicate_reference.citations.claims[0]
+            .evidence_ids
+            .push(evidence_id);
+        duplicate_reference.citations.integrity_hash = duplicate_reference
+            .citations
+            .calculate_integrity_hash()
+            .expect("modified citation hash should compute");
+        let error = CompletedSummaryView::try_from(duplicate_reference)
+            .expect_err("duplicate evidence within one claim must fail");
+        assert_eq!(error.code(), "CITATION_ARTIFACT_MISMATCH");
     }
 }

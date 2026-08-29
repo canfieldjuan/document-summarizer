@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -241,6 +242,17 @@ pub struct ModelRequest {
     pub system_prompt: String,
     pub user_prompt: String,
     pub max_output_tokens: u32,
+    pub output_format: ModelOutputFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ModelOutputFormat {
+    #[default]
+    Text,
+    JsonSchema {
+        name: String,
+        schema: Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +282,25 @@ pub struct ChunkAnalysis {
     pub chunk_id: String,
     pub summary_text: String,
     pub source_spans: Vec<SourceSpan>,
+    #[serde(default)]
+    pub evidence: Vec<EvidenceItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceItem {
+    pub evidence_id: String,
+    pub chunk_id: String,
+    pub block_id: String,
+    pub claim_text: String,
+    pub exact_quote: String,
+    pub source_span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CitedClaim {
+    pub claim_id: String,
+    pub text: String,
+    pub evidence_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +321,8 @@ pub struct SynthesizedDocument {
     pub model_id: String,
     pub summary_text: String,
     pub source_chunk_ids: Vec<String>,
+    #[serde(default)]
+    pub claims: Vec<CitedClaim>,
     pub warnings: Vec<PipelineWarning>,
 }
 
@@ -299,7 +332,21 @@ pub struct VerifiedDocument {
     pub verification_version: String,
     pub summary_text: String,
     pub source_chunk_ids: Vec<String>,
+    #[serde(default)]
+    pub claims: Vec<CitedClaim>,
     pub warnings: Vec<PipelineWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CitationArtifact {
+    pub document_id: String,
+    pub citation_version: String,
+    pub summary_integrity_hash: String,
+    pub rendered_text: String,
+    pub claims: Vec<CitedClaim>,
+    pub evidence: Vec<EvidenceItem>,
+    pub created_at: DateTime<Utc>,
+    pub integrity_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,6 +364,13 @@ pub struct CompletedSummary {
     pub run_id: String,
     pub document: IngestedDocument,
     pub summary: SummaryArtifact,
+    pub citations: CitationArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryArtifacts {
+    pub summary: SummaryArtifact,
+    pub citations: CitationArtifact,
 }
 
 impl SummaryArtifact {
@@ -326,6 +380,21 @@ impl SummaryArtifact {
             &self.summary_version,
             &self.text,
             &self.warnings,
+            self.created_at,
+        ))?;
+        Ok(format!("{:x}", Sha256::digest(canonical)))
+    }
+}
+
+impl CitationArtifact {
+    pub fn calculate_integrity_hash(&self) -> Result<String, serde_json::Error> {
+        let canonical = serde_json::to_vec(&(
+            &self.document_id,
+            &self.citation_version,
+            &self.summary_integrity_hash,
+            &self.rendered_text,
+            &self.claims,
+            &self.evidence,
             self.created_at,
         ))?;
         Ok(format!("{:x}", Sha256::digest(canonical)))

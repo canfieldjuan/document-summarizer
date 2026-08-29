@@ -467,7 +467,7 @@ fn process_job(state: ProviderState, job_id: String) {
                 runtime: runtime.as_ref(),
             },
         )?;
-        let result = JobResult::from_summary(&job.input, &summary)?;
+        let result = JobResult::from_summary(&job.input, &summary.summary)?;
         store::mark_completed(&conn, &job_id, &result)?;
         Ok(())
     })();
@@ -915,13 +915,8 @@ mod tests {
 
     impl ModelRuntime for FixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
-            let text = if request.system_prompt.contains("synthesize chunk notes") {
-                "Connect returned a grounded summary from the realistic PDF fixture."
-            } else {
-                "Grounded source-chunk notes for Connect."
-            };
             Ok(ModelResponse {
-                text: text.to_string(),
+                text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
             })
@@ -1098,7 +1093,7 @@ mod tests {
         assert!(terminal.result.as_ref().unwrap().outputs[0]
             .content
             .text
-            .contains("grounded summary"));
+            .contains("[p. "));
 
         let duplicate = client
             .post(format!("{}v1/jobs", provider.base_url()))

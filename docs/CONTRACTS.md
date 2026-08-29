@@ -309,12 +309,28 @@ artifact is returned.
 
 ## Local summary artifacts
 
-`ModelRuntime` is the only inference boundary. `AnalyzedDocument` preserves one
-ordered analysis per source chunk with the chunk's exact source spans.
-`SynthesizedDocument` references every chunk ID exactly once in source order.
-`VerifiedDocument` preserves the synthesis text and source coverage without
-rewriting it. The current verification is mechanical, not semantic, and always
-adds `SEMANTIC_VERIFICATION_DEFERRED`.
+`ModelRuntime` is the only inference boundary. A request may select plain text
+or a named, bounded JSON Schema output contract. Analysis version `2.0.0`
+requires each chunk response to contain structured evidence. Rust accepts an
+evidence item only when its block ID belongs to that chunk and its quotation is
+a bounded, contiguous, exact substring of the authoritative normalized block.
+The application derives the `SourceSpan`, chunk association, and deterministic
+evidence ID; the model cannot supply or override those fields.
+
+Synthesis version `2.0.0` receives only the validated evidence catalog and
+returns structured claims. Every claim must reference one or more known,
+unique evidence IDs. Rust canonicalizes those references into source order,
+derives a deterministic claim ID, and renders page labels from the validated
+source spans. `SynthesizedDocument` still references every chunk ID exactly
+once in source order. `VerifiedDocument` preserves claims, rendered text, and
+coverage without rewriting them.
+
+Verification is mechanical, not semantic. It proves citation identity,
+contiguous quotation, normalized-block provenance, ordered chunk coverage,
+deterministic rendering, and artifact integrity. It does not prove that a
+model-authored claim is logically entailed by its quotation or that the source
+itself is factually correct, and it always adds
+`SEMANTIC_VERIFICATION_DEFERRED`.
 
 The supported runtime adapter is Ollama through its loopback OpenAI-compatible
 API. It defaults to `http://127.0.0.1:11434/v1/` and
@@ -324,15 +340,27 @@ API. It defaults to `http://127.0.0.1:11434/v1/` and
 only plain HTTP on exact IPv4 or IPv6 loopback, uses bounded connect, health, and
 response limits, disables proxies and redirects, and reads only this
 application's optional bounded token file. It never reads another application's
-credential store. Document text is marked as untrusted data in both prompts,
-and model output is stored only as text; it cannot invoke pipeline actions.
+credential store. Document and evidence text are marked as untrusted data in
+both prompts. The adapter maps the schema request to Ollama's OpenAI-compatible
+structured-output field; Rust parses and validates the returned JSON before it
+can become a pipeline artifact. Model output cannot invoke pipeline actions.
+The selected imported Qwen model may make Ollama report the exact server error
+`failed to load model vocabulary required for format`. Only for that exact
+HTTP-500 response, the adapter caches the incompatibility and retries without
+server-side grammar enforcement. The prompt still carries the explicit JSON
+shape and the same Rust schema, identity, quotation, and provenance checks
+remain mandatory. Other HTTP failures do not activate the fallback.
 
 Analysis version, synthesis version, verification version, and summary version
-are each `1.0.0`. Schema versions 6 through 9 add separate durable tables for
-the three checkpoints and final summary. Each row records the run/document,
-stage version, serialized artifact, creation timestamp, and SHA-256 row hash.
-The final `SummaryArtifact` also carries a content integrity hash over its
-identity, version, text, warnings, and timestamp. Retrieval checks both layers.
+are each `2.0.0`; citation version is `1.0.0`. Schema versions 6 through 9 keep
+the separate analysis, synthesis, verification, and summary tables. Schema v11
+adds an independent `citation_artifacts` table without rewriting historical
+summary rows. Each artifact row records the run/document, stage version,
+serialized artifact, creation timestamp, and SHA-256 row hash. The final
+`SummaryArtifact` and `CitationArtifact` each carry their own content integrity
+hash, and the citation artifact binds to the exact summary integrity hash and
+rendered text. Retrieval checks both layers and their binding. Historical
+summary version `1.0.0` rows remain readable without inventing citations.
 
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
@@ -340,8 +368,11 @@ Thin Tauri commands select concrete adapters, invoke that service, report
 Ollama readiness, and expose UI-neutral read models for recent runs and
 persisted summaries. The frontend owns selection and display only; it cannot
 query SQLite, mutate pipeline state, or construct a summary artifact. Command
-responses expose only presentation fields; private source paths and artifact
-integrity metadata remain inside the Rust/persistence boundary.
+responses expose only presentation fields. For current summaries this includes
+claim text, application-derived page labels, and exact source quotations;
+private source paths, normalized block IDs, chunk IDs, and artifact integrity
+metadata remain inside the Rust/persistence boundary. The frontend selects and
+displays citations but does not calculate provenance or validate model output.
 
 Recent-run history is capped at 30 items and ordered deterministically by
 persisted `updated_at` then `run_id`, both descending. Its read model includes
@@ -360,8 +391,11 @@ that silently depends on the development server.
 Current limits are conservative: source chunks and one-pass synthesis input
 are each capped at 100,000 Unicode characters. A native-text-free document or
 an input beyond those limits fails with a structured domain error; no summary
-text is invented. Hierarchical synthesis, OCR/vision routing, citations, and
-semantic fact verification remain deferred.
+text is invented. Analysis evidence, summary claims, quotation length, evidence
+references per claim, response schemas, and model response bytes are also
+bounded. Semantic entailment/fact verification, hierarchical synthesis,
+OCR/vision routing, PDF-viewer navigation, and citations for visual-only pages
+remain deferred.
 
 ## Connect v1 provider
 

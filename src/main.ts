@@ -68,6 +68,21 @@ interface SummaryArtifact {
   text: string;
   warnings: PipelineWarning[];
   createdAt: string;
+  claims: CitedClaim[];
+}
+
+interface CitedClaim {
+  claimId: string;
+  text: string;
+  citations: Citation[];
+}
+
+interface Citation {
+  evidenceId: string;
+  label: string;
+  pageStart: number;
+  pageEnd: number;
+  exactQuote: string;
 }
 
 interface PersistedSummary {
@@ -104,6 +119,10 @@ const processingFilename = element<HTMLHeadingElement>("#processing-filename");
 const summaryFilename = element<HTMLHeadingElement>("#summary-filename");
 const summaryMeta = element<HTMLParagraphElement>("#summary-meta");
 const summaryText = element<HTMLPreElement>("#summary-text");
+const summaryClaims = element<HTMLDivElement>("#summary-claims");
+const evidencePanel = element<HTMLElement>("#evidence-panel");
+const evidenceLabel = element<HTMLParagraphElement>("#evidence-label");
+const evidenceQuote = element<HTMLQuoteElement>("#evidence-quote");
 const warningSection = element<HTMLElement>("#warning-section");
 const warningList = element<HTMLUListElement>("#warning-list");
 const failureTitle = element<HTMLHeadingElement>("#failure-title");
@@ -319,10 +338,74 @@ async function selectAndSummarize(): Promise<void> {
 
 function renderSummary(filename: string, byteSize: number, summary: SummaryArtifact): void {
   summaryFilename.textContent = filename;
-  summaryMeta.textContent = `${formatBytes(byteSize)} · ${formatDate(summary.createdAt)}`;
-  summaryText.textContent = summary.text;
+  const citedClaimCount = summary.claims.length;
+  summaryMeta.textContent = citedClaimCount > 0
+    ? `${formatBytes(byteSize)} · ${formatDate(summary.createdAt)} · ${citedClaimCount} cited ${citedClaimCount === 1 ? "claim" : "claims"}`
+    : `${formatBytes(byteSize)} · ${formatDate(summary.createdAt)}`;
+  renderClaims(summary);
   renderWarnings(summary.warnings);
   showStage("summary");
+}
+
+function renderClaims(summary: SummaryArtifact): void {
+  summaryClaims.replaceChildren();
+  evidencePanel.hidden = true;
+  evidenceLabel.textContent = "";
+  evidenceQuote.textContent = "";
+
+  if (summary.claims.length === 0) {
+    summaryClaims.hidden = true;
+    summaryText.hidden = false;
+    summaryText.textContent = summary.text;
+    return;
+  }
+
+  summaryText.textContent = "";
+  summaryText.hidden = true;
+  summaryClaims.hidden = false;
+  summary.claims.forEach((claim, claimIndex) => {
+    const item = document.createElement("section");
+    item.className = "summary-claim";
+
+    const ordinal = document.createElement("p");
+    ordinal.className = "claim-ordinal";
+    ordinal.textContent = `Claim ${String(claimIndex + 1).padStart(2, "0")}`;
+
+    const text = document.createElement("p");
+    text.className = "claim-text";
+    text.textContent = claim.text;
+
+    const actions = document.createElement("div");
+    actions.className = "citation-actions";
+    actions.setAttribute("aria-label", `Evidence for claim ${claimIndex + 1}`);
+    for (const citation of claim.citations) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "citation-button";
+      button.textContent = citation.label;
+      button.setAttribute("aria-pressed", "false");
+      button.setAttribute(
+        "aria-label",
+        `Show exact source excerpt from ${citation.label} for claim ${claimIndex + 1}`,
+      );
+      button.addEventListener("click", () => showEvidence(citation, button));
+      actions.append(button);
+    }
+
+    item.append(ordinal, text, actions);
+    summaryClaims.append(item);
+  });
+}
+
+function showEvidence(citation: Citation, selected: HTMLButtonElement): void {
+  for (const button of summaryClaims.querySelectorAll<HTMLButtonElement>(".citation-button")) {
+    const isSelected = button === selected;
+    button.classList.toggle("is-active", isSelected);
+    button.setAttribute("aria-pressed", String(isSelected));
+  }
+  evidenceLabel.textContent = citation.label;
+  evidenceQuote.textContent = citation.exactQuote;
+  evidencePanel.hidden = false;
 }
 
 function renderWarnings(warnings: PipelineWarning[]): void {

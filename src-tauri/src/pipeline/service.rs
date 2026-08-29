@@ -58,7 +58,8 @@ pub fn process_pdf_to_summary(
     Ok(CompletedSummary {
         run_id: run.run_id,
         document,
-        summary,
+        summary: summary.summary,
+        citations: summary.citations,
     })
 }
 
@@ -66,7 +67,7 @@ pub fn process_ingested_to_summary(
     conn: &mut Connection,
     run_id: &str,
     components: SummaryComponents<'_>,
-) -> Result<crate::pipeline::contracts::SummaryArtifact, DocumentServiceError> {
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     parse_document(conn, components.parser, run_id)?;
     normalize_document(conn, components.normalizer, run_id)?;
     structure_document(conn, components.interpreter, run_id)?;
@@ -85,23 +86,39 @@ mod tests {
     use crate::pipeline::contracts::{
         ModelRequest, ModelResponse, ModelRuntimeFailure, PipelineState,
     };
-    use crate::pipeline::db::{get_pipeline_run, get_summary_artifact, init_db};
+    use crate::pipeline::db::{
+        get_citation_artifact, get_normalized_document, get_pipeline_run, get_summary_artifact,
+        get_synthesized_document, init_db,
+    };
+    use crate::pipeline::model::OllamaRuntime;
     use crate::pipeline::normalize::CanonicalNormalizer;
     use crate::pipeline::parser::PdfExtractParser;
     use crate::pipeline::structure::DeterministicStructureInterpreter;
+    use std::collections::HashMap;
+    use std::fs;
     use std::path::PathBuf;
+    use uuid::Uuid;
+
+    struct TestDatabase(PathBuf);
+
+    impl TestDatabase {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!("doc-sum-live-citation-{}.db", Uuid::new_v4())))
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
 
     struct FixtureRuntime;
 
     impl ModelRuntime for FixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
-            let text = if request.system_prompt.contains("synthesize chunk notes") {
-                "A grounded summary from the realistic PDF fixture."
-            } else {
-                "Grounded source-chunk notes."
-            };
             Ok(ModelResponse {
-                text: text.to_string(),
+                text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
             })
@@ -154,6 +171,95 @@ mod tests {
                 .expect("summary should load")
                 .expect("summary should exist"),
             result.summary
+        );
+        assert_eq!(
+            get_citation_artifact(&conn, &result.run_id)
+                .expect("citations should load")
+                .expect("citations should exist"),
+            result.citations
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the configured local Ollama runtime and selected model"]
+    fn live_ollama_pipeline_persists_exact_citations_across_database_reopen() {
+        let database = TestDatabase::new();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let runtime = OllamaRuntime::from_environment().expect("Ollama runtime should configure");
+        let parser = PdfExtractParser::new();
+        let normalizer = CanonicalNormalizer::new();
+        let interpreter = DeterministicStructureInterpreter::new();
+        let chunker = DeterministicDocumentChunker::new();
+        let (run_id, summary_hash, citation_hash, claim_count, evidence_count) = {
+            let mut conn = init_db(&database.0).expect("live database should initialize");
+            let result = process_pdf_to_summary(
+                &mut conn,
+                source.to_str().expect("fixture path should be UTF-8"),
+                SummaryComponents {
+                    parser: &parser,
+                    normalizer: &normalizer,
+                    interpreter: &interpreter,
+                    chunker: &chunker,
+                    runtime: &runtime,
+                },
+            )
+            .expect("configured Ollama should complete the real PDF pipeline");
+            let normalized = get_normalized_document(&conn, &result.run_id)
+                .expect("normalized artifact should load")
+                .expect("normalized artifact should exist");
+            let blocks = normalized
+                .pages
+                .iter()
+                .flat_map(|page| page.content.iter())
+                .map(|block| (block.block_id.as_str(), block))
+                .collect::<HashMap<_, _>>();
+            assert!(!result.citations.claims.is_empty());
+            assert!(!result.citations.evidence.is_empty());
+            for evidence in &result.citations.evidence {
+                let block = blocks
+                    .get(evidence.block_id.as_str())
+                    .expect("live citation block should exist");
+                assert!(block.text.contains(&evidence.exact_quote));
+                assert_eq!(evidence.source_span, block.source);
+            }
+            let synthesized = get_synthesized_document(&conn, &result.run_id)
+                .expect("synthesis should load")
+                .expect("synthesis should exist");
+            assert_eq!(synthesized.model_id, runtime.model_id());
+            (
+                result.run_id,
+                result.summary.integrity_hash,
+                result.citations.integrity_hash,
+                result.citations.claims.len(),
+                result.citations.evidence.len(),
+            )
+        };
+
+        let reopened = init_db(&database.0).expect("live database should independently reopen");
+        assert_eq!(
+            reopened
+                .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .expect("quick check should run"),
+            "ok"
+        );
+        let summary = get_summary_artifact(&reopened, &run_id)
+            .expect("summary should load")
+            .expect("summary should persist");
+        let citations = get_citation_artifact(&reopened, &run_id)
+            .expect("citations should load")
+            .expect("citations should persist");
+        assert_eq!(summary.integrity_hash, summary_hash);
+        assert_eq!(citations.integrity_hash, citation_hash);
+        assert_eq!(citations.summary_integrity_hash, summary.integrity_hash);
+        assert_eq!(citations.claims.len(), claim_count);
+        assert_eq!(citations.evidence.len(), evidence_count);
+        assert_eq!(
+            get_pipeline_run(&reopened, &run_id)
+                .expect("run should load")
+                .expect("run should persist")
+                .state,
+            PipelineState::CompleteWithWarnings
         );
     }
 }
