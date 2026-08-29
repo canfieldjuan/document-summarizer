@@ -493,7 +493,7 @@ future work
 
 ## Connect v1 Two-App Acceptance Checkpoint (2026-08-29)
 
-**Status**: Deterministic cross-process proof passed; Ollama/Qwen document acceptance pending
+**Status**: Deterministic and selected Ollama/Qwen cross-process proofs passed
 
 **Exact implementation heads exercised**:
 - Document Summarizer provider source: `3e7ff62`.
@@ -515,6 +515,23 @@ future work
   database reopened with `quick_check = ok` at schema version 4, and its
   persisted status and summary matched the returned result.
 
+**Selected Ollama runtime acceptance**:
+- The merged Email Watcher harness at `13e2e7f` exercised the Document Summarizer
+  provider whose latest `src-tauri` code commit was `3e7ff62`. PR #27 subsequently
+  merged as `5e0aee8`.
+- Ollama `0.24.0` served `qwen3-30b-a3b:latest` (model ID `1eda56426671`) at the
+  exact-loopback OpenAI-compatible endpoint. The server process environment was
+  verified to use the Dev Drive model store, cloud access disabled, and an 8192-
+  token context; `ollama ps` reported the selected model fully on GPU.
+- The real configured-runtime proof observed capability counts `0` before
+  provider startup, `1` while live, `0` after termination, and `1` after restart.
+  The job and persisted job both completed, the persisted input hash and summary
+  matched, and the independently opened Email Watcher database returned
+  `quick_check = ok` at schema version 4.
+- This is an integration acceptance for the selected runtime/model using the
+  realistic repository PDF. It does not repeat or replace the separate Email
+  Watcher model-quality evaluation.
+
 **Verification gate**:
 - Document Summarizer: all 83 Rust tests passed, `cargo fmt --check` passed,
   strict Clippy passed, and the release executable rebuilt successfully.
@@ -532,9 +549,8 @@ future work
 **Evidence boundary**:
 - The proof harness now supports an explicitly configured exact-loopback
   OpenAI-compatible endpoint in addition to its deterministic fixture default.
-  It has not yet been accepted against the selected Ollama-hosted Qwen3 30B-A3B
-  model. The separate Email Watcher evaluation does not prove this document
-  pipeline path.
+  That configured path is now accepted against the selected Ollama-hosted Qwen3
+  30B-A3B model for the proof fixture.
 - No live Gmail OAuth attachment fetch, human Tauri Summarize click, Debian
   package install/uninstall, cross-machine transport, or on-prem gateway was
   exercised. These are not claimed by this checkpoint.
