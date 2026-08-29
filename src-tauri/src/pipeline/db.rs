@@ -1,7 +1,7 @@
 use crate::pipeline::contracts::{
-    ChunkedDocument, IngestedDocument, NormalizedDocument, ParsedDocument, PipelineEvent,
-    PipelineFailure, PipelineRun, PipelineStage, PipelineState, PipelineWarning,
-    StructuredDocument,
+    AnalyzedDocument, ChunkedDocument, IngestedDocument, NormalizedDocument, ParsedDocument,
+    PipelineEvent, PipelineFailure, PipelineRun, PipelineStage, PipelineState, PipelineWarning,
+    StructuredDocument, SummaryArtifact, SynthesizedDocument, VerifiedDocument,
 };
 use crate::pipeline::schema::{self, MigrationError};
 use crate::pipeline::state::{StateMachine, TransitionError};
@@ -73,6 +73,29 @@ pub enum StoreError {
     ChunkedArtifactMetadataMismatch { run_id: String },
     #[error("Chunked artifact integrity hash does not match for run {run_id}")]
     ChunkedArtifactIntegrityMismatch { run_id: String },
+    #[error("{artifact_kind} artifact not found for pipeline run {run_id}")]
+    DownstreamArtifactNotFound {
+        artifact_kind: String,
+        run_id: String,
+    },
+    #[error("{artifact_kind} artifact document {artifact_document_id} does not match run document {run_document_id}")]
+    DownstreamArtifactDocumentMismatch {
+        artifact_kind: String,
+        artifact_document_id: String,
+        run_document_id: String,
+    },
+    #[error(
+        "{artifact_kind} artifact metadata does not match its storage record for run {run_id}"
+    )]
+    DownstreamArtifactMetadataMismatch {
+        artifact_kind: String,
+        run_id: String,
+    },
+    #[error("{artifact_kind} artifact integrity hash does not match for run {run_id}")]
+    DownstreamArtifactIntegrityMismatch {
+        artifact_kind: String,
+        run_id: String,
+    },
     #[error("Persisted transition lost its expected state/version for run {run_id}")]
     StaleWrite { run_id: String },
     #[error(transparent)]
@@ -515,6 +538,171 @@ pub fn get_chunked_document(
     .transpose()
 }
 
+trait DownstreamArtifactMetadata {
+    fn document_id(&self) -> &str;
+    fn version(&self) -> &str;
+}
+
+#[derive(Clone, Copy)]
+struct DownstreamArtifactTable {
+    table: &'static str,
+    version_column: &'static str,
+    artifact_column: &'static str,
+}
+
+const ANALYZED_ARTIFACT_TABLE: DownstreamArtifactTable = DownstreamArtifactTable {
+    table: "analyzed_documents",
+    version_column: "analysis_version",
+    artifact_column: "analyzed_artifact",
+};
+const SYNTHESIZED_ARTIFACT_TABLE: DownstreamArtifactTable = DownstreamArtifactTable {
+    table: "synthesized_documents",
+    version_column: "synthesis_version",
+    artifact_column: "synthesized_artifact",
+};
+const VERIFIED_ARTIFACT_TABLE: DownstreamArtifactTable = DownstreamArtifactTable {
+    table: "verified_documents",
+    version_column: "verification_version",
+    artifact_column: "verified_artifact",
+};
+const SUMMARY_ARTIFACT_TABLE: DownstreamArtifactTable = DownstreamArtifactTable {
+    table: "summary_artifacts",
+    version_column: "summary_version",
+    artifact_column: "summary_artifact",
+};
+
+impl DownstreamArtifactMetadata for AnalyzedDocument {
+    fn document_id(&self) -> &str {
+        &self.document_id
+    }
+
+    fn version(&self) -> &str {
+        &self.analysis_version
+    }
+}
+
+impl DownstreamArtifactMetadata for SynthesizedDocument {
+    fn document_id(&self) -> &str {
+        &self.document_id
+    }
+
+    fn version(&self) -> &str {
+        &self.synthesis_version
+    }
+}
+
+impl DownstreamArtifactMetadata for VerifiedDocument {
+    fn document_id(&self) -> &str {
+        &self.document_id
+    }
+
+    fn version(&self) -> &str {
+        &self.verification_version
+    }
+}
+
+impl DownstreamArtifactMetadata for SummaryArtifact {
+    fn document_id(&self) -> &str {
+        &self.document_id
+    }
+
+    fn version(&self) -> &str {
+        &self.summary_version
+    }
+}
+
+fn get_downstream_artifact<T: DeserializeOwned + DownstreamArtifactMetadata>(
+    conn: &Connection,
+    run_id: &str,
+    table: DownstreamArtifactTable,
+    artifact_kind: &str,
+) -> Result<Option<T>, StoreError> {
+    let DownstreamArtifactTable {
+        table,
+        version_column,
+        artifact_column,
+    } = table;
+    let sql = format!(
+        "SELECT artifact.document_id, artifact.{version_column}, artifact.artifact_hash,
+                artifact.{artifact_column}, pipeline_runs.document_id
+         FROM {table} AS artifact
+         JOIN pipeline_runs USING (run_id)
+         WHERE artifact.run_id = ?1"
+    );
+    let row = conn
+        .query_row(&sql, [run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .optional()?;
+
+    row.map(
+        |(document_id, version, artifact_hash, artifact_json, run_document_id)| {
+            if sha256_hex(artifact_json.as_bytes()) != artifact_hash {
+                return Err(StoreError::DownstreamArtifactIntegrityMismatch {
+                    artifact_kind: artifact_kind.to_string(),
+                    run_id: run_id.to_string(),
+                });
+            }
+            let artifact: T = from_json(&artifact_json)?;
+            if artifact.document_id() != document_id
+                || artifact.version() != version
+                || document_id != run_document_id
+            {
+                return Err(StoreError::DownstreamArtifactMetadataMismatch {
+                    artifact_kind: artifact_kind.to_string(),
+                    run_id: run_id.to_string(),
+                });
+            }
+            Ok(artifact)
+        },
+    )
+    .transpose()
+}
+
+pub fn get_analyzed_document(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<AnalyzedDocument>, StoreError> {
+    get_downstream_artifact(conn, run_id, ANALYZED_ARTIFACT_TABLE, "analyzed")
+}
+
+pub fn get_synthesized_document(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<SynthesizedDocument>, StoreError> {
+    get_downstream_artifact(conn, run_id, SYNTHESIZED_ARTIFACT_TABLE, "synthesized")
+}
+
+pub fn get_verified_document(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<VerifiedDocument>, StoreError> {
+    get_downstream_artifact(conn, run_id, VERIFIED_ARTIFACT_TABLE, "verified")
+}
+
+pub fn get_summary_artifact(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<SummaryArtifact>, StoreError> {
+    let artifact: Option<SummaryArtifact> =
+        get_downstream_artifact(conn, run_id, SUMMARY_ARTIFACT_TABLE, "summary")?;
+    if let Some(summary) = &artifact {
+        if summary.calculate_integrity_hash()? != summary.integrity_hash {
+            return Err(StoreError::DownstreamArtifactIntegrityMismatch {
+                artifact_kind: "summary".to_string(),
+                run_id: run_id.to_string(),
+            });
+        }
+    }
+    Ok(artifact)
+}
+
 pub(super) fn persist_ingestion(
     conn: &mut Connection,
     document: &IngestedDocument,
@@ -928,6 +1116,296 @@ pub(super) fn fail_chunking(
     Ok(failed_run)
 }
 
+pub(super) fn start_analysis(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+) -> Result<(PipelineRun, ChunkedDocument), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let chunked = get_chunked_document(&tx, run_id)?
+        .ok_or_else(|| StoreError::ChunkedArtifactNotFound(run_id.to_string()))?;
+    let analyzing_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Chunked,
+        expected_version,
+        PipelineState::Analyzing,
+        Some(PipelineStage::Analyze),
+        None,
+        TransitionPatch::default(),
+    )?;
+    tx.commit()?;
+    Ok((analyzing_run, chunked))
+}
+
+pub(super) fn complete_analysis(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    analyzed: &AnalyzedDocument,
+    warnings: Vec<PipelineWarning>,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_document_matches(&tx, run_id, "analyzed", &analyzed.document_id)?;
+    insert_analyzed_document(&tx, run_id, analyzed)?;
+    let analyzed_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Analyzing,
+        expected_version,
+        PipelineState::Analyzed,
+        Some(PipelineStage::Analyze),
+        None,
+        TransitionPatch {
+            warnings: Some(warnings),
+            failure: None,
+        },
+    )?;
+    tx.commit()?;
+    Ok(analyzed_run)
+}
+
+pub(super) fn fail_analysis(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    failure: PipelineFailure,
+) -> Result<PipelineRun, StoreError> {
+    fail_downstream_stage(
+        conn,
+        run_id,
+        PipelineState::Analyzing,
+        expected_version,
+        PipelineStage::Analyze,
+        failure,
+    )
+}
+
+pub(super) fn start_synthesis(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+) -> Result<(PipelineRun, AnalyzedDocument), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let analyzed = get_analyzed_document(&tx, run_id)?.ok_or_else(|| {
+        StoreError::DownstreamArtifactNotFound {
+            artifact_kind: "analyzed".to_string(),
+            run_id: run_id.to_string(),
+        }
+    })?;
+    let synthesizing_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Analyzed,
+        expected_version,
+        PipelineState::Synthesizing,
+        Some(PipelineStage::Synthesize),
+        None,
+        TransitionPatch::default(),
+    )?;
+    tx.commit()?;
+    Ok((synthesizing_run, analyzed))
+}
+
+pub(super) fn complete_synthesis(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    synthesized: &SynthesizedDocument,
+    warnings: Vec<PipelineWarning>,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_document_matches(&tx, run_id, "synthesized", &synthesized.document_id)?;
+    insert_synthesized_document(&tx, run_id, synthesized)?;
+    let synthesized_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Synthesizing,
+        expected_version,
+        PipelineState::Synthesized,
+        Some(PipelineStage::Synthesize),
+        None,
+        TransitionPatch {
+            warnings: Some(warnings),
+            failure: None,
+        },
+    )?;
+    tx.commit()?;
+    Ok(synthesized_run)
+}
+
+pub(super) fn fail_synthesis(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    failure: PipelineFailure,
+) -> Result<PipelineRun, StoreError> {
+    fail_downstream_stage(
+        conn,
+        run_id,
+        PipelineState::Synthesizing,
+        expected_version,
+        PipelineStage::Synthesize,
+        failure,
+    )
+}
+
+pub(super) fn start_verification(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+) -> Result<(PipelineRun, SynthesizedDocument), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let synthesized = get_synthesized_document(&tx, run_id)?.ok_or_else(|| {
+        StoreError::DownstreamArtifactNotFound {
+            artifact_kind: "synthesized".to_string(),
+            run_id: run_id.to_string(),
+        }
+    })?;
+    let verifying_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Synthesized,
+        expected_version,
+        PipelineState::Verifying,
+        Some(PipelineStage::Verify),
+        None,
+        TransitionPatch::default(),
+    )?;
+    tx.commit()?;
+    Ok((verifying_run, synthesized))
+}
+
+pub(super) fn complete_verification(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    verified: &VerifiedDocument,
+    warnings: Vec<PipelineWarning>,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_document_matches(&tx, run_id, "verified", &verified.document_id)?;
+    insert_verified_document(&tx, run_id, verified)?;
+    let verified_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Verifying,
+        expected_version,
+        PipelineState::Verified,
+        Some(PipelineStage::Verify),
+        None,
+        TransitionPatch {
+            warnings: Some(warnings),
+            failure: None,
+        },
+    )?;
+    tx.commit()?;
+    Ok(verified_run)
+}
+
+pub(super) fn fail_verification(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    failure: PipelineFailure,
+) -> Result<PipelineRun, StoreError> {
+    fail_downstream_stage(
+        conn,
+        run_id,
+        PipelineState::Verifying,
+        expected_version,
+        PipelineStage::Verify,
+        failure,
+    )
+}
+
+pub(super) fn complete_summary(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    summary: &SummaryArtifact,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_document_matches(&tx, run_id, "summary", &summary.document_id)?;
+    insert_summary_artifact(&tx, run_id, summary)?;
+    let completed_run = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Verified,
+        expected_version,
+        PipelineState::CompleteWithWarnings,
+        Some(PipelineStage::Verify),
+        Some("semantic_verification_deferred".to_string()),
+        TransitionPatch {
+            warnings: Some(summary.warnings.clone()),
+            failure: None,
+        },
+    )?;
+    tx.commit()?;
+    Ok(completed_run)
+}
+
+pub(super) fn fail_summary(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    failure: PipelineFailure,
+) -> Result<PipelineRun, StoreError> {
+    fail_downstream_stage(
+        conn,
+        run_id,
+        PipelineState::Verified,
+        expected_version,
+        PipelineStage::Verify,
+        failure,
+    )
+}
+
+fn fail_downstream_stage(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_state: PipelineState,
+    expected_version: u32,
+    stage: PipelineStage,
+    failure: PipelineFailure,
+) -> Result<PipelineRun, StoreError> {
+    let reason = Some(failure.code.clone());
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let failed_run = transition_in_tx(
+        &tx,
+        run_id,
+        expected_state,
+        expected_version,
+        PipelineState::Failed,
+        Some(stage),
+        reason,
+        TransitionPatch {
+            warnings: None,
+            failure: Some(failure),
+        },
+    )?;
+    tx.commit()?;
+    Ok(failed_run)
+}
+
+fn ensure_run_document_matches(
+    conn: &Connection,
+    run_id: &str,
+    artifact_kind: &str,
+    artifact_document_id: &str,
+) -> Result<(), StoreError> {
+    let run = get_pipeline_run(conn, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    if run.document_id != artifact_document_id {
+        return Err(StoreError::DownstreamArtifactDocumentMismatch {
+            artifact_kind: artifact_kind.to_string(),
+            artifact_document_id: artifact_document_id.to_string(),
+            run_document_id: run.document_id,
+        });
+    }
+    Ok(())
+}
+
 fn insert_parsed_document(
     conn: &Connection,
     run_id: &str,
@@ -1019,6 +1497,106 @@ fn insert_chunked_document(
         ],
     )?;
     Ok(())
+}
+
+fn insert_downstream_artifact<T: Serialize>(
+    conn: &Connection,
+    run_id: &str,
+    document_id: &str,
+    version: &str,
+    artifact: &T,
+    table: DownstreamArtifactTable,
+) -> Result<(), StoreError> {
+    let DownstreamArtifactTable {
+        table,
+        version_column,
+        artifact_column,
+    } = table;
+    let artifact_json = to_json(artifact)?;
+    let artifact_hash = sha256_hex(artifact_json.as_bytes());
+    let sql = format!(
+        "INSERT INTO {table} (
+            run_id, document_id, {version_column}, artifact_hash, {artifact_column}, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+    );
+    conn.execute(
+        &sql,
+        params![
+            run_id,
+            document_id,
+            version,
+            artifact_hash,
+            artifact_json,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_analyzed_document(
+    conn: &Connection,
+    run_id: &str,
+    analyzed: &AnalyzedDocument,
+) -> Result<(), StoreError> {
+    insert_downstream_artifact(
+        conn,
+        run_id,
+        &analyzed.document_id,
+        &analyzed.analysis_version,
+        analyzed,
+        ANALYZED_ARTIFACT_TABLE,
+    )
+}
+
+fn insert_synthesized_document(
+    conn: &Connection,
+    run_id: &str,
+    synthesized: &SynthesizedDocument,
+) -> Result<(), StoreError> {
+    insert_downstream_artifact(
+        conn,
+        run_id,
+        &synthesized.document_id,
+        &synthesized.synthesis_version,
+        synthesized,
+        SYNTHESIZED_ARTIFACT_TABLE,
+    )
+}
+
+fn insert_verified_document(
+    conn: &Connection,
+    run_id: &str,
+    verified: &VerifiedDocument,
+) -> Result<(), StoreError> {
+    insert_downstream_artifact(
+        conn,
+        run_id,
+        &verified.document_id,
+        &verified.verification_version,
+        verified,
+        VERIFIED_ARTIFACT_TABLE,
+    )
+}
+
+fn insert_summary_artifact(
+    conn: &Connection,
+    run_id: &str,
+    summary: &SummaryArtifact,
+) -> Result<(), StoreError> {
+    if summary.calculate_integrity_hash()? != summary.integrity_hash {
+        return Err(StoreError::DownstreamArtifactIntegrityMismatch {
+            artifact_kind: "summary".to_string(),
+            run_id: run_id.to_string(),
+        });
+    }
+    insert_downstream_artifact(
+        conn,
+        run_id,
+        &summary.document_id,
+        &summary.summary_version,
+        summary,
+        SUMMARY_ARTIFACT_TABLE,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1388,7 +1966,10 @@ mod tests {
 
         {
             let migrated = init_db(&database.0).expect("legacy DB should migrate");
-            assert_eq!(schema_version(&migrated).expect("version should load"), 5);
+            assert_eq!(
+                schema_version(&migrated).expect("version should load"),
+                schema::CURRENT_SCHEMA_VERSION
+            );
             let run = get_pipeline_run(&migrated, "legacy-run")
                 .expect("run should load")
                 .expect("run should exist");
@@ -1401,7 +1982,10 @@ mod tests {
         }
 
         let reopened = init_db(&database.0).expect("migrated DB should reopen");
-        assert_eq!(schema_version(&reopened).expect("version should load"), 5);
+        assert_eq!(
+            schema_version(&reopened).expect("version should load"),
+            schema::CURRENT_SCHEMA_VERSION
+        );
         assert_eq!(
             list_pipeline_events(&reopened, "legacy-run")
                 .expect("events should load")

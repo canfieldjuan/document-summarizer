@@ -4,17 +4,19 @@ use pipeline::chunk::{
     chunk_document as chunk_pipeline_document, ChunkPipelineError, DeterministicDocumentChunker,
 };
 use pipeline::contracts::{
-    ChunkedDocument, IngestedDocument, NormalizedDocument, ParsedDocument, PipelineRun,
-    StructuredDocument,
+    ChunkedDocument, CompletedSummary, IngestedDocument, ModelRuntimeFailure, NormalizedDocument,
+    ParsedDocument, PipelineRun, StructuredDocument,
 };
 use pipeline::db::init_db;
 use pipeline::ingest::{ingest_pdf, IngestError};
+use pipeline::model::OpenAiCompatibleRuntime;
 use pipeline::normalize::{
     normalize_document as normalize_pipeline_document, CanonicalNormalizer, NormalizePipelineError,
 };
 use pipeline::parser::{
     parse_document as parse_pipeline_document, ParsePipelineError, PdfExtractParser,
 };
+use pipeline::service::{process_pdf_to_summary, DocumentServiceError, SummaryComponents};
 use pipeline::structure::{
     structure_document as structure_pipeline_document, DeterministicStructureInterpreter,
     StructurePipelineError,
@@ -76,6 +78,19 @@ impl From<ChunkPipelineError> for CommandError {
     fn from(error: ChunkPipelineError) -> Self {
         let code = error.code().to_string();
         Self::new(code, error.to_string())
+    }
+}
+
+impl From<DocumentServiceError> for CommandError {
+    fn from(error: DocumentServiceError) -> Self {
+        let code = error.code().to_string();
+        Self::new(code, error.to_string())
+    }
+}
+
+impl From<ModelRuntimeFailure> for CommandError {
+    fn from(error: ModelRuntimeFailure) -> Self {
+        Self::new(error.code, error.message)
     }
 }
 
@@ -157,6 +172,32 @@ fn chunk_document(
         .map_err(CommandError::from)
 }
 
+#[tauri::command]
+fn summarize_document(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<CompletedSummary, CommandError> {
+    let runtime = OpenAiCompatibleRuntime::from_environment().map_err(CommandError::from)?;
+    let mut conn = state.db.lock().map_err(|_| {
+        CommandError::new(
+            "DATABASE_LOCK_UNAVAILABLE",
+            "The local database lock is unavailable",
+        )
+    })?;
+    process_pdf_to_summary(
+        &mut conn,
+        &file_path,
+        SummaryComponents {
+            parser: &PdfExtractParser::new(),
+            normalizer: &CanonicalNormalizer::new(),
+            interpreter: &DeterministicStructureInterpreter::new(),
+            chunker: &DeterministicDocumentChunker::new(),
+            runtime: &runtime,
+        },
+    )
+    .map_err(CommandError::from)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn Error>> {
     tauri::Builder::default()
@@ -178,7 +219,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             parse_document,
             normalize_document,
             structure_document,
-            chunk_document
+            chunk_document,
+            summarize_document
         ])
         .run(tauri::generate_context!())?;
     Ok(())

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +236,94 @@ pub struct ChunkedDocument {
     pub warnings: Vec<PipelineWarning>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRequest {
+    pub system_prompt: String,
+    pub user_prompt: String,
+    pub max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelResponse {
+    pub text: String,
+    pub runtime_id: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRuntimeFailure {
+    pub code: String,
+    pub message: String,
+    pub recoverable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkAnalysis {
+    pub chunk_id: String,
+    pub summary_text: String,
+    pub source_spans: Vec<SourceSpan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyzedDocument {
+    pub document_id: String,
+    pub analysis_version: String,
+    pub runtime_id: String,
+    pub model_id: String,
+    pub chunks: Vec<ChunkAnalysis>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SynthesizedDocument {
+    pub document_id: String,
+    pub synthesis_version: String,
+    pub runtime_id: String,
+    pub model_id: String,
+    pub summary_text: String,
+    pub source_chunk_ids: Vec<String>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedDocument {
+    pub document_id: String,
+    pub verification_version: String,
+    pub summary_text: String,
+    pub source_chunk_ids: Vec<String>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryArtifact {
+    pub document_id: String,
+    pub summary_version: String,
+    pub text: String,
+    pub warnings: Vec<PipelineWarning>,
+    pub created_at: DateTime<Utc>,
+    pub integrity_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedSummary {
+    pub run_id: String,
+    pub document: IngestedDocument,
+    pub summary: SummaryArtifact,
+}
+
+impl SummaryArtifact {
+    pub fn calculate_integrity_hash(&self) -> Result<String, serde_json::Error> {
+        let canonical = serde_json::to_vec(&(
+            &self.document_id,
+            &self.summary_version,
+            &self.text,
+            &self.warnings,
+            self.created_at,
+        ))?;
+        Ok(format!("{:x}", Sha256::digest(canonical)))
+    }
+}
+
 /// Replaceable boundary between an ingested source and a parser-specific
 /// implementation. Downstream stages depend on `ParsedDocument`, never on a
 /// PDF crate's types.
@@ -270,4 +359,13 @@ pub trait DocumentChunker {
         structured: &StructuredDocument,
     ) -> Result<ChunkedDocument, PipelineFailure>;
     fn version(&self) -> &'static str;
+}
+
+/// Replaceable local inference boundary. Generic pipeline state and storage do
+/// not depend on a concrete server, model family, or SDK.
+pub trait ModelRuntime: Send + Sync {
+    fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure>;
+    fn health(&self) -> Result<(), ModelRuntimeFailure>;
+    fn runtime_id(&self) -> &str;
+    fn model_id(&self) -> &str;
 }

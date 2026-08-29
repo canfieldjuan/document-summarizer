@@ -119,8 +119,11 @@ per-run sequence and SQLite triggers reject update or deletion.
   PDF-library types are not part of either normalization contract. Future DOCX,
   OCR, and vision paths must converge into this canonical representation with
   an appropriate `SourceType`.
-- `ModelRuntime` is deliberately deferred. Generic run state and SQLite schema
-  contain no llama.cpp, ONNX, model, prompt, or inference-runtime assumptions.
+- `ModelRuntime` accepts a provider-neutral `ModelRequest` and returns either a
+  `ModelResponse` or structured `ModelRuntimeFailure`. Generic run state and
+  artifact persistence contain no model-family or SDK types. The first adapter
+  uses an OpenAI-compatible exact-loopback HTTP endpoint and can be replaced
+  without changing analysis, synthesis, verification, or Connect contracts.
 
 ## `ParsedDocument` (Slice 2)
 
@@ -303,3 +306,39 @@ association, creation time, and SHA-256 integrity hash. Artifact insertion,
 `CHUNKING -> CHUNKED`, state-version update, and immutable event append share
 one transaction. Retrieval verifies integrity and stored metadata before the
 artifact is returned.
+
+## Local summary artifacts
+
+`ModelRuntime` is the only inference boundary. `AnalyzedDocument` preserves one
+ordered analysis per source chunk with the chunk's exact source spans.
+`SynthesizedDocument` references every chunk ID exactly once in source order.
+`VerifiedDocument` preserves the synthesis text and source coverage without
+rewriting it. The current verification is mechanical, not semantic, and always
+adds `SEMANTIC_VERIFICATION_DEFERRED`.
+
+The first runtime adapter is configured with `DOC_SUM_MODEL_BASE_URL`,
+`DOC_SUM_MODEL_NAME`, `DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional
+`DOC_SUM_MODEL_API_TOKEN_FILE`. It accepts only plain HTTP on exact IPv4 or IPv6
+loopback, disables proxies and redirects, and reads a bounded token file owned
+by this application. It never reads another application's credential store.
+Document text is marked as untrusted data in both prompts, and model output is
+stored only as text; it cannot invoke pipeline actions.
+
+Analysis version, synthesis version, verification version, and summary version
+are each `1.0.0`. Schema versions 6 through 9 add separate durable tables for
+the three checkpoints and final summary. Each row records the run/document,
+stage version, serialized artifact, creation timestamp, and SHA-256 row hash.
+The final `SummaryArtifact` also carries a content integrity hash over its
+identity, version, text, warnings, and timestamp. Retrieval checks both layers.
+
+The application service composes ingestion, parsing, normalization, structural
+interpretation, chunking, analysis, synthesis, verification, and completion.
+The Tauri command only selects concrete adapters, invokes that service, and
+returns `CompletedSummary`; the frontend only selects a file and renders the
+returned text.
+
+Current limits are conservative: source chunks and one-pass synthesis input
+are each capped at 100,000 Unicode characters. A native-text-free document or
+an input beyond those limits fails with a structured domain error; no summary
+text is invented. Hierarchical synthesis, OCR/vision routing, citations, and
+semantic fact verification remain deferred.

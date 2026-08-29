@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -121,6 +121,70 @@ CREATE TABLE chunked_documents (
 
 CREATE INDEX chunked_documents_document_id_idx
 ON chunked_documents(document_id);
+"#;
+
+const V5_TO_V6: &str = r#"
+CREATE TABLE analyzed_documents (
+    run_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    analysis_version TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    analyzed_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX analyzed_documents_document_id_idx
+ON analyzed_documents(document_id);
+"#;
+
+const V6_TO_V7: &str = r#"
+CREATE TABLE synthesized_documents (
+    run_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    synthesis_version TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    synthesized_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX synthesized_documents_document_id_idx
+ON synthesized_documents(document_id);
+"#;
+
+const V7_TO_V8: &str = r#"
+CREATE TABLE verified_documents (
+    run_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    verification_version TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    verified_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX verified_documents_document_id_idx
+ON verified_documents(document_id);
+"#;
+
+const V8_TO_V9: &str = r#"
+CREATE TABLE summary_artifacts (
+    run_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    summary_version TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    summary_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX summary_artifacts_document_id_idx
+ON summary_artifacts(document_id);
 "#;
 
 const LEGACY_TO_V2: &str = r#"
@@ -298,6 +362,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V2_TO_V3)?;
         tx.execute_batch(V3_TO_V4)?;
         tx.execute_batch(V4_TO_V5)?;
+        tx.execute_batch(V5_TO_V6)?;
+        tx.execute_batch(V6_TO_V7)?;
+        tx.execute_batch(V7_TO_V8)?;
+        tx.execute_batch(V8_TO_V9)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -317,6 +385,22 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 4 {
         migrate_v4_to_v5(conn)?;
+        current_version = 5;
+    }
+    if current_version == 5 {
+        migrate_v5_to_v6(conn)?;
+        current_version = 6;
+    }
+    if current_version == 6 {
+        migrate_v6_to_v7(conn)?;
+        current_version = 7;
+    }
+    if current_version == 7 {
+        migrate_v7_to_v8(conn)?;
+        current_version = 8;
+    }
+    if current_version == 8 {
+        migrate_v8_to_v9(conn)?;
     }
     validate(conn)
 }
@@ -362,6 +446,34 @@ fn migrate_v4_to_v5(conn: &mut Connection) -> Result<(), MigrationError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(V4_TO_V5)?;
     tx.pragma_update(None, "user_version", 5)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v5_to_v6(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V5_TO_V6, 6)
+}
+
+fn migrate_v6_to_v7(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V6_TO_V7, 7)
+}
+
+fn migrate_v7_to_v8(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V7_TO_V8, 8)
+}
+
+fn migrate_v8_to_v9(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V8_TO_V9, 9)
+}
+
+fn migrate_additive(
+    conn: &mut Connection,
+    statements: &str,
+    version: u32,
+) -> Result<(), MigrationError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(statements)?;
+    tx.pragma_update(None, "user_version", version)?;
     tx.commit()?;
     Ok(())
 }
@@ -419,6 +531,38 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         return Err(MigrationError::Invariant(
             "chunked_documents artifact columns are missing".to_string(),
         ));
+    }
+
+    for (table, columns) in [
+        (
+            "analyzed_documents",
+            ["analysis_version", "artifact_hash", "analyzed_artifact"],
+        ),
+        (
+            "synthesized_documents",
+            ["synthesis_version", "artifact_hash", "synthesized_artifact"],
+        ),
+        (
+            "verified_documents",
+            ["verification_version", "artifact_hash", "verified_artifact"],
+        ),
+        (
+            "summary_artifacts",
+            ["summary_version", "artifact_hash", "summary_artifact"],
+        ),
+    ] {
+        for column in columns {
+            let present: u32 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                [table, column],
+                |row| row.get(0),
+            )?;
+            if present != 1 {
+                return Err(MigrationError::Invariant(format!(
+                    "{table}.{column} is missing"
+                )));
+            }
+        }
     }
 
     let foreign_key_violation: Option<String> = conn
@@ -504,7 +648,10 @@ mod tests {
             conn.pragma_update(None, "foreign_keys", "ON")
                 .expect("foreign keys should enable");
             migrate(&mut conn).expect("v2 schema should migrate");
-            assert_eq!(version(&conn).expect("version should load"), 5);
+            assert_eq!(
+                version(&conn).expect("version should load"),
+                CURRENT_SCHEMA_VERSION
+            );
             assert_eq!(
                 conn.query_row(
                     "SELECT parsed_artifact FROM parsed_documents WHERE run_id = 'slice2-run'",
@@ -534,8 +681,11 @@ mod tests {
         reopened
             .pragma_update(None, "foreign_keys", "ON")
             .expect("foreign keys should enable");
-        migrate(&mut reopened).expect("repeated v5 initialization should be deterministic");
-        assert_eq!(version(&reopened).expect("version should load"), 5);
+        migrate(&mut reopened).expect("repeated initialization should be deterministic");
+        assert_eq!(
+            version(&reopened).expect("version should load"),
+            CURRENT_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -582,7 +732,10 @@ mod tests {
             conn.pragma_update(None, "foreign_keys", "ON")
                 .expect("foreign keys should enable");
             migrate(&mut conn).expect("v3 schema should migrate");
-            assert_eq!(version(&conn).expect("version should load"), 5);
+            assert_eq!(
+                version(&conn).expect("version should load"),
+                CURRENT_SCHEMA_VERSION
+            );
             assert_eq!(
                 conn.query_row(
                     "SELECT normalized_artifact FROM normalized_documents
@@ -606,7 +759,99 @@ mod tests {
         reopened
             .pragma_update(None, "foreign_keys", "ON")
             .expect("foreign keys should enable");
-        migrate(&mut reopened).expect("repeated v5 initialization should be deterministic");
-        assert_eq!(version(&reopened).expect("version should load"), 5);
+        migrate(&mut reopened).expect("repeated initialization should be deterministic");
+        assert_eq!(
+            version(&reopened).expect("version should load"),
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn schema_v5_upgrades_to_current_without_rewriting_chunked_artifacts() {
+        let database = TestDatabase::new();
+        {
+            let conn = Connection::open(&database.0).expect("v5 database should open");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            conn.execute_batch(SCHEMA_V2)
+                .expect("v2 schema should initialize");
+            conn.execute_batch(V2_TO_V3)
+                .expect("v3 schema should initialize");
+            conn.execute_batch(V3_TO_V4)
+                .expect("v4 schema should initialize");
+            conn.execute_batch(V4_TO_V5)
+                .expect("v5 schema should initialize");
+            conn.pragma_update(None, "user_version", 5)
+                .expect("v5 version should persist");
+            conn.execute_batch(
+                r#"
+                INSERT INTO documents VALUES (
+                    'slice5-document', 'slice5.pdf', 'pdf', 12, 'slice5-hash',
+                    '/slice5.pdf', '2026-08-29T00:00:00+00:00'
+                );
+                INSERT INTO pipeline_runs VALUES (
+                    'slice5-run', 'slice5-document', '"Chunked"', 11, '1.0',
+                    '2026-08-29T00:00:00+00:00', '2026-08-29T00:00:01+00:00',
+                    '2026-08-29T00:00:02+00:00', NULL, '"Chunk"',
+                    '{"total_units":0,"completed_units":0,"failed_units":0}',
+                    '[]', NULL, 0, 1
+                );
+                INSERT INTO pipeline_events VALUES (
+                    'slice5-event', 'slice5-run', 0, NULL, '"Chunked"',
+                    '2026-08-29T00:00:02+00:00', '"Chunk"', NULL, NULL
+                );
+                INSERT INTO chunked_documents VALUES (
+                    'slice5-run', 'slice5-document', '1.0.0', 'slice5-artifact-hash',
+                    '{"slice":5}', '2026-08-29T00:00:02+00:00'
+                );
+                "#,
+            )
+            .expect("Slice 5 rows should persist");
+        }
+
+        {
+            let mut conn = Connection::open(&database.0).expect("database should reopen");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            migrate(&mut conn).expect("v5 schema should migrate");
+            assert_eq!(
+                version(&conn).expect("version should load"),
+                CURRENT_SCHEMA_VERSION
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT chunked_artifact FROM chunked_documents WHERE run_id = 'slice5-run'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("chunked artifact should survive"),
+                r#"{"slice":5}"#
+            );
+            for table in [
+                "analyzed_documents",
+                "synthesized_documents",
+                "verified_documents",
+                "summary_artifacts",
+            ] {
+                let present: u32 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                        [table],
+                        |row| row.get(0),
+                    )
+                    .expect("artifact table should be queryable");
+                assert_eq!(present, 1);
+            }
+        }
+
+        let mut reopened = Connection::open(&database.0).expect("migrated database should reopen");
+        reopened
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        migrate(&mut reopened).expect("repeated initialization should be deterministic");
+        assert_eq!(
+            version(&reopened).expect("version should load"),
+            CURRENT_SCHEMA_VERSION
+        );
     }
 }

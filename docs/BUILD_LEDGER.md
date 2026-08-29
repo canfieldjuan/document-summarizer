@@ -291,3 +291,58 @@ deterministically; password handling is deferred.
   single oversized page remains one oversized chunk with an explicit warning.
 - Model inference, summary synthesis, factual verification, citations, OCR,
   vision, embeddings, RAG, and chat remain deferred.
+
+## Standalone Local Summary Checkpoint
+
+**Status**: Implemented for the native-text standalone path
+
+**Contract and implementation**:
+- Added a replaceable `ModelRuntime` plus an OpenAI-compatible loopback-only
+  adapter. The adapter rejects remote, HTTPS, credential-bearing, query-bearing,
+  and redirecting endpoints and uses this application's optional token file.
+- Added durable `AnalyzedDocument`, `SynthesizedDocument`, `VerifiedDocument`,
+  and `SummaryArtifact` contracts. Ordered chunk identity and source spans are
+  preserved through analysis; synthesis and verification require complete,
+  ordered source-chunk coverage.
+- Added a Rust application service that executes the existing real PDF path
+  through completion. The Tauri command remains an adapter and the TypeScript
+  frontend renders only returned summary text.
+- Mechanical verification explicitly records `SEMANTIC_VERIFICATION_DEFERRED`;
+  no factual-verification or citation claim is made.
+
+**Persistence and failure behavior**:
+- Explicit schema versions 6 through 9 add separate artifact tables without
+  rewriting the schema-v5 chunk checkpoint.
+- Each checkpoint artifact, state/version update, and immutable event append is
+  atomic. The final artifact has both a persisted-row hash and an internal
+  content integrity hash.
+- Model/runtime, malformed-chunk, size-limit, validation, and ordinary database
+  failures persist `FAILED` without a false next-stage or completion event.
+- Visual-only documents fail truthfully with `NO_NATIVE_TEXT_FOR_SUMMARY`; OCR
+  and vision remain deferred.
+
+**Focused proof completed before the full-suite gate**:
+- Eight summary tests passed, covering lifecycle/events, all durable artifacts,
+  runtime failure, malformed input, stale CAS, final-write rollback, tamper
+  detection, visual-only behavior, and independent database reopen.
+- One application-service test passed through the real PDF parser,
+  normalization, structure, chunking, fake runtime, and durable summary.
+- One schema-v5 migration test passed, preserving the exact chunk artifact,
+  creating all four later tables, and reopening deterministically at the
+  current schema.
+- After correcting the IPv6 loopback host representation exposed by the first
+  full run, the combined Rust suite passed 75 tests with no failures. The model
+  boundary suite includes positive IPv4/IPv6 loopback cases and negative HTTPS,
+  hostname, adjacent non-loopback IP, URL-credential, query, empty-model, and
+  zero-timeout cases, plus bounded-response acceptance/rejection.
+- `cargo fmt --check`, strict Clippy, the TypeScript/Vite production build, and
+  the no-bundle Tauri release build passed. The release build emitted
+  `src-tauri/target/release/tauri-appdoc_sum`.
+
+**Known limitations and deferred work**:
+- The live OpenAI-compatible endpoint has not yet been exercised in this
+  checkpoint; tests use the replaceable fake runtime.
+- One-pass synthesis input and each source chunk are capped at 100,000 Unicode
+  characters. Hierarchical synthesis is deferred.
+- Semantic fact verification, citations, OCR, vision, embeddings, RAG, chat,
+  and workflow automation remain deferred.

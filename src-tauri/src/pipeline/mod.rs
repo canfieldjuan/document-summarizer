@@ -2,11 +2,14 @@ pub mod chunk;
 pub mod contracts;
 pub mod db;
 pub mod ingest;
+pub mod model;
 pub mod normalize;
 pub mod parser;
 mod schema;
+pub mod service;
 pub mod state;
 pub mod structure;
+pub mod summary;
 
 #[cfg(test)]
 mod tests {

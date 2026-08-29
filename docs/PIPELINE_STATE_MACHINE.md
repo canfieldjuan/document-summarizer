@@ -106,6 +106,24 @@ event append share one transaction. Invalid inputs or chunker output persist
 may reach `CHUNKED` with zero chunks and `NO_TEXT_TO_CHUNK`; later summarization
 must fail truthfully unless a future OCR/vision stage supplies text.
 
+For summarization, the verified chunk artifact is loaded before `CHUNKED ->
+ANALYZING`. Model availability and each chunk response are checked before the
+analysis artifact commits with `ANALYZING -> ANALYZED`. Synthesis then loads
+that persisted artifact and commits its own artifact with `SYNTHESIZING ->
+SYNTHESIZED`. Verification is currently a deterministic mechanical check of
+non-empty output, runtime identity, ordered source-chunk coverage, and artifact
+integrity. It does not claim factual verification. Its artifact commits with
+`VERIFYING -> VERIFIED` and records `SEMANTIC_VERIFICATION_DEFERRED`.
+
+The final summary artifact and `VERIFIED -> COMPLETE_WITH_WARNINGS` transition,
+state-version increment, and event append share one transaction. A model,
+validation, or ordinary artifact-write failure persists `FAILED` from the
+active stage and cannot create the next checkpoint or a false completion
+event. If SQLite itself cannot record the failure, the active state remains
+truthful evidence of interrupted work. A zero-chunk visual-only document fails
+analysis with `NO_NATIVE_TEXT_FOR_SUMMARY`; OCR and visual analysis are not
+implicitly attempted.
+
 ### Ingestion transaction behavior
 
 Extension/signature validation and source reading occur before durable run
