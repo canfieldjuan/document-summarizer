@@ -42,6 +42,15 @@ pub fn ingest_pdf(
     conn: &mut Connection,
     file_path: &str,
 ) -> Result<(IngestedDocument, PipelineRun), IngestError> {
+    let (document, run) = prepare_pdf_ingestion(file_path, None)?;
+    let ingested_run = db::persist_ingestion(conn, &document, &run)?;
+    Ok((document, ingested_run))
+}
+
+pub(crate) fn prepare_pdf_ingestion(
+    file_path: &str,
+    original_filename_override: Option<&str>,
+) -> Result<(IngestedDocument, PipelineRun), IngestError> {
     let path = Path::new(file_path);
 
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -76,11 +85,15 @@ pub fn ingest_pdf(
         .to_str()
         .ok_or(IngestError::InvalidSourcePath)?
         .to_string();
-    let original_filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(IngestError::InvalidFilename)?
-        .to_string();
+    let original_filename = match original_filename_override {
+        Some(name) if valid_original_filename(name) => name.to_string(),
+        Some(_) => return Err(IngestError::InvalidFilename),
+        None => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(IngestError::InvalidFilename)?
+            .to_string(),
+    };
     let now = Utc::now();
 
     let document = IngestedDocument {
@@ -114,8 +127,16 @@ pub fn ingest_pdf(
         cancellation_requested: false,
         resumable: true,
     };
-    let ingested_run = db::persist_ingestion(conn, &document, &run)?;
-    Ok((document, ingested_run))
+    Ok((document, run))
+}
+
+fn valid_original_filename(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 255
+        && trimmed != "."
+        && trimmed != ".."
+        && !trimmed.contains(['/', '\\', '\0'])
 }
 
 #[cfg(test)]

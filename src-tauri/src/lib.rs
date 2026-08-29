@@ -1,5 +1,7 @@
+pub mod connect;
 pub mod pipeline;
 
+use connect::provider::ConnectProvider;
 use pipeline::chunk::{
     chunk_document as chunk_pipeline_document, ChunkPipelineError, DeterministicDocumentChunker,
 };
@@ -210,6 +212,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             app.manage(AppState {
                 db: Mutex::new(conn),
             });
+            match ConnectProvider::start(db_path, app_data_dir) {
+                Ok(provider) => {
+                    app.manage(provider);
+                }
+                Err(error) => {
+                    eprintln!("Connect provider unavailable; standalone mode continues: {error}");
+                }
+            }
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())

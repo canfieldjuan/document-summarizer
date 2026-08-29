@@ -124,6 +124,30 @@ truthful evidence of interrupted work. A zero-chunk visual-only document fails
 analysis with `NO_NATIVE_TEXT_FOR_SUMMARY`; OCR and visual analysis are not
 implicitly attempted.
 
+### Connect job mapping
+
+Connect job state is a provider API lifecycle, not a replacement for the
+pipeline state machine:
+
+```text
+accepted -> processing -> completed | failed
+```
+
+`accepted` is committed only when the provider-owned source file exists and the
+document, run through `INGESTED`, and job-to-run mapping commit in one SQLite
+transaction. A database uniqueness constraint enforces at most one
+accepted/processing Connect job. `processing` is a compare-and-set update made
+before the existing application service advances the mapped run. `completed`
+is written only after the durable summary exists; `failed` carries a bounded
+public error and never impersonates pipeline completion.
+
+Connect job rows are status records rather than the immutable pipeline-event
+ledger. Their legal payload/state combinations are constrained by SQLite, and
+updates use expected current states. On provider startup, an accepted or
+processing job left by process interruption becomes `failed` with retryable
+`PROVIDER_RESTARTED`. The underlying pipeline run remains authoritative; the
+automatic pipeline resume/rollback policy is still deferred.
+
 ### Ingestion transaction behavior
 
 Extension/signature validation and source reading occur before durable run

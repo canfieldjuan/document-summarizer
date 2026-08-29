@@ -257,6 +257,14 @@ pub struct ModelRuntimeFailure {
     pub recoverable: bool,
 }
 
+impl fmt::Display for ModelRuntimeFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ModelRuntimeFailure {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkAnalysis {
     pub chunk_id: String,

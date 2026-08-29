@@ -718,10 +718,29 @@ pub(super) fn persist_ingestion(
     }
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    insert_document(&tx, document)?;
-    insert_pipeline_run(&tx, run)?;
+    let ingested = persist_ingestion_in_transaction(&tx, document, run)?;
+    tx.commit()?;
+    Ok(ingested)
+}
+
+pub(crate) fn persist_ingestion_in_transaction(
+    tx: &Transaction<'_>,
+    document: &IngestedDocument,
+    run: &PipelineRun,
+) -> Result<PipelineRun, StoreError> {
+    if run.document_id != document.document_id
+        || run.state != PipelineState::Received
+        || run.state_version != 1
+    {
+        return Err(StoreError::InvalidIngestion(
+            "new run must reference the document at RECEIVED version 1".to_string(),
+        ));
+    }
+
+    insert_document(tx, document)?;
+    insert_pipeline_run(tx, run)?;
     insert_pipeline_event(
-        &tx,
+        tx,
         &PipelineEvent {
             event_id: Uuid::new_v4().to_string(),
             run_id: run.run_id.clone(),
@@ -736,7 +755,7 @@ pub(super) fn persist_ingestion(
     )?;
 
     let ingesting = transition_in_tx(
-        &tx,
+        tx,
         &run.run_id,
         PipelineState::Received,
         1,
@@ -746,7 +765,7 @@ pub(super) fn persist_ingestion(
         TransitionPatch::default(),
     )?;
     let ingested = transition_in_tx(
-        &tx,
+        tx,
         &run.run_id,
         PipelineState::Ingesting,
         ingesting.state_version,
@@ -755,7 +774,6 @@ pub(super) fn persist_ingestion(
         None,
         TransitionPatch::default(),
     )?;
-    tx.commit()?;
     Ok(ingested)
 }
 

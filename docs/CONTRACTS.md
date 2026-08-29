@@ -342,3 +342,46 @@ are each capped at 100,000 Unicode characters. A native-text-free document or
 an input beyond those limits fails with a structured domain error; no summary
 text is invented. Hierarchical synthesis, OCR/vision routing, citations, and
 semantic fact verification remain deferred.
+
+## Connect v1 provider
+
+Document Summarizer advertises `document.summarize` version `1.0`, accepting
+`application/pdf` and producing
+`application/vnd.local-connect.document-summary+json`. The wire shapes follow
+the executable contracts committed in the separate `connect-contracts`
+repository. Protocol, application, capability, and summary versions are
+separate fields.
+
+When `XDG_RUNTIME_DIR` is available, the Tauri process binds an ephemeral exact
+IPv4-loopback HTTP endpoint and atomically writes an owner-only registration at
+`$XDG_RUNTIME_DIR/local-connect/v1/providers/`. Each process uses a fresh UUID
+and bearer token. Manifest, submission, and status routes require that token;
+browser `Origin` requests are rejected. Missing runtime-directory or provider
+startup failures are logged and do not prevent standalone startup.
+
+`POST /v1/jobs` requires the bounded job-request JSON as the first multipart
+field and one `application/pdf` byte stream as the second. No caller path is
+accepted. The provider checks protocol/capability versions, UUIDs, display-name
+safety, declared size, configured size ceiling, and SHA-256 while streaming to
+an owner-only staging file. It flushes, atomically promotes, and revalidates the
+provider-owned source before ingestion.
+
+Schema v10 adds private `connect_jobs` persistence. The provider-owned document
+and its normal `RECEIVED -> INGESTING -> INGESTED` run are inserted in the same
+SQLite transaction as the accepted job-to-run mapping. A partial unique index
+permits only one accepted/processing Connect job. Same job ID plus the same
+canonical request returns the existing job; different input returns a conflict.
+Interrupted active jobs become durable retryable failures on provider restart.
+
+Job processing calls the same UI-neutral Rust application service as standalone
+use. Completed wire output contains plain text, bounded warnings, and the input
+artifact ID/media type/size/hash, but no provider-private document/run ID,
+database shape, filesystem path, email metadata, or credentials. Provider
+output is admitted against the v1 byte/count/field limits before completion.
+
+This is a same-OS-user possession boundary, not application authentication. A
+hostile process running as the same user can read the registration token; a
+future trusted broker or OS package identity would be required to change that
+threat model. Launch-on-demand, multiple-provider selection, callbacks,
+workflow automation, remote execution, and cross-machine discovery are not
+implemented.

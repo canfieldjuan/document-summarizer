@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -187,6 +187,40 @@ CREATE INDEX summary_artifacts_document_id_idx
 ON summary_artifacts(document_id);
 "#;
 
+const V9_TO_V10: &str = r#"
+CREATE TABLE connect_jobs (
+    job_id TEXT PRIMARY KEY,
+    request_hash TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    capability_version TEXT NOT NULL,
+    input_artifact_id TEXT NOT NULL,
+    input_media_type TEXT NOT NULL,
+    input_byte_size INTEGER NOT NULL CHECK (input_byte_size > 0),
+    input_sha256 TEXT NOT NULL,
+    input_display_name TEXT NOT NULL,
+    source_app_id TEXT NOT NULL,
+    import_path TEXT NOT NULL,
+    pipeline_run_id TEXT NOT NULL UNIQUE,
+    provider_instance_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('accepted', 'processing', 'completed', 'failed')),
+    result_json TEXT,
+    error_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(pipeline_run_id) REFERENCES pipeline_runs(run_id),
+    CHECK (
+        (status IN ('accepted', 'processing') AND result_json IS NULL AND error_json IS NULL)
+        OR (status = 'completed' AND result_json IS NOT NULL AND error_json IS NULL)
+        OR (status = 'failed' AND result_json IS NULL AND error_json IS NOT NULL)
+    )
+);
+
+CREATE INDEX connect_jobs_status_idx ON connect_jobs(status);
+CREATE INDEX connect_jobs_pipeline_run_idx ON connect_jobs(pipeline_run_id);
+CREATE UNIQUE INDEX connect_jobs_single_active_idx ON connect_jobs((1))
+WHERE status IN ('accepted', 'processing');
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -366,6 +400,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V6_TO_V7)?;
         tx.execute_batch(V7_TO_V8)?;
         tx.execute_batch(V8_TO_V9)?;
+        tx.execute_batch(V9_TO_V10)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -401,6 +436,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 8 {
         migrate_v8_to_v9(conn)?;
+        current_version = 9;
+    }
+    if current_version == 9 {
+        migrate_v9_to_v10(conn)?;
     }
     validate(conn)
 }
@@ -464,6 +503,10 @@ fn migrate_v7_to_v8(conn: &mut Connection) -> Result<(), MigrationError> {
 
 fn migrate_v8_to_v9(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V8_TO_V9, 9)
+}
+
+fn migrate_v9_to_v10(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V9_TO_V10, 10)
 }
 
 fn migrate_additive(
@@ -563,6 +606,39 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
                 )));
             }
         }
+    }
+
+    for column in [
+        "request_hash",
+        "input_artifact_id",
+        "input_sha256",
+        "pipeline_run_id",
+        "provider_instance_id",
+        "status",
+        "result_json",
+        "error_json",
+    ] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('connect_jobs') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!(
+                "connect_jobs.{column} is missing"
+            )));
+        }
+    }
+    let single_active_index: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'index' AND name = 'connect_jobs_single_active_idx'",
+        [],
+        |row| row.get(0),
+    )?;
+    if single_active_index != 1 {
+        return Err(MigrationError::Invariant(
+            "connect_jobs single-active-job index is missing".to_string(),
+        ));
     }
 
     let foreign_key_violation: Option<String> = conn
@@ -832,6 +908,7 @@ mod tests {
                 "synthesized_documents",
                 "verified_documents",
                 "summary_artifacts",
+                "connect_jobs",
             ] {
                 let present: u32 = conn
                     .query_row(

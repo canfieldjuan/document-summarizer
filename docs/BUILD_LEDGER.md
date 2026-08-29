@@ -346,3 +346,72 @@ deterministically; password handling is deferred.
   characters. Hierarchical synthesis is deferred.
 - Semantic fact verification, citations, OCR, vision, embeddings, RAG, chat,
   and workflow automation remain deferred.
+
+## Connect v1 Document Summarizer Provider
+
+**Status**: Implemented and green at the automated provider gate
+
+**Contract authority**:
+- The separate local `connect-contracts` repository froze the v1 manifests,
+  registration, job request/status, error schemas, positive fixtures, and
+  negative protocol/path/remote-endpoint/size/completion fixtures in commit
+  `07fa0c4`.
+- The provider advertises capability ID `document.summarize`, capability
+  version `1.0`, PDF input, and versioned plain-JSON summary output. It does not
+  expose a private document ID, run ID, database path, or source path.
+
+**Provider implementation**:
+- Tauri starts an optional ephemeral-loopback HTTP provider. An unavailable
+  `XDG_RUNTIME_DIR` or any Connect initialization failure leaves the standalone
+  app operational.
+- Runtime registration is written atomically with owner-only permissions and a
+  fresh instance/token. Every route authenticates the token, browser origins
+  are rejected, redirects/proxies are irrelevant on the listening side, and
+  request/artifact/output sizes are bounded.
+- PDF bytes stream into owner-only staging, are checked against declared size
+  and SHA-256, flushed, atomically promoted, and then ingested from
+  provider-owned storage. Display names are validated but never used as paths.
+- Schema v10 adds durable jobs. Accepted job mapping and the normal document/run
+  ingestion transaction commit together; a partial unique index enforces one
+  active Connect job. Same-request replay is idempotent and different input for
+  the same job ID conflicts.
+- The worker invokes the same parser-neutral standalone application service.
+  Startup marks interrupted jobs retryably failed, and registration is removed
+  on normal provider teardown.
+
+**Automated proof**:
+- Eight focused Connect tests passed. They cover request/path/version/size
+  admission, stable request hashing, output caps, atomic accepted mapping,
+  single-active enforcement, Connect-state CAS, restart failure conversion,
+  authentication, browser-origin rejection, real multipart PDF streaming,
+  provider-owned byte equality, the full real PDF pipeline, polling completion,
+  idempotent replay, conflicting job IDs, malformed-PDF failure, digest
+  mismatch cleanup, persistence through independently opened connections, and
+  registration removal.
+- The combined Rust suite passed 83 tests with no failures. Strict Clippy also
+  passed.
+- The latest TypeScript/Vite build and no-bundle Tauri release build passed,
+  emitting `src-tauri/target/release/tauri-appdoc_sum`.
+- That exact release executable was launched with an isolated runtime
+  directory. While the real Tauri process was running, one mode-`0600`
+  registration advertised protocol 1 at an ephemeral `127.0.0.1` endpoint;
+  authenticated manifest retrieval returned the same instance ID plus
+  `document.summarize` accepting `application/pdf`.
+- The process was stopped with `Ctrl-C`, not a graceful desktop close. One stale
+  registration remained and its endpoint was unreachable, proving why
+  consumers must require a live authenticated manifest rather than trusting
+  registration presence. Normal registration removal is separately exercised
+  by the provider teardown test. No live model job was submitted in this
+  process smoke.
+- After that release-process launch, the independently reopened AppData SQLite
+  database reported schema version 10, `quick_check = ok`, one `connect_jobs`
+  table, and the single-active-job unique index. This is a process-driven
+  migration plus connection reopen, not a full GUI close/reopen exercise.
+
+**Deferred**:
+- Package install/removal and a real live-model job remain to be exercised; the
+  release-process manifest smoke and automated fake-runtime job proof are not
+  mislabeled as either.
+- Same-user malicious-process impersonation, launch-on-demand, multiple-provider
+  choice, alternate transports, callbacks, workflow automation, remote
+  execution, and cross-machine discovery remain deferred.

@@ -54,16 +54,28 @@ pub fn process_pdf_to_summary(
     components: SummaryComponents<'_>,
 ) -> Result<CompletedSummary, DocumentServiceError> {
     let (document, run) = ingest_pdf(conn, file_path)?;
-    parse_document(conn, components.parser, &run.run_id)?;
-    normalize_document(conn, components.normalizer, &run.run_id)?;
-    structure_document(conn, components.interpreter, &run.run_id)?;
-    chunk_document(conn, components.chunker, &run.run_id)?;
-    let summary = summarize_chunked_document(conn, components.runtime, &run.run_id)?;
+    let summary = process_ingested_to_summary(conn, &run.run_id, components)?;
     Ok(CompletedSummary {
         run_id: run.run_id,
         document,
         summary,
     })
+}
+
+pub fn process_ingested_to_summary(
+    conn: &mut Connection,
+    run_id: &str,
+    components: SummaryComponents<'_>,
+) -> Result<crate::pipeline::contracts::SummaryArtifact, DocumentServiceError> {
+    parse_document(conn, components.parser, run_id)?;
+    normalize_document(conn, components.normalizer, run_id)?;
+    structure_document(conn, components.interpreter, run_id)?;
+    chunk_document(conn, components.chunker, run_id)?;
+    Ok(summarize_chunked_document(
+        conn,
+        components.runtime,
+        run_id,
+    )?)
 }
 
 #[cfg(test)]
