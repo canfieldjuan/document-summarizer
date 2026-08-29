@@ -1244,7 +1244,7 @@ fn build_citation_artifact(
     Ok(artifact)
 }
 
-fn validate_citation_artifact(
+pub(crate) fn validate_citation_artifact(
     artifact: &CitationArtifact,
     summary: &SummaryArtifact,
     verified: &VerifiedDocument,

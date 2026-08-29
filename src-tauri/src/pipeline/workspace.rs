@@ -1,6 +1,6 @@
 use crate::pipeline::contracts::{
-    CitationArtifact, CompletedSummary, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
-    PipelineRun, PipelineState, PipelineWarning, SummaryArtifact,
+    CitationArtifact, ModelRuntime, ModelRuntimeFailure, PipelineFailure, PipelineRun,
+    PipelineState, PipelineWarning, SummaryArtifact,
 };
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::model::OllamaRuntime;
@@ -84,17 +84,14 @@ pub struct CompletedSummaryView {
     pub summary: SummaryView,
 }
 
-impl TryFrom<CompletedSummary> for CompletedSummaryView {
-    type Error = WorkspaceError;
-
-    fn try_from(completed: CompletedSummary) -> Result<Self, Self::Error> {
-        let summary = summary_view(completed.summary, Some(completed.citations))?;
-        Ok(Self {
-            run_id: completed.run_id,
-            original_filename: completed.document.original_filename,
-            byte_size: completed.document.byte_size,
-            summary,
-        })
+impl From<PersistedSummary> for CompletedSummaryView {
+    fn from(persisted: PersistedSummary) -> Self {
+        Self {
+            run_id: persisted.run.run_id,
+            original_filename: persisted.run.original_filename,
+            byte_size: persisted.run.byte_size,
+            summary: persisted.summary,
+        }
     }
 }
 
@@ -166,6 +163,7 @@ pub fn get_persisted_summary(
         .ok_or_else(|| WorkspaceError::SummaryNotFound(run_id.to_string()))?;
     let citations = db::get_citation_artifact(conn, run_id)?;
     validate_summary_state(&run, true)?;
+    validate_citations_against_sources(conn, run_id, &summary, citations.as_ref())?;
     let summary = summary_view(summary, citations)?;
 
     Ok(PersistedSummary {
@@ -185,6 +183,40 @@ pub fn get_persisted_summary(
         },
         summary,
     })
+}
+
+fn validate_citations_against_sources(
+    conn: &Connection,
+    run_id: &str,
+    summary: &SummaryArtifact,
+    citations: Option<&CitationArtifact>,
+) -> Result<(), WorkspaceError> {
+    let Some(citations) = citations else {
+        return if summary.summary_version == "1.0.0" {
+            Ok(())
+        } else {
+            Err(WorkspaceError::CitationMismatch(
+                summary.document_id.clone(),
+            ))
+        };
+    };
+    let normalized = db::get_normalized_document(conn, run_id)?
+        .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
+    let chunked = db::get_chunked_document(conn, run_id)?
+        .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
+    let analyzed = db::get_analyzed_document(conn, run_id)?
+        .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
+    let verified = db::get_verified_document(conn, run_id)?
+        .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
+    crate::pipeline::summary::validate_citation_artifact(
+        citations,
+        summary,
+        &verified,
+        &analyzed,
+        &chunked,
+        &normalized,
+    )
+    .map_err(|_| WorkspaceError::CitationMismatch(summary.document_id.clone()))
 }
 
 fn summary_view(
@@ -350,7 +382,9 @@ fn validate_summary_state(run: &PipelineRun, has_summary: bool) -> Result<(), Wo
 mod tests {
     use super::*;
     use crate::pipeline::chunk::DeterministicDocumentChunker;
-    use crate::pipeline::contracts::{CompletedSummary, ModelRequest, ModelResponse};
+    use crate::pipeline::contracts::{
+        CitationArtifact, CompletedSummary, ModelRequest, ModelResponse,
+    };
     use crate::pipeline::db::init_db;
     use crate::pipeline::ingest::ingest_pdf;
     use crate::pipeline::normalize::CanonicalNormalizer;
@@ -446,6 +480,19 @@ mod tests {
             },
         )
         .expect("fixture summary should complete")
+    }
+
+    fn replace_citation_artifact(conn: &Connection, run_id: &str, citations: &CitationArtifact) {
+        let artifact_json =
+            serde_json::to_string(citations).expect("citation artifact should serialize");
+        let row_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+        conn.execute(
+            "UPDATE citation_artifacts
+             SET artifact_hash = ?1, citation_artifact = ?2
+             WHERE run_id = ?3",
+            params![row_hash, artifact_json, run_id],
+        )
+        .expect("citation artifact should be replaced");
     }
 
     #[test]
@@ -628,11 +675,10 @@ mod tests {
         let expected_filename = completed.document.original_filename.clone();
         let expected_summary = completed.summary.text.clone();
 
-        let serialized = serde_json::to_value(
-            CompletedSummaryView::try_from(completed)
-                .expect("completed result should pass citation validation"),
-        )
-        .expect("presentation result should serialize");
+        let persisted = get_persisted_summary(&conn, &completed.run_id)
+            .expect("completed result should pass citation validation");
+        let serialized = serde_json::to_value(CompletedSummaryView::from(persisted))
+            .expect("presentation result should serialize");
         assert_eq!(serialized["originalFilename"], expected_filename);
         assert_eq!(serialized["summary"]["text"], expected_summary);
         assert!(serialized["summary"]["claims"]
@@ -668,27 +714,70 @@ mod tests {
             source.to_str().expect("fixture path should be UTF-8"),
         );
 
-        let mut invalid_span = completed.clone();
-        invalid_span.citations.evidence[0].source_span.page_start = 0;
-        invalid_span.citations.integrity_hash = invalid_span
-            .citations
+        let original = completed.citations;
+        let mut invalid_span = original.clone();
+        invalid_span.evidence[0].source_span.page_start = 0;
+        invalid_span.integrity_hash = invalid_span
             .calculate_integrity_hash()
             .expect("modified citation hash should compute");
-        let error = CompletedSummaryView::try_from(invalid_span)
+        replace_citation_artifact(&conn, &completed.run_id, &invalid_span);
+        let error = get_persisted_summary(&conn, &completed.run_id)
             .expect_err("page zero must fail the presentation boundary");
         assert_eq!(error.code(), "CITATION_ARTIFACT_MISMATCH");
 
-        let mut duplicate_reference = completed;
-        let evidence_id = duplicate_reference.citations.claims[0].evidence_ids[0].clone();
-        duplicate_reference.citations.claims[0]
-            .evidence_ids
-            .push(evidence_id);
-        duplicate_reference.citations.integrity_hash = duplicate_reference
-            .citations
+        let mut duplicate_reference = original;
+        let evidence_id = duplicate_reference.claims[0].evidence_ids[0].clone();
+        duplicate_reference.claims[0].evidence_ids.push(evidence_id);
+        duplicate_reference.integrity_hash = duplicate_reference
             .calculate_integrity_hash()
             .expect("modified citation hash should compute");
-        let error = CompletedSummaryView::try_from(duplicate_reference)
+        replace_citation_artifact(&conn, &completed.run_id, &duplicate_reference);
+        let error = get_persisted_summary(&conn, &completed.run_id)
             .expect_err("duplicate evidence within one claim must fail");
+        assert_eq!(error.code(), "CITATION_ARTIFACT_MISMATCH");
+    }
+
+    #[test]
+    fn presentation_boundary_revalidates_checksum_valid_content_against_sources() {
+        let mut conn = init_db(":memory:").expect("database should initialize");
+        let source = fixture_path();
+        let completed = complete_fixture_summary(
+            &mut conn,
+            source.to_str().expect("fixture path should be UTF-8"),
+        );
+        let original = completed.citations;
+
+        let mut altered_claim = original.clone();
+        altered_claim.claims[0].text.push_str(" altered");
+        altered_claim.integrity_hash = altered_claim
+            .calculate_integrity_hash()
+            .expect("modified citation hash should compute");
+        replace_citation_artifact(&conn, &completed.run_id, &altered_claim);
+        assert_eq!(
+            crate::pipeline::db::get_citation_artifact(&conn, &completed.run_id)
+                .expect("checksum-valid citation should load")
+                .expect("citation should exist"),
+            altered_claim
+        );
+        let error = get_persisted_summary(&conn, &completed.run_id)
+            .expect_err("altered claim must fail authoritative validation");
+        assert_eq!(error.code(), "CITATION_ARTIFACT_MISMATCH");
+
+        let mut altered_quote = original;
+        altered_quote.evidence[0].exact_quote =
+            "This quotation is absent from the normalized source.".to_string();
+        altered_quote.integrity_hash = altered_quote
+            .calculate_integrity_hash()
+            .expect("modified citation hash should compute");
+        replace_citation_artifact(&conn, &completed.run_id, &altered_quote);
+        assert_eq!(
+            crate::pipeline::db::get_citation_artifact(&conn, &completed.run_id)
+                .expect("checksum-valid citation should load")
+                .expect("citation should exist"),
+            altered_quote
+        );
+        let error = get_persisted_summary(&conn, &completed.run_id)
+            .expect_err("altered quote must fail authoritative validation");
         assert_eq!(error.code(), "CITATION_ARTIFACT_MISMATCH");
     }
 }

@@ -209,7 +209,8 @@ fn summarize_document(
         },
     )
     .map_err(CommandError::from)?;
-    CompletedSummaryView::try_from(completed).map_err(CommandError::from)
+    let persisted = load_persisted_summary(&conn, &completed.run_id).map_err(CommandError::from)?;
+    Ok(CompletedSummaryView::from(persisted))
 }
 
 #[tauri::command]
