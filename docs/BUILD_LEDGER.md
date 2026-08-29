@@ -415,3 +415,124 @@ deterministically; password handling is deferred.
 - Same-user malicious-process impersonation, launch-on-demand, multiple-provider
   choice, alternate transports, callbacks, workflow automation, remote
   execution, and cross-machine discovery remain deferred.
+
+## Cross-App Product Direction: Connect and Shared Inference Are Separate Boundaries
+
+**Status**: Architectural distinction accepted; shared on-prem inference remains
+future work
+
+**Two independent planes**:
+- Connect is the typed interoperability plane between independently installed
+  applications. It discovers domain capabilities such as `document.summarize`
+  and exchanges explicit jobs and artifacts. It does not discover, select, or
+  schedule models.
+- `ModelRuntime` is an internal inference boundary used by an application that
+  owns a model-dependent capability. Its transport may be the current local
+  loopback adapter or a future authenticated on-prem gateway without changing
+  the Connect capability contract.
+- Email Watcher asks Connect for a compatible capability. Document Summarizer
+  remains the capability provider and owns ingestion, provenance, pipeline
+  state, validation, and results. Email Watcher never selects a model or calls
+  the inference service directly.
+
+**Current verified implementation**:
+- Connect v1 registration, discovery, and jobs use an exact-loopback endpoint on
+  the same computer. Cross-machine Connect discovery is not implemented.
+- The current OpenAI-compatible `ModelRuntime` adapter also accepts only exact
+  loopback HTTP. It does not support a private-network inference appliance.
+- Runtime and model identities are persisted as result provenance. They do not
+  form part of the caller-facing Connect capability selection contract.
+
+**Standalone and availability contract**:
+- Standalone means each application starts, owns its private persistence, and
+  retains its non-Connect workflows without another application or Connect being
+  available. It does not mean every model-dependent action can run without an
+  available inference runtime.
+- Summarization requires a configured, healthy `ModelRuntime`. If no runtime is
+  available, the application must report that model-dependent action as
+  unavailable or failed while keeping the rest of the application healthy.
+- In a future appliance deployment, client computers need no model weights,
+  CUDA toolchain, or inference GPU. The appliance is optional to application
+  startup but required for inference while that deployment mode is selected.
+- The current guarded loopback adapter remains a separate deployment path. A
+  future network adapter must be additive rather than weakening its exact-
+  loopback admission rule.
+
+**Future on-prem inference direction**:
+- The intended deployment is one small business with administrator and user
+  roles, not multi-tenant SaaS. Customer content remains on the business's
+  private network.
+- The appliance would own model/runtime installation, capacity, health,
+  authentication, and fair scheduling. Applications would request versioned
+  task requirements rather than choose concrete model identities.
+- The current prompt-level `ModelRequest` does not yet define the task-profile
+  contract required for gateway routing. That contract, multi-model routing,
+  and model promotion policy require a separate evidence-driven slice.
+- A pinned llama.cpp worker is the supported operational direction. LM Studio is
+  no longer a supported deployment target; compatibility with an
+  OpenAI-compatible protocol does not imply product support for every server
+  implementing that protocol. The llama.cpp model/runtime acceptance remains a
+  separately tested deployment concern, not behavior proved by this entry.
+
+**Safety and ownership**:
+- Shared inference is infrastructure, not application discovery or workflow
+  orchestration. Connect retains the app-capability boundary.
+- Models interpret unstructured content and propose results. Deterministic
+  application code retains authorization, validation, idempotency, and
+  irreversible-effect gates.
+- A future network transport must be authenticated and encrypted; prompts and
+  document bodies must not be logged by default. Applications must degrade
+  safely when the appliance is unavailable.
+
+**Current-slice constraint**:
+- This direction does not expand the current Document Summarizer or Connect v1
+  proof. The inference gateway, administrator UI, appliance packaging,
+  multi-model routing, capacity policy, and cross-machine discovery remain
+  separately scoped follow-up work.
+
+## Connect v1 Two-App Acceptance Checkpoint (2026-08-29)
+
+**Status**: Deterministic cross-process proof passed; llama.cpp acceptance pending
+
+**Exact implementation heads exercised**:
+- Document Summarizer provider source: `3e7ff62`.
+- Email Watcher consumer: merged `origin/main` commit `ea663e1` from PR #26.
+
+**Cross-process proof**:
+- The Document Summarizer release executable was rebuilt from the current source
+  and launched by Email Watcher's `connect-local-proof.py` in an isolated runtime
+  and data directory.
+- A realistic repository PDF was supplied as synthetic Gmail attachment bytes.
+  The proof used the real provider process, real consumer discovery/client code,
+  real parser-to-summary pipeline, and both applications' real SQLite stores. It
+  used a deterministic fixture model and did not contact Gmail.
+- Observed capability counts were `0` before provider startup, `1` while live,
+  `0` after provider termination, and `1` after restart. No Email Watcher code or
+  configuration changed between those availability states.
+- The Connect job completed after the provider's streamed size/SHA-256 admission
+  checks. Email Watcher's persisted input SHA-256 matched the supplied PDF; its
+  database reopened with `quick_check = ok` at schema version 4, and its
+  persisted status and summary matched the returned result.
+
+**Verification gate**:
+- Document Summarizer: all 83 Rust tests passed, `cargo fmt --check` passed,
+  strict Clippy passed, and the release executable rebuilt successfully.
+- Email Watcher: all 214 Python tests and all 15 desktop Rust tests passed. Ruff
+  lint passed. The modified proof harness passed its focused formatter check and
+  rejected partial configured-runtime arguments and a zero timeout. A focused
+  failure probe also proved that unsuccessful provider startup cleans up the
+  spawned child process.
+- The TypeScript/Vite production build, packaged Python sidecar, optimized Tauri
+  desktop executable, and Debian bundle completed successfully.
+- The repository-wide Email Watcher Ruff formatter check is not green: the
+  installed formatter reports 21 pre-existing files would be reformatted. Those
+  unrelated files were not rewritten in this slice.
+
+**Evidence boundary**:
+- The proof harness now supports an explicitly configured exact-loopback
+  OpenAI-compatible endpoint in addition to its deterministic fixture default.
+  It has not yet been accepted against the selected llama.cpp model because that
+  evaluation is still in progress elsewhere.
+- No live Gmail OAuth attachment fetch, human Tauri Summarize click, Debian
+  package install/uninstall, cross-machine transport, or on-prem gateway was
+  exercised. These are not claimed by this checkpoint.
