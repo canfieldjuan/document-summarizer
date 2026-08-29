@@ -216,6 +216,25 @@ pub struct StructuredDocument {
     pub warnings: Vec<PipelineWarning>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentChunk {
+    pub chunk_id: String,
+    pub ordinal: u32,
+    pub structure_node_id: String,
+    pub text: String,
+    pub block_ids: Vec<String>,
+    pub source_spans: Vec<SourceSpan>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkedDocument {
+    pub document_id: String,
+    pub chunking_version: String,
+    pub chunks: Vec<DocumentChunk>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
 /// Replaceable boundary between an ingested source and a parser-specific
 /// implementation. Downstream stages depend on `ParsedDocument`, never on a
 /// PDF crate's types.
@@ -239,5 +258,16 @@ pub trait StructureInterpreter {
         &self,
         normalized: &NormalizedDocument,
     ) -> Result<StructuredDocument, PipelineFailure>;
+    fn version(&self) -> &'static str;
+}
+
+/// Parser- and model-independent boundary between deterministic structure and
+/// the bounded source units consumed by later inference stages.
+pub trait DocumentChunker {
+    fn chunk(
+        &self,
+        normalized: &NormalizedDocument,
+        structured: &StructuredDocument,
+    ) -> Result<ChunkedDocument, PipelineFailure>;
     fn version(&self) -> &'static str;
 }

@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -105,6 +105,22 @@ CREATE TABLE structured_documents (
 
 CREATE INDEX structured_documents_document_id_idx
 ON structured_documents(document_id);
+"#;
+
+const V4_TO_V5: &str = r#"
+CREATE TABLE chunked_documents (
+    run_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    chunking_version TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    chunked_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX chunked_documents_document_id_idx
+ON chunked_documents(document_id);
 "#;
 
 const LEGACY_TO_V2: &str = r#"
@@ -281,6 +297,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(SCHEMA_V2)?;
         tx.execute_batch(V2_TO_V3)?;
         tx.execute_batch(V3_TO_V4)?;
+        tx.execute_batch(V4_TO_V5)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -296,6 +313,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 3 {
         migrate_v3_to_v4(conn)?;
+        current_version = 4;
+    }
+    if current_version == 4 {
+        migrate_v4_to_v5(conn)?;
     }
     validate(conn)
 }
@@ -333,6 +354,14 @@ fn migrate_v3_to_v4(conn: &mut Connection) -> Result<(), MigrationError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(V3_TO_V4)?;
     tx.pragma_update(None, "user_version", 4)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v4_to_v5(conn: &mut Connection) -> Result<(), MigrationError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(V4_TO_V5)?;
+    tx.pragma_update(None, "user_version", 5)?;
     tx.commit()?;
     Ok(())
 }
@@ -377,6 +406,18 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
     if structured_columns != 3 {
         return Err(MigrationError::Invariant(
             "structured_documents artifact columns are missing".to_string(),
+        ));
+    }
+
+    let chunked_columns: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('chunked_documents')
+         WHERE name IN ('chunking_version', 'artifact_hash', 'chunked_artifact')",
+        [],
+        |row| row.get(0),
+    )?;
+    if chunked_columns != 3 {
+        return Err(MigrationError::Invariant(
+            "chunked_documents artifact columns are missing".to_string(),
         ));
     }
 
@@ -463,7 +504,7 @@ mod tests {
             conn.pragma_update(None, "foreign_keys", "ON")
                 .expect("foreign keys should enable");
             migrate(&mut conn).expect("v2 schema should migrate");
-            assert_eq!(version(&conn).expect("version should load"), 4);
+            assert_eq!(version(&conn).expect("version should load"), 5);
             assert_eq!(
                 conn.query_row(
                     "SELECT parsed_artifact FROM parsed_documents WHERE run_id = 'slice2-run'",
@@ -493,8 +534,8 @@ mod tests {
         reopened
             .pragma_update(None, "foreign_keys", "ON")
             .expect("foreign keys should enable");
-        migrate(&mut reopened).expect("repeated v4 initialization should be deterministic");
-        assert_eq!(version(&reopened).expect("version should load"), 4);
+        migrate(&mut reopened).expect("repeated v5 initialization should be deterministic");
+        assert_eq!(version(&reopened).expect("version should load"), 5);
     }
 
     #[test]
@@ -541,7 +582,7 @@ mod tests {
             conn.pragma_update(None, "foreign_keys", "ON")
                 .expect("foreign keys should enable");
             migrate(&mut conn).expect("v3 schema should migrate");
-            assert_eq!(version(&conn).expect("version should load"), 4);
+            assert_eq!(version(&conn).expect("version should load"), 5);
             assert_eq!(
                 conn.query_row(
                     "SELECT normalized_artifact FROM normalized_documents
@@ -565,7 +606,7 @@ mod tests {
         reopened
             .pragma_update(None, "foreign_keys", "ON")
             .expect("foreign keys should enable");
-        migrate(&mut reopened).expect("repeated v4 initialization should be deterministic");
-        assert_eq!(version(&reopened).expect("version should load"), 4);
+        migrate(&mut reopened).expect("repeated v5 initialization should be deterministic");
+        assert_eq!(version(&reopened).expect("version should load"), 5);
     }
 }

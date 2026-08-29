@@ -260,3 +260,46 @@ representation cannot encode reference cycles. Schema v4 persists the artifact,
 document/run association, structure version, serialized JSON, and SHA-256
 integrity hash. Artifact insertion, `STRUCTURING -> STRUCTURED`, state-version
 increment, and immutable event append share one transaction.
+
+## `ChunkedDocument` (Slice 5)
+
+```rust
+pub struct ChunkedDocument {
+    pub document_id: String,
+    pub chunking_version: String,
+    pub chunks: Vec<DocumentChunk>,
+    pub warnings: Vec<PipelineWarning>,
+}
+
+pub struct DocumentChunk {
+    pub chunk_id: String,
+    pub ordinal: u32,
+    pub structure_node_id: String,
+    pub text: String,
+    pub block_ids: Vec<String>,
+    pub source_spans: Vec<SourceSpan>,
+    pub warnings: Vec<PipelineWarning>,
+}
+```
+
+`DocumentChunker` accepts canonical `NormalizedDocument` plus its
+`StructuredDocument`; it has no parser, PDF, UI, or model dependency. Chunking
+version `1.0.0` groups blocks only within a top-level structural owner and
+splits between normalized blocks when adding another block would exceed the
+12,000-character target. A single oversized block remains intact and receives
+`CHUNK_EXCEEDS_TARGET`; chunking never rewrites or truncates authoritative
+normalized text to satisfy the target.
+
+Chunk text is the exact ordered block text joined by two LF characters for
+later prompt construction. Each deterministic chunk ID is derived from the
+document, chunking version, ordinal, structural owner, block IDs, and resulting
+text. Validation requires canonical ordinals, unique deterministic identities,
+one top-level owner per chunk, exact block/source-span association, and 100%
+normalized-block coverage exactly once in source order. Documents without
+native text produce no invented chunks and receive `NO_TEXT_TO_CHUNK`.
+
+Explicit schema v5 persists the chunking version, artifact JSON, document/run
+association, creation time, and SHA-256 integrity hash. Artifact insertion,
+`CHUNKING -> CHUNKED`, state-version update, and immutable event append share
+one transaction. Retrieval verifies integrity and stored metadata before the
+artifact is returned.

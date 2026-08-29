@@ -242,3 +242,52 @@ deterministically; password handling is deferred.
 - Repeated header/footer classification remains deferred because current one-block-per-page input lacks reliable layout boundaries.
 - Automatic recovery for a process interrupted in `STRUCTURING` is not implemented.
 - Semantic chunking, tokenization, models, summaries, evidence extraction, verification, citations, OCR, vision, embeddings, RAG, and chat remain deferred.
+
+## Slice 5: Deterministic Structure-Aware Chunking
+
+**Status**: Implemented
+
+**Contract**:
+- `DocumentChunker` consumes only canonical normalized and structured artifacts
+  and emits `ChunkedDocument`; it has no parser, PDF-library, UI, or model
+  dependency.
+- Version `1.0.0` groups blocks within their top-level structural owner and
+  targets 12,000 characters while splitting only at normalized-block
+  boundaries.
+- Every normalized block has one canonical chunk owner. Block IDs and exact
+  source spans remain ordered and complete; the prompt-oriented joined text
+  does not replace authoritative normalized content.
+- Deterministic chunk IDs include document/version/order/owner/block/text
+  inputs. Oversized individual blocks remain intact with a warning rather than
+  being truncated or split without a finer source representation.
+
+**Persistence and state proof**:
+- Explicit schema version 5 adds `chunked_documents` with run/document
+  association, chunking version, serialized artifact, integrity hash, and
+  creation time.
+- `STRUCTURED -> CHUNKING -> CHUNKED` uses the centralized expected-state and
+  expected-version transition boundary.
+- Artifact insertion, state/version update, and event append commit together.
+  Injected artifact failure produces `FAILED`, no artifact, and no false
+  `CHUNKED` event.
+- Independent SQLite reopen returns the identical chunked artifact and
+  `CHUNKED` state after integrity verification.
+
+**Tests/proof**:
+- The focused chunk suite passed 8 tests covering structural boundaries,
+  provenance, deterministic output, exact coverage rejection, empty visual
+  input, lifecycle/version/events, atomic rollback, invalid chunker output,
+  and independent reopen.
+- The combined Rust suite passed 62 tests with no failures after schema-v5
+  migration expectations were updated.
+- `cargo fmt --check`, strict Clippy, the TypeScript/Vite production build,
+  `git diff --check`, and the no-bundle Tauri release build passed. The release
+  build emitted `src-tauri/target/release/tauri-appdoc_sum`.
+
+**Known limitations and deferred work**:
+- The target is measured in Unicode characters, not model tokens. Tokenizer
+  coupling remains deferred to the model-runtime stage.
+- Current normalization provides at most one block per non-empty page, so a
+  single oversized page remains one oversized chunk with an explicit warning.
+- Model inference, summary synthesis, factual verification, citations, OCR,
+  vision, embeddings, RAG, and chat remain deferred.

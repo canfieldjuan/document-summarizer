@@ -1,3 +1,4 @@
+pub mod chunk;
 pub mod contracts;
 pub mod db;
 pub mod ingest;

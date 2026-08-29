@@ -1,7 +1,11 @@
 pub mod pipeline;
 
+use pipeline::chunk::{
+    chunk_document as chunk_pipeline_document, ChunkPipelineError, DeterministicDocumentChunker,
+};
 use pipeline::contracts::{
-    IngestedDocument, NormalizedDocument, ParsedDocument, PipelineRun, StructuredDocument,
+    ChunkedDocument, IngestedDocument, NormalizedDocument, ParsedDocument, PipelineRun,
+    StructuredDocument,
 };
 use pipeline::db::init_db;
 use pipeline::ingest::{ingest_pdf, IngestError};
@@ -63,6 +67,13 @@ impl From<NormalizePipelineError> for CommandError {
 
 impl From<StructurePipelineError> for CommandError {
     fn from(error: StructurePipelineError) -> Self {
+        let code = error.code().to_string();
+        Self::new(code, error.to_string())
+    }
+}
+
+impl From<ChunkPipelineError> for CommandError {
+    fn from(error: ChunkPipelineError) -> Self {
         let code = error.code().to_string();
         Self::new(code, error.to_string())
     }
@@ -131,6 +142,21 @@ fn structure_document(
     .map_err(CommandError::from)
 }
 
+#[tauri::command]
+fn chunk_document(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<ChunkedDocument, CommandError> {
+    let mut conn = state.db.lock().map_err(|_| {
+        CommandError::new(
+            "DATABASE_LOCK_UNAVAILABLE",
+            "The local database lock is unavailable",
+        )
+    })?;
+    chunk_pipeline_document(&mut conn, &DeterministicDocumentChunker::new(), &run_id)
+        .map_err(CommandError::from)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn Error>> {
     tauri::Builder::default()
@@ -151,7 +177,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             ingest_document,
             parse_document,
             normalize_document,
-            structure_document
+            structure_document,
+            chunk_document
         ])
         .run(tauri::generate_context!())?;
     Ok(())

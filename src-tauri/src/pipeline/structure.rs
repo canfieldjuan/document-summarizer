@@ -1312,7 +1312,7 @@ mod tests {
         let reopened = db::init_db(&database.0).expect("database should reopen");
         assert_eq!(
             db::schema_version(&reopened).expect("version should load"),
-            4
+            5
         );
         assert_eq!(
             db::get_structured_document(&reopened, &run_id)

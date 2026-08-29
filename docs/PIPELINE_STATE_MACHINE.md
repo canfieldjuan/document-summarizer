@@ -96,6 +96,16 @@ increment, and its event. Invalid normalized input or interpreter output
 persists `STRUCTURING -> FAILED` without a structured artifact. Finding no
 headings is valid and produces an `Unstructured` node rather than failure.
 
+For chunking, the verified normalized and structured artifacts are both loaded
+before `STRUCTURED -> CHUNKING` commits. The deterministic chunker groups only
+within top-level structure boundaries, preserves every normalized block and
+source span exactly once, and does not invoke a model. Successful artifact
+insertion, integrity hash, `CHUNKING -> CHUNKED`, state-version increment, and
+event append share one transaction. Invalid inputs or chunker output persist
+`CHUNKING -> FAILED` without a chunked artifact. A document with no native text
+may reach `CHUNKED` with zero chunks and `NO_TEXT_TO_CHUNK`; later summarization
+must fail truthfully unless a future OCR/vision stage supplies text.
+
 ### Ingestion transaction behavior
 
 Extension/signature validation and source reading occur before durable run
