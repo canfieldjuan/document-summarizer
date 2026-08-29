@@ -167,10 +167,26 @@ it cannot leave a durable run stranded in `INGESTING`.
 
 ### Crash recovery status
 
-Automatic active-run detection, rollback, and resume are **not implemented**.
-A durable active state in a future long-running stage may truthfully represent
-an interrupted process, but this version does not automatically recover it.
-Connection reopen preserves the state and history exactly as stored.
+The desktop acquires single-instance ownership before database setup. It then
+reconciles runs left in the implemented active states `INGESTING`, `PARSING`,
+`NORMALIZING`, `STRUCTURING`, `CHUNKING`, `ANALYZING`, `SYNTHESIZING`, or
+`VERIFYING`. Each active state transitions through the existing expected-state
+and expected-version boundary to `FAILED` with a structured, recoverable
+`PROCESS_INTERRUPTED` failure and a stage-matched immutable event.
+
+The full recovery batch is one SQLite transaction. State, version, failure, and
+events therefore all commit or all roll back. Stable/terminal runs are ignored,
+and repeated reconciliation is idempotent. Recovery is explicit desktop
+startup behavior rather than part of `init_db`, so opening another connection
+does not mutate pipeline state. It runs before the Connect provider starts and
+before Connect performs its separate job-status restart reconciliation.
+
+This is truthful interruption reconciliation, not work replay. It preserves
+completed checkpoint artifacts and prior history but does not automatically
+rerun parsing or model requests. There is still no same-run resume command;
+users retry by submitting the document again. Reserved `VISUAL_ANALYZING` and
+`CANCELLING` execution recovery remains deferred because those execution paths
+are not implemented.
 
 The standalone desktop history is a read-only projection of this persisted
 truth. It lists terminal, failed, and interrupted runs without advancing or

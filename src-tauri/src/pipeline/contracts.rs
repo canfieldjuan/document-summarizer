@@ -45,6 +45,33 @@ pub enum PipelineStage {
     Verify,
 }
 
+impl PipelineState {
+    pub(crate) const IMPLEMENTED_ACTIVE_STATES: [Self; 8] = [
+        Self::Ingesting,
+        Self::Parsing,
+        Self::Normalizing,
+        Self::Structuring,
+        Self::Chunking,
+        Self::Analyzing,
+        Self::Synthesizing,
+        Self::Verifying,
+    ];
+
+    pub(crate) fn active_stage(&self) -> Option<PipelineStage> {
+        match self {
+            Self::Ingesting => Some(PipelineStage::Ingest),
+            Self::Parsing => Some(PipelineStage::Parse),
+            Self::Normalizing => Some(PipelineStage::Normalize),
+            Self::Structuring => Some(PipelineStage::Structure),
+            Self::Chunking => Some(PipelineStage::Chunk),
+            Self::Analyzing => Some(PipelineStage::Analyze),
+            Self::Synthesizing => Some(PipelineStage::Synthesize),
+            Self::Verifying => Some(PipelineStage::Verify),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineProgress {
     pub total_units: u32,

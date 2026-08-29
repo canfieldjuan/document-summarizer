@@ -5,6 +5,7 @@ pub mod ingest;
 pub mod model;
 pub mod normalize;
 pub mod parser;
+pub mod recovery;
 mod schema;
 pub mod service;
 pub mod state;
