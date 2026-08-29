@@ -7,15 +7,18 @@
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
-    "frontendDist": "../dist"
+    "frontendDist": "../dist",
+    "features": ["custom-protocol"]
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "tauri-appdoc_sum",
-        "width": 800,
-        "height": 600
+        "title": "Document Summarizer",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 720,
+        "minHeight": 600
       }
     ],
     "security": {

@@ -20,6 +20,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "tauri-appdoc_sum"
 path = "src/main.rs"
 
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

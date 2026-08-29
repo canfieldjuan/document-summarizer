@@ -316,13 +316,16 @@ ordered analysis per source chunk with the chunk's exact source spans.
 rewriting it. The current verification is mechanical, not semantic, and always
 adds `SEMANTIC_VERIFICATION_DEFERRED`.
 
-The first runtime adapter is configured with `DOC_SUM_MODEL_BASE_URL`,
-`DOC_SUM_MODEL_NAME`, `DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional
-`DOC_SUM_MODEL_API_TOKEN_FILE`. It accepts only plain HTTP on exact IPv4 or IPv6
-loopback, disables proxies and redirects, and reads a bounded token file owned
-by this application. It never reads another application's credential store.
-Document text is marked as untrusted data in both prompts, and model output is
-stored only as text; it cannot invoke pipeline actions.
+The supported runtime adapter is Ollama through its loopback OpenAI-compatible
+API. It defaults to `http://127.0.0.1:11434/v1/` and
+`qwen3-30b-a3b:latest`; `DOC_SUM_MODEL_BASE_URL`, `DOC_SUM_MODEL_NAME`,
+`DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional
+`DOC_SUM_MODEL_API_TOKEN_FILE` remain deployment overrides. The adapter accepts
+only plain HTTP on exact IPv4 or IPv6 loopback, uses bounded connect, health, and
+response limits, disables proxies and redirects, and reads only this
+application's optional bounded token file. It never reads another application's
+credential store. Document text is marked as untrusted data in both prompts,
+and model output is stored only as text; it cannot invoke pipeline actions.
 
 Analysis version, synthesis version, verification version, and summary version
 are each `1.0.0`. Schema versions 6 through 9 add separate durable tables for
@@ -333,9 +336,26 @@ identity, version, text, warnings, and timestamp. Retrieval checks both layers.
 
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
-The Tauri command only selects concrete adapters, invokes that service, and
-returns `CompletedSummary`; the frontend only selects a file and renders the
-returned text.
+Thin Tauri commands select concrete adapters, invoke that service, report
+Ollama readiness, and expose UI-neutral read models for recent runs and
+persisted summaries. The frontend owns selection and display only; it cannot
+query SQLite, mutate pipeline state, or construct a summary artifact. Command
+responses expose only presentation fields; private source paths and artifact
+integrity metadata remain inside the Rust/persistence boundary.
+
+Recent-run history is capped at 30 items and ordered deterministically by
+persisted `updated_at` then `run_id`, both descending. Its read model includes
+document identity, filename, byte size, state/version, timestamps, warnings,
+failure, and whether a summary row exists, but not the private source path.
+Opening a result reuses the integrity-validating summary retrieval path and
+requires a completed run. A corrupted artifact therefore remains visible as a
+historical run but fails closed when opened. Connection reopen reconstructs the
+same read model from durable state; history is not a frontend cache.
+
+Release binaries must be produced through the Tauri build command with the
+`custom-protocol` feature so the Vite output is embedded. A release compilation
+without that feature fails at compile time rather than producing an executable
+that silently depends on the development server.
 
 Current limits are conservative: source chunks and one-pass synthesis input
 are each capped at 100,000 Unicode characters. A native-text-free document or

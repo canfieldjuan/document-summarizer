@@ -314,6 +314,34 @@ pub fn get_pipeline_run(
     .transpose()
 }
 
+pub fn list_recent_pipeline_runs(
+    conn: &Connection,
+    limit: u32,
+) -> Result<Vec<PipelineRun>, StoreError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let run_ids = {
+        let mut statement = conn.prepare(
+            "SELECT run_id
+             FROM pipeline_runs
+             ORDER BY updated_at DESC, run_id DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::from(limit)], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    run_ids
+        .into_iter()
+        .map(|run_id| {
+            get_pipeline_run(conn, &run_id)?
+                .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))
+        })
+        .collect()
+}
+
 fn insert_pipeline_event(conn: &Connection, event: &PipelineEvent) -> Result<(), StoreError> {
     conn.execute(
         "INSERT INTO pipeline_events (
@@ -701,6 +729,15 @@ pub fn get_summary_artifact(
         }
     }
     Ok(artifact)
+}
+
+pub fn summary_artifact_exists(conn: &Connection, run_id: &str) -> Result<bool, StoreError> {
+    let count: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM summary_artifacts WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    Ok(count == 1)
 }
 
 pub(super) fn persist_ingestion(

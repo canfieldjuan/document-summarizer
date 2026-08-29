@@ -4,23 +4,123 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Summarize native-text PDF documents with a local Ollama model."
+    />
     <title>Document Summarizer</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
   <body>
-    <main class="container" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif;">
-      <h1>Document Summarizer</h1>
-      <p>Select a native-text PDF to summarize locally.</p>
-      
-      <button id="select-btn" style="padding: 10px 20px; font-size: 16px; cursor: pointer;">Select PDF File</button>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand" aria-label="Document Summarizer">
+          <span class="brand-mark" aria-hidden="true"><span></span></span>
+          <div>
+            <p class="utility-label">Private document desk</p>
+            <h1>Document Summarizer</h1>
+          </div>
+        </div>
 
-      <div id="status" style="margin-top: 20px; text-align: left; max-width: 600px; word-wrap: break-word; background: #f0f0f0; padding: 15px; border-radius: 8px; display: none;">
-        <h3>Summary</h3>
-        <pre id="summary" style="white-space: pre-wrap; font-size: 14px;"></pre>
-      </div>
-      
-      <div id="error" style="margin-top: 20px; color: red; display: none;"></div>
-    </main>
+        <section class="runtime-card" aria-labelledby="runtime-title" aria-live="polite">
+          <span id="runtime-dot" class="runtime-dot is-checking" aria-hidden="true"></span>
+          <div class="runtime-copy">
+            <p id="runtime-title" class="runtime-title">Checking Ollama</p>
+            <p id="runtime-detail" class="runtime-detail">Looking for the local model…</p>
+          </div>
+          <button id="runtime-retry" class="quiet-button" type="button" hidden>
+            Check again
+          </button>
+        </section>
+      </header>
+
+      <main class="workspace">
+        <section class="workbench" aria-labelledby="workbench-title">
+          <div class="workbench-intro">
+            <div>
+              <p class="utility-label">Native-text PDF workflow</p>
+              <h2 id="workbench-title">Bring one document into focus.</h2>
+              <p class="intro-copy">
+                Choose a PDF to create a local summary. Your source stays on this computer.
+              </p>
+            </div>
+            <div class="primary-action-wrap">
+              <button id="select-btn" class="primary-button" type="button" disabled>
+                <span>Choose a PDF</span>
+                <span aria-hidden="true">＋</span>
+              </button>
+              <p id="action-hint" class="action-hint">Waiting for Ollama readiness.</p>
+            </div>
+          </div>
+
+          <section id="document-stage" class="document-stage" aria-live="polite">
+            <div id="empty-view" class="stage-view empty-view">
+              <div class="page-stack" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+              <p class="stage-kicker">No document selected</p>
+              <h3>Your next summary will open here.</h3>
+              <p>
+                Completed work remains available in the recent-document rail after the app
+                reopens.
+              </p>
+            </div>
+
+            <div id="processing-view" class="stage-view processing-view" hidden>
+              <div class="processing-mark" aria-hidden="true"><span></span></div>
+              <p class="stage-kicker">Processing locally</p>
+              <h3 id="processing-filename">Preparing document…</h3>
+              <p>Reading, organizing, and summarizing the source without changing it.</p>
+              <div class="progress-track" aria-hidden="true"><span></span></div>
+            </div>
+
+            <article id="summary-view" class="stage-view summary-view" hidden>
+              <header class="summary-header">
+                <div>
+                  <p class="stage-kicker">Completed summary</p>
+                  <h3 id="summary-filename">Document summary</h3>
+                </div>
+                <p id="summary-meta" class="summary-meta"></p>
+              </header>
+              <pre id="summary-text" class="summary-text"></pre>
+              <section id="warning-section" class="warning-section" hidden>
+                <p class="utility-label">Processing notes</p>
+                <ul id="warning-list"></ul>
+              </section>
+            </article>
+
+            <div id="failure-view" class="stage-view failure-view" hidden>
+              <p class="stage-kicker">Could not complete this document</p>
+              <h3 id="failure-title">Processing stopped safely.</h3>
+              <p id="failure-message"></p>
+              <p id="failure-code" class="failure-code"></p>
+            </div>
+          </section>
+        </section>
+
+        <aside class="history-panel" aria-labelledby="history-title">
+          <header class="history-header">
+            <div>
+              <p class="utility-label">Durable local record</p>
+              <h2 id="history-title">Recent work</h2>
+            </div>
+            <button id="history-refresh" class="icon-button" type="button" aria-label="Refresh recent work">
+              ↻
+            </button>
+          </header>
+          <p id="history-status" class="history-status">Loading recent documents…</p>
+          <ol id="history-list" class="history-list" aria-live="polite"></ol>
+        </aside>
+      </main>
+
+      <footer class="app-footer">
+        <span>Local processing</span>
+        <span aria-hidden="true">•</span>
+        <span>Original files remain untouched</span>
+      </footer>
+    </div>
   </body>
 </html>

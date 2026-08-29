@@ -8,7 +8,7 @@ use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{ModelRuntime, ModelRuntimeFailure};
 use crate::pipeline::db;
 use crate::pipeline::ingest::prepare_pdf_ingestion;
-use crate::pipeline::model::OpenAiCompatibleRuntime;
+use crate::pipeline::model::OllamaRuntime;
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
 use crate::pipeline::service::{process_ingested_to_summary, SummaryComponents};
@@ -87,7 +87,7 @@ impl ConnectProvider {
             Err(_) => DEFAULT_MAX_INPUT_BYTES,
         };
         let runtime_factory: RuntimeFactory = Arc::new(|| {
-            OpenAiCompatibleRuntime::from_environment()
+            OllamaRuntime::from_environment()
                 .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
         });
         Self::start_at(

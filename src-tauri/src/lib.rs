@@ -6,12 +6,12 @@ use pipeline::chunk::{
     chunk_document as chunk_pipeline_document, ChunkPipelineError, DeterministicDocumentChunker,
 };
 use pipeline::contracts::{
-    ChunkedDocument, CompletedSummary, IngestedDocument, ModelRuntimeFailure, NormalizedDocument,
-    ParsedDocument, PipelineRun, StructuredDocument,
+    ChunkedDocument, IngestedDocument, ModelRuntimeFailure, NormalizedDocument, ParsedDocument,
+    PipelineRun, StructuredDocument,
 };
 use pipeline::db::init_db;
 use pipeline::ingest::{ingest_pdf, IngestError};
-use pipeline::model::OpenAiCompatibleRuntime;
+use pipeline::model::OllamaRuntime;
 use pipeline::normalize::{
     normalize_document as normalize_pipeline_document, CanonicalNormalizer, NormalizePipelineError,
 };
@@ -22,6 +22,11 @@ use pipeline::service::{process_pdf_to_summary, DocumentServiceError, SummaryCom
 use pipeline::structure::{
     structure_document as structure_pipeline_document, DeterministicStructureInterpreter,
     StructurePipelineError,
+};
+use pipeline::workspace::{
+    get_persisted_summary as load_persisted_summary, list_recent_runs as load_recent_runs,
+    ollama_runtime_status, CompletedSummaryView, PersistedSummary, RunHistoryItem, RuntimeStatus,
+    WorkspaceError,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -93,6 +98,12 @@ impl From<DocumentServiceError> for CommandError {
 impl From<ModelRuntimeFailure> for CommandError {
     fn from(error: ModelRuntimeFailure) -> Self {
         Self::new(error.code, error.message)
+    }
+}
+
+impl From<WorkspaceError> for CommandError {
+    fn from(error: WorkspaceError) -> Self {
+        Self::new(error.code(), error.to_string())
     }
 }
 
@@ -178,8 +189,8 @@ fn chunk_document(
 fn summarize_document(
     state: State<'_, AppState>,
     file_path: String,
-) -> Result<CompletedSummary, CommandError> {
-    let runtime = OpenAiCompatibleRuntime::from_environment().map_err(CommandError::from)?;
+) -> Result<CompletedSummaryView, CommandError> {
+    let runtime = OllamaRuntime::from_environment().map_err(CommandError::from)?;
     let mut conn = state.db.lock().map_err(|_| {
         CommandError::new(
             "DATABASE_LOCK_UNAVAILABLE",
@@ -197,7 +208,38 @@ fn summarize_document(
             runtime: &runtime,
         },
     )
+    .map(CompletedSummaryView::from)
     .map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn get_runtime_status() -> RuntimeStatus {
+    ollama_runtime_status()
+}
+
+#[tauri::command]
+fn list_recent_runs(state: State<'_, AppState>) -> Result<Vec<RunHistoryItem>, CommandError> {
+    let conn = state.db.lock().map_err(|_| {
+        CommandError::new(
+            "DATABASE_LOCK_UNAVAILABLE",
+            "The local database lock is unavailable",
+        )
+    })?;
+    load_recent_runs(&conn).map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn get_persisted_summary(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<PersistedSummary, CommandError> {
+    let conn = state.db.lock().map_err(|_| {
+        CommandError::new(
+            "DATABASE_LOCK_UNAVAILABLE",
+            "The local database lock is unavailable",
+        )
+    })?;
+    load_persisted_summary(&conn, &run_id).map_err(CommandError::from)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -230,7 +272,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             normalize_document,
             structure_document,
             chunk_document,
-            summarize_document
+            summarize_document,
+            get_runtime_status,
+            list_recent_runs,
+            get_persisted_summary
         ])
         .run(tauri::generate_context!())?;
     Ok(())

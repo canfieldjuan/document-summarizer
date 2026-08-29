@@ -162,3 +162,10 @@ Automatic active-run detection, rollback, and resume are **not implemented**.
 A durable active state in a future long-running stage may truthfully represent
 an interrupted process, but this version does not automatically recover it.
 Connection reopen preserves the state and history exactly as stored.
+
+The standalone desktop history is a read-only projection of this persisted
+truth. It lists terminal, failed, and interrupted runs without advancing or
+repairing them. A summary can be opened only when its integrity-valid artifact
+exists and the authoritative run is `COMPLETE` or `COMPLETE_WITH_WARNINGS`.
+Runtime readiness and frontend display state never mutate the pipeline state
+machine or its event ledger.

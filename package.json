@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "desktop:build:no-bundle": "tauri build --no-bundle",
     "preview": "vite preview",
     "tauri": "tauri"
   },

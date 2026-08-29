@@ -554,3 +554,86 @@ future work
 - No live Gmail OAuth attachment fetch, human Tauri Summarize click, Debian
   package install/uninstall, cross-machine transport, or on-prem gateway was
   exercised. These are not claimed by this checkpoint.
+
+## Slice 6 — Ollama-Backed Standalone Desktop Workflow
+
+**Status**: Implemented and locally accepted
+
+**Runtime and application boundary**:
+- The supported default runtime is now Ollama at
+  `http://127.0.0.1:11434/v1/` with `qwen3-30b-a3b:latest`. Existing
+  `DOC_SUM_MODEL_*` deployment overrides remain supported, and exact-loopback,
+  no-proxy, no-redirect, token-file, and bounded-response protections remain in
+  force. Connect and standalone processing use the same `OllamaRuntime` through
+  the existing `ModelRuntime` abstraction.
+- A UI-neutral workspace service exposes Ollama readiness, the 30 most recently
+  updated pipeline runs, and integrity-checked persisted-summary retrieval.
+  History ordering is deterministic, private source paths are not exposed, and
+  incomplete runs cannot masquerade as completed summaries.
+- History listing checks summary-row presence without decoding every artifact;
+  an individual corrupt artifact therefore remains accounted for but fails
+  closed when opened.
+
+**Desktop workflow and build behavior**:
+- The template page was replaced with explicit runtime-checking, unavailable,
+  empty, processing, completed-summary, warning, failure, and recent-history
+  states. TypeScript remains display/interaction code and calls only thin Tauri
+  commands; it contains no SQLite, state-transition, parsing, or inference
+  logic.
+- The production window now opens as `Document Summarizer` at a desktop-oriented
+  default size with responsive narrow-window behavior, visible keyboard focus,
+  and reduced-motion handling.
+- Canonical desktop scripts invoke the Tauri CLI. Tauri configuration explicitly
+  enables `custom-protocol`, and a release compilation without that feature is
+  rejected at compile time instead of producing a binary that depends on the
+  Vite development server.
+
+**Automated proof**:
+- Six focused workspace tests passed for ready/unavailable runtime states,
+  incomplete-run handling, deterministic tie ordering, corrupt-artifact
+  isolation, identical history/summary retrieval after an independent database
+  reopen, and the narrow frontend serialization boundary. The selected Ollama
+  default test also passed.
+- The combined Rust suite passed 90 tests with no failures. `cargo fmt --check`,
+  strict all-target/all-feature Clippy, and the TypeScript/Vite production build
+  passed.
+- `npm run desktop:build:no-bundle` completed and emitted the release desktop
+  executable. The opposite boundary probe ran raw release compilation without
+  `custom-protocol` and observed the intended compile-time rejection message.
+
+**Production-process and persistence proof**:
+- Ollama `0.24.0` was started on `127.0.0.1:11434` with the Dev Drive model
+  store, cloud disabled, and an 8192-token context. A bounded request to the
+  exact API returned `READY`; `ollama ps` reported model ID `1eda56426671`, 18 GB,
+  100% GPU, and context 8192.
+- With Vite stopped and port 1420 unserved, the release executable launched from
+  isolated runtime/data directories and rendered the full embedded UI. Its real
+  Tauri readiness command displayed `Ollama ready` and
+  `qwen3-30b-a3b:latest`.
+- A realistic PDF was submitted to that production process through its public
+  Connect contract. The actual Qwen job completed with a 1,372-byte summary and
+  two persisted warnings; the returned input SHA-256 matched the fixture.
+- The window was closed normally and its process exited successfully. An
+  independent SQLite open returned `quick_check = ok`, schema version 10, one
+  summary artifact, and an authoritative `CompleteWithWarnings` run at state
+  version 18.
+- Reopening the same release executable against the same application-data
+  directory displayed `structured_report.pdf` in Recent work. Activating that
+  row invoked the integrity-checking Tauri retrieval command and rendered the
+  persisted summary without rerunning the job.
+
+**Evidence boundary and deferred hardening**:
+- The real file-picker-to-standalone-submit click was not automated in this
+  checkpoint; the production-process job entered through Connect. The same
+  application service and real model runtime were exercised, while file-picker
+  wiring remains covered by TypeScript compilation and visual inspection.
+- Runtime-unavailable behavior is covered by a focused Rust boundary test and a
+  browser fallback-state visual pass, not by stopping the live Ollama process
+  during the production smoke.
+- A normal GUI close still left an unreachable Connect registration file in the
+  isolated runtime directory. Live authenticated manifest discovery makes that
+  stale entry non-authoritative, so it did not block standalone restart or this
+  slice, but process-exit registration cleanup remains deferred Connect
+  hardening.
+- No schema version, pipeline transition, prompt, summary semantics, Connect
+  wire contract, OCR, citation, or semantic-verification behavior changed.

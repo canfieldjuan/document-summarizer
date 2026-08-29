@@ -10,6 +10,7 @@ pub mod service;
 pub mod state;
 pub mod structure;
 pub mod summary;
+pub mod workspace;
 
 #[cfg(test)]
 mod tests {

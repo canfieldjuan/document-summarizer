@@ -8,20 +8,22 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
-const DEFAULT_BASE_URL: &str = "http://127.0.0.1:1234/v1/";
-const DEFAULT_MODEL: &str = "qwen3.5-4b";
+const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1/";
+const DEFAULT_MODEL: &str = "qwen3-30b-a3b:latest";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 3;
+const HEALTH_TIMEOUT_SECONDS: u64 = 5;
 const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
-pub struct OpenAiCompatibleRuntime {
+pub struct OllamaRuntime {
     client: Client,
     base_url: Url,
     model_id: String,
     api_token: Option<String>,
 }
 
-impl OpenAiCompatibleRuntime {
+impl OllamaRuntime {
     pub fn from_environment() -> Result<Self, ModelRuntimeFailure> {
         let base_url = std::env::var("DOC_SUM_MODEL_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
@@ -85,6 +87,7 @@ impl OpenAiCompatibleRuntime {
         }
         let client = Client::builder()
             .timeout(timeout)
+            .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECONDS))
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -121,7 +124,7 @@ impl OpenAiCompatibleRuntime {
     }
 }
 
-impl ModelRuntime for OpenAiCompatibleRuntime {
+impl ModelRuntime for OllamaRuntime {
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
         if request.system_prompt.trim().is_empty()
             || request.user_prompt.trim().is_empty()
@@ -193,7 +196,11 @@ impl ModelRuntime for OpenAiCompatibleRuntime {
 
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
         let response = self
-            .authorize(self.client.get(self.endpoint("models")?))
+            .authorize(
+                self.client
+                    .get(self.endpoint("models")?)
+                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
+            )
             .send()
             .map_err(|_| {
                 runtime_failure(
@@ -224,7 +231,7 @@ impl ModelRuntime for OpenAiCompatibleRuntime {
     }
 
     fn runtime_id(&self) -> &str {
-        "openai-compatible-loopback"
+        "ollama-openai-loopback"
     }
 
     fn model_id(&self) -> &str {
@@ -359,52 +366,54 @@ mod tests {
     #[test]
     fn runtime_rejects_remote_credentials_and_invalid_limits() {
         for invalid in [
-            "https://127.0.0.1:1234/v1",
+            "https://127.0.0.1:11434/v1",
             "http://example.com/v1",
-            "http://localhost:1234/v1",
-            "http://127.0.0.2:1234/v1",
-            "http://[::2]:1234/v1",
-            "http://user:pass@127.0.0.1:1234/v1",
-            "http://127.0.0.1:1234/v1?token=secret",
+            "http://localhost:11434/v1",
+            "http://127.0.0.2:11434/v1",
+            "http://[::2]:11434/v1",
+            "http://user:pass@127.0.0.1:11434/v1",
+            "http://127.0.0.1:11434/v1?token=secret",
         ] {
-            let error =
-                OpenAiCompatibleRuntime::new(invalid, "model", Duration::from_secs(1), None)
-                    .err()
-                    .expect("unsafe endpoint must fail");
+            let error = OllamaRuntime::new(invalid, "model", Duration::from_secs(1), None)
+                .err()
+                .expect("unsafe endpoint must fail");
             assert_eq!(error.code, "MODEL_CONFIG_INVALID");
         }
-        assert!(OpenAiCompatibleRuntime::new(
-            "http://127.0.0.1:1234/v1",
+        assert!(OllamaRuntime::new(
+            "http://127.0.0.1:11434/v1",
             "",
             Duration::from_secs(1),
             None,
         )
         .is_err());
-        assert!(OpenAiCompatibleRuntime::new(
-            "http://127.0.0.1:1234/v1",
-            "model",
-            Duration::ZERO,
-            None,
-        )
-        .is_err());
+        assert!(
+            OllamaRuntime::new("http://127.0.0.1:11434/v1", "model", Duration::ZERO, None,)
+                .is_err()
+        );
     }
 
     #[test]
     fn runtime_accepts_exact_ipv4_and_ipv6_loopback() {
-        assert!(OpenAiCompatibleRuntime::new(
-            "http://127.0.0.1:1234/v1",
+        assert!(OllamaRuntime::new(
+            "http://127.0.0.1:11434/v1",
             "model",
             Duration::from_secs(1),
             None,
         )
         .is_ok());
-        assert!(OpenAiCompatibleRuntime::new(
-            "http://[::1]:1234/v1",
+        assert!(OllamaRuntime::new(
+            "http://[::1]:11434/v1",
             "model",
             Duration::from_secs(1),
             None,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn runtime_defaults_to_the_selected_ollama_deployment() {
+        assert_eq!(DEFAULT_BASE_URL, "http://127.0.0.1:11434/v1/");
+        assert_eq!(DEFAULT_MODEL, "qwen3-30b-a3b:latest");
     }
 
     #[test]
