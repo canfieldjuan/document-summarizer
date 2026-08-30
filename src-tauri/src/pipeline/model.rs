@@ -13,7 +13,7 @@ use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1/";
 const DEFAULT_MODEL: &str = "qwen3-30b-a3b:latest";
-const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const HEALTH_TIMEOUT_SECONDS: u64 = 5;
 const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
@@ -35,20 +35,11 @@ impl OllamaRuntime {
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let model_id =
             std::env::var("DOC_SUM_MODEL_NAME").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        let timeout = match std::env::var("DOC_SUM_MODEL_TIMEOUT_SECONDS") {
-            Ok(value) => value
-                .parse::<u64>()
+        let timeout = model_timeout_seconds(
+            std::env::var("DOC_SUM_MODEL_TIMEOUT_SECONDS")
                 .ok()
-                .filter(|value| *value > 0)
-                .ok_or_else(|| {
-                    runtime_failure(
-                        "MODEL_CONFIG_INVALID",
-                        "DOC_SUM_MODEL_TIMEOUT_SECONDS must be a positive integer",
-                        false,
-                    )
-                })?,
-            Err(_) => DEFAULT_TIMEOUT_SECONDS,
-        };
+                .as_deref(),
+        )?;
         let token = std::env::var_os("DOC_SUM_MODEL_API_TOKEN_FILE")
             .map(|value| read_token(Path::new(&value)))
             .transpose()?;
@@ -165,6 +156,23 @@ impl OllamaRuntime {
                 true,
             )
         })
+    }
+}
+
+fn model_timeout_seconds(value: Option<&str>) -> Result<u64, ModelRuntimeFailure> {
+    match value {
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                runtime_failure(
+                    "MODEL_CONFIG_INVALID",
+                    "DOC_SUM_MODEL_TIMEOUT_SECONDS must be a positive integer",
+                    false,
+                )
+            }),
+        None => Ok(DEFAULT_TIMEOUT_SECONDS),
     }
 }
 
@@ -506,6 +514,33 @@ mod tests {
     fn runtime_defaults_to_the_selected_ollama_deployment() {
         assert_eq!(DEFAULT_BASE_URL, "http://127.0.0.1:11434/v1/");
         assert_eq!(DEFAULT_MODEL, "qwen3-30b-a3b:latest");
+        assert_eq!(
+            model_timeout_seconds(None).expect("default timeout should configure"),
+            300
+        );
+    }
+
+    #[test]
+    fn runtime_timeout_override_accepts_positive_values_and_rejects_invalid_boundaries() {
+        assert_eq!(
+            model_timeout_seconds(Some("1")).expect("minimum positive timeout should configure"),
+            1
+        );
+        let maximum = model_timeout_seconds(Some(&u64::MAX.to_string()))
+            .expect("maximum timeout should parse");
+        assert_eq!(maximum, u64::MAX);
+        assert!(OllamaRuntime::new(
+            "http://127.0.0.1:11434/v1",
+            "model",
+            Duration::from_secs(maximum),
+            None,
+        )
+        .is_ok());
+        for invalid in ["", "0", "-1", "1.5", "not-a-number", "18446744073709551616"] {
+            let error = model_timeout_seconds(Some(invalid))
+                .expect_err("non-positive or malformed timeouts must fail");
+            assert_eq!(error.code, "MODEL_CONFIG_INVALID");
+        }
     }
 
     #[test]
