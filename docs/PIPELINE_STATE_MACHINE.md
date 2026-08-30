@@ -209,10 +209,10 @@ Eligibility requires `FAILED`, `resumable = true`, a structured recoverable
 failure from a post-ingestion stage, and no existing direct retry. The caller
 supplies the source state version, and SQLite rechecks state/version plus the
 one-child constraint in the same immediate transaction that creates the child,
-lineage, four events, and active `PARSING` state. A crash after that commit is
-therefore visible to ordinary active-stage startup recovery instead of leaving
-a stable, inaccessible `INGESTED` child. Rejected or stale calls change neither
-run.
+lineage, four events, and active `PARSING` state. A crash before parsing
+completes is therefore visible to ordinary active-stage startup recovery
+instead of leaving a stable, inaccessible `INGESTED` child. Rejected or stale
+calls change neither run.
 
 The parser remains the source-identity boundary. Missing or changed bytes cause
 the new child to fail at `PARSING`; the source failure remains unchanged. A

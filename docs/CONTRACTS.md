@@ -163,10 +163,10 @@ The child run, lineage row, `RECEIVED -> INGESTING -> INGESTED -> PARSING`
 state/version updates, and four immutable events commit in one SQLite
 transaction. The events identify retry creation, checkpoint reuse, and parser
 work admission. Committing the child as active closes the crash window between
-checkpoint creation and parser startup: any later process interruption is
-handled by ordinary active-stage recovery. A stale source version, invalid
-source, duplicate child, event failure, or lineage write failure leaves no
-partial child.
+checkpoint creation and parser startup: an interruption before parsing
+completes is handled by ordinary active-stage recovery. A stale source version,
+invalid source, duplicate child, event failure, or lineage write failure leaves
+no partial child.
 
 After the atomic admission transaction, the ordinary parser/runtime-neutral
 pipeline continues from active `PARSING`. The parser reads the persisted source

@@ -889,3 +889,7 @@ future work
 - A retry still requires the privately owned source path to remain readable
   with its original bytes. Background job execution, cancellation UI, visual
   analysis, OCR, and stale Connect registration cleanup remain deferred.
+- Stable inter-stage checkpoints reached just before a later stage starts are
+  still preserved as truthful incomplete runs rather than auto-replayed on
+  startup. A future explicit checkpoint-resume policy may make those runs
+  actionable; this slice closes only the retry-child creation-to-parser handoff.
