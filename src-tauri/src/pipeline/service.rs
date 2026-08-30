@@ -1,17 +1,23 @@
 use crate::pipeline::chunk::{chunk_document, ChunkPipelineError};
 use crate::pipeline::contracts::{
     CompletedSummary, ContinuationCheckpoint, DocumentChunker, DocumentNormalizer, DocumentParser,
-    ModelRuntime, PipelineState, StructureInterpreter,
+    IngestedDocument, ModelRuntime, PipelineRun, PipelineState, StructureInterpreter,
 };
+use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::ingest::prepare_received_run;
 use crate::pipeline::ingest::{ingest_pdf, IngestError};
 use crate::pipeline::normalize::{normalize_document, NormalizePipelineError};
 use crate::pipeline::parser::{parse_document, parse_started_document, ParsePipelineError};
 use crate::pipeline::structure::{structure_document, StructurePipelineError};
+#[cfg(test)]
 use crate::pipeline::summary::{
-    analyze_chunked_document, complete_verified_document, synthesize_analyzed_document,
-    verify_synthesized_document, SummaryPipelineError,
+    analyze_chunked_document, synthesize_analyzed_document, verify_synthesized_document,
+};
+use crate::pipeline::summary::{
+    analyze_chunked_document_controlled, complete_verified_document,
+    synthesize_analyzed_document_controlled, verify_synthesized_document_controlled,
+    SummaryPipelineError,
 };
 use chrono::Utc;
 use rusqlite::Connection;
@@ -35,6 +41,10 @@ pub enum DocumentServiceError {
     Retry(#[from] RetryPipelineError),
     #[error(transparent)]
     Continuation(#[from] ContinuationPipelineError),
+    #[error("Pipeline cancellation was observed at a safe work boundary")]
+    CancellationObserved,
+    #[error("Pipeline run {0} requires the local model runtime for background processing")]
+    RuntimeRequiredForBackground(String),
 }
 
 impl DocumentServiceError {
@@ -48,8 +58,61 @@ impl DocumentServiceError {
             Self::Summary(error) => error.code(),
             Self::Retry(error) => error.code(),
             Self::Continuation(error) => error.code(),
+            Self::CancellationObserved => "PIPELINE_CANCELLATION_OBSERVED",
+            Self::RuntimeRequiredForBackground(_) => "BACKGROUND_RUNTIME_REQUIRED",
         }
     }
+
+    pub(crate) fn is_concurrent_ownership_loss(&self) -> bool {
+        match self {
+            Self::Ingest(IngestError::Store(error)) => is_stale_store_error(error),
+            Self::Parse(
+                ParsePipelineError::Store(error)
+                | ParsePipelineError::ArtifactPersistence(error)
+                | ParsePipelineError::FailurePersistence {
+                    persistence: error, ..
+                },
+            ) => is_stale_store_error(error),
+            Self::Normalize(
+                NormalizePipelineError::Store(error)
+                | NormalizePipelineError::ArtifactPersistence(error)
+                | NormalizePipelineError::FailurePersistence {
+                    persistence: error, ..
+                },
+            ) => is_stale_store_error(error),
+            Self::Structure(
+                StructurePipelineError::Store(error)
+                | StructurePipelineError::ArtifactPersistence(error)
+                | StructurePipelineError::FailurePersistence {
+                    persistence: error, ..
+                },
+            ) => is_stale_store_error(error),
+            Self::Chunk(
+                ChunkPipelineError::Store(error)
+                | ChunkPipelineError::ArtifactPersistence(error)
+                | ChunkPipelineError::FailurePersistence {
+                    persistence: error, ..
+                },
+            ) => is_stale_store_error(error),
+            Self::Summary(
+                SummaryPipelineError::Store(error)
+                | SummaryPipelineError::ArtifactPersistence { source: error, .. }
+                | SummaryPipelineError::FailurePersistence {
+                    persistence: error, ..
+                },
+            ) => is_stale_store_error(error),
+            Self::Retry(RetryPipelineError::Store(error))
+            | Self::Continuation(ContinuationPipelineError::Store(error)) => {
+                is_stale_store_error(error)
+            }
+            Self::Continuation(ContinuationPipelineError::StaleState { .. }) => true,
+            _ => false,
+        }
+    }
+}
+
+fn is_stale_store_error(error: &StoreError) -> bool {
+    error.is_stale_transition()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +223,23 @@ pub fn continue_run_to_summary(
     expected_state_version: u32,
     components: ContinuationComponents<'_>,
 ) -> Result<CompletedSummary, DocumentServiceError> {
+    continue_run_to_summary_controlled(
+        conn,
+        run_id,
+        expected_state_version,
+        components,
+        &UNCONTROLLED_EXECUTION,
+    )
+}
+
+pub(crate) fn continue_run_to_summary_controlled(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_state_version: u32,
+    components: ContinuationComponents<'_>,
+    control: &dyn ExecutionControl,
+) -> Result<CompletedSummary, DocumentServiceError> {
+    cancellation_checkpoint(control)?;
     let plan = continuation_plan(conn, run_id, expected_state_version)?;
     let run = db::get_pipeline_run(conn, run_id)
         .map_err(ContinuationPipelineError::from)?
@@ -173,42 +253,52 @@ pub fn continue_run_to_summary(
         })?;
 
     let summary = match plan.checkpoint {
-        ContinuationCheckpoint::Ingested => process_ingested_to_summary(
+        ContinuationCheckpoint::Ingested => process_ingested_to_summary_controlled(
             conn,
             run_id,
             continuation_summary_components(run_id, components)?,
+            control,
         )?,
-        ContinuationCheckpoint::Parsed => process_parsed_to_summary(
+        ContinuationCheckpoint::Parsed => process_parsed_to_summary_controlled(
             conn,
             run_id,
             continuation_summary_components(run_id, components)?,
+            control,
         )?,
-        ContinuationCheckpoint::Normalized => process_normalized_to_summary(
+        ContinuationCheckpoint::Normalized => process_normalized_to_summary_controlled(
             conn,
             run_id,
             continuation_summary_components(run_id, components)?,
+            control,
         )?,
-        ContinuationCheckpoint::Structured => process_structured_to_summary(
+        ContinuationCheckpoint::Structured => process_structured_to_summary_controlled(
             conn,
             run_id,
             continuation_summary_components(run_id, components)?,
+            control,
         )?,
-        ContinuationCheckpoint::Chunked => process_chunked_to_summary(
+        ContinuationCheckpoint::Chunked => process_chunked_to_summary_controlled(
             conn,
             run_id,
             required_continuation_runtime(run_id, components.runtime)?,
+            control,
         )?,
-        ContinuationCheckpoint::Analyzed => process_analyzed_to_summary(
+        ContinuationCheckpoint::Analyzed => process_analyzed_to_summary_controlled(
             conn,
             run_id,
             required_continuation_runtime(run_id, components.runtime)?,
+            control,
         )?,
-        ContinuationCheckpoint::Synthesized => process_synthesized_to_summary(
+        ContinuationCheckpoint::Synthesized => process_synthesized_to_summary_controlled(
             conn,
             run_id,
             required_continuation_runtime(run_id, components.runtime)?,
+            control,
         )?,
-        ContinuationCheckpoint::Verified => complete_verified_document(conn, run_id)?,
+        ContinuationCheckpoint::Verified => {
+            cancellation_checkpoint(control)?;
+            complete_verified_document(conn, run_id)?
+        }
     };
 
     Ok(CompletedSummary {
@@ -256,12 +346,47 @@ pub fn process_pdf_to_summary(
     })
 }
 
+pub(crate) fn admit_pdf_for_background(
+    conn: &mut Connection,
+    file_path: &str,
+) -> Result<(IngestedDocument, PipelineRun), DocumentServiceError> {
+    let (document, ingested) = ingest_pdf(conn, file_path)?;
+    let (parsing, persisted_document) =
+        db::start_parsing(conn, &ingested.run_id, ingested.state_version)
+            .map_err(ParsePipelineError::from)?;
+    debug_assert_eq!(document, persisted_document);
+    Ok((document, parsing))
+}
+
+pub(crate) fn admit_retry_for_background(
+    conn: &mut Connection,
+    source_run_id: &str,
+    expected_source_version: u32,
+) -> Result<(IngestedDocument, PipelineRun), DocumentServiceError> {
+    create_retry_processing_run(conn, source_run_id, expected_source_version)
+}
+
 pub fn retry_failed_run_to_summary(
     conn: &mut Connection,
     source_run_id: &str,
     expected_source_version: u32,
     components: SummaryComponents<'_>,
 ) -> Result<CompletedSummary, DocumentServiceError> {
+    let (_document, retry_run) =
+        create_retry_processing_run(conn, source_run_id, expected_source_version)?;
+    process_started_parsing_to_summary_controlled(
+        conn,
+        &retry_run.run_id,
+        components,
+        &UNCONTROLLED_EXECUTION,
+    )
+}
+
+fn create_retry_processing_run(
+    conn: &mut Connection,
+    source_run_id: &str,
+    expected_source_version: u32,
+) -> Result<(IngestedDocument, PipelineRun), DocumentServiceError> {
     let source_run = db::get_pipeline_run(conn, source_run_id)
         .map_err(RetryPipelineError::from)?
         .ok_or_else(|| StoreError::RunNotFound(source_run_id.to_string()))
@@ -277,16 +402,34 @@ pub fn retry_failed_run_to_summary(
     let (retry_run, document, _) =
         db::create_retry_run(conn, source_run_id, expected_source_version, &retry_run)
             .map_err(RetryPipelineError::from)?;
+    Ok((document, retry_run))
+}
+
+pub(crate) fn process_started_parsing_to_summary_controlled(
+    conn: &mut Connection,
+    run_id: &str,
+    components: SummaryComponents<'_>,
+    control: &dyn ExecutionControl,
+) -> Result<CompletedSummary, DocumentServiceError> {
+    cancellation_checkpoint(control)?;
+    let run = db::get_pipeline_run(conn, run_id)
+        .map_err(ParsePipelineError::from)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))
+        .map_err(ParsePipelineError::from)?;
+    let document = db::get_document(conn, &run.document_id)
+        .map_err(ParsePipelineError::from)?
+        .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))
+        .map_err(ParsePipelineError::from)?;
     parse_started_document(
         conn,
         components.parser,
-        &retry_run.run_id,
-        retry_run.state_version,
+        run_id,
+        run.state_version,
         &document,
     )?;
-    let summary = process_parsed_to_summary(conn, &retry_run.run_id, components)?;
+    let summary = process_parsed_to_summary_controlled(conn, run_id, components, control)?;
     Ok(CompletedSummary {
-        run_id: retry_run.run_id,
+        run_id: run_id.to_string(),
         document,
         summary: summary.summary,
         citations: summary.citations,
@@ -298,62 +441,92 @@ pub fn process_ingested_to_summary(
     run_id: &str,
     components: SummaryComponents<'_>,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    process_ingested_to_summary_controlled(conn, run_id, components, &UNCONTROLLED_EXECUTION)
+}
+
+pub(crate) fn process_ingested_to_summary_controlled(
+    conn: &mut Connection,
+    run_id: &str,
+    components: SummaryComponents<'_>,
+    control: &dyn ExecutionControl,
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    cancellation_checkpoint(control)?;
     parse_document(conn, components.parser, run_id)?;
-    process_parsed_to_summary(conn, run_id, components)
+    process_parsed_to_summary_controlled(conn, run_id, components, control)
 }
 
-fn process_parsed_to_summary(
+fn process_parsed_to_summary_controlled(
     conn: &mut Connection,
     run_id: &str,
     components: SummaryComponents<'_>,
+    control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    cancellation_checkpoint(control)?;
     normalize_document(conn, components.normalizer, run_id)?;
-    process_normalized_to_summary(conn, run_id, components)
+    process_normalized_to_summary_controlled(conn, run_id, components, control)
 }
 
-fn process_normalized_to_summary(
+fn process_normalized_to_summary_controlled(
     conn: &mut Connection,
     run_id: &str,
     components: SummaryComponents<'_>,
+    control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    cancellation_checkpoint(control)?;
     structure_document(conn, components.interpreter, run_id)?;
-    process_structured_to_summary(conn, run_id, components)
+    process_structured_to_summary_controlled(conn, run_id, components, control)
 }
 
-fn process_structured_to_summary(
+fn process_structured_to_summary_controlled(
     conn: &mut Connection,
     run_id: &str,
     components: SummaryComponents<'_>,
+    control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    cancellation_checkpoint(control)?;
     chunk_document(conn, components.chunker, run_id)?;
-    process_chunked_to_summary(conn, run_id, components.runtime)
+    process_chunked_to_summary_controlled(conn, run_id, components.runtime, control)
 }
 
-fn process_chunked_to_summary(
+fn process_chunked_to_summary_controlled(
     conn: &mut Connection,
     run_id: &str,
     runtime: &dyn ModelRuntime,
+    control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
-    analyze_chunked_document(conn, runtime, run_id)?;
-    process_analyzed_to_summary(conn, run_id, runtime)
+    cancellation_checkpoint(control)?;
+    analyze_chunked_document_controlled(conn, runtime, run_id, control)?;
+    process_analyzed_to_summary_controlled(conn, run_id, runtime, control)
 }
 
-fn process_analyzed_to_summary(
+fn process_analyzed_to_summary_controlled(
     conn: &mut Connection,
     run_id: &str,
     runtime: &dyn ModelRuntime,
+    control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
-    synthesize_analyzed_document(conn, runtime, run_id)?;
-    process_synthesized_to_summary(conn, run_id, runtime)
+    cancellation_checkpoint(control)?;
+    synthesize_analyzed_document_controlled(conn, runtime, run_id, control)?;
+    process_synthesized_to_summary_controlled(conn, run_id, runtime, control)
 }
 
-fn process_synthesized_to_summary(
+fn process_synthesized_to_summary_controlled(
     conn: &mut Connection,
     run_id: &str,
     runtime: &dyn ModelRuntime,
+    control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
-    verify_synthesized_document(conn, runtime, run_id)?;
+    cancellation_checkpoint(control)?;
+    verify_synthesized_document_controlled(conn, runtime, run_id, control)?;
+    cancellation_checkpoint(control)?;
     Ok(complete_verified_document(conn, run_id)?)
+}
+
+fn cancellation_checkpoint(control: &dyn ExecutionControl) -> Result<(), DocumentServiceError> {
+    if control.cancellation_requested() {
+        return Err(DocumentServiceError::CancellationObserved);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

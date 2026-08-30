@@ -112,16 +112,41 @@ pub enum StoreError {
     },
     #[error("Retry lineage metadata is inconsistent for run {retry_run_id}")]
     RetryLineageMismatch { retry_run_id: String },
+    #[error("Pipeline run {run_id} cannot be cancelled from {state:?}")]
+    CancellationNotAllowed {
+        run_id: String,
+        state: PipelineState,
+    },
     #[error(transparent)]
     Migration(#[from] MigrationError),
     #[error(transparent)]
     Transition(#[from] TransitionError),
 }
 
+impl StoreError {
+    pub(crate) fn is_stale_transition(&self) -> bool {
+        matches!(
+            self,
+            Self::StaleWrite { .. }
+                | Self::Transition(
+                    TransitionError::StaleExpectedState { .. }
+                        | TransitionError::ConcurrentModification { .. }
+                )
+        )
+    }
+}
+
 #[derive(Default)]
 struct TransitionPatch {
     warnings: Option<Vec<PipelineWarning>>,
     failure: Option<PipelineFailure>,
+    cancellation_requested: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum InterruptedRunAction {
+    Fail(PipelineFailure),
+    CompleteCancellation,
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +154,7 @@ pub(super) struct InterruptedRunTransition {
     pub run_id: String,
     pub expected_state: PipelineState,
     pub expected_version: u32,
-    pub failure: PipelineFailure,
+    pub action: InterruptedRunAction,
 }
 
 pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, StoreError> {
@@ -441,10 +466,11 @@ pub fn list_recent_pipeline_runs(
 pub(super) fn list_pipeline_runs_for_recovery(
     conn: &Connection,
 ) -> Result<Vec<PipelineRun>, StoreError> {
-    let states = PipelineState::IMPLEMENTED_ACTIVE_STATES
+    let mut states = PipelineState::IMPLEMENTED_ACTIVE_STATES
         .iter()
         .map(to_json)
         .collect::<Result<Vec<_>, _>>()?;
+    states.push(to_json(&PipelineState::Cancelling)?);
     let placeholders = (1..=states.len())
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
@@ -1183,6 +1209,7 @@ pub(super) fn complete_parsing(
         TransitionPatch {
             warnings: Some(warnings),
             failure: None,
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1208,6 +1235,7 @@ pub(super) fn fail_parsing(
         TransitionPatch {
             warnings: None,
             failure: Some(failure),
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1265,6 +1293,7 @@ pub(super) fn complete_normalization(
         TransitionPatch {
             warnings: Some(warnings),
             failure: None,
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1290,6 +1319,7 @@ pub(super) fn fail_normalization(
         TransitionPatch {
             warnings: None,
             failure: Some(failure),
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1347,6 +1377,7 @@ pub(super) fn complete_structuring(
         TransitionPatch {
             warnings: Some(warnings),
             failure: None,
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1372,6 +1403,7 @@ pub(super) fn fail_structuring(
         TransitionPatch {
             warnings: None,
             failure: Some(failure),
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1431,6 +1463,7 @@ pub(super) fn complete_chunking(
         TransitionPatch {
             warnings: Some(warnings),
             failure: None,
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1456,6 +1489,7 @@ pub(super) fn fail_chunking(
         TransitionPatch {
             warnings: None,
             failure: Some(failure),
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1505,6 +1539,7 @@ pub(super) fn complete_analysis(
         TransitionPatch {
             warnings: Some(warnings),
             failure: None,
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1574,6 +1609,7 @@ pub(super) fn complete_synthesis(
         TransitionPatch {
             warnings: Some(warnings),
             failure: None,
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1643,6 +1679,7 @@ pub(super) fn complete_verification(
         TransitionPatch {
             warnings: Some(warnings),
             failure: None,
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1719,6 +1756,7 @@ pub(super) fn complete_summary(
         TransitionPatch {
             warnings: Some(summary.warnings.clone()),
             failure: None,
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -1739,6 +1777,131 @@ pub(super) fn fail_summary(
         PipelineStage::Verify,
         failure,
     )
+}
+
+pub(crate) fn request_cancellation(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let run = get_pipeline_run(&tx, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    if !run.state.can_request_cancellation() {
+        return Err(StoreError::CancellationNotAllowed {
+            run_id: run_id.to_string(),
+            state: run.state,
+        });
+    }
+    let stage = run.state.active_stage();
+    let cancelling = transition_in_tx(
+        &tx,
+        run_id,
+        run.state,
+        expected_version,
+        PipelineState::Cancelling,
+        stage,
+        Some("cancellation_requested".to_string()),
+        TransitionPatch {
+            warnings: None,
+            failure: None,
+            cancellation_requested: Some(true),
+        },
+    )?;
+    tx.commit()?;
+    Ok(cancelling)
+}
+
+pub(crate) fn complete_cancellation(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let run = get_pipeline_run(&tx, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    if run.state != PipelineState::Cancelling || !run.cancellation_requested {
+        return Err(StoreError::CancellationNotAllowed {
+            run_id: run_id.to_string(),
+            state: run.state,
+        });
+    }
+    let cancelled = transition_in_tx(
+        &tx,
+        run_id,
+        PipelineState::Cancelling,
+        expected_version,
+        PipelineState::Cancelled,
+        run.current_stage,
+        Some("cancellation_completed".to_string()),
+        TransitionPatch {
+            warnings: None,
+            failure: None,
+            cancellation_requested: Some(true),
+        },
+    )?;
+    tx.commit()?;
+    Ok(cancelled)
+}
+
+pub(crate) fn fail_background_execution(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_state: PipelineState,
+    expected_version: u32,
+    failure: PipelineFailure,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let persisted = get_pipeline_run(&tx, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    if persisted.state == PipelineState::Cancelling {
+        if !persisted.cancellation_requested {
+            return Err(StoreError::CancellationNotAllowed {
+                run_id: run_id.to_string(),
+                state: persisted.state,
+            });
+        }
+        let cancelled = transition_in_tx(
+            &tx,
+            run_id,
+            PipelineState::Cancelling,
+            persisted.state_version,
+            PipelineState::Cancelled,
+            persisted.current_stage,
+            Some("cancellation_completed".to_string()),
+            TransitionPatch {
+                warnings: None,
+                failure: None,
+                cancellation_requested: Some(true),
+            },
+        )?;
+        tx.commit()?;
+        return Ok(cancelled);
+    }
+    if !expected_state.can_request_cancellation() {
+        return Err(StoreError::CancellationNotAllowed {
+            run_id: run_id.to_string(),
+            state: expected_state,
+        });
+    }
+    let reason = Some(failure.code.clone());
+    let stage = failure.stage.clone();
+    let failed = transition_in_tx(
+        &tx,
+        run_id,
+        expected_state,
+        expected_version,
+        PipelineState::Failed,
+        stage,
+        reason,
+        TransitionPatch {
+            warnings: None,
+            failure: Some(failure),
+            cancellation_requested: None,
+        },
+    )?;
+    tx.commit()?;
+    Ok(failed)
 }
 
 fn fail_downstream_stage(
@@ -1762,6 +1925,7 @@ fn fail_downstream_stage(
         TransitionPatch {
             warnings: None,
             failure: Some(failure),
+            cancellation_requested: None,
         },
     )?;
     tx.commit()?;
@@ -2010,7 +2174,7 @@ fn insert_citation_artifact(
     Ok(())
 }
 
-pub(super) fn fail_interrupted_runs(
+pub(super) fn reconcile_interrupted_runs_in_transaction(
     conn: &mut Connection,
     interrupted: &[InterruptedRunTransition],
 ) -> Result<Vec<PipelineRun>, StoreError> {
@@ -2021,32 +2185,69 @@ pub(super) fn fail_interrupted_runs(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut recovered = Vec::with_capacity(interrupted.len());
     for candidate in interrupted {
-        let Some(stage) = candidate.expected_state.active_stage() else {
-            return Err(StoreError::InvalidRecoveryTransition {
-                state: candidate.expected_state.clone(),
-            });
+        let recovered_run = match &candidate.action {
+            InterruptedRunAction::Fail(failure) => {
+                let Some(stage) = candidate.expected_state.active_stage() else {
+                    return Err(StoreError::InvalidRecoveryTransition {
+                        state: candidate.expected_state.clone(),
+                    });
+                };
+                if failure.code != "PROCESS_INTERRUPTED"
+                    || failure.stage.as_ref() != Some(&stage)
+                    || !failure.recoverable
+                {
+                    return Err(StoreError::InvalidRecoveryTransition {
+                        state: candidate.expected_state.clone(),
+                    });
+                }
+                transition_in_tx(
+                    &tx,
+                    &candidate.run_id,
+                    candidate.expected_state.clone(),
+                    candidate.expected_version,
+                    PipelineState::Failed,
+                    Some(stage),
+                    Some(failure.code.clone()),
+                    TransitionPatch {
+                        warnings: None,
+                        failure: Some(failure.clone()),
+                        cancellation_requested: None,
+                    },
+                )?
+            }
+            InterruptedRunAction::CompleteCancellation => {
+                if candidate.expected_state != PipelineState::Cancelling {
+                    return Err(StoreError::InvalidRecoveryTransition {
+                        state: candidate.expected_state.clone(),
+                    });
+                }
+                let persisted = get_pipeline_run(&tx, &candidate.run_id)?
+                    .ok_or_else(|| StoreError::RunNotFound(candidate.run_id.clone()))?;
+                if persisted.state == candidate.expected_state
+                    && persisted.state_version == candidate.expected_version
+                    && !persisted.cancellation_requested
+                {
+                    return Err(StoreError::InvalidRecoveryTransition {
+                        state: candidate.expected_state.clone(),
+                    });
+                }
+                transition_in_tx(
+                    &tx,
+                    &candidate.run_id,
+                    PipelineState::Cancelling,
+                    candidate.expected_version,
+                    PipelineState::Cancelled,
+                    None,
+                    Some("cancellation_completed_after_restart".to_string()),
+                    TransitionPatch {
+                        warnings: None,
+                        failure: None,
+                        cancellation_requested: Some(true),
+                    },
+                )?
+            }
         };
-        if candidate.failure.code != "PROCESS_INTERRUPTED"
-            || candidate.failure.stage.as_ref() != Some(&stage)
-            || !candidate.failure.recoverable
-        {
-            return Err(StoreError::InvalidRecoveryTransition {
-                state: candidate.expected_state.clone(),
-            });
-        }
-        recovered.push(transition_in_tx(
-            &tx,
-            &candidate.run_id,
-            candidate.expected_state.clone(),
-            candidate.expected_version,
-            PipelineState::Failed,
-            Some(stage),
-            Some(candidate.failure.code.clone()),
-            TransitionPatch {
-                warnings: None,
-                failure: Some(candidate.failure.clone()),
-            },
-        )?);
+        recovered.push(recovered_run);
     }
     tx.commit()?;
     Ok(recovered)
@@ -2085,6 +2286,9 @@ fn transition_in_tx(
     }
     if let Some(failure) = patch.failure {
         run.failure = Some(failure);
+    }
+    if let Some(cancellation_requested) = patch.cancellation_requested {
+        run.cancellation_requested = cancellation_requested;
     }
 
     let changed = tx.execute(
@@ -2276,6 +2480,137 @@ mod tests {
             .expect("run should exist");
         assert_eq!(persisted.state, PipelineState::Parsing);
         assert_eq!(persisted.state_version, caller_a.state_version);
+    }
+
+    #[test]
+    fn cancellation_state_flag_version_and_events_commit_atomically() {
+        let source = TestFile::new("pdf", b"%PDF-1.4\nCANCELLATION_ATOMICITY_BODY");
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let (_, ingested) = ingest_pdf(&mut conn, source.0.to_str().expect("UTF-8 path"))
+            .expect("candidate should ingest");
+        let (parsing, _) = start_parsing(&mut conn, &ingested.run_id, ingested.state_version)
+            .expect("parsing should start");
+        let events_before =
+            list_pipeline_events(&conn, &parsing.run_id).expect("events should load");
+
+        let stale = request_cancellation(
+            &mut conn,
+            &parsing.run_id,
+            parsing.state_version.saturating_sub(1),
+        );
+        assert!(matches!(
+            stale,
+            Err(StoreError::Transition(
+                TransitionError::ConcurrentModification { .. }
+            ))
+        ));
+        assert_eq!(
+            get_pipeline_run(&conn, &parsing.run_id)
+                .expect("run should reload")
+                .expect("run should exist"),
+            parsing
+        );
+
+        conn.execute_batch(
+            "CREATE TRIGGER test_fail_cancellation_event
+             BEFORE INSERT ON pipeline_events
+             WHEN NEW.next_state = '\"Cancelling\"'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected cancellation event failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+        let injected = request_cancellation(&mut conn, &parsing.run_id, parsing.state_version);
+        assert!(matches!(injected, Err(StoreError::Sqlite(_))));
+        let after_rollback = get_pipeline_run(&conn, &parsing.run_id)
+            .expect("run should reload")
+            .expect("run should exist");
+        assert_eq!(after_rollback, parsing);
+        assert!(!after_rollback.cancellation_requested);
+        assert_eq!(
+            list_pipeline_events(&conn, &parsing.run_id).expect("events should reload"),
+            events_before
+        );
+
+        conn.execute_batch("DROP TRIGGER test_fail_cancellation_event;")
+            .expect("failure trigger should drop");
+        let cancelling = request_cancellation(&mut conn, &parsing.run_id, parsing.state_version)
+            .expect("cancellation should commit");
+        assert_eq!(cancelling.state, PipelineState::Cancelling);
+        assert_eq!(cancelling.state_version, parsing.state_version + 1);
+        assert!(cancelling.cancellation_requested);
+        assert!(cancelling.completed_at.is_none());
+
+        let cancelled =
+            complete_cancellation(&mut conn, &cancelling.run_id, cancelling.state_version)
+                .expect("cancellation should complete");
+        assert_eq!(cancelled.state, PipelineState::Cancelled);
+        assert_eq!(cancelled.state_version, parsing.state_version + 2);
+        assert!(cancelled.cancellation_requested);
+        assert!(cancelled.completed_at.is_some());
+        assert!(matches!(
+            request_cancellation(&mut conn, &cancelled.run_id, cancelled.state_version),
+            Err(StoreError::CancellationNotAllowed {
+                state: PipelineState::Cancelled,
+                ..
+            })
+        ));
+
+        let events = list_pipeline_events(&conn, &cancelled.run_id)
+            .expect("cancellation events should load");
+        assert_eq!(events.len(), events_before.len() + 2);
+        assert_eq!(
+            events[events.len() - 2].next_state,
+            PipelineState::Cancelling
+        );
+        assert_eq!(
+            events[events.len() - 1].next_state,
+            PipelineState::Cancelled
+        );
+        assert!(!serde_json::to_string(&events)
+            .expect("events should serialize")
+            .contains("CANCELLATION_ATOMICITY_BODY"));
+    }
+
+    #[test]
+    fn cancellation_wins_over_stale_background_failure_atomically() {
+        let source = TestFile::new("pdf", b"%PDF-1.4\nCANCEL_FAILURE_RACE_BODY");
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let (_, ingested) = ingest_pdf(&mut conn, source.0.to_str().expect("UTF-8 path"))
+            .expect("candidate should ingest");
+        let (parsing, _) = start_parsing(&mut conn, &ingested.run_id, ingested.state_version)
+            .expect("parsing should start");
+        let cancelling = request_cancellation(&mut conn, &parsing.run_id, parsing.state_version)
+            .expect("cancellation should win first");
+
+        let settled = fail_background_execution(
+            &mut conn,
+            &parsing.run_id,
+            parsing.state,
+            parsing.state_version,
+            PipelineFailure {
+                code: "BACKGROUND_WORKER_PANIC".to_string(),
+                message: "stale worker failure".to_string(),
+                stage: Some(PipelineStage::Parse),
+                recoverable: true,
+            },
+        )
+        .expect("failure finalization should acknowledge the winning cancellation");
+
+        assert_eq!(settled.state, PipelineState::Cancelled);
+        assert_eq!(settled.state_version, cancelling.state_version + 1);
+        assert!(settled.cancellation_requested);
+        assert!(settled.failure.is_none());
+        let events =
+            list_pipeline_events(&conn, &settled.run_id).expect("cancellation history should load");
+        assert_eq!(
+            events[events.len() - 2].next_state,
+            PipelineState::Cancelling
+        );
+        assert_eq!(
+            events[events.len() - 1].next_state,
+            PipelineState::Cancelled
+        );
     }
 
     #[test]

@@ -1029,3 +1029,88 @@ future work
   adversarial verifier-model evaluation, hierarchical synthesis, OCR/vision,
   visual-page citations, background jobs, cancellation, and Connect protocol
   changes remain deferred.
+
+## Slice 12 — Background Execution and Cooperative Cancellation
+
+**Status**: Implemented; locally verified
+
+**Execution contract**:
+- Standalone summarize, retry, and stable-checkpoint continuation now return an
+  accepted run projection after an application-owned worker starts. The worker
+  performs the existing parser-to-summary service flow on its own SQLite
+  connection while exact-run status reads use independent short-lived
+  connections. The former application-wide connection mutex is gone.
+- `PipelineRun` remains the durable job identity; no parallel job table or
+  schema migration was introduced. A per-process registry prevents duplicate
+  desktop workers and ensures the UI does not claim ownership of Connect work.
+- Existing synchronous core and Connect service entry points retain their
+  behavior through an explicit no-op execution control. The background manager
+  is an application adapter around the same parser, normalizer, structure,
+  chunking, runtime, verification, and persistence boundaries.
+
+**Cancellation, state, and atomicity**:
+- A fresh run/version request atomically commits the current cancellable state
+  to `CANCELLING`, sets the durable request marker, increments state version,
+  and appends an immutable event. Worker acknowledgement atomically commits
+  `CANCELLING -> CANCELLED` with its next version and event.
+- Cooperative checkpoints exist between pipeline stages, before and after
+  runtime operations, for every analysis chunk, and for every verification
+  batch. Ollama requests and deterministic work units are not killed midway.
+  If cancellation wins, the existing state/version CAS prevents unfinished
+  artifacts and success events from committing; completed checkpoints remain.
+- Startup recovery now converts a coherently marked `CANCELLING` run to
+  `CANCELLED` without replay. A boundary test corrupts only the marker and proves
+  that recovery rejects the inconsistent row without changing version or event
+  history.
+- The failure/cancellation race is resolved inside an immediate transaction: a
+  cancellation that already won is acknowledged as `CANCELLED`, while a stale
+  worker that lost CAS ownership cannot fail a newer state. Paired tests prove
+  stale finalization is non-mutating and a genuine non-stale worker error still
+  becomes durable `FAILED`.
+- Worker-start failure after new/retry admission, panic, or unexpected
+  nonterminal return becomes a structured recoverable failure when SQLite
+  remains writable. A continuation that cannot spawn retains its stable
+  checkpoint. A cancelled run is terminal and is not presented as an ordinary
+  processing failure.
+
+**Desktop behavior and proof**:
+- The TypeScript UI polls `get_run_status` by exact run ID, displays the durable
+  stage, exposes `Cancel processing` only for a registered cancellable desktop
+  worker, and resumes monitoring after a webview reload within the same process.
+  Explicit ephemeral `backgroundActive` status prevents terminal cancellation
+  history from masquerading as live work and stops polling if worker ownership
+  disappears. Frontend code does not set cancellation state or write
+  persistence.
+- A blocking-runtime race test proves the initial command returns while model
+  work remains active, a second database connection remains readable, stale
+  cancellation changes nothing, fresh cancellation wins during generation, no
+  analysis/summary artifact persists, both cancellation events remain ordered,
+  and the terminal result survives independent SQLite reopen with
+  `quick_check = ok`.
+- A separate background completion test proves a normal accepted run reaches a
+  durable completed summary and survives independent SQLite reopen. Focused
+  database tests inject event-write failure and prove state, version, marker,
+  and event rollback together.
+- The final all-target Rust suite ran 143 tests: 142 passed and the opt-in live
+  Ollama test was ignored by default. Strict all-target/all-feature Clippy, the
+  TypeScript/Vite production build, and the no-bundle Tauri release build
+  passed. The release executable was emitted at
+  `src-tauri/target/release/tauri-appdoc_sum`.
+- Release builds were launched three bounded times against the same isolated
+  application-data profile through the available desktop display, including a
+  launch after the final rebuild. The rendered 1180-by-780 window reported
+  `Ollama ready` and `qwen3-30b-a3b:latest`; while each process was live, the
+  same SQLite database reported schema version 12 and `quick_check = ok`. This
+  proves real release-process startup and reopen of an empty application
+  database. It does not prove a human file-selection/cancellation interaction:
+  no GUI input driver was installed, so the native picker and cancel button
+  were not clicked during the process smoke. The worker/cancellation race is
+  automated below the Tauri adapter, and the frontend dispatch path is
+  TypeScript-compiled.
+
+**Deferred**:
+- Cancellation remains cooperative rather than forced mid-request. Progress is
+  stage-level; there is no persisted percentage/work-unit counter beyond the
+  existing pipeline metadata. Automatic replay, scheduler/queue infrastructure,
+  cross-process cancellation, Connect cancellation, OCR/vision, and hierarchical
+  synthesis remain deferred.

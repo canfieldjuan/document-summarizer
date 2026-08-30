@@ -30,9 +30,15 @@ pub struct PipelineRun {
 
 `resumable` records checkpoint eligibility metadata. Desktop startup detects
 implemented active-stage states and reconciles work interrupted by a previous
-process to a retryable `FAILED` result. An eligible failed run can now create a
-separate retry run from the durable `INGESTED` checkpoint. No same-run resume
-command or automatic work replay is implemented.
+process to a retryable `FAILED` result. An eligible failed run can create a
+separate retry run from the durable `INGESTED` checkpoint, while stable
+checkpoints can be continued explicitly on the same run. Startup never replays
+work automatically.
+
+`cancellation_requested` is a durable marker, not a frontend-owned flag. It is
+set only in the same compare-and-set transaction that enters `CANCELLING`,
+increments `state_version`, and appends the request event. It remains true in
+terminal `CANCELLED` history.
 
 ## `PipelineEvent`
 An immutable ledger entry indicating a transition from one state to another.
@@ -125,6 +131,10 @@ startup scans persisted runs in deterministic `run_id` order. The implemented
 active states `INGESTING`, `PARSING`, `NORMALIZING`, `STRUCTURING`, `CHUNKING`,
 `ANALYZING`, `SYNTHESIZING`, and `VERIFYING` map explicitly to their pipeline
 stages. Each receives a structured, recoverable `PROCESS_INTERRUPTED` failure.
+A durable `CANCELLING` run instead completes as `CANCELLED` without replaying
+work. Recovery requires its durable cancellation marker; an inconsistent
+`CANCELLING` row is rejected rather than rewritten.
+
 All recovered state/version updates and immutable events commit in one SQLite
 transaction; a stale expectation or any event/write failure rolls back the
 entire recovery batch. Stable and terminal states are untouched, and a repeated
@@ -135,8 +145,7 @@ artifacts, warnings, and prior history. It never invokes a parser or model and
 does not delete partial files. `init_db` remains schema/persistence-only; the
 desktop invokes reconciliation explicitly after acquiring process ownership so
 an ordinary second database connection cannot steal active work. Reserved
-visual-analysis and cancellation states remain outside this policy until their
-execution paths exist.
+visual-analysis execution remains outside this policy.
 
 ## Explicit retry lineage
 
@@ -509,6 +518,52 @@ authoritative run state; command admission rechecks the state/version and the
 stage boundary validates the actual artifact. The frontend supplies only the
 run ID and expected version. Startup still performs no automatic replay: a
 stable run changes only after an explicit continuation request.
+
+## Desktop background execution and cooperative cancellation
+
+Standalone `summarize_document`, `retry_document`, and `continue_document`
+commands admit work through the existing transactional service boundaries,
+start one application-owned worker per run, and return a bounded
+`BackgroundRunAccepted` projection instead of waiting for the final summary.
+Each worker opens its own SQLite connection. Read/status commands likewise use
+short-lived independent connections, so a model request does not hold an
+application-wide database mutex or prevent status polling.
+
+The in-process worker registry prevents a second desktop worker for the same
+run and scopes cancellation to work owned by this desktop process.
+`backgroundActive` reports that ephemeral ownership, while `canCancel` is true
+only when both the durable state is cancellable and that run has a registered
+desktop worker. These are Tauri read-model projections, not persisted pipeline
+truth; Connect jobs are not implicitly controlled by the standalone UI. The
+frontend polls `get_run_status` by exact run ID and expected-state/version
+admission remains authoritative in Rust.
+
+A cancellation request requires the current `state_version`. Its SQLite
+transaction moves the run from an implemented active state or stable checkpoint
+through `CANCELLING`, sets `cancellation_requested`, increments the version, and
+appends `cancellation_requested`. Only after that commit does the manager signal
+the in-memory token. The worker checks the token between pipeline stages, before
+and after runtime health/generation operations, before each analysis chunk, and
+before each verification batch. `CANCELLING -> CANCELLED` is a second atomic
+state/version/event transaction after the worker acknowledges the request.
+
+Cancellation is cooperative: the current parser, deterministic stage, SQLite
+transaction, or Ollama HTTP request is not forcibly killed. If cancellation
+wins the compare-and-set race, a concurrent stage-completion transaction cannot
+persist its artifact or success event. If stage completion wins first, the
+cancellation request applies to the newly durable checkpoint. Already-completed
+checkpoint artifacts remain valid; unfinished model output is not persisted.
+If cancellation commits between a failure finalizer's read and write, the same
+immediate transaction acknowledges `CANCELLED` rather than stranding
+`CANCELLING` or persisting a conflicting failure. A stale worker that lost CAS
+ownership never fails the newer state.
+
+A worker-start failure after new/retry admission is converted to structured,
+recoverable `FAILED` when SQLite remains writable. A continuation worker that
+cannot start leaves its stable checkpoint unchanged. Once a worker is running,
+a panic, non-stale error, or unexpected nonterminal return is failed durably
+when possible. A process exit while `CANCELLING` is finalized by startup
+recovery as described above.
 
 ## Connect v1 provider
 

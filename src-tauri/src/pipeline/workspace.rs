@@ -45,6 +45,9 @@ pub struct RunHistoryItem {
     pub continuation_checkpoint: Option<ContinuationCheckpoint>,
     pub can_continue: bool,
     pub continuation_requires_runtime: bool,
+    pub cancellation_requested: bool,
+    pub background_active: bool,
+    pub can_cancel: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -134,14 +137,14 @@ pub fn ollama_runtime_status() -> RuntimeStatus {
 pub fn list_recent_runs(conn: &Connection) -> Result<Vec<RunHistoryItem>, WorkspaceError> {
     db::list_recent_pipeline_runs(conn, RECENT_RUN_LIMIT)?
         .into_iter()
-        .map(|run| {
-            let document = db::get_document(conn, &run.document_id)?
-                .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
-            let has_summary = db::summary_artifact_exists(conn, &run.run_id)?;
-            validate_summary_state(&run, has_summary)?;
-            run_history_item(conn, run, document, has_summary)
-        })
+        .map(|run| run_history_item_from_run(conn, run))
         .collect()
+}
+
+pub fn get_run(conn: &Connection, run_id: &str) -> Result<RunHistoryItem, WorkspaceError> {
+    let run = db::get_pipeline_run(conn, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    run_history_item_from_run(conn, run)
 }
 
 pub fn get_persisted_summary(
@@ -195,7 +198,21 @@ fn run_history_item(
         can_continue: continuation_checkpoint.is_some(),
         continuation_requires_runtime: continuation_checkpoint
             .is_some_and(ContinuationCheckpoint::requires_runtime),
+        cancellation_requested: run.cancellation_requested,
+        background_active: false,
+        can_cancel: false,
     })
+}
+
+fn run_history_item_from_run(
+    conn: &Connection,
+    run: PipelineRun,
+) -> Result<RunHistoryItem, WorkspaceError> {
+    let document = db::get_document(conn, &run.document_id)?
+        .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
+    let has_summary = db::summary_artifact_exists(conn, &run.run_id)?;
+    validate_summary_state(&run, has_summary)?;
+    run_history_item(conn, run, document, has_summary)
 }
 
 fn validate_citations_against_sources(

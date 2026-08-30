@@ -70,6 +70,21 @@ impl PipelineState {
             _ => None,
         }
     }
+
+    pub(crate) fn can_request_cancellation(&self) -> bool {
+        self.active_stage().is_some()
+            || matches!(
+                self,
+                Self::Ingested
+                    | Self::Parsed
+                    | Self::Normalized
+                    | Self::Structured
+                    | Self::Chunked
+                    | Self::Analyzed
+                    | Self::Synthesized
+                    | Self::Verified
+            )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

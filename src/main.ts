@@ -68,6 +68,18 @@ interface RunHistoryItem {
   continuationCheckpoint: PipelineState | null;
   canContinue: boolean;
   continuationRequiresRuntime: boolean;
+  cancellationRequested: boolean;
+  backgroundActive: boolean;
+  canCancel: boolean;
+}
+
+interface BackgroundRunAccepted {
+  runId: string;
+  documentId: string;
+  originalFilename: string;
+  byteSize: number;
+  state: PipelineState;
+  stateVersion: number;
 }
 
 interface SummaryArtifact {
@@ -96,13 +108,6 @@ interface PersistedSummary {
   summary: SummaryArtifact;
 }
 
-interface CompletedSummary {
-  runId: string;
-  originalFilename: string;
-  byteSize: number;
-  summary: SummaryArtifact;
-}
-
 interface CommandError {
   code: string;
   message: string;
@@ -125,6 +130,9 @@ const processingView = element<HTMLDivElement>("#processing-view");
 const summaryView = element<HTMLElement>("#summary-view");
 const failureView = element<HTMLDivElement>("#failure-view");
 const processingFilename = element<HTMLHeadingElement>("#processing-filename");
+const processingStatus = element<HTMLParagraphElement>("#processing-status");
+const cancelButton = element<HTMLButtonElement>("#cancel-btn");
+const cancelHint = element<HTMLParagraphElement>("#cancel-hint");
 const summaryFilename = element<HTMLHeadingElement>("#summary-filename");
 const summaryMeta = element<HTMLParagraphElement>("#summary-meta");
 const summaryText = element<HTMLPreElement>("#summary-text");
@@ -145,6 +153,8 @@ const retryHint = element<HTMLParagraphElement>("#retry-hint");
 
 let runtimeReady = false;
 let processing = false;
+let processingRun: RunHistoryItem | null = null;
+let processingRunId: string | null = null;
 let activeRunId: string | null = null;
 let recentRuns: RunHistoryItem[] = [];
 let retrySourceRun: RunHistoryItem | null = null;
@@ -198,6 +208,17 @@ function syncPrimaryAction(): void {
       : runtimeAvailable
         ? `Continue this run from ${stateLabel(continuationRun.state).toLowerCase()} without repeating completed stages.`
         : "Start Ollama before continuing this checkpoint.";
+  }
+
+  cancelButton.hidden = !processing;
+  cancelButton.disabled = !processingRun?.canCancel;
+  cancelHint.hidden = !processing;
+  if (processing) {
+    cancelHint.textContent = processingRun?.cancellationRequested
+      ? "Finishing the current safe work unit before cancellation completes."
+      : processingRun?.canCancel
+        ? "Cancellation preserves completed checkpoints and discards unfinished output."
+        : "Waiting for the background worker to reach a cancellable checkpoint.";
   }
 }
 
@@ -311,10 +332,31 @@ function renderHistory(): void {
     historyList.append(item);
   });
 }
-
 async function openHistoryRun(run: RunHistoryItem): Promise<void> {
   activeRunId = run.runId;
   renderHistory();
+
+  if (isMonitoredBackgroundRun(run)) {
+    if (processingRunId === run.runId) {
+      processingFilename.textContent = run.originalFilename;
+      processingStatus.textContent = processingStatusText(run);
+      showStage("processing");
+      syncPrimaryAction();
+      return;
+    }
+    beginProcessing(run, run.originalFilename, processingStatusText(run));
+    await monitorBackgroundRun(run.runId, run.originalFilename);
+    return;
+  }
+
+  if (run.state === "Cancelled") {
+    showFailure(
+      run.originalFilename,
+      "Processing was cancelled. Completed checkpoints remain in the local record.",
+      "PROCESS_CANCELLED",
+    );
+    return;
+  }
 
   if (run.failure) {
     showFailure(run.originalFilename, run.failure.message, run.failure.code, run);
@@ -348,45 +390,203 @@ async function openHistoryRun(run: RunHistoryItem): Promise<void> {
   }
 }
 
+function beginProcessing(
+  run: RunHistoryItem | null,
+  title: string,
+  status: string,
+): void {
+  processing = true;
+  processingRun = run;
+  processingRunId = run?.runId ?? null;
+  activeRunId = run?.runId ?? null;
+  processingFilename.textContent = title;
+  processingStatus.textContent = status;
+  showStage("processing");
+  syncPrimaryAction();
+}
+
+function stopProcessing(): void {
+  processing = false;
+  processingRun = null;
+  processingRunId = null;
+  syncPrimaryAction();
+}
+
+async function monitorBackgroundRun(runId: string, fallbackFilename: string): Promise<void> {
+  processingRunId = runId;
+  activeRunId = runId;
+
+  while (processing && processingRunId === runId) {
+    let run: RunHistoryItem;
+    try {
+      run = await invoke<RunHistoryItem>("get_run_status", { runId });
+    } catch (error) {
+      stopProcessing();
+      const commandError = normalizeCommandError(error);
+      showFailure(fallbackFilename, commandError.message, commandError.code);
+      await refreshHistory();
+      return;
+    }
+
+    processingRun = run;
+    upsertRecentRun(run);
+    if (activeRunId === runId) {
+      processingFilename.textContent = run.originalFilename;
+      processingStatus.textContent = processingStatusText(run);
+      showStage("processing");
+    }
+    syncPrimaryAction();
+
+    if (isTerminalState(run.state)) {
+      const shouldRender = activeRunId === runId;
+      stopProcessing();
+      await refreshHistory();
+      if (!shouldRender) {
+        return;
+      }
+      if (run.state === "Complete" || run.state === "CompleteWithWarnings") {
+        try {
+          const persisted = await invoke<PersistedSummary>("get_persisted_summary", { runId });
+          renderSummary(
+            persisted.run.originalFilename,
+            persisted.run.byteSize,
+            persisted.summary,
+          );
+        } catch (error) {
+          const commandError = normalizeCommandError(error);
+          showFailure(run.originalFilename, commandError.message, commandError.code);
+        }
+      } else if (run.state === "Cancelled") {
+        showFailure(
+          run.originalFilename,
+          "Processing was cancelled. Completed checkpoints remain in the local record.",
+          "PROCESS_CANCELLED",
+        );
+      } else {
+        const failure = run.failure ?? {
+          code: "BACKGROUND_PROCESSING_FAILED",
+          message: "Background processing stopped safely.",
+          recoverable: true,
+        };
+        showFailure(run.originalFilename, failure.message, failure.code, run);
+      }
+      return;
+    }
+
+    if (!run.backgroundActive) {
+      const shouldRender = activeRunId === runId;
+      stopProcessing();
+      await refreshHistory();
+      if (shouldRender) {
+        const latest = recentRuns.find((item) => item.runId === runId);
+        if (latest) {
+          await openHistoryRun(latest);
+        } else {
+          showFailure(
+            fallbackFilename,
+            "The background worker stopped before a terminal result was persisted.",
+            "BACKGROUND_JOB_NOT_RUNNING",
+          );
+        }
+      }
+      return;
+    }
+
+    await delay(500);
+  }
+}
+
+async function cancelSelectedRun(): Promise<void> {
+  const run = processingRun;
+  if (!run?.canCancel) {
+    return;
+  }
+  cancelButton.disabled = true;
+  processingStatus.textContent = "Requesting cancellation…";
+  try {
+    processingRun = await invoke<RunHistoryItem>("cancel_document", {
+      runId: run.runId,
+      expectedStateVersion: run.stateVersion,
+    });
+    processingStatus.textContent = processingStatusText(processingRun);
+  } catch (error) {
+    const commandError = normalizeCommandError(error);
+    processingStatus.textContent = commandError.code === "BACKGROUND_STALE_STATE"
+      ? "The pipeline advanced while cancellation was requested; refreshing its current stage…"
+      : commandError.message;
+  } finally {
+    syncPrimaryAction();
+  }
+}
+
+function upsertRecentRun(run: RunHistoryItem): void {
+  const existing = recentRuns.findIndex((item) => item.runId === run.runId);
+  if (existing >= 0) {
+    recentRuns[existing] = run;
+  } else {
+    recentRuns.unshift(run);
+  }
+  recentRuns.sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt) || right.runId.localeCompare(left.runId));
+  renderHistory();
+}
+
+function processingStatusText(run: RunHistoryItem): string {
+  if (run.cancellationRequested || run.state === "Cancelling") {
+    return "Cancellation requested; finishing the current safe work unit…";
+  }
+  return `${stateLabel(run.state)} in the background…`;
+}
+
+function isTerminalState(state: PipelineState): boolean {
+  return state === "Complete"
+    || state === "CompleteWithWarnings"
+    || state === "Failed"
+    || state === "Cancelled";
+}
+
+function isMonitoredBackgroundRun(run: RunHistoryItem): boolean {
+  return run.backgroundActive && !isTerminalState(run.state);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
 async function selectAndSummarize(): Promise<void> {
   if (!runtimeReady || processing) {
     return;
   }
 
+  let selected: string | null;
   try {
-    const selected = await open({
+    selected = await open({
       multiple: false,
       filters: [{
         name: "PDF",
         extensions: ["pdf"],
       }],
     });
-    if (selected === null) {
-      return;
-    }
-
-    const filename = displayFilename(selected);
-    processing = true;
-    activeRunId = null;
-    processingFilename.textContent = filename;
-    showStage("processing");
-    syncPrimaryAction();
-
-    const completed = await invoke<CompletedSummary>("summarize_document", {
-      filePath: selected,
-    });
-    activeRunId = completed.runId;
-    renderSummary(
-      completed.originalFilename,
-      completed.byteSize,
-      completed.summary,
-    );
   } catch (error) {
     const commandError = normalizeCommandError(error);
+    showFailure("File selection failed", commandError.message, commandError.code);
+    return;
+  }
+  if (selected === null) {
+    return;
+  }
+
+  const filename = displayFilename(selected);
+  beginProcessing(null, filename, "Preparing the durable pipeline run…");
+  try {
+    const accepted = await invoke<BackgroundRunAccepted>("summarize_document", {
+      filePath: selected,
+    });
+    await monitorBackgroundRun(accepted.runId, accepted.originalFilename);
+  } catch (error) {
+    stopProcessing();
+    const commandError = normalizeCommandError(error);
     showFailure("Processing stopped safely", commandError.message, commandError.code);
-  } finally {
-    processing = false;
-    syncPrimaryAction();
     await refreshHistory();
   }
 }
@@ -397,38 +597,26 @@ async function retrySelectedRun(): Promise<void> {
     return;
   }
 
-  processing = true;
-  activeRunId = source.runId;
-  processingFilename.textContent = `Retrying ${source.originalFilename}`;
-  showStage("processing");
-  syncPrimaryAction();
+  beginProcessing(source, `Retrying ${source.originalFilename}`, "Creating a separate retry run…");
 
-  let completed: CompletedSummary | null = null;
+  let accepted: BackgroundRunAccepted | null = null;
   let commandError: CommandError | null = null;
   try {
-    completed = await invoke<CompletedSummary>("retry_document", {
+    accepted = await invoke<BackgroundRunAccepted>("retry_document", {
       runId: source.runId,
       expectedStateVersion: source.stateVersion,
     });
   } catch (error) {
     commandError = normalizeCommandError(error);
-  } finally {
-    processing = false;
-    await refreshHistory();
-    syncPrimaryAction();
   }
 
-  if (completed) {
-    activeRunId = completed.runId;
-    renderHistory();
-    renderSummary(
-      completed.originalFilename,
-      completed.byteSize,
-      completed.summary,
-    );
+  if (accepted) {
+    await monitorBackgroundRun(accepted.runId, accepted.originalFilename);
     return;
   }
 
+  stopProcessing();
+  await refreshHistory();
   const child = recentRuns.find((run) => run.retryOfRunId === source.runId);
   if (child) {
     await openHistoryRun(child);
@@ -449,38 +637,30 @@ async function continueSelectedRun(): Promise<void> {
     return;
   }
 
-  processing = true;
-  activeRunId = source.runId;
-  processingFilename.textContent = `Continuing ${source.originalFilename}`;
-  showStage("processing");
-  syncPrimaryAction();
+  beginProcessing(
+    source,
+    `Continuing ${source.originalFilename}`,
+    `Resuming from ${stateLabel(source.state).toLowerCase()}…`,
+  );
 
-  let completed: CompletedSummary | null = null;
+  let accepted: BackgroundRunAccepted | null = null;
   let commandError: CommandError | null = null;
   try {
-    completed = await invoke<CompletedSummary>("continue_document", {
+    accepted = await invoke<BackgroundRunAccepted>("continue_document", {
       runId: source.runId,
       expectedStateVersion: source.stateVersion,
     });
   } catch (error) {
     commandError = normalizeCommandError(error);
-  } finally {
-    processing = false;
-    await refreshHistory();
-    syncPrimaryAction();
   }
 
-  if (completed) {
-    activeRunId = completed.runId;
-    renderHistory();
-    renderSummary(
-      completed.originalFilename,
-      completed.byteSize,
-      completed.summary,
-    );
+  if (accepted) {
+    await monitorBackgroundRun(accepted.runId, accepted.originalFilename);
     return;
   }
 
+  stopProcessing();
+  await refreshHistory();
   const updated = recentRuns.find((run) => run.runId === source.runId);
   if (updated) {
     await openHistoryRun(updated);
@@ -684,8 +864,14 @@ async function initialize(): Promise<void> {
   runtimeRetry.addEventListener("click", () => void refreshRuntimeStatus());
   continueButton.addEventListener("click", () => void continueSelectedRun());
   retryButton.addEventListener("click", () => void retrySelectedRun());
+  cancelButton.addEventListener("click", () => void cancelSelectedRun());
   historyRefresh.addEventListener("click", () => void refreshHistory());
   await Promise.all([refreshRuntimeStatus(), refreshHistory()]);
+  const active = recentRuns.find(isMonitoredBackgroundRun);
+  if (active) {
+    beginProcessing(active, active.originalFilename, processingStatusText(active));
+    void monitorBackgroundRun(active.runId, active.originalFilename);
+  }
 }
 
 void initialize();
