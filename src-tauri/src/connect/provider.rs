@@ -563,7 +563,7 @@ async fn create_job_for(
             if let Some(existing) =
                 store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
             {
-                if !existing_request_matches(&existing, &request_hash, version) {
+                if !existing_job_owns_import_path(&existing.import_path, &import_path) {
                     remove_file_quietly(&import_path).await;
                 }
                 return idempotent_response(existing, &request_hash, version);
@@ -838,6 +838,10 @@ fn existing_request_matches(
     existing.protocol_version == version.protocol_version() && existing.request_hash == request_hash
 }
 
+fn existing_job_owns_import_path(existing_import_path: &str, candidate: &Path) -> bool {
+    Path::new(existing_import_path) == candidate
+}
+
 fn authorize(state: &ProviderState, headers: &HeaderMap) -> Result<(), ProviderHttpError> {
     if headers.contains_key(header::ORIGIN) {
         return Err(ProviderHttpError::new(
@@ -1084,6 +1088,21 @@ mod tests {
     use reqwest::blocking::{multipart, Client};
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn accepted_job_ownership_preserves_only_its_shared_import() {
+        let shared = PathBuf::from("imports").join("job-artifact.pdf");
+        let loser_only = PathBuf::from("imports").join("other-artifact.pdf");
+
+        assert!(existing_job_owns_import_path(
+            shared.to_str().unwrap(),
+            &shared
+        ));
+        assert!(!existing_job_owns_import_path(
+            shared.to_str().unwrap(),
+            &loser_only
+        ));
+    }
 
     struct TestDirectory(PathBuf);
 
