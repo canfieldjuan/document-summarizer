@@ -16,6 +16,7 @@ const DEFAULT_MODEL: &str = "qwen3-30b-a3b:latest";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const HEALTH_TIMEOUT_SECONDS: u64 = 5;
+const DETERMINISTIC_GENERATION_SEED: u64 = 42;
 const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
@@ -139,8 +140,10 @@ impl OllamaRuntime {
                 },
             ],
             temperature: 0.0,
+            seed: DETERMINISTIC_GENERATION_SEED,
             max_tokens: request.max_output_tokens,
             stream: false,
+            reasoning_effort: "none",
             response_format,
         };
         self.authorize(
@@ -188,22 +191,25 @@ impl ModelRuntime for OllamaRuntime {
                 false,
             ));
         }
-        let mut output_format = response_format(&request.output_format)?;
-        if self.format_vocabulary_unavailable.load(Ordering::Relaxed) {
-            output_format = None;
-        }
-        let attempted_structured_output = output_format.is_some();
+        let schema_format = response_format(&request.output_format)?;
+        let schema_unavailable = self.format_vocabulary_unavailable.load(Ordering::Relaxed);
+        let attempted_schema = schema_format.is_some() && !schema_unavailable;
+        let output_format = if schema_format.is_some() && schema_unavailable {
+            Some(json_object_response_format())
+        } else {
+            schema_format
+        };
         let mut response = self.send_chat(request, output_format)?;
-        if !response.status().is_success() && attempted_structured_output {
+        if !response.status().is_success() && attempted_schema {
             let status = response.status();
             let body = read_bounded_body(response)?;
             if is_format_vocabulary_failure(status, &body) {
                 self.format_vocabulary_unavailable
                     .store(true, Ordering::Relaxed);
                 eprintln!(
-                    "Ollama structured-output grammar is unavailable; retrying with strict application validation"
+                    "Ollama structured-output grammar is unavailable; retrying in JSON mode with strict application validation"
                 );
-                response = self.send_chat(request, None)?;
+                response = self.send_chat(request, Some(json_object_response_format()))?;
             } else {
                 return Err(rejected_response(status));
             }
@@ -416,13 +422,19 @@ fn response_format(
     })))
 }
 
+fn json_object_response_format() -> serde_json::Value {
+    serde_json::json!({"type": "json_object"})
+}
+
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
     messages: [ChatMessage<'a>; 2],
     temperature: f32,
+    seed: u64,
     max_tokens: u32,
     stream: bool,
+    reasoning_effort: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
 }
@@ -461,7 +473,93 @@ struct ModelRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    fn read_json_request(stream: &mut TcpStream) -> serde_json::Value {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let header_end = loop {
+            let count = stream
+                .read(&mut buffer)
+                .expect("loopback request should be readable");
+            assert!(count > 0, "loopback request ended before headers");
+            request.extend_from_slice(&buffer[..count]);
+            if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&request[..header_end])
+            .expect("loopback request headers should be UTF-8");
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+            })
+            .expect("loopback request should include Content-Length");
+        while request.len() < header_end + content_length {
+            let count = stream
+                .read(&mut buffer)
+                .expect("loopback request body should be readable");
+            assert!(count > 0, "loopback request ended before its body");
+            request.extend_from_slice(&buffer[..count]);
+        }
+        serde_json::from_slice(&request[header_end..header_end + content_length])
+            .expect("loopback request body should be JSON")
+    }
+
+    fn write_json_response(stream: &mut TcpStream, status: &str, body: &serde_json::Value) {
+        let body = serde_json::to_vec(body).expect("loopback response should serialize");
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("loopback response headers should write");
+        stream
+            .write_all(&body)
+            .expect("loopback response body should write");
+    }
+
+    fn schema_fallback_server() -> (String, thread::JoinHandle<Vec<serde_json::Value>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().expect("loopback request should arrive");
+                requests.push(read_json_request(&mut stream));
+                if index == 0 {
+                    write_json_response(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        &serde_json::json!({
+                            "error": {
+                                "message": "failed to load model vocabulary required for format"
+                            }
+                        }),
+                    );
+                } else {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        &serde_json::json!({
+                            "choices": [{"message": {"content": "{\"status\":\"ok\"}"}}]
+                        }),
+                    );
+                }
+            }
+            requests
+        });
+        (format!("http://{address}/v1/"), handle)
+    }
 
     #[test]
     fn runtime_rejects_remote_credentials_and_invalid_limits() {
@@ -607,6 +705,77 @@ mod tests {
         })
         .expect_err("an oversized schema must fail before an HTTP request");
         assert_eq!(error.code, "MODEL_CONFIG_INVALID");
+    }
+
+    #[test]
+    fn chat_request_disables_reasoning_and_json_fallback_remains_structured() {
+        assert_eq!(
+            json_object_response_format(),
+            serde_json::json!({"type": "json_object"})
+        );
+        let payload = ChatRequest {
+            model: "fixture-model",
+            messages: [
+                ChatMessage {
+                    role: "system",
+                    content: "system",
+                },
+                ChatMessage {
+                    role: "user",
+                    content: "user",
+                },
+            ],
+            temperature: 0.0,
+            seed: DETERMINISTIC_GENERATION_SEED,
+            max_tokens: 8,
+            stream: false,
+            reasoning_effort: "none",
+            response_format: Some(json_object_response_format()),
+        };
+        let serialized = serde_json::to_value(payload).expect("chat payload should serialize");
+        assert_eq!(serialized["reasoning_effort"], "none");
+        assert_eq!(serialized["response_format"]["type"], "json_object");
+        assert_eq!(serialized["seed"], DETERMINISTIC_GENERATION_SEED);
+        assert_eq!(serialized["max_tokens"], 8);
+    }
+
+    #[test]
+    fn exact_vocabulary_failure_retries_and_caches_json_mode() {
+        let (base_url, server) = schema_fallback_server();
+        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+            .expect("loopback runtime should configure");
+        let request = ModelRequest {
+            system_prompt: "system".to_string(),
+            user_prompt: "user".to_string(),
+            max_output_tokens: 8,
+            output_format: ModelOutputFormat::JsonSchema {
+                name: "fixture_v1".to_string(),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"status": {"type": "string"}},
+                    "required": ["status"],
+                    "additionalProperties": false
+                }),
+            },
+        };
+
+        for _ in 0..2 {
+            let response = runtime
+                .generate(&request)
+                .expect("schema fallback request should succeed");
+            assert_eq!(response.text, "{\"status\":\"ok\"}");
+        }
+        let requests = server.join().expect("loopback server should finish");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["response_format"]["type"], "json_schema");
+        assert_eq!(requests[1]["response_format"]["type"], "json_object");
+        assert_eq!(requests[2]["response_format"]["type"], "json_object");
+        assert!(requests
+            .iter()
+            .all(|request| request["reasoning_effort"] == "none"));
+        assert!(requests
+            .iter()
+            .all(|request| request["seed"] == DETERMINISTIC_GENERATION_SEED));
     }
 
     #[test]
