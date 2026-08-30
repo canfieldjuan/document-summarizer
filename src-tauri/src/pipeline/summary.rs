@@ -29,12 +29,13 @@ const SYNTHESIS_SCHEMA_NAME: &str = "document_summary_claims_v1";
 const VERIFICATION_SCHEMA_NAME: &str = "document_claim_verdicts_v1";
 const ANALYSIS_OUTPUT_TOKENS: u32 = 2_048;
 const SYNTHESIS_OUTPUT_TOKENS: u32 = 2_048;
-const VERIFICATION_OUTPUT_TOKENS: u32 = 2_048;
+const VERIFICATION_OUTPUT_TOKENS: u32 = 4_096;
 const MAX_CHUNK_INPUT_CHARACTERS: usize = 100_000;
 const MAX_SYNTHESIS_INPUT_CHARACTERS: usize = 100_000;
 const MAX_VERIFICATION_INPUT_CHARACTERS: usize = 100_000;
 const MAX_EVIDENCE_PER_CHUNK: usize = 64;
 const MAX_SUMMARY_CLAIMS: usize = 64;
+const MAX_VERIFICATION_CLAIMS_PER_REQUEST: usize = 16;
 const MAX_EVIDENCE_PER_CLAIM: usize = 16;
 const MAX_CLAIM_CHARACTERS: usize = 2_000;
 const MAX_QUOTE_CHARACTERS: usize = 4_000;
@@ -112,13 +113,13 @@ struct RawClaim {
     evidence_ids: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VerificationPrompt {
     claims: Vec<PromptVerificationClaim>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PromptVerificationClaim {
     claim_id: String,
@@ -126,7 +127,7 @@ struct PromptVerificationClaim {
     evidence: Vec<PromptVerificationEvidence>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PromptVerificationEvidence {
     evidence_id: String,
@@ -593,9 +594,6 @@ fn verify(
     normalized: &NormalizedDocument,
 ) -> Result<VerifiedDocument, PipelineFailure> {
     validate_synthesized_document_without_runtime(synthesized, analyzed, chunked, normalized)?;
-    runtime.health().map_err(|failure| {
-        runtime_pipeline_failure(PipelineStage::Verify, "MODEL_HEALTH", failure)
-    })?;
     let evidence = analyzed
         .chunks
         .iter()
@@ -635,37 +633,7 @@ fn verify(
             })
             .collect::<Result<Vec<_>, PipelineFailure>>()?,
     };
-    let prompt = serde_json::to_string(&prompt).map_err(|_| {
-        stage_failure(
-            PipelineStage::Verify,
-            "MODEL_REQUEST_INVALID",
-            "The semantic-verification request could not be serialized",
-            false,
-        )
-    })?;
-    if prompt.chars().count() > MAX_VERIFICATION_INPUT_CHARACTERS {
-        return Err(stage_failure(
-            PipelineStage::Verify,
-            "VERIFICATION_INPUT_TOO_LARGE",
-            "The claim evidence catalog exceeds the supported one-pass verification limit",
-            false,
-        ));
-    }
-    let response = runtime
-        .generate(&ModelRequest {
-            system_prompt: VERIFICATION_SYSTEM_PROMPT.to_string(),
-            user_prompt: prompt,
-            max_output_tokens: VERIFICATION_OUTPUT_TOKENS,
-            output_format: ModelOutputFormat::JsonSchema {
-                name: VERIFICATION_SCHEMA_NAME.to_string(),
-                schema: verification_output_schema(),
-            },
-        })
-        .map_err(|failure| {
-            runtime_pipeline_failure(PipelineStage::Verify, "MODEL_VERIFICATION", failure)
-        })?;
-    validate_runtime_response(runtime, &response, PipelineStage::Verify)?;
-    let claim_verifications = parse_verification_response(&response.text, synthesized)?;
+    let claim_verifications = classify_claim_support(runtime, &prompt, &synthesized.claims)?;
     let claims = synthesized
         .claims
         .iter()
@@ -678,8 +646,8 @@ fn verify(
     let verified = VerifiedDocument {
         document_id: synthesized.document_id.clone(),
         verification_version: VERIFICATION_VERSION.to_string(),
-        runtime_id: response.runtime_id,
-        model_id: response.model_id,
+        runtime_id: runtime.runtime_id().to_string(),
+        model_id: runtime.model_id().to_string(),
         summary_text,
         source_chunk_ids: synthesized.source_chunk_ids.clone(),
         claims,
@@ -688,6 +656,90 @@ fn verify(
     };
     validate_verified_document(&verified, synthesized, analyzed, chunked, normalized)?;
     Ok(verified)
+}
+
+fn classify_claim_support(
+    runtime: &dyn ModelRuntime,
+    prompt: &VerificationPrompt,
+    claims: &[CitedClaim],
+) -> Result<Vec<ClaimVerification>, PipelineFailure> {
+    if prompt.claims.is_empty()
+        || prompt.claims.len() > MAX_SUMMARY_CLAIMS
+        || prompt.claims.len() != claims.len()
+        || prompt
+            .claims
+            .iter()
+            .zip(claims)
+            .any(|(prompt_claim, claim)| {
+                prompt_claim.claim_id != claim.claim_id
+                    || prompt_claim
+                        .evidence
+                        .iter()
+                        .map(|evidence| evidence.evidence_id.as_str())
+                        .ne(claim.evidence_ids.iter().map(String::as_str))
+            })
+    {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "MODEL_REQUEST_INVALID",
+            "The semantic-verification request does not match the synthesized claim catalog",
+            false,
+        ));
+    }
+    let complete_prompt = serde_json::to_string(prompt).map_err(|_| {
+        stage_failure(
+            PipelineStage::Verify,
+            "MODEL_REQUEST_INVALID",
+            "The semantic-verification request could not be serialized",
+            false,
+        )
+    })?;
+    if complete_prompt.chars().count() > MAX_VERIFICATION_INPUT_CHARACTERS {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "VERIFICATION_INPUT_TOO_LARGE",
+            "The claim evidence catalog exceeds the supported verification limit",
+            false,
+        ));
+    }
+    runtime.health().map_err(|failure| {
+        runtime_pipeline_failure(PipelineStage::Verify, "MODEL_HEALTH", failure)
+    })?;
+
+    let mut claim_verifications = Vec::with_capacity(claims.len());
+    for (prompt_claims, claim_batch) in prompt
+        .claims
+        .chunks(MAX_VERIFICATION_CLAIMS_PER_REQUEST)
+        .zip(claims.chunks(MAX_VERIFICATION_CLAIMS_PER_REQUEST))
+    {
+        let user_prompt = serde_json::to_string(&VerificationPrompt {
+            claims: prompt_claims.to_vec(),
+        })
+        .map_err(|_| {
+            stage_failure(
+                PipelineStage::Verify,
+                "MODEL_REQUEST_INVALID",
+                "The semantic-verification request could not be serialized",
+                false,
+            )
+        })?;
+        let response = runtime
+            .generate(&ModelRequest {
+                system_prompt: VERIFICATION_SYSTEM_PROMPT.to_string(),
+                user_prompt,
+                max_output_tokens: VERIFICATION_OUTPUT_TOKENS,
+                output_format: ModelOutputFormat::JsonSchema {
+                    name: VERIFICATION_SCHEMA_NAME.to_string(),
+                    schema: verification_output_schema(),
+                },
+            })
+            .map_err(|failure| {
+                runtime_pipeline_failure(PipelineStage::Verify, "MODEL_VERIFICATION", failure)
+            })?;
+        validate_runtime_response(runtime, &response, PipelineStage::Verify)?;
+        claim_verifications.extend(parse_verification_response(&response.text, claim_batch)?);
+    }
+    Ok(claim_verifications)
 }
 
 fn validate_chunked_document(chunked: &ChunkedDocument) -> Result<(), PipelineFailure> {
@@ -824,7 +876,7 @@ fn verification_output_schema() -> Value {
             "verdicts": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": MAX_SUMMARY_CLAIMS,
+                "maxItems": MAX_VERIFICATION_CLAIMS_PER_REQUEST,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -1120,7 +1172,7 @@ fn parse_claims_response(
 
 fn parse_verification_response(
     response: &str,
-    synthesized: &SynthesizedDocument,
+    claims: &[CitedClaim],
 ) -> Result<Vec<ClaimVerification>, PipelineFailure> {
     let raw: RawVerificationResponse = serde_json::from_str(response).map_err(|_| {
         stage_failure(
@@ -1130,9 +1182,9 @@ fn parse_verification_response(
             true,
         )
     })?;
-    if raw.verdicts.len() != synthesized.claims.len()
+    if raw.verdicts.len() != claims.len()
         || raw.verdicts.is_empty()
-        || raw.verdicts.len() > MAX_SUMMARY_CLAIMS
+        || raw.verdicts.len() > MAX_VERIFICATION_CLAIMS_PER_REQUEST
     {
         return Err(stage_failure(
             PipelineStage::Verify,
@@ -1142,8 +1194,7 @@ fn parse_verification_response(
         ));
     }
 
-    let known_claim_ids = synthesized
-        .claims
+    let known_claim_ids = claims
         .iter()
         .map(|claim| claim.claim_id.as_str())
         .collect::<HashSet<_>>();
@@ -1163,8 +1214,7 @@ fn parse_verification_response(
         }
     }
 
-    synthesized
-        .claims
+    claims
         .iter()
         .map(|claim| {
             let verdict = verdicts.remove(&claim.claim_id).ok_or_else(|| {
@@ -2536,7 +2586,7 @@ mod tests {
             .collect::<Vec<_>>();
         let accepted = parse_verification_response(
             &json!({"verdicts": reordered.clone()}).to_string(),
-            &synthesized,
+            &synthesized.claims,
         )
         .expect("complete reordered verdicts should canonicalize");
         assert_eq!(
@@ -2579,10 +2629,64 @@ mod tests {
             json!({"verdicts": unknown}).to_string(),
             json!({"verdicts": invalid_verdict}).to_string(),
         ] {
-            let error = parse_verification_response(&invalid, &synthesized)
+            let error = parse_verification_response(&invalid, &synthesized.claims)
                 .expect_err("malformed, partial, duplicate, foreign, or invalid verdicts fail");
             assert_eq!(error.code, "MODEL_VERIFICATION_RESPONSE_INVALID");
         }
+    }
+
+    #[test]
+    fn maximum_claim_catalog_is_verified_in_bounded_complete_batches() {
+        let claims = (0..MAX_SUMMARY_CLAIMS)
+            .map(|index| CitedClaim {
+                claim_id: format!("claim-{index:064x}"),
+                text: format!("Claim {index}"),
+                evidence_ids: vec![format!("evidence-{index:064x}")],
+            })
+            .collect::<Vec<_>>();
+        let prompt = VerificationPrompt {
+            claims: claims
+                .iter()
+                .map(|claim| PromptVerificationClaim {
+                    claim_id: claim.claim_id.clone(),
+                    text: claim.text.clone(),
+                    evidence: vec![PromptVerificationEvidence {
+                        evidence_id: claim.evidence_ids[0].clone(),
+                        exact_quote: "Exact source quotation.".to_string(),
+                    }],
+                })
+                .collect(),
+        };
+        for batch in prompt.claims.chunks(MAX_VERIFICATION_CLAIMS_PER_REQUEST) {
+            let response = RawVerificationResponse {
+                verdicts: batch
+                    .iter()
+                    .map(|claim| RawClaimVerdict {
+                        claim_id: claim.claim_id.clone(),
+                        verdict: ClaimVerdict::Unsupported,
+                    })
+                    .collect(),
+            };
+            assert!(
+                serde_json::to_string(&response)
+                    .expect("boundary response should serialize")
+                    .chars()
+                    .count()
+                    <= VERIFICATION_OUTPUT_TOKENS as usize
+            );
+        }
+
+        let runtime = FakeRuntime::healthy();
+        let verdicts = classify_claim_support(&runtime, &prompt, &claims)
+            .expect("the maximum accepted claim catalog should verify in batches");
+        assert_eq!(verdicts.len(), MAX_SUMMARY_CLAIMS);
+        assert!(verdicts
+            .iter()
+            .all(|verification| verification.verdict == ClaimVerdict::Supported));
+        assert_eq!(
+            runtime.calls.load(Ordering::SeqCst),
+            MAX_SUMMARY_CLAIMS / MAX_VERIFICATION_CLAIMS_PER_REQUEST
+        );
     }
 
     #[test]
@@ -2697,9 +2801,9 @@ mod tests {
             claims,
             warnings: vec![],
         };
-        let runtime = FakeRuntime::healthy();
+        let runtime = FakeRuntime::failing(FailurePoint::Health);
         let error = verify(&runtime, &synthesized, &analyzed, &chunked, &normalized)
-            .expect_err("oversized verification input must fail closed");
+            .expect_err("permanent input failure must take precedence over runtime health");
         assert_eq!(error.code, "VERIFICATION_INPUT_TOO_LARGE");
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
     }

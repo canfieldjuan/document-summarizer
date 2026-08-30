@@ -391,14 +391,16 @@ source spans. `SynthesizedDocument` still references every chunk ID exactly
 once in source order.
 
 Verification version `3.0.0` asks `ModelRuntime` to classify every synthesized
-claim against only its validated exact quotations. The bounded response may
-contain only the application-issued claim ID and one of `supported`,
-`unsupported`, or `ambiguous`. Rust requires exactly one unique verdict for
-every synthesized claim in canonical order and restores the evidence IDs from
-the persisted synthesis; the model cannot add a claim, choose provenance, or
-rewrite source text. `VerifiedDocument` records runtime/model identity and the
-complete claim-to-evidence verdict catalog for audit. Its displayed claims and
-rendered text contain only claims classified as supported.
+claim against only its validated exact quotations. Rust validates the complete
+catalog and its aggregate size before checking runtime health, then processes
+it in deterministic batches of at most 16 claims with a bounded output budget.
+Each response may contain only the application-issued claim ID and one of
+`supported`, `unsupported`, or `ambiguous`. Rust requires exactly one unique
+verdict for every synthesized claim in canonical order and restores the
+evidence IDs from the persisted synthesis; the model cannot add a claim, choose
+provenance, or rewrite source text. `VerifiedDocument` records runtime/model
+identity and the complete claim-to-evidence verdict catalog for audit. Its
+displayed claims and rendered text contain only claims classified as supported.
 
 This is model-assisted evidence-entailment screening, not independent fact
 checking. `supported` means the selected runtime classified every material
@@ -469,7 +471,7 @@ without that feature fails at compile time rather than producing an executable
 that silently depends on the development server.
 
 Current limits are conservative: source chunks, one-pass synthesis input, and
-the one-pass claim-verification input are each capped at 100,000 Unicode
+the aggregate claim-verification input are each capped at 100,000 Unicode
 characters. A native-text-free document or an input beyond those limits fails
 with a structured domain error; no summary text is invented. Analysis evidence,
 summary claims, quotation length, evidence references per claim, response

@@ -962,10 +962,12 @@ future work
   version `3.0.0`; citation artifacts are version `2.0.0`.
 - Verification now calls the replaceable `ModelRuntime` with each canonical
   synthesized claim and only its validated exact quotations. The bounded
-  response contains application-issued claim IDs plus `supported`,
+  responses contain application-issued claim IDs plus `supported`,
   `unsupported`, or `ambiguous`; Rust rejects malformed, partial, duplicate,
   foreign, or oversized responses and restores evidence IDs from durable
-  application state.
+  application state. The complete catalog is size-checked before runtime
+  health, then classified in deterministic batches of at most 16 claims with a
+  4,096-token output budget.
 - `VerifiedDocument` persists runtime/model identity and a verdict for every
   synthesized claim. Supported claims alone are rendered into the final
   summary. Unsupported and ambiguous claims remain durable for audit, are
@@ -994,7 +996,7 @@ future work
   `SEMANTIC_VERIFICATION_DEFERRED`.
 
 **Automated and live proof**:
-- The full Rust suite ran 132 tests: 131 passed and the opt-in Ollama test was
+- The full Rust suite ran 133 tests: 132 passed and the opt-in Ollama test was
   ignored by default. Focused verification tests cover full and reordered
   verdict coverage, malformed/partial/duplicate/foreign verdict rejection,
   input bounds before generation, mixed supported/unsupported/ambiguous
@@ -1011,6 +1013,10 @@ future work
   and matched the verdict, summary, citation hashes, terminal state, and
   `quick_check = ok`. This proves a database-connection reopen, not a full
   desktop-process restart.
+- PR review identified and corrected two boundary-order/capacity defects before
+  merge: permanent oversized input now wins over runtime health failure, and
+  the accepted 64-claim catalog no longer depends on one 2,048-token response.
+  Focused tests exercise both corrected sides directly.
 
 **Cold architecture audit and deferred work**:
 - Verification consumes only canonical synthesized claims, validated evidence,
