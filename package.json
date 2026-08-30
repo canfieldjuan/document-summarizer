@@ -1,5 +1,5 @@
 {
-  "name": "tauri-appdoc_sum",
+  "name": "document-summarizer",
   "private": true,
   "version": "0.1.0",
   "type": "module",

@@ -1,10 +1,10 @@
 [package]
-name = "tauri-appdoc_sum"
+name = "document-summarizer"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Local, evidence-grounded summaries for native-text PDF documents"
+authors = ["Juan Canfield"]
 edition = "2021"
-default-run = "tauri-appdoc_sum"
+default-run = "document-summarizer"
 autobins = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -13,11 +13,11 @@ autobins = false
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "tauri_appdoc_sum_lib"
+name = "document_summarizer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "tauri-appdoc_sum"
+name = "document-summarizer"
 path = "src/main.rs"
 
 [features]
