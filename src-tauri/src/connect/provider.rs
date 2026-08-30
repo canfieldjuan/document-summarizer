@@ -37,12 +37,14 @@ use uuid::Uuid;
 
 type RuntimeFactory =
     Arc<dyn Fn() -> Result<Box<dyn ModelRuntime>, ModelRuntimeFailure> + Send + Sync + 'static>;
+const V2_INSTANCE_ID_FILE: &str = "connect-v2-instance-id";
 
 #[derive(Clone)]
 struct ProviderState {
     db_path: PathBuf,
     imports_dir: PathBuf,
-    instance_id: String,
+    instance_id_v1: String,
+    instance_id_v2: String,
     token: String,
     manifest_v1: AppManifest,
     manifest_v2: v2::AppManifest,
@@ -56,6 +58,8 @@ pub enum ProviderStartError {
     RuntimeDirectoryUnavailable,
     #[error("Invalid DOC_SUM_CONNECT_MAX_BYTES configuration")]
     InvalidMaxInputBytes,
+    #[error("Connect v2 instance identity is invalid")]
+    InvalidInstanceIdentity,
     #[error("Connect provider I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error("Connect provider database setup failed: {0}")]
@@ -72,7 +76,8 @@ pub struct ConnectProvider {
     registration_path_v1: PathBuf,
     registration_path_v2: PathBuf,
     base_url: String,
-    instance_id: String,
+    instance_id_v1: String,
+    instance_id_v2: String,
     shutdown: Option<oneshot::Sender<()>>,
     server_thread: Option<JoinHandle<()>>,
 }
@@ -110,8 +115,10 @@ impl ConnectProvider {
         max_input_bytes: u64,
         runtime_factory: RuntimeFactory,
     ) -> Result<Self, ProviderStartError> {
+        ensure_private_directory(&app_data_dir)?;
         let imports_dir = app_data_dir.join("connect-imports");
         ensure_private_directory(&imports_dir)?;
+        let instance_id_v2 = load_or_create_v2_instance_id(&app_data_dir)?;
         let providers_dir_v1 = runtime_root.join("local-connect/v1/providers");
         let providers_dir_v2 = runtime_root.join("local-connect/v2/providers");
         ensure_private_directory(&providers_dir_v1)?;
@@ -132,14 +139,15 @@ impl ConnectProvider {
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let base_url = format!("http://127.0.0.1:{port}/");
-        let instance_id = Uuid::new_v4().to_string();
+        let instance_id_v1 = Uuid::new_v4().to_string();
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let manifest_v1 = AppManifest::new(&instance_id, max_input_bytes);
-        let manifest_v2 = v2::AppManifest::new(&instance_id, max_input_bytes);
+        let manifest_v1 = AppManifest::new(&instance_id_v1, max_input_bytes);
+        let manifest_v2 = v2::AppManifest::new(&instance_id_v2, max_input_bytes);
         let state = ProviderState {
             db_path,
             imports_dir,
-            instance_id: instance_id.clone(),
+            instance_id_v1: instance_id_v1.clone(),
+            instance_id_v2: instance_id_v2.clone(),
             token: token.clone(),
             manifest_v1,
             manifest_v2,
@@ -212,7 +220,7 @@ impl ConnectProvider {
         let started_at = Utc::now();
         let registration_v1 = RuntimeRegistration {
             protocol_version: PROTOCOL_VERSION,
-            instance_id: instance_id.clone(),
+            instance_id: instance_id_v1.clone(),
             app_id: APP_ID.to_string(),
             pid: std::process::id(),
             started_at,
@@ -227,7 +235,7 @@ impl ConnectProvider {
         };
         let registration_v2 = v2::RuntimeRegistration {
             protocol_version: v2::PROTOCOL_VERSION,
-            instance_id: instance_id.clone(),
+            instance_id: instance_id_v2.clone(),
             app_id: APP_ID.to_string(),
             pid: std::process::id(),
             started_at,
@@ -240,8 +248,8 @@ impl ConnectProvider {
                 token,
             },
         };
-        let registration_path_v1 = providers_dir_v1.join(format!("{APP_ID}-{instance_id}.json"));
-        let registration_path_v2 = providers_dir_v2.join(format!("{APP_ID}-{instance_id}.json"));
+        let registration_path_v1 = providers_dir_v1.join(format!("{APP_ID}-{instance_id_v1}.json"));
+        let registration_path_v2 = providers_dir_v2.join(format!("{APP_ID}-{instance_id_v2}.json"));
         if let Err(error) = write_registration(&registration_path_v1, &registration_v1) {
             let _ = shutdown_tx.send(());
             let _ = server_thread.join();
@@ -258,7 +266,8 @@ impl ConnectProvider {
             registration_path_v1,
             registration_path_v2,
             base_url,
-            instance_id,
+            instance_id_v1,
+            instance_id_v2,
             shutdown: Some(shutdown_tx),
             server_thread: Some(server_thread),
         })
@@ -269,7 +278,11 @@ impl ConnectProvider {
     }
 
     pub fn instance_id(&self) -> &str {
-        &self.instance_id
+        &self.instance_id_v1
+    }
+
+    pub fn instance_id_v2(&self) -> &str {
+        &self.instance_id_v2
     }
 
     pub fn registration_path(&self) -> &Path {
@@ -548,12 +561,16 @@ async fn create_job_for(
             false,
         ));
     }
+    let provider_instance_id = match version {
+        WireVersion::V1 => &state.instance_id_v1,
+        WireVersion::V2 => &state.instance_id_v2,
+    };
     let accepted = store::accept_job_with_ingestion(
         &mut conn,
         &request,
         &request_hash,
         import_path_text,
-        &state.instance_id,
+        provider_instance_id,
         &document,
         &run,
     );
@@ -1041,6 +1058,44 @@ fn ensure_private_directory(path: &Path) -> Result<(), io::Error> {
     Ok(())
 }
 
+fn parse_v2_instance_id(value: &str) -> Result<String, ProviderStartError> {
+    let candidate = value.strip_suffix('\n').unwrap_or(value);
+    if candidate.contains('\n') || candidate.contains('\r') || !valid_uuid_v4(candidate) {
+        return Err(ProviderStartError::InvalidInstanceIdentity);
+    }
+    Ok(candidate.to_string())
+}
+
+fn load_or_create_v2_instance_id(app_data_dir: &Path) -> Result<String, ProviderStartError> {
+    let path = app_data_dir.join(V2_INSTANCE_ID_FILE);
+    match fs::read_to_string(&path) {
+        Ok(value) => return parse_v2_instance_id(&value),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let instance_id = Uuid::new_v4().to_string();
+    let mut file = match private_create_new(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return parse_v2_instance_id(&fs::read_to_string(path)?);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let write_result = (|| -> Result<(), io::Error> {
+        file.write_all(instance_id.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        File::open(app_data_dir)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(path);
+        return Err(error.into());
+    }
+    Ok(instance_id)
+}
+
 fn private_create_new(path: &Path) -> Result<File, io::Error> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -1398,6 +1453,122 @@ mod tests {
     }
 
     #[test]
+    fn restarted_v2_provider_reuses_identity_and_exposes_interrupted_failure() {
+        let root = TestDirectory::new("doc-sum-connect-v2-restart");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let runtime_factory: RuntimeFactory =
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>));
+        let first = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory.clone(),
+        )
+        .unwrap();
+        let first_v1: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(first.registration_path()).unwrap()).unwrap();
+        let first_v2: v2::RuntimeRegistration =
+            serde_json::from_slice(&fs::read(first.registration_path_v2()).unwrap()).unwrap();
+
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(&source).unwrap();
+        let import_path = app_data.join("connect-imports/interrupted.pdf");
+        fs::copy(&source, &import_path).unwrap();
+        let (document, run) =
+            prepare_pdf_ingestion(import_path.to_str().unwrap(), Some("interrupted.pdf")).unwrap();
+        let mut request = fixture_request(&bytes);
+        request.protocol_version = v2::PROTOCOL_VERSION;
+        let mut conn = db::init_db(&db_path).unwrap();
+        store::accept_job_with_ingestion(
+            &mut conn,
+            &request,
+            "seeded-v2-request",
+            import_path.to_str().unwrap(),
+            &first_v2.instance_id,
+            &document,
+            &run,
+        )
+        .unwrap();
+        drop(conn);
+        drop(first);
+
+        let second = ConnectProvider::start_at(
+            db_path,
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory,
+        )
+        .unwrap();
+        let second_v1: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(second.registration_path()).unwrap()).unwrap();
+        let second_v2: v2::RuntimeRegistration =
+            serde_json::from_slice(&fs::read(second.registration_path_v2()).unwrap()).unwrap();
+
+        assert_ne!(first_v1.instance_id, second_v1.instance_id);
+        assert_eq!(first_v2.instance_id, second_v2.instance_id);
+        assert_ne!(first_v2.auth.token, second_v2.auth.token);
+        assert_eq!(
+            fs::read_to_string(app_data.join(V2_INSTANCE_ID_FILE)).unwrap(),
+            format!("{}\n", second_v2.instance_id)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(app_data.join(V2_INSTANCE_ID_FILE))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        let status = client()
+            .get(format!("{}v2/jobs/{}", second.base_url(), request.job_id))
+            .bearer_auth(&second_v2.auth.token)
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<v2::JobStatus>()
+            .unwrap();
+        assert_eq!(status.provider.instance_id, first_v2.instance_id);
+        assert_eq!(status.status, JobState::Failed);
+        assert_eq!(status.error.unwrap().code, "PROVIDER_RESTARTED");
+    }
+
+    #[test]
+    fn provider_rejects_invalid_persisted_v2_instance_identity() {
+        let root = TestDirectory::new("doc-sum-connect-v2-invalid-instance");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        fs::write(app_data.join(V2_INSTANCE_ID_FILE), "not-a-uuid\n").unwrap();
+
+        let result = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        );
+
+        assert!(matches!(
+            result,
+            Err(ProviderStartError::InvalidInstanceIdentity)
+        ));
+    }
+
+    #[test]
     fn provider_auth_handoff_idempotency_persistence_and_removal_work_end_to_end() {
         let root = TestDirectory::new("doc-sum-connect-provider");
         let runtime_root = root.0.join("runtime");
@@ -1425,7 +1596,7 @@ mod tests {
         .expect("v2 registration should decode");
         assert_eq!(registration.instance_id, provider.instance_id());
         assert_eq!(registration.transport.base_url, provider.base_url());
-        assert_eq!(registration_v2.instance_id, provider.instance_id());
+        assert_eq!(registration_v2.instance_id, provider.instance_id_v2());
         assert_eq!(registration_v2.protocol_version, v2::PROTOCOL_VERSION);
         assert_eq!(registration_v2.transport.kind, v2::TRANSPORT_KIND);
         assert_eq!(registration_v2.transport.base_url, provider.base_url());
@@ -1495,7 +1666,7 @@ mod tests {
             .unwrap()
             .json::<v2::AppManifest>()
             .unwrap();
-        assert_eq!(manifest_v2.instance_id, provider.instance_id());
+        assert_eq!(manifest_v2.instance_id, provider.instance_id_v2());
         assert_eq!(manifest_v2.capabilities[0].id, CAPABILITY_ID);
         assert_eq!(manifest_v2.capabilities[0].action.label, "Summarize");
 
