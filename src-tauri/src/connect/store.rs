@@ -2,6 +2,7 @@ use crate::connect::contracts::{
     ArtifactProvenance, CapabilityRef, InputArtifact, JobError, JobRequest, JobResult, JobState,
     JobStatus, ProviderRef, CAPABILITY_ID, CAPABILITY_VERSION, PROTOCOL_VERSION,
 };
+use crate::connect::v2;
 use crate::pipeline::contracts::{IngestedDocument, PipelineRun};
 use crate::pipeline::db::{self, StoreError};
 use chrono::{DateTime, Utc};
@@ -221,6 +222,30 @@ pub fn has_active_job(conn: &Connection) -> Result<bool, ConnectStoreError> {
         |row| row.get(0),
     )?;
     Ok(active)
+}
+
+pub fn active_v2_provider_instance_id(
+    conn: &Connection,
+) -> Result<Option<String>, ConnectStoreError> {
+    let mut statement = conn.prepare(
+        "SELECT provider_instance_id
+         FROM connect_jobs
+         WHERE protocol_version = ?1 AND status IN ('accepted', 'processing')
+         GROUP BY provider_instance_id
+         ORDER BY provider_instance_id
+         LIMIT 2",
+    )?;
+    let mut rows = statement.query([v2::PROTOCOL_VERSION])?;
+    let first = match rows.next()? {
+        Some(row) => Some(row.get(0)?),
+        None => None,
+    };
+    if rows.next()?.is_some() {
+        return Err(ConnectStoreError::InvalidJob(
+            "active Connect v2 jobs have inconsistent provider identities".to_string(),
+        ));
+    }
+    Ok(first)
 }
 
 pub fn mark_processing(
@@ -476,7 +501,9 @@ mod tests {
         let file = TestFile::pdf();
         let bytes = fs::read(&file.0).unwrap();
         let mut conn = db::init_db(":memory:").unwrap();
-        let request = request(&bytes);
+        let mut request = request(&bytes);
+        request.protocol_version = v2::PROTOCOL_VERSION;
+        let provider_instance_id = Uuid::new_v4().to_string();
         let (document, run) = prepare_pdf_ingestion(
             file.0.to_str().unwrap(),
             Some(&request.inputs[0].display_name),
@@ -487,11 +514,15 @@ mod tests {
             &request,
             &request.canonical_hash().unwrap(),
             file.0.to_str().unwrap(),
-            &Uuid::new_v4().to_string(),
+            &provider_instance_id,
             &document,
             &run,
         )
         .unwrap();
+        assert_eq!(
+            active_v2_provider_instance_id(&conn).unwrap(),
+            Some(provider_instance_id)
+        );
         assert_eq!(
             mark_interrupted_jobs_failed(
                 &conn,
@@ -503,5 +534,6 @@ mod tests {
         let stored = get_job(&conn, &request.job_id).unwrap().unwrap();
         assert_eq!(stored.state, JobState::Failed);
         assert_eq!(stored.error.unwrap().code, "PROVIDER_RESTARTED");
+        assert_eq!(active_v2_provider_instance_id(&conn).unwrap(), None);
     }
 }

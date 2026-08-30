@@ -118,13 +118,15 @@ impl ConnectProvider {
         ensure_private_directory(&app_data_dir)?;
         let imports_dir = app_data_dir.join("connect-imports");
         ensure_private_directory(&imports_dir)?;
-        let instance_id_v2 = load_or_create_v2_instance_id(&app_data_dir)?;
         let providers_dir_v1 = runtime_root.join("local-connect/v1/providers");
         let providers_dir_v2 = runtime_root.join("local-connect/v2/providers");
         ensure_private_directory(&providers_dir_v1)?;
         ensure_private_directory(&providers_dir_v2)?;
 
         let conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
+        let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
+        let instance_id_v2 =
+            load_or_create_v2_instance_id(&app_data_dir, active_v2_instance_id.as_deref())?;
         store::mark_interrupted_jobs_failed(
             &conn,
             &job_error(
@@ -1066,15 +1068,29 @@ fn parse_v2_instance_id(value: &str) -> Result<String, ProviderStartError> {
     Ok(candidate.to_string())
 }
 
-fn load_or_create_v2_instance_id(app_data_dir: &Path) -> Result<String, ProviderStartError> {
+fn load_or_create_v2_instance_id(
+    app_data_dir: &Path,
+    bootstrap_instance_id: Option<&str>,
+) -> Result<String, ProviderStartError> {
     let path = app_data_dir.join(V2_INSTANCE_ID_FILE);
+    let bootstrap_instance_id = bootstrap_instance_id
+        .map(parse_v2_instance_id)
+        .transpose()?;
     match fs::read_to_string(&path) {
-        Ok(value) => return parse_v2_instance_id(&value),
+        Ok(value) => {
+            let persisted = parse_v2_instance_id(&value)?;
+            if let Some(expected) = bootstrap_instance_id.as_deref() {
+                if expected != persisted {
+                    return Err(ProviderStartError::InvalidInstanceIdentity);
+                }
+            }
+            return Ok(persisted);
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
 
-    let instance_id = Uuid::new_v4().to_string();
+    let instance_id = bootstrap_instance_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let temporary = app_data_dir.join(format!(".{V2_INSTANCE_ID_FILE}.{}.tmp", Uuid::new_v4()));
     let write_result = (|| -> Result<(), io::Error> {
         let mut file = private_create_new(&temporary)?;
@@ -1493,6 +1509,7 @@ mod tests {
         .unwrap();
         drop(conn);
         drop(first);
+        fs::remove_file(app_data.join(V2_INSTANCE_ID_FILE)).unwrap();
 
         let second = ConnectProvider::start_at(
             db_path,
@@ -1557,6 +1574,25 @@ mod tests {
             DEFAULT_MAX_INPUT_BYTES,
             Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
         );
+
+        assert!(matches!(
+            result,
+            Err(ProviderStartError::InvalidInstanceIdentity)
+        ));
+    }
+
+    #[test]
+    fn provider_rejects_persisted_v2_identity_that_conflicts_with_active_job() {
+        let root = TestDirectory::new("doc-sum-connect-v2-conflicting-instance");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&app_data).unwrap();
+        fs::write(
+            app_data.join(V2_INSTANCE_ID_FILE),
+            format!("{}\n", Uuid::new_v4()),
+        )
+        .unwrap();
+
+        let result = load_or_create_v2_instance_id(&app_data, Some(&Uuid::new_v4().to_string()));
 
         assert!(matches!(
             result,
