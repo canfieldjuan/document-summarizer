@@ -28,8 +28,11 @@ pub struct PipelineRun {
 }
 ```
 
-`resumable` records checkpoint eligibility metadata only. Automatic active-run
-detection and a resume command are not implemented in the current slice.
+`resumable` records checkpoint eligibility metadata only. Desktop startup now
+detects implemented active-stage states and reconciles work interrupted by a
+previous process to a retryable `FAILED` result. No same-run resume command or
+automatic work replay is implemented; retry currently means submitting the
+document again.
 
 ## `PipelineEvent`
 An immutable ledger entry indicating a transition from one state to another.
@@ -108,6 +111,32 @@ operation, which requires `run_id`, expected state, expected version, and next
 state. A successful transaction updates state/version and appends its event.
 An invalid or stale transition changes neither. `pipeline_events` has a unique
 per-run sequence and SQLite triggers reject update or deletion.
+
+## Desktop process ownership and interrupted-run recovery
+
+The desktop registers Tauri's single-instance plugin before setup or any other
+plugin. Only the owning process opens the application workflow. A second launch
+exits after its callback asks the existing window to unminimize, show, and take
+focus, preventing startup recovery from mistaking another live desktop
+process's work for an interruption.
+
+After single-instance ownership is established and schema migration completes,
+startup scans persisted runs in deterministic `run_id` order. The implemented
+active states `INGESTING`, `PARSING`, `NORMALIZING`, `STRUCTURING`, `CHUNKING`,
+`ANALYZING`, `SYNTHESIZING`, and `VERIFYING` map explicitly to their pipeline
+stages. Each receives a structured, recoverable `PROCESS_INTERRUPTED` failure.
+All recovered state/version updates and immutable events commit in one SQLite
+transaction; a stale expectation or any event/write failure rolls back the
+entire recovery batch. Stable and terminal states are untouched, and a repeated
+startup adds no event or version increment.
+
+Recovery preserves the document record, original source, completed checkpoint
+artifacts, warnings, and prior history. It never invokes a parser or model and
+does not delete partial files. `init_db` remains schema/persistence-only; the
+desktop invokes reconciliation explicitly after acquiring process ownership so
+an ordinary second database connection cannot steal active work. Reserved
+visual-analysis and cancellation states remain outside this policy until their
+execution paths exist.
 
 ## Long-term replaceability seams
 
@@ -394,8 +423,8 @@ an input beyond those limits fails with a structured domain error; no summary
 text is invented. Analysis evidence, summary claims, quotation length, evidence
 references per claim, response schemas, and model response bytes are also
 bounded. Semantic entailment/fact verification, hierarchical synthesis,
-OCR/vision routing, PDF-viewer navigation, and citations for visual-only pages
-remain deferred.
+same-run resume, OCR/vision routing, PDF-viewer navigation, and citations for
+visual-only pages remain deferred.
 
 ## Connect v1 provider
 

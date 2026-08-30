@@ -742,3 +742,65 @@ future work
   Connect citation output, citations for future OCR/vision evidence, OCR,
   vision, embeddings, RAG, chat, workflow automation, and cross-machine model
   transport remain deferred.
+
+## Slice 8 — Desktop Instance Ownership and Interrupted-Run Reconciliation
+
+**Status**: Implemented and locally accepted
+
+**Recovery contract**:
+- The official Tauri single-instance plugin is registered before setup and all
+  other plugins. A second desktop launch routes its callback to the existing
+  process, requests window focus, and exits instead of opening the shared
+  application database as a competing workflow owner.
+- After ownership and schema migration, desktop startup scans runs in
+  deterministic `run_id` order. Implemented active states from `INGESTING`
+  through `VERIFYING` map explicitly to their stages and transition to `FAILED`
+  with a recoverable `PROCESS_INTERRUPTED` failure.
+- Recovery uses the existing expected-state/version transition boundary. Every
+  candidate's state, version, failure, and immutable event commit in one batch
+  transaction. Stable runs are untouched, any failed event/write rolls back the
+  full batch, and repeated startup is idempotent.
+- Recovery preserves source/document identity, existing checkpoint artifacts,
+  warnings, and event history. It performs no parser or model calls. This slice
+  does not add backward state edges, same-run resume, or automatic model replay;
+  retry means resubmitting the document.
+
+**Automated proof**:
+- Five focused Rust tests passed for the complete active/stable state mapping,
+  connection-close/reopen recovery, stable-run/source/document preservation,
+  idempotency, mixed/invalid candidate rejection, batch rollback on the second
+  event insert, and a two-connection stale recovery snapshot losing to a newer
+  failure.
+- The full Rust run executed 112 tests: 111 passed and the opt-in live Ollama
+  test was ignored. Strict formatting and all-target/all-feature Clippy passed.
+- The TypeScript/Vite production build and no-bundle Tauri release build passed
+  with `tauri-plugin-single-instance` 2.4.3 locked.
+
+**Real process proof**:
+- Two release executables were launched against the same isolated runtime and
+  data directories. The second exited with status 0 while the first remained
+  alive, proving the single-instance gate on the exercised Linux desktop.
+- An isolated application database was seeded with a coherent `PARSING` run at
+  version 4 and four ordered events. Launching the release executable invoked
+  the real Tauri setup path and persisted `FAILED` at version 5 with a
+  stage-`Parse`, recoverable `PROCESS_INTERRUPTED` failure and sequence-4
+  `PARSING -> FAILED` event. A second independent process launch left version 5
+  and the five-event history unchanged.
+- A read after both processes exited returned SQLite `quick_check = ok` at
+  schema version 11.
+- The process probe seeded an interrupted state after the first app process was
+  stopped; it did not kill a parser while native parsing was executing. The
+  automated connection-reopen test creates its active `PARSING` state through
+  the real ingestion and `start_parsing` boundaries.
+
+**Known boundaries and deferred work**:
+- `init_db` deliberately does not reconcile work; non-Tauri/headless entrypoints
+  must acquire equivalent exclusive ownership before calling the explicit
+  recovery service.
+- Same-run resume/retry, cancellation recovery, visual-analysis recovery,
+  startup recovery notices in the UI, and Snap/Flatpak DBus packaging rules for
+  single-instance behavior remain deferred.
+- The second-process probe proved clean exit and survival of the owning process;
+  it did not visually assert that the existing window took focus.
+- The existing stale Connect registration-file cleanup and live UI citation
+  click remain separate deferred hardening.

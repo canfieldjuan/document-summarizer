@@ -6,7 +6,9 @@ use crate::pipeline::contracts::{
 use crate::pipeline::schema::{self, MigrationError};
 use crate::pipeline::state::{StateMachine, TransitionError};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{
+    params, params_from_iter, Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -98,6 +100,8 @@ pub enum StoreError {
     },
     #[error("Persisted transition lost its expected state/version for run {run_id}")]
     StaleWrite { run_id: String },
+    #[error("Invalid interrupted-run recovery transition from {state:?}")]
+    InvalidRecoveryTransition { state: PipelineState },
     #[error(transparent)]
     Migration(#[from] MigrationError),
     #[error(transparent)]
@@ -108,6 +112,14 @@ pub enum StoreError {
 struct TransitionPatch {
     warnings: Option<Vec<PipelineWarning>>,
     failure: Option<PipelineFailure>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct InterruptedRunTransition {
+    pub run_id: String,
+    pub expected_state: PipelineState,
+    pub expected_version: u32,
+    pub failure: PipelineFailure,
 }
 
 pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, StoreError> {
@@ -330,6 +342,37 @@ pub fn list_recent_pipeline_runs(
              LIMIT ?1",
         )?;
         let rows = statement.query_map([i64::from(limit)], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    run_ids
+        .into_iter()
+        .map(|run_id| {
+            get_pipeline_run(conn, &run_id)?
+                .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))
+        })
+        .collect()
+}
+
+pub(super) fn list_pipeline_runs_for_recovery(
+    conn: &Connection,
+) -> Result<Vec<PipelineRun>, StoreError> {
+    let states = PipelineState::IMPLEMENTED_ACTIVE_STATES
+        .iter()
+        .map(to_json)
+        .collect::<Result<Vec<_>, _>>()?;
+    let placeholders = (1..=states.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!(
+        "SELECT run_id FROM pipeline_runs
+         WHERE state IN ({placeholders})
+         ORDER BY run_id"
+    );
+    let run_ids = {
+        let mut statement = conn.prepare(&query)?;
+        let rows = statement.query_map(params_from_iter(&states), |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
 
@@ -1762,6 +1805,48 @@ fn insert_citation_artifact(
         ],
     )?;
     Ok(())
+}
+
+pub(super) fn fail_interrupted_runs(
+    conn: &mut Connection,
+    interrupted: &[InterruptedRunTransition],
+) -> Result<Vec<PipelineRun>, StoreError> {
+    if interrupted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut recovered = Vec::with_capacity(interrupted.len());
+    for candidate in interrupted {
+        let Some(stage) = candidate.expected_state.active_stage() else {
+            return Err(StoreError::InvalidRecoveryTransition {
+                state: candidate.expected_state.clone(),
+            });
+        };
+        if candidate.failure.code != "PROCESS_INTERRUPTED"
+            || candidate.failure.stage.as_ref() != Some(&stage)
+            || !candidate.failure.recoverable
+        {
+            return Err(StoreError::InvalidRecoveryTransition {
+                state: candidate.expected_state.clone(),
+            });
+        }
+        recovered.push(transition_in_tx(
+            &tx,
+            &candidate.run_id,
+            candidate.expected_state.clone(),
+            candidate.expected_version,
+            PipelineState::Failed,
+            Some(stage),
+            Some(candidate.failure.code.clone()),
+            TransitionPatch {
+                warnings: None,
+                failure: Some(candidate.failure.clone()),
+            },
+        )?);
+    }
+    tx.commit()?;
+    Ok(recovered)
 }
 
 #[allow(clippy::too_many_arguments)]

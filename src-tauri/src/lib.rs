@@ -18,6 +18,7 @@ use pipeline::normalize::{
 use pipeline::parser::{
     parse_document as parse_pipeline_document, ParsePipelineError, PdfExtractParser,
 };
+use pipeline::recovery::reconcile_interrupted_runs;
 use pipeline::service::{process_pdf_to_summary, DocumentServiceError, SummaryComponents};
 use pipeline::structure::{
     structure_document as structure_pipeline_document, DeterministicStructureInterpreter,
@@ -245,12 +246,29 @@ fn get_persisted_summary(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn Error>> {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+
+    builder
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
             let db_path = app_data_dir.join("summarizer.db");
-            let conn = init_db(&db_path)?;
+            let mut conn = init_db(&db_path)?;
+            let recovered = reconcile_interrupted_runs(&mut conn)?;
+            if !recovered.is_empty() {
+                eprintln!(
+                    "Reconciled {} interrupted pipeline run(s) after restart",
+                    recovered.len()
+                );
+            }
 
             app.manage(AppState {
                 db: Mutex::new(conn),
