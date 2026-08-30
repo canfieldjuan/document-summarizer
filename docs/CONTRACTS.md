@@ -506,10 +506,12 @@ requires a completed run. A corrupted artifact therefore remains visible as a
 historical run but fails closed when opened. Connection reopen reconstructs the
 same read model from durable state; history is not a frontend cache.
 
-Release binaries must be produced through the Tauri build command with the
-`custom-protocol` feature so the Vite output is embedded. A release compilation
-without that feature fails at compile time rather than producing an executable
-that silently depends on the development server.
+The Tauri CLI owns the `custom-protocol` mode switch. The Cargo feature is in the
+crate's default feature set, so Tauri release builds embed `frontendDist`; Tauri
+development invokes Cargo with `--no-default-features` and loads the configured
+Vite `devUrl`. The application configuration must not force the feature for both
+modes. A raw featureless release compilation fails at compile time rather than
+producing an executable that silently depends on the development server.
 
 The release product identity is `Document Summarizer`; its Cargo and installed
 binary name is `document-summarizer`. Cargo automatic binary discovery remains

@@ -21,6 +21,7 @@ name = "document-summarizer"
 path = "src/main.rs"
 
 [features]
+default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]

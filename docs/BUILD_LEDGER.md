@@ -1436,3 +1436,69 @@ passed; full multi-page live completion remains blocked by concurrent GPU load
   with provider-present, provider-absent, entitlement-denied, and restoration
   proofs. Billing UX, workflow automation, OCR/vision, and broader document
   formats remain deferred.
+
+## Real-Document Acceptance and Desktop Launch Repair (2026-08-30)
+
+**Status**: Verified locally
+
+**Violations found and repaired**:
+- A real `npm run desktop:dev` attempt from a clean worktree failed before its
+  window opened. Application configuration forced the production
+  `custom-protocol` feature during development, so Tauri selected embedded
+  assets and rejected the absent ignored `dist` directory.
+- Removed the mode override from `tauri.conf.json` and restored
+  `custom-protocol` as a Cargo default feature. Tauri development can now invoke
+  Cargo with `--no-default-features` and use `devUrl`, while Tauri release builds
+  retain the feature and embed `frontendDist`. A regression test pins both sides
+  of that contract.
+- A realistic long attachment filename overflowed the processing workbench and
+  displaced the recent-work column. The workbench children may now shrink, and
+  filename fields wrap without changing the authoritative stored filename.
+
+**Real application and document proof**:
+- The external deterministic office harness passed for a public W-9, a rotated
+  minimum-wage poster, contractor agreements, a scanned NARA PDF, and a
+  multi-page DOL slide deck. The scanned fixture retained its visual-routing
+  marker instead of inventing text.
+- A private ten-page PDF selected through the real file picker reached live
+  model analysis. Closing the application during analysis and reopening it
+  created the documented retryable `PROCESS_INTERRUPTED` failure rather than a
+  false completion; the UI exposed recovery and retry.
+- A protocol-v2 job submitted the public DOL poster with the extensionless
+  display name `minimum-wage-poster`. The live
+  `qwen3-30b-a3b:latest` runtime completed it after the provider's bounded JSON
+  fallback. Connect returned one summary artifact whose declared byte size and
+  SHA-256 matched the decoded bytes, while SQLite held a `Complete` pipeline run
+  and its summary artifact.
+- After closing and independently restarting the Tauri process against the same
+  isolated application-data directory, the prior Connect job remained
+  `completed` and returned the identical output bytes and hash.
+- Email Watcher's protocol-v2 discovery returned one capability while the
+  provider was live, zero after it stopped, and one from the new instance after
+  restart, with no Email Watcher code change. Its focused Connect test module
+  also passed.
+
+**Build and boundary proof**:
+- A clean development launch opened through `npm run desktop:dev` without a
+  pre-existing `dist`; command output showed Tauri using
+  `cargo run --no-default-features`.
+- `npm run build`, `cargo fmt --check`, the full Rust suite, and strict Clippy
+  passed. The Rust suite reported 169 passed and two live-runtime tests ignored;
+  the default office suite reported one passed and three opt-in tests ignored;
+  all three release-contract tests passed.
+- `npm run desktop:build:no-bundle` completed and emitted the optimized desktop
+  executable. The opposite boundary probe ran
+  `cargo build --release --no-default-features` and observed the intended
+  compile-time rejection with Cargo exit 101.
+- Visual inspection of the fresh-process retry view confirmed the long
+  filename remained within the workbench and did not cover the recent-work
+  column.
+
+**Known limitation / deferred hardening**:
+- Terminal-driven Tauri shutdowns left owner-only but unreachable provider
+  registration files. Email Watcher's live authenticated-manifest discovery
+  ignored every dead entry, so capability removal/restoration remained truthful.
+  Proactive stale-file scavenging remains deferred Connect lifecycle hardening.
+- The combined Email Watcher Connect/engine test invocation was not exercised in
+  the detached v2 worktree because that interpreter lacked `google.auth`; the
+  self-contained Connect tests and live discovery path were exercised instead.
