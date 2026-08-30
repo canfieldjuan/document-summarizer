@@ -392,12 +392,25 @@ a bounded, contiguous, exact substring of the authoritative normalized block.
 The application derives the `SourceSpan`, chunk association, and deterministic
 evidence ID; the model cannot supply or override those fields.
 
-Synthesis version `2.0.0` receives only the validated evidence catalog and
-returns structured claims. Every claim must reference one or more known,
-unique evidence IDs. Rust canonicalizes those references into source order,
-derives a deterministic claim ID, and renders page labels from the validated
-source spans. `SynthesizedDocument` still references every chunk ID exactly
-once in source order.
+Synthesis version `3.0.0` receives only the validated evidence catalog and
+returns structured claims. A catalog that fits one bounded request keeps the
+direct path. Larger catalogs are partitioned deterministically in source order,
+with at most eight items and 16,000 Unicode characters per request. Each first
+pass produces at most four intermediate claims. Candidate reductions use the
+same request bounds and must reduce every non-final batch by at least half.
+The complete plan is conservatively capped at 256 model requests.
+
+Intermediate candidates are ephemeral and have deterministic IDs derived from
+the document, synthesis version, reduction round, batch/order, text, and
+original evidence IDs. A model response may reference only evidence or
+candidate IDs present in that exact request. Rust expands candidate references
+back to unique original evidence IDs, restores canonical source order, and
+rejects claims expanding beyond 16 evidence items. Only final claims enter the
+durable `SynthesizedDocument`; Rust derives their deterministic IDs and renders
+page labels from authoritative source spans. The artifact still references
+every chunk ID exactly once in source order. Historical synthesis version
+`2.0.0` artifacts remain validation-compatible and retain their original claim
+identity derivation.
 
 Verification version `3.0.0` asks `ModelRuntime` to classify every synthesized
 claim against only its validated exact quotations. Rust validates the complete
@@ -439,11 +452,11 @@ server-side grammar enforcement. The prompt still carries the explicit JSON
 shape and the same Rust schema, identity, quotation, and provenance checks
 remain mandatory. Other HTTP failures do not activate the fallback.
 
-Analysis and synthesis versions remain `2.0.0`; verification and summary
-versions are `3.0.0`, and citation version is `2.0.0`. No schema migration is
-required because the existing verification, summary, and citation tables
-already persist explicitly versioned JSON plus row hashes. Each artifact row
-records the run/document, stage version, serialized artifact, creation
+Analysis remains version `2.0.0`; synthesis, verification, and summary are
+version `3.0.0`, and citation is version `2.0.0`. No schema migration is
+required because the existing synthesis, verification, summary, and citation
+tables already persist explicitly versioned JSON plus row hashes. Each artifact
+row records the run/document, stage version, serialized artifact, creation
 timestamp, and SHA-256 row hash. The final `SummaryArtifact` and
 `CitationArtifact` each carry their own content integrity hash, and the
 citation artifact binds to the exact summary integrity hash and rendered text.
@@ -479,14 +492,20 @@ Release binaries must be produced through the Tauri build command with the
 without that feature fails at compile time rather than producing an executable
 that silently depends on the development server.
 
-Current limits are conservative: source chunks, one-pass synthesis input, and
-the aggregate claim-verification input are each capped at 100,000 Unicode
-characters. A native-text-free document or an input beyond those limits fails
-with a structured domain error; no summary text is invented. Analysis evidence,
-summary claims, quotation length, evidence references per claim, response
-schemas, and model response bytes are also bounded. Independent source-fact
-verification, hierarchical synthesis, OCR/vision routing, PDF-viewer
-navigation, and citations for visual-only pages remain deferred.
+Current limits are conservative: source chunks and the aggregate
+claim-verification input are capped at 100,000 Unicode characters. Synthesis
+has no single aggregate prompt; every direct, evidence-batch, and candidate
+request is capped at eight items and 16,000 Unicode characters, and a hierarchy
+is capped at 256 requests. A native-text-free document, an individually
+oversized synthesis item, or a plan beyond those limits fails with a structured
+domain error; no summary text is invented. Intermediate reductions are not
+persisted or treated as checkpoints; any later synthesis attempt must recompute
+them under the existing failure/retry policy. Cancellation is checked before
+and after every model request.
+Analysis evidence, summary claims, quotation length, evidence references per
+claim, response schemas, and model response bytes are also bounded. Independent
+source-fact verification, OCR/vision routing, PDF-viewer navigation, and
+citations for visual-only pages remain deferred.
 
 ## Stable checkpoint continuation
 
