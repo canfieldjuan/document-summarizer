@@ -705,14 +705,12 @@ async fn receive_artifact(
     input: &InputArtifact,
     mut field: axum::extract::multipart::Field<'_>,
 ) -> Result<PathBuf, ProviderHttpError> {
-    let staging = state.imports_dir.join(format!(
-        ".{job_id}-{}.{}.part",
-        input.artifact_id,
-        Uuid::new_v4()
-    ));
-    let final_path = state
-        .imports_dir
-        .join(format!("{job_id}-{}.pdf", input.artifact_id));
+    let (staging, final_path) = allocate_import_paths(
+        &state.imports_dir,
+        job_id,
+        &input.artifact_id,
+        Uuid::new_v4(),
+    );
     let mut file = tokio::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -769,6 +767,22 @@ async fn receive_artifact(
     }
 
     promote_staged_artifact(&staging, &final_path, input, &state.imports_dir).await
+}
+
+fn allocate_import_paths(
+    imports_dir: &Path,
+    job_id: &str,
+    artifact_id: &str,
+    transfer_id: Uuid,
+) -> (PathBuf, PathBuf) {
+    // The database job identity provides idempotency. Import paths are private to
+    // one transfer so a rejected concurrent request can never unlink the file
+    // another request accepted for the same job and artifact identities.
+    let stem = format!("{job_id}-{artifact_id}-{transfer_id}");
+    (
+        imports_dir.join(format!(".{stem}.part")),
+        imports_dir.join(format!("{stem}.pdf")),
+    )
 }
 
 async fn promote_staged_artifact(
@@ -1117,6 +1131,38 @@ mod tests {
             shared.to_str().unwrap(),
             &loser_only
         ));
+    }
+
+    #[test]
+    fn concurrent_transfers_never_share_import_paths() {
+        let imports = PathBuf::from("imports");
+        let job_id = "33333333-3333-4333-8333-333333333333";
+        let artifact_id = "22222222-2222-4222-8222-222222222222";
+        let first = allocate_import_paths(
+            &imports,
+            job_id,
+            artifact_id,
+            Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap(),
+        );
+        let second = allocate_import_paths(
+            &imports,
+            job_id,
+            artifact_id,
+            Uuid::parse_str("55555555-5555-4555-8555-555555555555").unwrap(),
+        );
+
+        assert_ne!(first.0, second.0);
+        assert_ne!(first.1, second.1);
+        assert!(first.0.starts_with(&imports));
+        assert!(first.1.starts_with(&imports));
+        assert_eq!(
+            first.0.extension().and_then(|value| value.to_str()),
+            Some("part")
+        );
+        assert_eq!(
+            first.1.extension().and_then(|value| value.to_str()),
+            Some("pdf")
+        );
     }
 
     #[test]
