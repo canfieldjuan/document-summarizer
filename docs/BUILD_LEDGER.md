@@ -847,7 +847,7 @@ future work
   mutate state; it supplies source run ID plus expected version to one thin
   Tauri command.
 - Startup-reconciled attempts render a durable recovery notice and an
-  `Interrupted - retry available` history state. Opening an eligible failure
+  `Interrupted · retry available` history state. Opening an eligible failure
   offers `Retry as new attempt`; an already-retried parent points the operator
   back to Recent work. Runtime-unavailable state disables execution without
   changing either attempt.
@@ -875,7 +875,7 @@ future work
 - The release executable was then reopened against the same durable database
   through the X11 desktop path. A captured 1180-by-780 application window
   displayed the recovery notice and marked the source item
-  `Interrupted - retry available`.
+  `Interrupted · retry available`.
 
 **Evidence boundary and deferred work**:
 - Retry execution is proven through the application service with deterministic
