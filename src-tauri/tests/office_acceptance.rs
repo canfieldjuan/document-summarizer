@@ -88,6 +88,12 @@ fn reveal_model_text() -> bool {
     env::var("DOC_SUM_OFFICE_TRACE_MODEL_RESPONSES").as_deref() == Ok("1")
 }
 
+fn add_optional_summary(report: &mut serde_json::Value, summary: &str, reveal_text: bool) {
+    if reveal_text {
+        report["summary"] = json!(summary);
+    }
+}
+
 fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
     let reveal_text = reveal_model_text();
     eprintln!("OFFICE_LIVE_MODEL_RESPONSES");
@@ -569,11 +575,28 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         "summary_characters": expected_summary.text.chars().count(),
         "summary_sha256": format!("{:x}", Sha256::digest(expected_summary.text.as_bytes())),
     });
-    if reveal_model_text() {
-        report["summary"] = json!(&expected_summary.text);
-    }
+    add_optional_summary(&mut report, &expected_summary.text, reveal_model_text());
     println!(
         "OFFICE_LIVE_REPORT\n{}",
         serde_json::to_string_pretty(&report).expect("live acceptance report should serialize")
     );
+}
+
+#[test]
+fn office_report_hides_summary_text_unless_explicitly_revealed() {
+    let sentinel = "PRIVATE-OFFICE-SUMMARY-SENTINEL";
+    let base_report = json!({
+        "summary_characters": sentinel.chars().count(),
+        "summary_sha256": format!("{:x}", Sha256::digest(sentinel.as_bytes())),
+    });
+
+    let mut hidden = base_report.clone();
+    add_optional_summary(&mut hidden, sentinel, false);
+    let hidden_output = serde_json::to_string(&hidden).expect("hidden report should serialize");
+    assert!(hidden.get("summary").is_none());
+    assert!(!hidden_output.contains(sentinel));
+
+    let mut revealed = base_report;
+    add_optional_summary(&mut revealed, sentinel, true);
+    assert_eq!(revealed["summary"], sentinel);
 }

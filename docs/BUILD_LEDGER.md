@@ -1401,9 +1401,10 @@ passed; full multi-page live completion remains blocked by concurrent GPU load
 **Tests and live evidence**:
 - The final full Rust run completed with 158 passing library tests, no failures,
   and two opt-in live Ollama tests ignored; all three release-contract tests
-  passed. The three external-office tests remain intentionally opt-in. Strict
-  Clippy, the frontend production build, and the release-mode Tauri no-bundle
-  build also passed.
+  passed. The office harness added one passing default-log privacy probe while
+  its three external-document tests remain intentionally opt-in. Strict Clippy,
+  the frontend production build, and the release-mode Tauri no-bundle build also
+  passed.
 - Focused tests cover exact, whitespace, and post-hyphen line-wrap quote
   resolution; changed/fused-text rejection; source-exact persistence; duplicate
   variants; empty/max/max-plus-one evidence counts; JSON fallback shape; fixed
