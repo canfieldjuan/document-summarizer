@@ -62,6 +62,9 @@ interface RunHistoryItem {
   warnings: PipelineWarning[];
   failure: PipelineFailure | null;
   hasSummary: boolean;
+  retryOfRunId: string | null;
+  retryRunId: string | null;
+  canRetry: boolean;
 }
 
 interface SummaryArtifact {
@@ -109,6 +112,9 @@ const runtimeTitle = element<HTMLParagraphElement>("#runtime-title");
 const runtimeDetail = element<HTMLParagraphElement>("#runtime-detail");
 const runtimeRetry = element<HTMLButtonElement>("#runtime-retry");
 const historyRefresh = element<HTMLButtonElement>("#history-refresh");
+const recoveryNotice = element<HTMLElement>("#recovery-notice");
+const recoveryNoticeTitle = element<HTMLParagraphElement>("#recovery-notice-title");
+const recoveryNoticeDetail = element<HTMLParagraphElement>("#recovery-notice-detail");
 const historyStatus = element<HTMLParagraphElement>("#history-status");
 const historyList = element<HTMLOListElement>("#history-list");
 const emptyView = element<HTMLDivElement>("#empty-view");
@@ -128,11 +134,14 @@ const warningList = element<HTMLUListElement>("#warning-list");
 const failureTitle = element<HTMLHeadingElement>("#failure-title");
 const failureMessage = element<HTMLParagraphElement>("#failure-message");
 const failureCode = element<HTMLParagraphElement>("#failure-code");
+const retryButton = element<HTMLButtonElement>("#retry-btn");
+const retryHint = element<HTMLParagraphElement>("#retry-hint");
 
 let runtimeReady = false;
 let processing = false;
 let activeRunId: string | null = null;
 let recentRuns: RunHistoryItem[] = [];
+let retrySourceRun: RunHistoryItem | null = null;
 
 function element<T extends HTMLElement>(selector: string): T {
   const match = document.querySelector<T>(selector);
@@ -163,6 +172,15 @@ function syncPrimaryAction(): void {
   } else {
     label.textContent = "Ollama unavailable";
     actionHint.textContent = "Start Ollama and check the selected model, then try again.";
+  }
+
+  if (retrySourceRun) {
+    retryButton.disabled = !runtimeReady || processing;
+    retryHint.textContent = processing
+      ? "Creating a separate retry attempt…"
+      : runtimeReady
+        ? "A new attempt will reuse the durable document identity. This failed record stays unchanged."
+        : "Start Ollama before retrying this document.";
   }
 }
 
@@ -206,13 +224,32 @@ async function refreshHistory(): Promise<void> {
   try {
     recentRuns = await invoke<RunHistoryItem[]>("list_recent_runs");
     renderHistory();
+    renderRecoveryNotice();
   } catch (error) {
     recentRuns = [];
     historyList.replaceChildren();
+    recoveryNotice.hidden = true;
     historyStatus.textContent = normalizeCommandError(error).message;
   } finally {
     historyRefresh.disabled = false;
   }
+}
+
+function renderRecoveryNotice(): void {
+  const interrupted = recentRuns.filter((run) => run.failure?.code === "PROCESS_INTERRUPTED");
+  if (interrupted.length === 0) {
+    recoveryNotice.hidden = true;
+    return;
+  }
+
+  const retryable = interrupted.filter((run) => run.canRetry).length;
+  recoveryNoticeTitle.textContent = interrupted.length === 1
+    ? "Interrupted work recovered safely"
+    : `${interrupted.length} interrupted runs recovered safely`;
+  recoveryNoticeDetail.textContent = retryable > 0
+    ? "Open the interrupted item below to create a separate retry attempt."
+    : "The interrupted attempts remain in local history; no work was replayed automatically.";
+  recoveryNotice.hidden = false;
 }
 
 function renderHistory(): void {
@@ -249,7 +286,7 @@ function renderHistory(): void {
     const state = document.createElement("span");
     state.className = "run-state";
     state.classList.toggle("is-failed", run.state === "Failed" || run.state === "Cancelled");
-    state.textContent = stateLabel(run.state);
+    state.textContent = historyStateLabel(run);
 
     copy.append(name, detail, state);
     button.append(ordinal, copy);
@@ -263,7 +300,7 @@ async function openHistoryRun(run: RunHistoryItem): Promise<void> {
   renderHistory();
 
   if (run.failure) {
-    showFailure(run.originalFilename, run.failure.message, run.failure.code);
+    showFailure(run.originalFilename, run.failure.message, run.failure.code, run);
     return;
   }
 
@@ -272,6 +309,7 @@ async function openHistoryRun(run: RunHistoryItem): Promise<void> {
       run.originalFilename,
       `This run stopped in ${stateLabel(run.state).toLowerCase()} and has no completed summary.`,
       "SUMMARY_NOT_AVAILABLE",
+      run,
     );
     return;
   }
@@ -336,7 +374,58 @@ async function selectAndSummarize(): Promise<void> {
   }
 }
 
+async function retrySelectedRun(): Promise<void> {
+  const source = retrySourceRun;
+  if (!source || !source.canRetry || !runtimeReady || processing) {
+    return;
+  }
+
+  processing = true;
+  activeRunId = source.runId;
+  processingFilename.textContent = `Retrying ${source.originalFilename}`;
+  showStage("processing");
+  syncPrimaryAction();
+
+  let completed: CompletedSummary | null = null;
+  let commandError: CommandError | null = null;
+  try {
+    completed = await invoke<CompletedSummary>("retry_document", {
+      runId: source.runId,
+      expectedStateVersion: source.stateVersion,
+    });
+  } catch (error) {
+    commandError = normalizeCommandError(error);
+  } finally {
+    processing = false;
+    await refreshHistory();
+    syncPrimaryAction();
+  }
+
+  if (completed) {
+    activeRunId = completed.runId;
+    renderHistory();
+    renderSummary(
+      completed.originalFilename,
+      completed.byteSize,
+      completed.summary,
+    );
+    return;
+  }
+
+  const child = recentRuns.find((run) => run.retryOfRunId === source.runId);
+  if (child) {
+    await openHistoryRun(child);
+    return;
+  }
+  const failure = commandError ?? {
+    code: "RETRY_FAILED",
+    message: "The retry attempt could not be created.",
+  };
+  showFailure(source.originalFilename, failure.message, failure.code, source);
+}
+
 function renderSummary(filename: string, byteSize: number, summary: SummaryArtifact): void {
+  retrySourceRun = null;
   summaryFilename.textContent = filename;
   const citedClaimCount = summary.claims.length;
   summaryMeta.textContent = citedClaimCount > 0
@@ -418,10 +507,22 @@ function renderWarnings(warnings: PipelineWarning[]): void {
   }
 }
 
-function showFailure(title: string, message: string, code: string): void {
+function showFailure(
+  title: string,
+  message: string,
+  code: string,
+  run: RunHistoryItem | null = null,
+): void {
+  retrySourceRun = run?.canRetry ? run : null;
   failureTitle.textContent = title;
   failureMessage.textContent = message;
   failureCode.textContent = code;
+  retryButton.hidden = retrySourceRun === null;
+  retryHint.hidden = retrySourceRun === null && !run?.retryRunId;
+  if (!retrySourceRun && run?.retryRunId) {
+    retryHint.textContent = "A separate retry attempt already exists in Recent work.";
+  }
+  syncPrimaryAction();
   showStage("failure");
 }
 
@@ -491,9 +592,20 @@ function stateLabel(state: PipelineState): string {
   return labels[state];
 }
 
+function historyStateLabel(run: RunHistoryItem): string {
+  if (run.failure?.code === "PROCESS_INTERRUPTED") {
+    if (run.canRetry) return "Interrupted · retry available";
+    if (run.retryRunId) return "Interrupted · retried";
+    return "Interrupted safely";
+  }
+  const label = stateLabel(run.state);
+  return run.retryOfRunId ? `${label} · retry` : label;
+}
+
 async function initialize(): Promise<void> {
   selectButton.addEventListener("click", () => void selectAndSummarize());
   runtimeRetry.addEventListener("click", () => void refreshRuntimeStatus());
+  retryButton.addEventListener("click", () => void retrySelectedRun());
   historyRefresh.addEventListener("click", () => void refreshHistory());
   await Promise.all([refreshRuntimeStatus(), refreshHistory()]);
 }

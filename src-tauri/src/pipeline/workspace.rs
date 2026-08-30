@@ -39,6 +39,9 @@ pub struct RunHistoryItem {
     pub warnings: Vec<PipelineWarning>,
     pub failure: Option<PipelineFailure>,
     pub has_summary: bool,
+    pub retry_of_run_id: Option<String>,
+    pub retry_run_id: Option<String>,
+    pub can_retry: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -133,20 +136,7 @@ pub fn list_recent_runs(conn: &Connection) -> Result<Vec<RunHistoryItem>, Worksp
                 .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
             let has_summary = db::summary_artifact_exists(conn, &run.run_id)?;
             validate_summary_state(&run, has_summary)?;
-            Ok(RunHistoryItem {
-                run_id: run.run_id,
-                document_id: document.document_id,
-                original_filename: document.original_filename,
-                byte_size: document.byte_size,
-                state: run.state,
-                state_version: run.state_version,
-                created_at: run.created_at,
-                updated_at: run.updated_at,
-                completed_at: run.completed_at,
-                warnings: run.warnings,
-                failure: run.failure,
-                has_summary,
-            })
+            run_history_item(conn, run, document, has_summary)
         })
         .collect()
 }
@@ -167,21 +157,36 @@ pub fn get_persisted_summary(
     let summary = summary_view(summary, citations)?;
 
     Ok(PersistedSummary {
-        run: RunHistoryItem {
-            run_id: run.run_id,
-            document_id: document.document_id,
-            original_filename: document.original_filename,
-            byte_size: document.byte_size,
-            state: run.state,
-            state_version: run.state_version,
-            created_at: run.created_at,
-            updated_at: run.updated_at,
-            completed_at: run.completed_at,
-            warnings: run.warnings,
-            failure: run.failure,
-            has_summary: true,
-        },
+        run: run_history_item(conn, run, document, true)?,
         summary,
+    })
+}
+
+fn run_history_item(
+    conn: &Connection,
+    run: PipelineRun,
+    document: crate::pipeline::contracts::IngestedDocument,
+    has_summary: bool,
+) -> Result<RunHistoryItem, WorkspaceError> {
+    let retry_of = db::get_retry_lineage_for_retry(conn, &run.run_id)?;
+    let retry_child = db::get_retry_lineage_for_source(conn, &run.run_id)?;
+    let can_retry = run.retry_checkpoint().is_some() && retry_child.is_none();
+    Ok(RunHistoryItem {
+        run_id: run.run_id,
+        document_id: document.document_id,
+        original_filename: document.original_filename,
+        byte_size: document.byte_size,
+        state: run.state,
+        state_version: run.state_version,
+        created_at: run.created_at,
+        updated_at: run.updated_at,
+        completed_at: run.completed_at,
+        warnings: run.warnings,
+        failure: run.failure,
+        has_summary,
+        retry_of_run_id: retry_of.map(|lineage| lineage.source_run_id),
+        retry_run_id: retry_child.map(|lineage| lineage.retry_run_id),
+        can_retry,
     })
 }
 

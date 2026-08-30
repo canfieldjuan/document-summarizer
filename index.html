@@ -105,6 +105,13 @@
               <h3 id="failure-title">Processing stopped safely.</h3>
               <p id="failure-message"></p>
               <p id="failure-code" class="failure-code"></p>
+              <div class="retry-action">
+                <button id="retry-btn" class="primary-button retry-button" type="button" hidden>
+                  <span>Retry as new attempt</span>
+                  <span aria-hidden="true">↻</span>
+                </button>
+                <p id="retry-hint" class="action-hint" hidden></p>
+              </div>
             </div>
           </section>
         </section>
@@ -119,6 +126,10 @@
               ↻
             </button>
           </header>
+          <section id="recovery-notice" class="recovery-notice" role="status" hidden>
+            <p id="recovery-notice-title" class="recovery-notice-title"></p>
+            <p id="recovery-notice-detail" class="recovery-notice-detail"></p>
+          </section>
           <p id="history-status" class="history-status">Loading recent documents…</p>
           <ol id="history-list" class="history-list" aria-live="polite"></ol>
         </aside>

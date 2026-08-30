@@ -1,6 +1,6 @@
 use crate::pipeline::contracts::{IngestedDocument, PipelineProgress, PipelineRun, PipelineState};
 use crate::pipeline::db::{self, StoreError};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -106,15 +106,20 @@ pub(crate) fn prepare_pdf_ingestion(
         created_at: now,
     };
 
-    let run = PipelineRun {
+    let run = prepare_received_run(document.document_id.clone(), now);
+    Ok((document, run))
+}
+
+pub(crate) fn prepare_received_run(document_id: String, created_at: DateTime<Utc>) -> PipelineRun {
+    PipelineRun {
         run_id: Uuid::new_v4().to_string(),
-        document_id: document.document_id.clone(),
+        document_id,
         state: PipelineState::Received,
         state_version: 1,
         pipeline_version: "1.0".to_string(),
-        created_at: now,
+        created_at,
         started_at: None,
-        updated_at: now,
+        updated_at: created_at,
         completed_at: None,
         current_stage: None,
         progress: PipelineProgress {
@@ -126,8 +131,7 @@ pub(crate) fn prepare_pdf_ingestion(
         failure: None,
         cancellation_requested: false,
         resumable: true,
-    };
-    Ok((document, run))
+    }
 }
 
 fn valid_original_filename(name: &str) -> bool {

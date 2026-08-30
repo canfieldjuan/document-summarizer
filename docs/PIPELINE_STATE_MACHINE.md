@@ -183,14 +183,43 @@ before Connect performs its separate job-status restart reconciliation.
 
 This is truthful interruption reconciliation, not work replay. It preserves
 completed checkpoint artifacts and prior history but does not automatically
-rerun parsing or model requests. There is still no same-run resume command;
-users retry by submitting the document again. Reserved `VISUAL_ANALYZING` and
-`CANCELLING` execution recovery remains deferred because those execution paths
-are not implemented.
+rerun parsing or model requests. There is still no same-run resume command.
+Reserved `VISUAL_ANALYZING` and `CANCELLING` execution recovery remains deferred
+because those execution paths are not implemented.
+
+### Explicit retry lifecycle
+
+An eligible terminal failure does not transition backward. User-initiated retry
+creates a distinct child run instead:
+
+```text
+source run: ... -> FAILED               (unchanged forever)
+                         \
+retry run:               RECEIVED -> INGESTING -> INGESTED -> PARSING -> ...
+```
+
+The retry and source share `document_id`, while their `run_id` values, state
+versions, and event histories remain independent. Slice 9 reuses only the
+durable `INGESTED` checkpoint; parsing and every later stage run normally. The
+child creation event has reason `retry_run_created`; its two ingestion events
+have reason `retry_checkpoint_reused`.
+
+Eligibility requires `FAILED`, `resumable = true`, a structured recoverable
+failure from a post-ingestion stage, and no existing direct retry. The caller
+supplies the source state version, and SQLite rechecks state/version plus the
+one-child constraint in the same immediate transaction that creates the child,
+lineage, and events. Rejected or stale calls change neither run.
+
+The parser remains the source-identity boundary. Missing or changed bytes cause
+the new child to fail at `PARSING`; the source failure remains unchanged. A
+failed child can itself be the source of another explicit retry. Nothing is
+retried automatically.
 
 The standalone desktop history is a read-only projection of this persisted
-truth. It lists terminal, failed, and interrupted runs without advancing or
-repairing them. A summary can be opened only when its integrity-valid artifact
-exists and the authoritative run is `COMPLETE` or `COMPLETE_WITH_WARNINGS`.
-Runtime readiness and frontend display state never mutate the pipeline state
-machine or its event ledger.
+truth. It lists terminal, failed, interrupted, and retry-linked runs without
+advancing or repairing them. A contextual retry action invokes the Rust retry
+boundary with source run ID and expected version; the frontend does not choose
+checkpoints or mutate state. A summary can be opened only when its
+integrity-valid artifact exists and the authoritative run is `COMPLETE` or
+`COMPLETE_WITH_WARNINGS`. Runtime readiness and frontend display state never
+mutate the pipeline state machine or its event ledger.
