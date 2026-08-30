@@ -386,11 +386,25 @@ artifact is returned.
 
 `ModelRuntime` is the only inference boundary. A request may select plain text
 or a named, bounded JSON Schema output contract. Analysis version `2.0.0`
-requires each chunk response to contain structured evidence. Rust accepts an
-evidence item only when its block ID belongs to that chunk and its quotation is
-a bounded, contiguous, exact substring of the authoritative normalized block.
-The application derives the `SourceSpan`, chunk association, and deterministic
-evidence ID; the model cannot supply or override those fields.
+requires each chunk response to contain one to five structured evidence items;
+the prompt requests three to five material items when the source supports that
+coverage, asks for the shortest sufficient source quotation, and uses a
+1,024-token response budget. Rust accepts an evidence item
+only when its block ID belongs to that chunk and its non-whitespace characters
+match a bounded contiguous region of the authoritative normalized block
+exactly. PDF line-wrap whitespace may be reconciled deterministically, but the
+persisted quotation is always copied from the normalized source itself.
+Punctuation, case, word, order, identity, and size changes remain invalid. The
+application derives the `SourceSpan`, chunk association, exact stored quote,
+and deterministic evidence ID; the model cannot supply or override those
+fields.
+
+If a generated chunk response fails the evidence JSON/source contract, analysis
+may make exactly one replacement request with a stricter one-block,
+one-contiguous-passage prompt. Nothing from the rejected response is persisted.
+The replacement must validate in full or the run fails normally; a successful
+replacement adds `MODEL_EVIDENCE_RESPONSE_REPAIRED` to the durable warning set.
+Runtime and response-identity failures are not retried by this contract.
 
 Synthesis version `3.0.0` receives only the validated evidence catalog and
 returns structured claims. A catalog that fits one bounded request keeps the
@@ -444,15 +458,18 @@ only plain HTTP on exact IPv4 or IPv6 loopback, uses bounded connect, health, an
 response limits, disables proxies and redirects, and reads only this
 application's optional bounded token file. It never reads another application's
 credential store. Document and evidence text are marked as untrusted data in
-both prompts. The adapter maps the schema request to Ollama's OpenAI-compatible
-structured-output field; Rust parses and validates the returned JSON before it
-can become a pipeline artifact. Model output cannot invoke pipeline actions.
+both prompts. Generation requests use temperature zero, fixed seed `42`, and no
+reasoning effort. The adapter maps the schema request to Ollama's
+OpenAI-compatible structured-output
+field; Rust parses and validates the returned JSON before it can become a
+pipeline artifact. Model output cannot invoke pipeline actions.
 The selected imported Qwen model may make Ollama report the exact server error
 `failed to load model vocabulary required for format`. Only for that exact
-HTTP-500 response, the adapter caches the incompatibility and retries without
-server-side grammar enforcement. The prompt still carries the explicit JSON
-shape and the same Rust schema, identity, quotation, and provenance checks
-remain mandatory. Other HTTP failures do not activate the fallback.
+HTTP-500 response, the adapter caches the incompatibility and retries with
+Ollama's JSON-object mode rather than unconstrained text. The prompt still
+carries the explicit JSON shape and the same Rust schema, identity, quotation,
+and provenance checks remain mandatory. Other HTTP failures do not activate the
+fallback.
 
 Analysis remains version `2.0.0`; synthesis, verification, and summary are
 version `3.0.0`, and citation is version `2.0.0`. No schema migration is
@@ -610,6 +627,15 @@ IPv4-loopback HTTP endpoint and atomically writes an owner-only registration at
 and bearer token. Manifest, submission, and status routes require that token;
 browser `Origin` requests are rejected. Missing runtime-directory or provider
 startup failures are logged and do not prevent standalone startup.
+
+"Optional" in this provider lifecycle means that Connect failure or absence
+cannot disable the standalone application. It is not a user-facing toggle and
+does not describe commercial entitlement. The current v1 provider advertises
+whenever startup succeeds; paid-entitlement gating is not implemented yet. The
+sellable product contract requires entitlement to gate capability visibility
+and job admission while leaving standalone document use healthy. Google OAuth
+remains owned by Email Watcher: Connect receives only explicitly handed-off PDF
+bytes and bounded artifact metadata, never mailbox credentials or tokens.
 
 `POST /v1/jobs` requires the bounded job-request JSON as the first multipart
 field and one `application/pdf` byte stream as the second. No caller path is
