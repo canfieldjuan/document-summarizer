@@ -159,18 +159,21 @@ no existing direct retry. One source attempt can create one direct child;
 another retry may originate from that child if it later fails. This forms an
 auditable chain without rewriting terminal history.
 
-The child run, lineage row, `RECEIVED -> INGESTING -> INGESTED` state/version
-updates, and three immutable events commit in one SQLite transaction. The
-events identify retry creation and checkpoint reuse. A stale source version,
-invalid source, duplicate child, event failure, or lineage write failure leaves
-no partial child.
+The child run, lineage row, `RECEIVED -> INGESTING -> INGESTED -> PARSING`
+state/version updates, and four immutable events commit in one SQLite
+transaction. The events identify retry creation, checkpoint reuse, and parser
+work admission. Committing the child as active closes the crash window between
+checkpoint creation and parser startup: any later process interruption is
+handled by ordinary active-stage recovery. A stale source version, invalid
+source, duplicate child, event failure, or lineage write failure leaves no
+partial child.
 
-After child creation, the ordinary parser/runtime-neutral pipeline runs from
-`INGESTED`. The parser reads the persisted source path, verifies byte size and
-SHA-256 against the shared document identity, and parses those verified bytes.
-A missing or changed source therefore fails the child attempt durably without
-altering its parent. Retry is user initiated; startup never invokes a parser or
-model.
+After the atomic admission transaction, the ordinary parser/runtime-neutral
+pipeline continues from active `PARSING`. The parser reads the persisted source
+path, verifies byte size and SHA-256 against the shared document identity, and
+parses those verified bytes. A missing or changed source therefore fails the
+child attempt durably without altering its parent. Retry is user initiated;
+startup never invokes a parser or model.
 
 ## Long-term replaceability seams
 

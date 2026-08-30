@@ -6,7 +6,7 @@ use crate::pipeline::contracts::{
 use crate::pipeline::ingest::prepare_received_run;
 use crate::pipeline::ingest::{ingest_pdf, IngestError};
 use crate::pipeline::normalize::{normalize_document, NormalizePipelineError};
-use crate::pipeline::parser::{parse_document, ParsePipelineError};
+use crate::pipeline::parser::{parse_document, parse_started_document, ParsePipelineError};
 use crate::pipeline::structure::{structure_document, StructurePipelineError};
 use crate::pipeline::summary::{summarize_chunked_document, SummaryPipelineError};
 use crate::pipeline::{
@@ -113,7 +113,14 @@ pub fn retry_failed_run_to_summary(
     let (retry_run, document, _) =
         db::create_retry_run(conn, source_run_id, expected_source_version, &retry_run)
             .map_err(RetryPipelineError::from)?;
-    let summary = process_ingested_to_summary(conn, &retry_run.run_id, components)?;
+    parse_started_document(
+        conn,
+        components.parser,
+        &retry_run.run_id,
+        retry_run.state_version,
+        &document,
+    )?;
+    let summary = process_parsed_to_summary(conn, &retry_run.run_id, components)?;
     Ok(CompletedSummary {
         run_id: retry_run.run_id,
         document,
@@ -128,6 +135,14 @@ pub fn process_ingested_to_summary(
     components: SummaryComponents<'_>,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     parse_document(conn, components.parser, run_id)?;
+    process_parsed_to_summary(conn, run_id, components)
+}
+
+fn process_parsed_to_summary(
+    conn: &mut Connection,
+    run_id: &str,
+    components: SummaryComponents<'_>,
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     normalize_document(conn, components.normalizer, run_id)?;
     structure_document(conn, components.interpreter, run_id)?;
     chunk_document(conn, components.chunker, run_id)?;
@@ -411,6 +426,10 @@ mod tests {
                 completed_events[2].reason.as_deref(),
                 Some("retry_checkpoint_reused")
             );
+            assert_eq!(
+                completed_events[3].reason.as_deref(),
+                Some("retry_processing_started")
+            );
 
             let history = crate::pipeline::workspace::list_recent_runs(&conn)
                 .expect("history should load after retry");
@@ -463,6 +482,112 @@ mod tests {
         assert!(get_retry_lineage_for_retry(&reopened, &completed.run_id)
             .expect("retry lineage should load after reopen")
             .is_some());
+    }
+
+    #[test]
+    fn committed_retry_is_active_and_restart_recovers_it_before_parser_work() {
+        let database = TestDatabase::new();
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let (parent, parent_events, retry_run_id) = {
+            let mut conn = init_db(&database.0).expect("schema should initialize");
+            let parent = create_recoverable_failed_run(&mut conn, &source, &pipeline);
+            let parent_events =
+                list_pipeline_events(&conn, &parent.run_id).expect("parent events should load");
+            let retry = prepare_received_run(parent.document_id.clone(), Utc::now());
+            let (parsing, document, lineage) =
+                db::create_retry_run(&mut conn, &parent.run_id, parent.state_version, &retry)
+                    .expect("retry creation should commit an active child");
+
+            assert_eq!(parsing.state, PipelineState::Parsing);
+            assert_eq!(parsing.state_version, 4);
+            assert_eq!(parsing.current_stage, Some(PipelineStage::Parse));
+            assert_eq!(document.document_id, parent.document_id);
+            assert_eq!(lineage.retry_run_id, parsing.run_id);
+            let child_events =
+                list_pipeline_events(&conn, &parsing.run_id).expect("child events should load");
+            assert_eq!(child_events.len(), 4);
+            assert_eq!(
+                child_events[3].previous_state,
+                Some(PipelineState::Ingested)
+            );
+            assert_eq!(child_events[3].next_state, PipelineState::Parsing);
+            assert_eq!(
+                child_events[3].reason.as_deref(),
+                Some("retry_processing_started")
+            );
+            assert_eq!(
+                get_pipeline_run(&conn, &parent.run_id)
+                    .expect("parent should reload")
+                    .expect("parent should exist"),
+                parent
+            );
+            assert_eq!(
+                list_pipeline_events(&conn, &parent.run_id).expect("parent events should reload"),
+                parent_events
+            );
+            (parent, parent_events, parsing.run_id)
+        };
+
+        let mut reopened = init_db(&database.0).expect("database should independently reopen");
+        let recovered = crate::pipeline::recovery::reconcile_interrupted_runs(&mut reopened)
+            .expect("startup recovery should reconcile the active retry");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].run_id, retry_run_id);
+
+        let failed_child = get_pipeline_run(&reopened, &retry_run_id)
+            .expect("child should reload")
+            .expect("child should exist");
+        assert_eq!(failed_child.state, PipelineState::Failed);
+        assert_eq!(failed_child.current_stage, Some(PipelineStage::Parse));
+        assert_eq!(
+            failed_child
+                .failure
+                .as_ref()
+                .map(|failure| (failure.code.as_str(), failure.recoverable)),
+            Some(("PROCESS_INTERRUPTED", true))
+        );
+        assert_eq!(
+            failed_child.retry_checkpoint(),
+            Some(RetryCheckpoint::Ingested)
+        );
+        assert_eq!(
+            get_pipeline_run(&reopened, &parent.run_id)
+                .expect("parent should reload")
+                .expect("parent should exist"),
+            parent
+        );
+        assert_eq!(
+            list_pipeline_events(&reopened, &parent.run_id)
+                .expect("parent events should remain immutable"),
+            parent_events
+        );
+        let child_events =
+            list_pipeline_events(&reopened, &retry_run_id).expect("child events should reload");
+        assert_eq!(child_events.len(), 5);
+        assert_eq!(child_events[4].previous_state, Some(PipelineState::Parsing));
+        assert_eq!(child_events[4].next_state, PipelineState::Failed);
+
+        let history = crate::pipeline::workspace::list_recent_runs(&reopened)
+            .expect("history should load after recovery");
+        let parent_item = history
+            .iter()
+            .find(|item| item.run_id == parent.run_id)
+            .expect("parent history should exist");
+        let child_item = history
+            .iter()
+            .find(|item| item.run_id == retry_run_id)
+            .expect("child history should exist");
+        assert!(!parent_item.can_retry);
+        assert_eq!(
+            parent_item.retry_run_id.as_deref(),
+            Some(retry_run_id.as_str())
+        );
+        assert!(child_item.can_retry);
+        assert_eq!(
+            child_item.retry_of_run_id.as_deref(),
+            Some(parent.run_id.as_str())
+        );
     }
 
     #[test]

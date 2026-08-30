@@ -213,22 +213,32 @@ pub fn parse_document(
         .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
     let (parsing_run, document) = db::start_parsing(conn, run_id, run.state_version)?;
 
-    let parsed = match parser.parse(&document) {
+    parse_started_document(conn, parser, run_id, parsing_run.state_version, &document)
+}
+
+pub(crate) fn parse_started_document(
+    conn: &mut Connection,
+    parser: &dyn DocumentParser,
+    run_id: &str,
+    parsing_state_version: u32,
+    document: &IngestedDocument,
+) -> Result<ParsedDocument, ParsePipelineError> {
+    let parsed = match parser.parse(document) {
         Ok(parsed) => parsed,
         Err(failure) => {
             return Err(persist_parser_failure(
                 conn,
                 run_id,
-                parsing_run.state_version,
+                parsing_state_version,
                 failure,
             ));
         }
     };
-    if let Err(failure) = validate_parsed_document(&parsed, &document, parser) {
+    if let Err(failure) = validate_parsed_document(&parsed, document, parser) {
         return Err(persist_parser_failure(
             conn,
             run_id,
-            parsing_run.state_version,
+            parsing_state_version,
             failure,
         ));
     }
@@ -240,14 +250,14 @@ pub fn parse_document(
         .cloned()
         .collect::<Vec<_>>();
     if let Err(persistence) =
-        db::complete_parsing(conn, run_id, parsing_run.state_version, &parsed, warnings)
+        db::complete_parsing(conn, run_id, parsing_state_version, &parsed, warnings)
     {
         let failure = parse_failure(
             "PARSED_ARTIFACT_PERSISTENCE_FAILED",
             "Parsed output could not be committed atomically",
             true,
         );
-        return match db::fail_parsing(conn, run_id, parsing_run.state_version, failure) {
+        return match db::fail_parsing(conn, run_id, parsing_state_version, failure) {
             Ok(_) => Err(ParsePipelineError::ArtifactPersistence(persistence)),
             Err(failure_persistence) => Err(ParsePipelineError::FailurePersistence {
                 primary: persistence.to_string(),

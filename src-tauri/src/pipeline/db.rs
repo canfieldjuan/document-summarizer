@@ -1074,6 +1074,16 @@ pub(super) fn create_retry_run(
         "retry_run_created",
         Some("retry_checkpoint_reused"),
     )?;
+    let parsing = transition_in_tx(
+        &tx,
+        &retry_run.run_id,
+        PipelineState::Ingested,
+        ingested.state_version,
+        PipelineState::Parsing,
+        Some(PipelineStage::Parse),
+        Some("retry_processing_started".to_string()),
+        TransitionPatch::default(),
+    )?;
     let lineage = RetryLineage {
         retry_run_id: retry_run.run_id.clone(),
         source_run_id: source_run_id.to_string(),
@@ -1092,7 +1102,7 @@ pub(super) fn create_retry_run(
         ],
     )?;
     tx.commit()?;
-    Ok((ingested, document, lineage))
+    Ok((parsing, document, lineage))
 }
 
 #[cfg(test)]

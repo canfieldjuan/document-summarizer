@@ -202,13 +202,17 @@ The retry and source share `document_id`, while their `run_id` values, state
 versions, and event histories remain independent. Slice 9 reuses only the
 durable `INGESTED` checkpoint; parsing and every later stage run normally. The
 child creation event has reason `retry_run_created`; its two ingestion events
-have reason `retry_checkpoint_reused`.
+have reason `retry_checkpoint_reused`; admission to parsing has reason
+`retry_processing_started`.
 
 Eligibility requires `FAILED`, `resumable = true`, a structured recoverable
 failure from a post-ingestion stage, and no existing direct retry. The caller
 supplies the source state version, and SQLite rechecks state/version plus the
 one-child constraint in the same immediate transaction that creates the child,
-lineage, and events. Rejected or stale calls change neither run.
+lineage, four events, and active `PARSING` state. A crash after that commit is
+therefore visible to ordinary active-stage startup recovery instead of leaving
+a stable, inaccessible `INGESTED` child. Rejected or stale calls change neither
+run.
 
 The parser remains the source-identity boundary. Missing or changed bytes cause
 the new child to fail at `PARSING`; the source failure remains unchanged. A

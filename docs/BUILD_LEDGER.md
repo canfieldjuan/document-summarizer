@@ -825,17 +825,21 @@ future work
 
 **State, source, and transaction behavior**:
 - Child creation reuses the ordinary centralized state transition boundary to
-  persist `RECEIVED -> INGESTING -> INGESTED`. Its creation event is labeled
-  `retry_run_created`; both checkpoint transitions are labeled
-  `retry_checkpoint_reused`.
-- The child run, three immutable events, and lineage relation commit in one
-  immediate SQLite transaction. Injected lineage failure rolls all of them
-  back. The source run and its existing event history are never written.
-- Processing after child creation uses the existing parser-neutral pipeline.
-  The parser rereads the persisted source, validates its exact byte size and
-  SHA-256, and durably fails only the child when the source is missing or has
-  changed. Restoring the bytes permits a new attempt sourced from that failed
-  child; no duplicate document row is created.
+  persist `RECEIVED -> INGESTING -> INGESTED -> PARSING`. Its creation event is
+  labeled `retry_run_created`; both checkpoint transitions are labeled
+  `retry_checkpoint_reused`, and parser admission is labeled
+  `retry_processing_started`.
+- The child run, four immutable events, active parser state, and lineage
+  relation commit in one immediate SQLite transaction. Injected lineage failure
+  rolls all of them back. Committing an active state also ensures a crash before
+  parser work is reconciled on restart instead of stranding an inaccessible
+  `INGESTED` child. The source run and its existing event history are never
+  written.
+- Processing after atomic parser admission uses the existing parser-neutral
+  pipeline. The parser rereads the persisted source, validates its exact byte
+  size and SHA-256, and durably fails only the child when the source is missing
+  or has changed. Restoring the bytes permits a new attempt sourced from that
+  failed child; no duplicate document row is created.
 
 **Desktop behavior**:
 - Recent-work projections expose only retry lineage IDs and an application-
@@ -852,10 +856,11 @@ future work
 - Focused service probes cover parent immutability, child completion, durable
   lineage and summary retrieval after independent database reopen, stale CAS,
   non-failed and non-recoverable rejection, one-child enforcement, lineage-
-  insert rollback, exact source-mutation failure, byte restoration, and chained
-  retry. The schema migration probe covers v11-to-v12 preservation, immutable
-  lineage, repeated initialization, reopen, and SQLite `quick_check`.
-- The standard Rust suite executed 117 tests: 116 passed and the opt-in live
+  insert rollback, crash-before-parser recovery, exact source-mutation failure,
+  byte restoration, and chained retry. The schema migration probe covers
+  v11-to-v12 preservation, immutable lineage, repeated initialization, reopen,
+  and SQLite `quick_check`.
+- The standard Rust suite executed 118 tests: 117 passed and the opt-in live
   Ollama test was ignored. Strict Rust formatting, all-target/all-feature
   Clippy, the TypeScript/Vite production build, and the no-bundle Tauri release
   build passed.
