@@ -238,6 +238,21 @@ impl AppManifest {
 
 impl JobRequest {
     pub fn validate(&self, max_input_bytes: u64) -> Result<(), JobError> {
+        self.validate_input(max_input_bytes, false)
+    }
+
+    pub(crate) fn validate_allowing_empty_input(
+        &self,
+        max_input_bytes: u64,
+    ) -> Result<(), JobError> {
+        self.validate_input(max_input_bytes, true)
+    }
+
+    fn validate_input(
+        &self,
+        max_input_bytes: u64,
+        allow_empty_input: bool,
+    ) -> Result<(), JobError> {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(job_error(
                 "PROTOCOL_VERSION_UNSUPPORTED",
@@ -269,7 +284,7 @@ impl JobRequest {
         let input = &self.inputs[0];
         if !valid_uuid_v4(&input.artifact_id)
             || input.media_type != INPUT_MEDIA_TYPE
-            || input.byte_size == 0
+            || (!allow_empty_input && input.byte_size == 0)
             || input.byte_size > max_input_bytes
             || !valid_sha256(&input.sha256)
             || !valid_display_name(&input.display_name)

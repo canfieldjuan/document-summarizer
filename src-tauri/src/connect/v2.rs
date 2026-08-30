@@ -194,7 +194,8 @@ impl JobRequest {
                 false,
             ));
         }
-        self.as_internal().validate(max_input_bytes)
+        self.as_internal()
+            .validate_allowing_empty_input(max_input_bytes)
     }
 
     pub fn canonical_hash(&self) -> Result<String, serde_json::Error> {
@@ -323,6 +324,20 @@ mod tests {
         let mut path = request();
         path.inputs[0].display_name = "../report.pdf".to_string();
         assert!(path.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_err());
+    }
+
+    #[test]
+    fn v2_accepts_zero_byte_wire_artifacts_without_changing_v1() {
+        let mut empty = request();
+        empty.inputs[0].byte_size = 0;
+        empty.inputs[0].sha256 =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string();
+
+        assert!(empty.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_ok());
+        assert!(empty
+            .as_internal()
+            .validate(v1::DEFAULT_MAX_INPUT_BYTES)
+            .is_err());
     }
 
     #[test]
