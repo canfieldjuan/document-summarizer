@@ -1075,22 +1075,18 @@ fn load_or_create_v2_instance_id(app_data_dir: &Path) -> Result<String, Provider
     }
 
     let instance_id = Uuid::new_v4().to_string();
-    let mut file = match private_create_new(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            return parse_v2_instance_id(&fs::read_to_string(path)?);
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let temporary = app_data_dir.join(format!(".{V2_INSTANCE_ID_FILE}.{}.tmp", Uuid::new_v4()));
     let write_result = (|| -> Result<(), io::Error> {
+        let mut file = private_create_new(&temporary)?;
         file.write_all(instance_id.as_bytes())?;
         file.write_all(b"\n")?;
         file.sync_all()?;
+        fs::rename(&temporary, &path)?;
         File::open(app_data_dir)?.sync_all()?;
         Ok(())
     })();
     if let Err(error) = write_result {
-        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(temporary);
         return Err(error.into());
     }
     Ok(instance_id)
