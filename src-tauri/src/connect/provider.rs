@@ -4,6 +4,7 @@ use crate::connect::contracts::{
     DEFAULT_MAX_INPUT_BYTES, MAX_REQUEST_JSON_BYTES, PROTOCOL_VERSION,
 };
 use crate::connect::store::{self, ConnectStoreError, StoredConnectJob};
+use crate::connect::v2;
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{ModelRuntime, ModelRuntimeFailure};
 use crate::pipeline::db;
@@ -19,6 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -42,7 +44,8 @@ struct ProviderState {
     imports_dir: PathBuf,
     instance_id: String,
     token: String,
-    manifest: AppManifest,
+    manifest_v1: AppManifest,
+    manifest_v2: v2::AppManifest,
     max_input_bytes: u64,
     runtime_factory: RuntimeFactory,
 }
@@ -66,7 +69,8 @@ pub enum ProviderStartError {
 }
 
 pub struct ConnectProvider {
-    registration_path: PathBuf,
+    registration_path_v1: PathBuf,
+    registration_path_v2: PathBuf,
     base_url: String,
     instance_id: String,
     shutdown: Option<oneshot::Sender<()>>,
@@ -108,8 +112,10 @@ impl ConnectProvider {
     ) -> Result<Self, ProviderStartError> {
         let imports_dir = app_data_dir.join("connect-imports");
         ensure_private_directory(&imports_dir)?;
-        let providers_dir = runtime_root.join("local-connect/v1/providers");
-        ensure_private_directory(&providers_dir)?;
+        let providers_dir_v1 = runtime_root.join("local-connect/v1/providers");
+        let providers_dir_v2 = runtime_root.join("local-connect/v2/providers");
+        ensure_private_directory(&providers_dir_v1)?;
+        ensure_private_directory(&providers_dir_v2)?;
 
         let conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
         store::mark_interrupted_jobs_failed(
@@ -128,13 +134,15 @@ impl ConnectProvider {
         let base_url = format!("http://127.0.0.1:{port}/");
         let instance_id = Uuid::new_v4().to_string();
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let manifest = AppManifest::new(&instance_id, max_input_bytes);
+        let manifest_v1 = AppManifest::new(&instance_id, max_input_bytes);
+        let manifest_v2 = v2::AppManifest::new(&instance_id, max_input_bytes);
         let state = ProviderState {
             db_path,
             imports_dir,
             instance_id: instance_id.clone(),
             token: token.clone(),
-            manifest,
+            manifest_v1,
+            manifest_v2,
             max_input_bytes,
             runtime_factory,
         };
@@ -146,6 +154,9 @@ impl ConnectProvider {
             .route("/v1/manifest", get(get_manifest))
             .route("/v1/jobs", post(create_job))
             .route("/v1/jobs/{job_id}", get(get_job_status))
+            .route("/v2/manifest", get(get_manifest_v2))
+            .route("/v2/jobs", post(create_job_v2))
+            .route("/v2/jobs/{job_id}", get(get_job_status_v2))
             .layer(DefaultBodyLimit::max(body_limit))
             .with_state(state);
 
@@ -198,14 +209,30 @@ impl ConnectProvider {
             }
         }
 
-        let registration = RuntimeRegistration {
+        let started_at = Utc::now();
+        let registration_v1 = RuntimeRegistration {
             protocol_version: PROTOCOL_VERSION,
             instance_id: instance_id.clone(),
             app_id: APP_ID.to_string(),
             pid: std::process::id(),
-            started_at: Utc::now(),
+            started_at,
             transport: TransportRegistration {
                 kind: "http-loopback-v1".to_string(),
+                base_url: base_url.clone(),
+            },
+            auth: AuthRegistration {
+                scheme: "bearer".to_string(),
+                token: token.clone(),
+            },
+        };
+        let registration_v2 = v2::RuntimeRegistration {
+            protocol_version: v2::PROTOCOL_VERSION,
+            instance_id: instance_id.clone(),
+            app_id: APP_ID.to_string(),
+            pid: std::process::id(),
+            started_at,
+            transport: TransportRegistration {
+                kind: v2::TRANSPORT_KIND.to_string(),
                 base_url: base_url.clone(),
             },
             auth: AuthRegistration {
@@ -213,15 +240,23 @@ impl ConnectProvider {
                 token,
             },
         };
-        let registration_path = providers_dir.join(format!("{APP_ID}-{instance_id}.json"));
-        if let Err(error) = write_registration(&registration_path, &registration) {
+        let registration_path_v1 = providers_dir_v1.join(format!("{APP_ID}-{instance_id}.json"));
+        let registration_path_v2 = providers_dir_v2.join(format!("{APP_ID}-{instance_id}.json"));
+        if let Err(error) = write_registration(&registration_path_v1, &registration_v1) {
+            let _ = shutdown_tx.send(());
+            let _ = server_thread.join();
+            return Err(error);
+        }
+        if let Err(error) = write_registration(&registration_path_v2, &registration_v2) {
+            let _ = fs::remove_file(&registration_path_v1);
             let _ = shutdown_tx.send(());
             let _ = server_thread.join();
             return Err(error);
         }
 
         Ok(Self {
-            registration_path,
+            registration_path_v1,
+            registration_path_v2,
             base_url,
             instance_id,
             shutdown: Some(shutdown_tx),
@@ -238,15 +273,21 @@ impl ConnectProvider {
     }
 
     pub fn registration_path(&self) -> &Path {
-        &self.registration_path
+        &self.registration_path_v1
+    }
+
+    pub fn registration_path_v2(&self) -> &Path {
+        &self.registration_path_v2
     }
 }
 
 impl Drop for ConnectProvider {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.registration_path) {
-            if error.kind() != io::ErrorKind::NotFound {
-                eprintln!("Connect registration cleanup failed: {error}");
+        for path in [&self.registration_path_v1, &self.registration_path_v2] {
+            if let Err(error) = fs::remove_file(path) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    eprintln!("Connect registration cleanup failed: {error}");
+                }
             }
         }
         if let Some(shutdown) = self.shutdown.take() {
@@ -256,12 +297,83 @@ impl Drop for ConnectProvider {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WireVersion {
+    V1,
+    V2,
+}
+
+impl WireVersion {
+    fn protocol_version(self) -> u32 {
+        match self {
+            Self::V1 => PROTOCOL_VERSION,
+            Self::V2 => v2::PROTOCOL_VERSION,
+        }
+    }
+}
+
+fn parse_job_request(
+    bytes: &[u8],
+    version: WireVersion,
+    max_input_bytes: u64,
+) -> Result<(JobRequest, String), ProviderHttpError> {
+    match version {
+        WireVersion::V1 => {
+            let request: JobRequest = serde_json::from_slice(bytes).map_err(|_| {
+                ProviderHttpError::bad_request("REQUEST_INVALID", "The request JSON is invalid.")
+            })?;
+            request
+                .validate(max_input_bytes)
+                .map_err(ProviderHttpError::from_job_error)?;
+            let request_hash = request.canonical_hash().map_err(ProviderHttpError::json)?;
+            Ok((request, request_hash))
+        }
+        WireVersion::V2 => {
+            let request: v2::JobRequest = serde_json::from_slice(bytes).map_err(|_| {
+                ProviderHttpError::bad_request("REQUEST_INVALID", "The request JSON is invalid.")
+            })?;
+            request
+                .validate(max_input_bytes)
+                .map_err(ProviderHttpError::from_job_error)?;
+            let request_hash = request.canonical_hash().map_err(ProviderHttpError::json)?;
+            let mut internal = request.as_internal();
+            internal.protocol_version = v2::PROTOCOL_VERSION;
+            Ok((internal, request_hash))
+        }
+    }
+}
+
+fn job_response(
+    version: WireVersion,
+    status: StatusCode,
+    job: &StoredConnectJob,
+) -> Result<Response, ProviderHttpError> {
+    match version {
+        WireVersion::V1 => Ok((status, Json(job.status())).into_response()),
+        WireVersion::V2 => {
+            let output = v2::JobStatus::from_v1(job.status()).map_err(|error| {
+                ProviderHttpError::contract(error).with_protocol_version(v2::PROTOCOL_VERSION)
+            })?;
+            Ok((status, Json(output)).into_response())
+        }
+    }
+}
+
 async fn get_manifest(
     State(state): State<ProviderState>,
     headers: HeaderMap,
 ) -> Result<Json<AppManifest>, ProviderHttpError> {
     authorize(&state, &headers)?;
-    Ok(Json(state.manifest))
+    Ok(Json(state.manifest_v1))
+}
+
+async fn get_manifest_v2(
+    State(state): State<ProviderState>,
+    headers: HeaderMap,
+) -> Result<Json<v2::AppManifest>, ProviderHttpError> {
+    authorize(&state, &headers)
+        .map_err(|error| error.with_protocol_version(v2::PROTOCOL_VERSION))?;
+    Ok(Json(state.manifest_v2))
 }
 
 async fn get_job_status(
@@ -279,6 +391,7 @@ async fn get_job_status(
     let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
     let job = store::get_job(&conn, &job_id)
         .map_err(ProviderHttpError::store)?
+        .filter(|job| job.protocol_version == PROTOCOL_VERSION)
         .ok_or_else(|| {
             ProviderHttpError::new(
                 StatusCode::NOT_FOUND,
@@ -290,8 +403,57 @@ async fn get_job_status(
     Ok(Json(job.status()))
 }
 
+async fn get_job_status_v2(
+    State(state): State<ProviderState>,
+    headers: HeaderMap,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Response, ProviderHttpError> {
+    let result = (|| {
+        authorize(&state, &headers)?;
+        if !valid_uuid_v4(&job_id) {
+            return Err(ProviderHttpError::bad_request(
+                "JOB_ID_INVALID",
+                "The job identifier is invalid.",
+            ));
+        }
+        let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+        let job = store::get_job(&conn, &job_id)
+            .map_err(ProviderHttpError::store)?
+            .filter(|job| job.protocol_version == v2::PROTOCOL_VERSION)
+            .ok_or_else(|| {
+                ProviderHttpError::new(
+                    StatusCode::NOT_FOUND,
+                    "JOB_NOT_FOUND",
+                    "The requested job does not exist.",
+                    false,
+                )
+            })?;
+        job_response(WireVersion::V2, StatusCode::OK, &job)
+    })();
+    result.map_err(|error| error.with_protocol_version(v2::PROTOCOL_VERSION))
+}
+
 async fn create_job(
     State(state): State<ProviderState>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> Result<Response, ProviderHttpError> {
+    create_job_for(WireVersion::V1, state, headers, multipart).await
+}
+
+async fn create_job_v2(
+    State(state): State<ProviderState>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> Result<Response, ProviderHttpError> {
+    create_job_for(WireVersion::V2, state, headers, multipart)
+        .await
+        .map_err(|error| error.with_protocol_version(v2::PROTOCOL_VERSION))
+}
+
+async fn create_job_for(
+    version: WireVersion,
+    state: ProviderState,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Response, ProviderHttpError> {
@@ -310,19 +472,14 @@ async fn create_job(
         ));
     }
     let request_bytes = read_field_limited(request_field, MAX_REQUEST_JSON_BYTES).await?;
-    let request: JobRequest = serde_json::from_slice(&request_bytes).map_err(|_| {
-        ProviderHttpError::bad_request("REQUEST_INVALID", "The request JSON is invalid.")
-    })?;
-    request
-        .validate(state.max_input_bytes)
-        .map_err(ProviderHttpError::from_job_error)?;
-    let request_hash = request.canonical_hash().map_err(ProviderHttpError::json)?;
+    let (request, request_hash) =
+        parse_job_request(&request_bytes, version, state.max_input_bytes)?;
 
     let mut conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
     if let Some(existing) =
         store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
     {
-        return idempotent_response(existing, &request_hash);
+        return idempotent_response(existing, &request_hash, version);
     }
     if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
         return Err(ProviderHttpError::new(
@@ -406,9 +563,10 @@ async fn create_job(
             if let Some(existing) =
                 store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
             {
-                if existing.request_hash == request_hash {
-                    return Ok((StatusCode::OK, Json(existing.status())).into_response());
+                if !existing_request_matches(&existing, &request_hash, version) {
+                    remove_file_quietly(&import_path).await;
                 }
+                return idempotent_response(existing, &request_hash, version);
             }
             remove_file_quietly(&import_path).await;
             if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
@@ -443,7 +601,7 @@ async fn create_job(
             true,
         ));
     }
-    Ok((StatusCode::ACCEPTED, Json(accepted.status())).into_response())
+    job_response(version, StatusCode::ACCEPTED, &accepted)
 }
 
 fn process_job(state: ProviderState, job_id: String) {
@@ -658,9 +816,10 @@ async fn read_field_limited(
 fn idempotent_response(
     existing: StoredConnectJob,
     request_hash: &str,
+    version: WireVersion,
 ) -> Result<Response, ProviderHttpError> {
-    if existing.request_hash == request_hash {
-        Ok((StatusCode::OK, Json(existing.status())).into_response())
+    if existing_request_matches(&existing, request_hash, version) {
+        job_response(version, StatusCode::OK, &existing)
     } else {
         Err(ProviderHttpError::new(
             StatusCode::CONFLICT,
@@ -669,6 +828,14 @@ fn idempotent_response(
             false,
         ))
     }
+}
+
+fn existing_request_matches(
+    existing: &StoredConnectJob,
+    request_hash: &str,
+    version: WireVersion,
+) -> bool {
+    existing.protocol_version == version.protocol_version() && existing.request_hash == request_hash
 }
 
 fn authorize(state: &ProviderState, headers: &HeaderMap) -> Result<(), ProviderHttpError> {
@@ -699,6 +866,7 @@ fn authorize(state: &ProviderState, headers: &HeaderMap) -> Result<(), ProviderH
 struct ProviderHttpError {
     status: StatusCode,
     error: JobError,
+    protocol_version: u32,
 }
 
 impl ProviderHttpError {
@@ -711,6 +879,7 @@ impl ProviderHttpError {
         Self {
             status,
             error: job_error(code, message, retryable),
+            protocol_version: PROTOCOL_VERSION,
         }
     }
 
@@ -724,7 +893,11 @@ impl ProviderHttpError {
             "INPUT_ARTIFACT_INVALID" => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::BAD_REQUEST,
         };
-        Self { status, error }
+        Self {
+            status,
+            error,
+            protocol_version: PROTOCOL_VERSION,
+        }
     }
 
     fn store(error: impl std::fmt::Display) -> Self {
@@ -745,6 +918,21 @@ impl ProviderHttpError {
             "The provider could not encode job metadata.",
             true,
         )
+    }
+
+    fn contract(error: impl std::fmt::Display) -> Self {
+        eprintln!("Connect provider contract conversion error: {error}");
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PROVIDER_OUTPUT_INVALID",
+            "The provider result did not satisfy the Connect output contract.",
+            false,
+        )
+    }
+
+    fn with_protocol_version(mut self, protocol_version: u32) -> Self {
+        self.protocol_version = protocol_version;
+        self
     }
 
     fn multipart(error: axum::extract::multipart::MultipartError) -> Self {
@@ -777,7 +965,7 @@ impl IntoResponse for ProviderHttpError {
         (
             self.status,
             Json(ErrorEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: self.protocol_version,
                 error: self.error,
             }),
         )
@@ -785,9 +973,9 @@ impl IntoResponse for ProviderHttpError {
     }
 }
 
-fn write_registration(
+fn write_registration<T: Serialize>(
     registration_path: &Path,
-    registration: &RuntimeRegistration,
+    registration: &T,
 ) -> Result<(), ProviderStartError> {
     let parent = registration_path
         .parent()
@@ -892,7 +1080,9 @@ mod tests {
         CapabilityRef, InputArtifact, JobState, CAPABILITY_ID, CAPABILITY_VERSION, INPUT_MEDIA_TYPE,
     };
     use crate::pipeline::contracts::{ModelRequest, ModelResponse};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use reqwest::blocking::{multipart, Client};
+    use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
 
     struct TestDirectory(PathBuf);
@@ -963,7 +1153,44 @@ mod tests {
         }
     }
 
+    fn fixture_request_v2(bytes: &[u8]) -> v2::JobRequest {
+        v2::JobRequest {
+            protocol_version: v2::PROTOCOL_VERSION,
+            job_id: Uuid::new_v4().to_string(),
+            capability: CapabilityRef {
+                id: CAPABILITY_ID.to_string(),
+                version: CAPABILITY_VERSION.to_string(),
+            },
+            inputs: vec![InputArtifact {
+                artifact_id: Uuid::new_v4().to_string(),
+                media_type: INPUT_MEDIA_TYPE.to_string(),
+                byte_size: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+                display_name: "quarterly-report.pdf".to_string(),
+                source_app_id: "email-watcher".to_string(),
+            }],
+            parameters: BTreeMap::new(),
+        }
+    }
+
     fn form(request: &JobRequest, bytes: Vec<u8>) -> multipart::Form {
+        multipart::Form::new()
+            .part(
+                "request",
+                multipart::Part::text(serde_json::to_string(request).unwrap())
+                    .mime_str("application/json")
+                    .unwrap(),
+            )
+            .part(
+                "artifact",
+                multipart::Part::bytes(bytes)
+                    .file_name("attachment.pdf")
+                    .mime_str("application/pdf")
+                    .unwrap(),
+            )
+    }
+
+    fn form_v2(request: &v2::JobRequest, bytes: Vec<u8>) -> multipart::Form {
         multipart::Form::new()
             .part(
                 "request",
@@ -1003,6 +1230,34 @@ mod tests {
         }
     }
 
+    fn wait_for_terminal_v2(
+        client: &Client,
+        base_url: &str,
+        token: &str,
+        job_id: &str,
+    ) -> v2::JobStatus {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = client
+                .get(format!("{base_url}v2/jobs/{job_id}"))
+                .bearer_auth(token)
+                .send()
+                .expect("v2 status request should succeed")
+                .error_for_status()
+                .expect("v2 status request should be successful")
+                .json::<v2::JobStatus>()
+                .expect("v2 status should decode");
+            if matches!(status.status, JobState::Completed | JobState::Failed) {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "v2 job did not finish before timeout"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     #[test]
     fn provider_auth_handoff_idempotency_persistence_and_removal_work_end_to_end() {
         let root = TestDirectory::new("doc-sum-connect-provider");
@@ -1025,19 +1280,29 @@ mod tests {
             &fs::read(provider.registration_path()).expect("registration should exist"),
         )
         .expect("registration should decode");
+        let registration_v2: v2::RuntimeRegistration = serde_json::from_slice(
+            &fs::read(provider.registration_path_v2()).expect("v2 registration should exist"),
+        )
+        .expect("v2 registration should decode");
         assert_eq!(registration.instance_id, provider.instance_id());
         assert_eq!(registration.transport.base_url, provider.base_url());
+        assert_eq!(registration_v2.instance_id, provider.instance_id());
+        assert_eq!(registration_v2.protocol_version, v2::PROTOCOL_VERSION);
+        assert_eq!(registration_v2.transport.kind, v2::TRANSPORT_KIND);
+        assert_eq!(registration_v2.transport.base_url, provider.base_url());
+        assert_eq!(registration_v2.auth.token, registration.auth.token);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(provider.registration_path())
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
+            for path in [
+                provider.registration_path(),
+                provider.registration_path_v2(),
+            ] {
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
         }
 
         let client = client();
@@ -1070,6 +1335,30 @@ mod tests {
             .unwrap();
         assert_eq!(manifest.instance_id, provider.instance_id());
         assert_eq!(manifest.capabilities[0].id, CAPABILITY_ID);
+        let unauthorized_v2 = client
+            .get(format!("{}v2/manifest", provider.base_url()))
+            .send()
+            .unwrap();
+        assert_eq!(unauthorized_v2.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthorized_v2
+                .json::<v2::ErrorEnvelope>()
+                .unwrap()
+                .protocol_version,
+            v2::PROTOCOL_VERSION
+        );
+        let manifest_v2 = client
+            .get(format!("{}v2/manifest", provider.base_url()))
+            .bearer_auth(&registration_v2.auth.token)
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<v2::AppManifest>()
+            .unwrap();
+        assert_eq!(manifest_v2.instance_id, provider.instance_id());
+        assert_eq!(manifest_v2.capabilities[0].id, CAPABILITY_ID);
+        assert_eq!(manifest_v2.capabilities[0].action.label, "Summarize");
 
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
@@ -1118,20 +1407,75 @@ mod tests {
             "JOB_ID_CONFLICT"
         );
 
+        assert_eq!(
+            client
+                .get(format!("{}v2/jobs/{}", provider.base_url(), request.job_id))
+                .bearer_auth(&registration_v2.auth.token)
+                .send()
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let request_v2 = fixture_request_v2(&bytes);
+        let accepted_v2 = client
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration_v2.auth.token)
+            .multipart(form_v2(&request_v2, bytes.clone()))
+            .send()
+            .expect("v2 job submission should succeed");
+        assert_eq!(accepted_v2.status(), StatusCode::ACCEPTED);
+        let terminal_v2 = wait_for_terminal_v2(
+            &client,
+            provider.base_url(),
+            &registration_v2.auth.token,
+            &request_v2.job_id,
+        );
+        assert_eq!(terminal_v2.status, JobState::Completed);
+        assert_eq!(terminal_v2.protocol_version, v2::PROTOCOL_VERSION);
+        assert!(terminal_v2.error.is_none());
+        let output_v2 = &terminal_v2.result.as_ref().unwrap().outputs[0];
+        let output_bytes = BASE64.decode(&output_v2.payload_base64).unwrap();
+        assert_eq!(output_bytes.len() as u64, output_v2.byte_size);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&output_bytes)),
+            output_v2.sha256
+        );
+        assert_eq!(
+            client
+                .get(format!(
+                    "{}v1/jobs/{}",
+                    provider.base_url(),
+                    request_v2.job_id
+                ))
+                .bearer_auth(&registration.auth.token)
+                .send()
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let duplicate_v2 = client
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration_v2.auth.token)
+            .multipart(form_v2(&request_v2, bytes.clone()))
+            .send()
+            .expect("v2 idempotent submission should succeed");
+        assert_eq!(duplicate_v2.status(), StatusCode::OK);
+
         let conn = db::init_db(&db_path).unwrap();
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM connect_jobs", [], |row| {
                 row.get::<_, u32>(0)
             })
             .unwrap(),
-            1
+            2
         );
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM documents", [], |row| {
                 row.get::<_, u32>(0)
             })
             .unwrap(),
-            1
+            2
         );
         let stored = store::get_job(&conn, &request.job_id)
             .unwrap()
@@ -1148,6 +1492,10 @@ mod tests {
             .expect("document should persist");
         assert_eq!(document.original_filename, "quarterly-report.pdf");
         assert_eq!(fs::read(stored.import_path).unwrap(), bytes);
+        let stored_v2 = store::get_job(&conn, &request_v2.job_id)
+            .unwrap()
+            .expect("v2 job should persist");
+        assert_eq!(stored_v2.protocol_version, v2::PROTOCOL_VERSION);
         drop(conn);
 
         let malformed_bytes = b"%PDF-1.4\nnot a structurally valid PDF".to_vec();
@@ -1170,8 +1518,10 @@ mod tests {
         assert!(malformed_terminal.error.is_some());
 
         let registration_path = provider.registration_path().to_path_buf();
+        let registration_path_v2 = provider.registration_path_v2().to_path_buf();
         drop(provider);
         assert!(!registration_path.exists());
+        assert!(!registration_path_v2.exists());
     }
 
     #[test]
