@@ -388,15 +388,28 @@ returns structured claims. Every claim must reference one or more known,
 unique evidence IDs. Rust canonicalizes those references into source order,
 derives a deterministic claim ID, and renders page labels from the validated
 source spans. `SynthesizedDocument` still references every chunk ID exactly
-once in source order. `VerifiedDocument` preserves claims, rendered text, and
-coverage without rewriting them.
+once in source order.
 
-Verification is mechanical, not semantic. It proves citation identity,
-contiguous quotation, normalized-block provenance, ordered chunk coverage,
-deterministic rendering, and artifact integrity. It does not prove that a
-model-authored claim is logically entailed by its quotation or that the source
-itself is factually correct, and it always adds
-`SEMANTIC_VERIFICATION_DEFERRED`.
+Verification version `3.0.0` asks `ModelRuntime` to classify every synthesized
+claim against only its validated exact quotations. Rust validates the complete
+catalog and its aggregate size before checking runtime health, then processes
+it in deterministic batches of at most 16 claims with a bounded output budget.
+Each response may contain only the application-issued claim ID and one of
+`supported`, `unsupported`, or `ambiguous`. Rust requires exactly one unique
+verdict for every synthesized claim in canonical order and restores the
+evidence IDs from the persisted synthesis; the model cannot add a claim, choose
+provenance, or rewrite source text. `VerifiedDocument` records runtime/model
+identity and the complete claim-to-evidence verdict catalog for audit. Its
+displayed claims and rendered text contain only claims classified as supported.
+
+This is model-assisted evidence-entailment screening, not independent fact
+checking. `supported` means the selected runtime classified every material
+detail as directly entailed by the supplied quotations. It does not certify
+that the source itself is factually correct. Unsupported or ambiguous claims
+remain in the durable verdict artifact but are withheld from the final summary
+and add `SEMANTIC_CLAIMS_WITHHELD`. If no claim is supported, the verdict
+artifact commits at `VERIFIED`, then the run transitions to `FAILED` with
+`NO_SEMANTICALLY_SUPPORTED_CLAIMS`; no summary or citation artifact is created.
 
 The supported runtime adapter is Ollama through its loopback OpenAI-compatible
 API. It defaults to `http://127.0.0.1:11434/v1/` and
@@ -417,16 +430,19 @@ server-side grammar enforcement. The prompt still carries the explicit JSON
 shape and the same Rust schema, identity, quotation, and provenance checks
 remain mandatory. Other HTTP failures do not activate the fallback.
 
-Analysis version, synthesis version, verification version, and summary version
-are each `2.0.0`; citation version is `1.0.0`. Schema versions 6 through 9 keep
-the separate analysis, synthesis, verification, and summary tables. Schema v11
-adds an independent `citation_artifacts` table without rewriting historical
-summary rows. Each artifact row records the run/document, stage version,
-serialized artifact, creation timestamp, and SHA-256 row hash. The final
-`SummaryArtifact` and `CitationArtifact` each carry their own content integrity
-hash, and the citation artifact binds to the exact summary integrity hash and
-rendered text. Retrieval checks both layers and their binding. Historical
-summary version `1.0.0` rows remain readable without inventing citations.
+Analysis and synthesis versions remain `2.0.0`; verification and summary
+versions are `3.0.0`, and citation version is `2.0.0`. No schema migration is
+required because the existing verification, summary, and citation tables
+already persist explicitly versioned JSON plus row hashes. Each artifact row
+records the run/document, stage version, serialized artifact, creation
+timestamp, and SHA-256 row hash. The final `SummaryArtifact` and
+`CitationArtifact` each carry their own content integrity hash, and the
+citation artifact binds to the exact summary integrity hash and rendered text.
+Retrieval revalidates the verdict artifact against the original synthesized
+claim catalog before accepting current citations. Historical summary version
+`1.0.0` rows remain readable without inventing citations. Historical mechanical
+verification `2.0.0` remains readable and can produce its paired summary
+`2.0.0` and citation `1.0.0` with `SEMANTIC_VERIFICATION_DEFERRED` intact.
 
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
@@ -454,14 +470,14 @@ Release binaries must be produced through the Tauri build command with the
 without that feature fails at compile time rather than producing an executable
 that silently depends on the development server.
 
-Current limits are conservative: source chunks and one-pass synthesis input
-are each capped at 100,000 Unicode characters. A native-text-free document or
-an input beyond those limits fails with a structured domain error; no summary
-text is invented. Analysis evidence, summary claims, quotation length, evidence
-references per claim, response schemas, and model response bytes are also
-bounded. Semantic entailment/fact verification, hierarchical synthesis,
-OCR/vision routing, PDF-viewer navigation, and citations for visual-only pages
-remain deferred.
+Current limits are conservative: source chunks, one-pass synthesis input, and
+the aggregate claim-verification input are each capped at 100,000 Unicode
+characters. A native-text-free document or an input beyond those limits fails
+with a structured domain error; no summary text is invented. Analysis evidence,
+summary claims, quotation length, evidence references per claim, response
+schemas, and model response bytes are also bounded. Independent source-fact
+verification, hierarchical synthesis, OCR/vision routing, PDF-viewer
+navigation, and citations for visual-only pages remain deferred.
 
 ## Stable checkpoint continuation
 
@@ -480,11 +496,11 @@ to use the existing atomic artifact/state/version/event transactions. A stale
 version, unsupported state, missing runtime, or corrupt/missing checkpoint
 artifact is rejected without pretending that downstream work completed.
 
-Continuation through `ANALYZED` requires `ModelRuntime` because analysis or
-synthesis remains. `SYNTHESIZED` and `VERIFIED` continuation is deterministic
-and does not construct or require Ollama: verification and final artifact
-assembly use already-persisted evidence and claims. Summary-stage entry points
-are independently callable at `CHUNKED`, `ANALYZED`, `SYNTHESIZED`, and
+Continuation through `SYNTHESIZED` requires `ModelRuntime` because analysis,
+synthesis, or semantic claim verification remains. `VERIFIED` continuation is
+deterministic and does not construct or require Ollama: final artifact assembly
+uses the already-persisted verdicts, evidence, and claims. Summary-stage entry
+points are independently callable at `CHUNKED`, `ANALYZED`, `SYNTHESIZED`, and
 `VERIFIED`, so completed model work is not repeated.
 
 The recent-work read model exposes the core-derived checkpoint, `canContinue`,

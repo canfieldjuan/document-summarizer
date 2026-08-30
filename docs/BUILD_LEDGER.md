@@ -952,3 +952,80 @@ future work
 - Startup remains non-replaying. Automatic scheduling, background jobs,
   cancellation, visual/OCR routing, Connect retry/resume, and cross-process
   continuation races beyond SQLite CAS remain deferred.
+
+## Slice 11 — Model-Assisted Claim Verification
+
+**Status**: Implemented and locally accepted
+
+**Verification contract**:
+- Analysis and synthesis remain version `2.0.0`. Verification and summary are
+  version `3.0.0`; citation artifacts are version `2.0.0`.
+- Verification now calls the replaceable `ModelRuntime` with each canonical
+  synthesized claim and only its validated exact quotations. The bounded
+  responses contain application-issued claim IDs plus `supported`,
+  `unsupported`, or `ambiguous`; Rust rejects malformed, partial, duplicate,
+  foreign, or oversized responses and restores evidence IDs from durable
+  application state. The complete catalog is size-checked before runtime
+  health, then classified in deterministic batches of at most 16 claims with a
+  4,096-token output budget.
+- `VerifiedDocument` persists runtime/model identity and a verdict for every
+  synthesized claim. Supported claims alone are rendered into the final
+  summary. Unsupported and ambiguous claims remain durable for audit, are
+  omitted from the displayed result, and produce `SEMANTIC_CLAIMS_WITHHELD`.
+- This is evidence-entailment screening by the selected model, not independent
+  verification that the source document itself is factually true.
+
+**State, atomicity, and compatibility**:
+- `SYNTHESIZED -> VERIFYING -> VERIFIED` continues through the existing
+  expected-state/version boundary. Verdict artifact insertion,
+  `VERIFYING -> VERIFIED`, version increment, and immutable event append share
+  one transaction. An injected event failure rolled all of them back before a
+  truthful failure was recorded.
+- A result with supported claims completes as `COMPLETE` when warning-free or
+  `COMPLETE_WITH_WARNINGS` when inherited or withheld-claim warnings remain.
+  If no claims are supported, the complete verdict artifact is retained at the
+  `VERIFIED` checkpoint before `VERIFIED -> FAILED` records
+  `NO_SEMANTICALLY_SUPPORTED_CLAIMS`; no summary or citation artifact exists.
+- `SYNTHESIZED` continuation now requires a runtime and performs exactly the
+  verification call; `VERIFIED` continuation remains runtime-free. A stale
+  verification caller cannot change state/version or append an event.
+- No SQLite migration was required. Existing versioned artifact JSON and row
+  hashes carry the added fields. A synthesized legacy mechanical verification
+  `2.0.0` fixture survived independent database reopen and completed without a
+  runtime as paired summary `2.0.0` plus citation `1.0.0`, retaining
+  `SEMANTIC_VERIFICATION_DEFERRED`.
+
+**Automated and live proof**:
+- The full Rust suite ran 133 tests: 132 passed and the opt-in Ollama test was
+  ignored by default. Focused verification tests cover full and reordered
+  verdict coverage, malformed/partial/duplicate/foreign verdict rejection,
+  input bounds before generation, mixed supported/unsupported/ambiguous
+  filtering, zero-supported failure, runtime failure, stale CAS, injected
+  event-write rollback, deterministic output, and artifact reopen equality.
+- Strict all-target/all-feature Clippy passed. The TypeScript/Vite production
+  build and no-bundle Tauri release build passed, producing
+  `src-tauri/target/release/tauri-appdoc_sum`.
+- The opt-in live test passed against Ollama on `127.0.0.1:11434` with
+  `qwen3-30b-a3b:latest`. Ollama reported the already-documented structured
+  grammar incompatibility, so the exact-error fallback ran while the same
+  strict Rust contract remained mandatory. The test persisted runtime/model
+  identity and complete verdict coverage, then independently reopened SQLite
+  and matched the verdict, summary, citation hashes, terminal state, and
+  `quick_check = ok`. This proves a database-connection reopen, not a full
+  desktop-process restart.
+- PR review identified and corrected two boundary-order/capacity defects before
+  merge: permanent oversized input now wins over runtime health failure, and
+  the accepted 64-claim catalog no longer depends on one 2,048-token response.
+  Focused tests exercise both corrected sides directly.
+
+**Cold architecture audit and deferred work**:
+- Verification consumes only canonical synthesized claims, validated evidence,
+  chunk metadata, and normalized provenance. It exposes no PDF-library type,
+  adds no frontend verification logic, and changes no Connect wire contract.
+  Ollama remains behind `ModelRuntime`; a replacement runtime requires no
+  pipeline-state or persistence redesign.
+- The live proof used the application service and real model but did not launch,
+  close, and reopen the Tauri UI process. Independent source-fact checking,
+  adversarial verifier-model evaluation, hierarchical synthesis, OCR/vision,
+  visual-page citations, background jobs, cancellation, and Connect protocol
+  changes remain deferred.

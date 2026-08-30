@@ -203,7 +203,11 @@ pub fn continue_run_to_summary(
             run_id,
             required_continuation_runtime(run_id, components.runtime)?,
         )?,
-        ContinuationCheckpoint::Synthesized => process_synthesized_to_summary(conn, run_id)?,
+        ContinuationCheckpoint::Synthesized => process_synthesized_to_summary(
+            conn,
+            run_id,
+            required_continuation_runtime(run_id, components.runtime)?,
+        )?,
         ContinuationCheckpoint::Verified => complete_verified_document(conn, run_id)?,
     };
 
@@ -340,14 +344,15 @@ fn process_analyzed_to_summary(
     runtime: &dyn ModelRuntime,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     synthesize_analyzed_document(conn, runtime, run_id)?;
-    process_synthesized_to_summary(conn, run_id)
+    process_synthesized_to_summary(conn, run_id, runtime)
 }
 
 fn process_synthesized_to_summary(
     conn: &mut Connection,
     run_id: &str,
+    runtime: &dyn ModelRuntime,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
-    verify_synthesized_document(conn, run_id)?;
+    verify_synthesized_document(conn, runtime, run_id)?;
     Ok(complete_verified_document(conn, run_id)?)
 }
 
@@ -357,7 +362,7 @@ mod tests {
     use crate::pipeline::chunk::DeterministicDocumentChunker;
     use crate::pipeline::contracts::{
         ModelRequest, ModelResponse, ModelRuntimeFailure, PipelineStage, PipelineState,
-        RetryCheckpoint,
+        PipelineWarning, RetryCheckpoint,
     };
     use crate::pipeline::db::{
         get_analyzed_document, get_chunked_document, get_citation_artifact, get_document,
@@ -370,6 +375,8 @@ mod tests {
     use crate::pipeline::normalize::CanonicalNormalizer;
     use crate::pipeline::parser::PdfExtractParser;
     use crate::pipeline::structure::DeterministicStructureInterpreter;
+    use rusqlite::params;
+    use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -594,7 +601,7 @@ mod tests {
                 .expect("run should exist");
         }
 
-        verify_synthesized_document(conn, &ingested.run_id)
+        verify_synthesized_document(conn, runtime, &ingested.run_id)
             .expect("fixture should verify to checkpoint");
         get_pipeline_run(conn, &ingested.run_id)
             .expect("run should load")
@@ -706,7 +713,11 @@ mod tests {
                 .expect("run should load")
                 .expect("run should exist")
                 .state,
-            PipelineState::CompleteWithWarnings
+            if result.summary.warnings.is_empty() {
+                PipelineState::Complete
+            } else {
+                PipelineState::CompleteWithWarnings
+            }
         );
         assert_eq!(
             get_summary_artifact(&conn, &result.run_id)
@@ -787,7 +798,14 @@ mod tests {
             let completed_run = get_pipeline_run(&conn, &before.run_id)
                 .expect("completed run should load")
                 .expect("completed run should exist");
-            assert_eq!(completed_run.state, PipelineState::CompleteWithWarnings);
+            assert_eq!(
+                completed_run.state,
+                if completed.summary.warnings.is_empty() {
+                    PipelineState::Complete
+                } else {
+                    PipelineState::CompleteWithWarnings
+                }
+            );
             let after_events =
                 list_pipeline_events(&conn, &before.run_id).expect("events should reload");
             assert_eq!(
@@ -808,16 +826,20 @@ mod tests {
 
             match checkpoint {
                 ContinuationCheckpoint::Analyzed => {
-                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 1);
-                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 0);
+                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 2);
+                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 1);
                 }
-                ContinuationCheckpoint::Synthesized | ContinuationCheckpoint::Verified => {
+                ContinuationCheckpoint::Synthesized => {
+                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 1);
+                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 1);
+                }
+                ContinuationCheckpoint::Verified => {
                     assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 0);
                     assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 0);
                 }
                 _ => {
                     assert!(runtime.generate_calls.load(Ordering::Relaxed) > 1);
-                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 1);
+                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 2);
                 }
             }
         }
@@ -1020,6 +1042,7 @@ mod tests {
             (run, artifact, events)
         };
 
+        runtime.reset();
         let completed = {
             let mut reopened = init_db(&database.0).expect("database should independently reopen");
             assert_eq!(
@@ -1034,10 +1057,12 @@ mod tests {
                 &mut reopened,
                 &checkpoint_run.run_id,
                 checkpoint_run.state_version,
-                pipeline.continuation_components(None),
+                pipeline.continuation_components(Some(&runtime)),
             )
-            .expect("reopened synthesized checkpoint should complete without runtime")
+            .expect("reopened synthesized checkpoint should verify with the runtime")
         };
+        assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 1);
 
         let reopened = init_db(&database.0).expect("completed database should reopen again");
         assert_eq!(
@@ -1058,7 +1083,14 @@ mod tests {
         let persisted_run = get_pipeline_run(&reopened, &checkpoint_run.run_id)
             .expect("run should load after reopen")
             .expect("run should persist");
-        assert_eq!(persisted_run.state, PipelineState::CompleteWithWarnings);
+        assert_eq!(
+            persisted_run.state,
+            if completed.summary.warnings.is_empty() {
+                PipelineState::Complete
+            } else {
+                PipelineState::CompleteWithWarnings
+            }
+        );
         let persisted_events =
             list_pipeline_events(&reopened, &checkpoint_run.run_id).expect("events should persist");
         assert_eq!(
@@ -1076,6 +1108,102 @@ mod tests {
                 .expect("citation should load")
                 .expect("citation should persist"),
             completed.citations
+        );
+    }
+
+    #[test]
+    fn legacy_mechanical_verified_checkpoint_remains_readable_and_completes_with_warning() {
+        let database = TestDatabase::new();
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let run_id = {
+            let mut conn = init_db(&database.0).expect("schema should initialize");
+            let run = prepare_checkpoint(
+                &mut conn,
+                &source,
+                &pipeline,
+                &FixtureRuntime,
+                ContinuationCheckpoint::Verified,
+            );
+            let synthesized = get_synthesized_document(&conn, &run.run_id)
+                .expect("synthesis should load")
+                .expect("synthesis should exist");
+            let mut legacy = get_verified_document(&conn, &run.run_id)
+                .expect("verification should load")
+                .expect("verification should exist");
+            legacy.verification_version = "2.0.0".to_string();
+            legacy.runtime_id.clear();
+            legacy.model_id.clear();
+            legacy.summary_text = synthesized.summary_text.clone();
+            legacy.claims = synthesized.claims.clone();
+            legacy.claim_verifications.clear();
+            legacy.warnings = synthesized.warnings.clone();
+            legacy.warnings.push(PipelineWarning {
+                code: "SEMANTIC_VERIFICATION_DEFERRED".to_string(),
+                message: "Citation provenance and artifact integrity were checked; semantic entailment remains deferred"
+                    .to_string(),
+                stage: Some(PipelineStage::Verify),
+            });
+            let artifact_json =
+                serde_json::to_string(&legacy).expect("legacy verification should serialize");
+            let artifact_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+            conn.execute(
+                "UPDATE verified_documents
+                 SET verification_version = ?1, artifact_hash = ?2, verified_artifact = ?3
+                 WHERE run_id = ?4",
+                params![
+                    legacy.verification_version,
+                    artifact_hash,
+                    artifact_json,
+                    run.run_id
+                ],
+            )
+            .expect("legacy verification fixture should install");
+
+            let completed = continue_run_to_summary(
+                &mut conn,
+                &run.run_id,
+                run.state_version,
+                pipeline.continuation_components(None),
+            )
+            .expect("legacy verified checkpoint should complete without a runtime");
+            assert_eq!(completed.summary.summary_version, "2.0.0");
+            assert_eq!(completed.citations.citation_version, "1.0.0");
+            assert!(completed
+                .summary
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "SEMANTIC_VERIFICATION_DEFERRED"));
+            run.run_id
+        };
+
+        let reopened = init_db(&database.0).expect("legacy database should independently reopen");
+        let persisted = crate::pipeline::workspace::get_persisted_summary(&reopened, &run_id)
+            .expect("legacy summary should remain readable");
+        assert!(persisted
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "SEMANTIC_VERIFICATION_DEFERRED"));
+        assert_eq!(
+            get_summary_artifact(&reopened, &run_id)
+                .expect("legacy summary artifact should load")
+                .expect("legacy summary artifact should exist")
+                .summary_version,
+            "2.0.0"
+        );
+        assert_eq!(
+            get_citation_artifact(&reopened, &run_id)
+                .expect("legacy citation artifact should load")
+                .expect("legacy citation artifact should exist")
+                .citation_version,
+            "1.0.0"
+        );
+        assert_eq!(
+            reopened
+                .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .expect("quick check should run"),
+            "ok"
         );
     }
 
@@ -1543,7 +1671,15 @@ mod tests {
         let normalizer = CanonicalNormalizer::new();
         let interpreter = DeterministicStructureInterpreter::new();
         let chunker = DeterministicDocumentChunker::new();
-        let (run_id, summary_hash, citation_hash, claim_count, evidence_count) = {
+        let (
+            run_id,
+            summary_hash,
+            citation_hash,
+            claim_count,
+            evidence_count,
+            expected_verification,
+            expected_state,
+        ) = {
             let mut conn = init_db(&database.0).expect("live database should initialize");
             let result = process_pdf_to_summary(
                 &mut conn,
@@ -1579,12 +1715,26 @@ mod tests {
                 .expect("synthesis should load")
                 .expect("synthesis should exist");
             assert_eq!(synthesized.model_id, runtime.model_id());
+            let verified = get_verified_document(&conn, &result.run_id)
+                .expect("verification should load")
+                .expect("verification should exist");
+            assert_eq!(verified.runtime_id, runtime.runtime_id());
+            assert_eq!(verified.model_id, runtime.model_id());
+            assert_eq!(verified.claim_verifications.len(), synthesized.claims.len());
+            assert_eq!(verified.claims, result.citations.claims);
+            let expected_state = if result.summary.warnings.is_empty() {
+                PipelineState::Complete
+            } else {
+                PipelineState::CompleteWithWarnings
+            };
             (
                 result.run_id,
                 result.summary.integrity_hash,
                 result.citations.integrity_hash,
                 result.citations.claims.len(),
                 result.citations.evidence.len(),
+                verified,
+                expected_state,
             )
         };
 
@@ -1601,6 +1751,12 @@ mod tests {
         let citations = get_citation_artifact(&reopened, &run_id)
             .expect("citations should load")
             .expect("citations should persist");
+        assert_eq!(
+            get_verified_document(&reopened, &run_id)
+                .expect("verification should load")
+                .expect("verification should persist"),
+            expected_verification
+        );
         assert_eq!(summary.integrity_hash, summary_hash);
         assert_eq!(citations.integrity_hash, citation_hash);
         assert_eq!(citations.summary_integrity_hash, summary.integrity_hash);
@@ -1611,7 +1767,7 @@ mod tests {
                 .expect("run should load")
                 .expect("run should persist")
                 .state,
-            PipelineState::CompleteWithWarnings
+            expected_state
         );
     }
 }

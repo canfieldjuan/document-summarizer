@@ -172,7 +172,7 @@ pub enum ContinuationCheckpoint {
 
 impl ContinuationCheckpoint {
     pub fn requires_runtime(self) -> bool {
-        !matches!(self, Self::Synthesized | Self::Verified)
+        !matches!(self, Self::Verified)
     }
 }
 
@@ -399,6 +399,21 @@ pub struct CitedClaim {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimVerdict {
+    Supported,
+    Unsupported,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimVerification {
+    pub claim_id: String,
+    pub evidence_ids: Vec<String>,
+    pub verdict: ClaimVerdict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalyzedDocument {
     pub document_id: String,
     pub analysis_version: String,
@@ -425,10 +440,16 @@ pub struct SynthesizedDocument {
 pub struct VerifiedDocument {
     pub document_id: String,
     pub verification_version: String,
+    #[serde(default)]
+    pub runtime_id: String,
+    #[serde(default)]
+    pub model_id: String,
     pub summary_text: String,
     pub source_chunk_ids: Vec<String>,
     #[serde(default)]
     pub claims: Vec<CitedClaim>,
+    #[serde(default)]
+    pub claim_verifications: Vec<ClaimVerification>,
     pub warnings: Vec<PipelineWarning>,
 }
 
