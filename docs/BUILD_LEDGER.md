@@ -1337,3 +1337,102 @@ future work
   Debian remains the only verified bundle target. OCR/vision, additional source
   formats, remote inference, workflow automation, and cross-machine Connect
   remain outside the native-text PDF v1 release boundary.
+
+## Office Document Acceptance and Paid-Connect Boundary (2026-08-30)
+
+**Status**: Deterministic public-corpus and one-page live completion proofs
+passed; full multi-page live completion remains blocked by concurrent GPU load
+
+**Commercial distinction**:
+- "Optional Connect" means failure isolation: Document Summarizer and Email
+  Watcher retain their standalone behavior when Connect or a peer application
+  is unavailable. It does not mean Connect is a free feature or a user setting.
+- The intended sellable behavior requires a paid Connect entitlement before an
+  application advertises/discovers cross-app capabilities or admits Connect
+  jobs. Current v1 automatically advertises when provider startup succeeds, so
+  entitlement enforcement is not implemented and remains a required product
+  slice.
+- Google OAuth remains exclusively owned by Email Watcher. It retrieves the
+  selected attachment and hands Connect explicit PDF bytes plus bounded
+  metadata; Document Summarizer receives no Gmail token, mailbox access, or
+  Email Watcher database path.
+
+**Real-document harness and deterministic proof**:
+- Added ignored, path-configured integration tests for deterministic checkpoints,
+  isolated live analysis, and complete live Ollama summary/citation persistence.
+  Raw model and summary content is hidden unless a dedicated trace variable
+  opts in; default reports expose only lengths and hashes.
+- Downloaded but did not commit five public documents: IRS Form W-9, a rotated
+  DOL minimum-wage poster, Grand County independent-contractor agreements, a
+  scanned/OCR NARA records schedule, and a 111-page DOL training deck. Their
+  source URLs, hashes, purposes, and reproducible commands are recorded in
+  `docs/OFFICE_ACCEPTANCE.md`.
+- All five passed ingestion through chunking with unchanged source bytes, page
+  topology, exact normalized-block accounting, provenance, ordered events, and
+  equal artifacts after an independent SQLite connection reopen. The NARA
+  schedule retained page 9 as visual-processing-required with
+  `NO_NATIVE_TEXT`; no page or source block was invented or silently dropped.
+
+**Defects exposed and fixes applied**:
+- The first W-9 analysis failed because Qwen normalized a PDF line-wrap newline
+  to a space in an otherwise verbatim quotation. A contractor agreement also
+  exposed `non-\nbreaching` becoming `non-breaching`. Analysis now reconciles
+  only layout whitespace, including whitespace immediately after an existing
+  hyphen, then stores the literal substring from the authoritative normalized
+  block. Punctuation, case, missing or reordered words, ordinary fused words,
+  foreign IDs, duplicates, and over-limit output still fail closed.
+- The original analysis contract allowed 64 generated evidence items and 2,048
+  output tokens. A dense W-9 page drove a request past the 300-second deadline.
+  An initial eight-item/768-token cap then truncated the poster JSON during its
+  sixth item. The aligned generation contract now requests at most five items,
+  shortest sufficient quotations, and a 1,024-token budget while the persisted
+  artifact validator retains its wider historical compatibility.
+- The selected imported model rejects the full server-side schema with its
+  documented vocabulary error. The exact-error fallback now uses Ollama JSON
+  mode rather than unconstrained output. All generation requests use
+  temperature zero, fixed seed `42`, and no reasoning effort. Rust validation
+  remains authoritative.
+- Dense contractor text exposed occasional invalid JSON, altered quotations,
+  and a cross-page quote falsely associated with one block. Analysis now allows
+  one complete replacement request under a stricter one-block/one-passage
+  prompt. Rejected evidence is never partly committed; successful replacement
+  is warned, while a second invalid response or runtime failure fails the stage.
+
+**Tests and live evidence**:
+- The final full Rust run completed with 158 passing library tests, no failures,
+  and two opt-in live Ollama tests ignored; all three release-contract tests
+  passed. The office harness added one passing default-log privacy probe while
+  its three external-document tests remain intentionally opt-in. Strict Clippy,
+  the frontend production build, and the release-mode Tauri no-bundle build also
+  passed.
+- Focused tests cover exact, whitespace, and post-hyphen line-wrap quote
+  resolution; changed/fused-text rejection; source-exact persistence; duplicate
+  variants; empty/max/max-plus-one evidence counts; JSON fallback shape; fixed
+  seed/no-reasoning payloads; successful whole-response repair; persistent
+  malformed output; and no retry for runtime failure.
+- The five-document deterministic harness passed again on the final code. It
+  preserved 6, 1, 8, 12, and 111 pages respectively, retained the NARA visual
+  page 9 with `NO_NATIVE_TEXT`, accounted for every normalized block, and
+  reproduced all artifacts/events after independent SQLite connection reopen.
+- With the final bounds, the public minimum-wage poster completed the full live
+  pipeline in 395.07 seconds with five evidence items, five supported claims,
+  state version 18, and 18 events. Exact citation and summary artifacts survived
+  independent connection reopen.
+- A seeded two-chunk contractor analysis completed in 349.67 seconds with ten
+  exact evidence items. A later full contractor run failed safely after 406.48
+  seconds: the first response was contract-invalid and its one repair request
+  returned `MODEL_RUNTIME_UNAVAILABLE`; no full contractor or W-9 completion is
+  claimed.
+- These timings are not release performance proof. During the latest failure,
+  Ollama reported 78% CPU / 22% GPU while the separate LM Studio evaluation
+  retained most GPU memory. No unrelated process or file was stopped, moved, or
+  deleted.
+
+**Remaining gate**:
+- After the separate GPU evaluation ends, rerun complete W-9 and
+  contractor-agreement live tests with uncontended Ollama; inspect coverage,
+  citations, and latency. The poster is already a full live completion proof.
+- The next product slice is entitlement-gated capability discovery/admission,
+  with provider-present, provider-absent, entitlement-denied, and restoration
+  proofs. Billing UX, workflow automation, OCR/vision, and broader document
+  formats remain deferred.

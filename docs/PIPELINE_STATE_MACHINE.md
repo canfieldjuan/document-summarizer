@@ -132,9 +132,19 @@ must fail truthfully unless a future OCR/vision stage supplies text.
 For summarization, the verified normalized and chunk artifacts are loaded
 before `CHUNKED -> ANALYZING`. Model availability and each structured chunk
 response are checked before the analysis artifact commits with `ANALYZING ->
-ANALYZED`. Unknown block IDs, non-contiguous quotations, malformed JSON, and
-mixed valid/invalid evidence fail the entire response. Evidence source spans
-and deterministic IDs come from authoritative Rust state, not model output.
+ANALYZED`. Each new response contains at most five evidence items under a
+1,024-token budget. Unknown block IDs, non-contiguous or text-altered quotations,
+malformed JSON, and mixed valid/invalid evidence fail the entire response. A
+candidate quote may differ only in runs of PDF layout whitespace; Rust resolves
+that candidate to, and persists, the literal normalized-source substring before
+deriving its evidence ID. Evidence source spans and deterministic IDs come from
+authoritative Rust state, not model output.
+
+A contract-invalid chunk response may trigger one bounded whole-response
+replacement request. The rejected response contributes no evidence. Only a
+fully valid replacement advances analysis, and successful replacement is
+recorded as `MODEL_EVIDENCE_RESPONSE_REPAIRED`; a second invalid response or a
+repair-runtime failure follows the ordinary `ANALYZING -> FAILED` path.
 
 Synthesis loads the persisted analysis artifact. A small evidence catalog uses
 one request; a larger catalog is partitioned and reduced deterministically with
