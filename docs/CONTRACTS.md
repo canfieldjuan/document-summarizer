@@ -492,6 +492,15 @@ Release binaries must be produced through the Tauri build command with the
 without that feature fails at compile time rather than producing an executable
 that silently depends on the development server.
 
+The release product identity is `Document Summarizer`; its Cargo and installed
+binary name is `document-summarizer`. Cargo automatic binary discovery remains
+disabled, and diagnostic PDF probes live under `src-tauri/tools/legacy` rather
+than `src/bin`, so they cannot become application or package targets. The base
+Tauri bundle configuration remains portable. Its Linux overlay selects only the
+currently verified Debian package; AppImage, RPM, macOS, and Windows packaging
+remain separate target-platform work. A supported Linux package must contain the
+desktop executable, desktop entry, and icons without legacy probe executables.
+
 Current limits are conservative: source chunks and the aggregate
 claim-verification input are capped at 100,000 Unicode characters. Synthesis
 has no single aggregate prompt; every direct, evidence-batch, and candidate

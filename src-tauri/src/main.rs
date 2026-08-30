@@ -7,7 +7,7 @@ compile_error!(
 );
 
 fn main() {
-    if let Err(error) = tauri_appdoc_sum_lib::run() {
+    if let Err(error) = document_summarizer_lib::run() {
         eprintln!("Document Summarizer failed to start: {error}");
         std::process::exit(1);
     }

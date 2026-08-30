@@ -1183,3 +1183,80 @@ future work
 - OCR/vision, citations for visual-only pages, finer progress counters,
   scheduler/queue infrastructure, cross-process or Connect cancellation, and
   independent source-fact checking remain deferred.
+
+## Slice 14 — Reproducible Linux Release Package and Desktop Acceptance
+
+**Status**: Implemented; locally verified
+
+**Release contract and fixes**:
+- Replaced scaffold package metadata with the `Document Summarizer` product,
+  `document-summarizer` Cargo/npm/binary identity, Juan Canfield publisher, a
+  native-text PDF description, and a productivity desktop category. The Tauri
+  application identifier remains unchanged, preserving the existing private
+  application-data location.
+- Retained the cross-platform base bundle configuration and added a Linux
+  override selecting the currently supported Debian bundle. The canonical
+  `npm run desktop:build` therefore no longer requests an AppImage from this
+  host, where the inspected GTK bundling plugin required unavailable
+  `librsvg-2.0` development metadata.
+- Moved both legacy PDF probe sources intact from Cargo's conventional
+  `src/bin` directory into `src-tauri/tools/legacy`. A clean target can no
+  longer fail because Tauri expects an excluded probe binary, and a dirty
+  target can no longer leak a stale diagnostic executable into the package.
+- Added a focused release-contract test for product metadata, the Linux bundle
+  boundary, and both sides of the probe-discovery rule: no Rust probes under
+  `src/bin`, while both retained legacy sources still exist.
+
+**Package and regression proof**:
+- `npm run desktop:build` was run with a newly created empty Cargo target. It
+  completed and emitted one Debian bundle. `dpkg-deb` reported package
+  `document-summarizer`, version `0.1.0`, architecture `amd64`, maintainer
+  `Juan Canfield`, and the intended short/long descriptions.
+- Package-content inspection found one executable,
+  `/usr/bin/document-summarizer`, plus the desktop entry and application icons;
+  neither legacy probe executable was present. The regenerated desktop entry
+  reported `Name=Document Summarizer`, `Exec=document-summarizer`, and a
+  nonempty `Office` category.
+- The all-target/all-feature Rust library suite ran 153 tests: 151 passed and
+  the two opt-in live Ollama tests were ignored. The release-contract
+  integration target ran 3 tests and all passed. Rust formatting, strict
+  all-target/all-feature Clippy, and the TypeScript/Vite production build also
+  passed.
+
+**Real desktop, failure, and restart proof**:
+- The exact fresh-target release executable was launched with an isolated
+  application-data profile. Its rendered Tauri window reported `Ollama ready`
+  and `qwen3-30b-a3b:latest`. The real `Choose a PDF` control opened the native
+  file chooser, which selected `tests/fixtures/structured_report.pdf`; the UI
+  then reported cancellable background processing.
+- Under the unchanged 60-second request timeout and concurrent GPU load from a
+  separate LM Studio `llama-server`, the first run durably failed during
+  synthesis at state version 15. It showed a recoverable retry action and had no
+  summary row, proving the release UI did not masquerade runtime failure as
+  success. That separate process was not stopped or modified.
+- The application was independently relaunched against the same profile with
+  the existing `DOC_SUM_MODEL_TIMEOUT_SECONDS=300` deployment override. The
+  failed record reappeared unchanged, its UI retry created a second run for the
+  same document identity, and live Ollama processing reached
+  `CompleteWithWarnings` at state version 18.
+- The completed UI rendered 5 cited claims. Activating claim 1's evidence
+  control displayed `EXACT SOURCE EXCERPT`, page 1, and the corresponding
+  source text. After another independent release-process reopen, Recent Work
+  restored both attempts and reopened the same completed summary.
+- Before and after reopen, the completed artifact remained summary version
+  `3.0.0` with SHA-256
+  `7b36913e8b0a4362e1d06a57f96e75454d03e53a15d48d6557619a75f319a5db`;
+  SQLite `quick_check` returned `ok`. This is a real native-picker, live-model,
+  packaged-release, process-restart proof, not merely a database-connection
+  reopen.
+
+**Known limits and deferred work**:
+- The successful live proof used the documented 300-second timeout override
+  after the default-timeout failure. An unrelated LM Studio test remained
+  GPU-resident throughout, but the generic runtime failure did not independently
+  prove contention was its sole cause. The default timeout's behavior under an
+  idle, fully GPU-resident model was not re-measured in this slice.
+- Linux Debian packaging is the only installer format verified here. AppImage,
+  RPM, macOS, and Windows packaging/install lifecycle tests remain deferred to
+  their target environments. OCR/vision and additional document formats remain
+  outside the native-text PDF v1 boundary.

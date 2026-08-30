@@ -947,6 +947,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "document-summarizer"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "pdf-extract",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "dom_query"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4054,29 +4077,6 @@ dependencies = [
  "webview2-com",
  "window-vibrancy",
  "windows",
-]
-
-[[package]]
-name = "tauri-appdoc_sum"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "pdf-extract",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-single-instance",
- "thiserror 1.0.69",
- "tokio",
- "uuid",
 ]
 
 [[package]]
