@@ -28,11 +28,11 @@ pub struct PipelineRun {
 }
 ```
 
-`resumable` records checkpoint eligibility metadata only. Desktop startup now
-detects implemented active-stage states and reconciles work interrupted by a
-previous process to a retryable `FAILED` result. No same-run resume command or
-automatic work replay is implemented; retry currently means submitting the
-document again.
+`resumable` records checkpoint eligibility metadata. Desktop startup detects
+implemented active-stage states and reconciles work interrupted by a previous
+process to a retryable `FAILED` result. An eligible failed run can now create a
+separate retry run from the durable `INGESTED` checkpoint. No same-run resume
+command or automatic work replay is implemented.
 
 ## `PipelineEvent`
 An immutable ledger entry indicating a transition from one state to another.
@@ -137,6 +137,43 @@ desktop invokes reconciliation explicitly after acquiring process ownership so
 an ordinary second database connection cannot steal active work. Reserved
 visual-analysis and cancellation states remain outside this policy until their
 execution paths exist.
+
+## Explicit retry lineage
+
+Retry never changes a failed run or appends new events to it. A retry creates a
+new `PipelineRun` for the same `document_id` and persists an immutable
+`RetryLineage` relation:
+
+```rust
+pub struct RetryLineage {
+    pub retry_run_id: String,
+    pub source_run_id: String,
+    pub checkpoint: RetryCheckpoint,
+    pub created_at: DateTime<Utc>,
+}
+```
+
+Slice 9 admits only the `INGESTED` checkpoint. The source must be `FAILED`,
+`resumable`, carry a recoverable failure from a stage after ingestion, and have
+no existing direct retry. One source attempt can create one direct child;
+another retry may originate from that child if it later fails. This forms an
+auditable chain without rewriting terminal history.
+
+The child run, lineage row, `RECEIVED -> INGESTING -> INGESTED -> PARSING`
+state/version updates, and four immutable events commit in one SQLite
+transaction. The events identify retry creation, checkpoint reuse, and parser
+work admission. Committing the child as active closes the crash window between
+checkpoint creation and parser startup: an interruption before parsing
+completes is handled by ordinary active-stage recovery. A stale source version,
+invalid source, duplicate child, event failure, or lineage write failure leaves
+no partial child.
+
+After the atomic admission transaction, the ordinary parser/runtime-neutral
+pipeline continues from active `PARSING`. The parser reads the persisted source
+path, verifies byte size and SHA-256 against the shared document identity, and
+parses those verified bytes. A missing or changed source therefore fails the
+child attempt durably without altering its parent. Retry is user initiated;
+startup never invokes a parser or model.
 
 ## Long-term replaceability seams
 

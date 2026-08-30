@@ -121,6 +121,21 @@ pub struct PipelineRun {
     pub resumable: bool,
 }
 
+impl PipelineRun {
+    pub(crate) fn retry_checkpoint(&self) -> Option<RetryCheckpoint> {
+        let failure = self.failure.as_ref()?;
+        if self.state != PipelineState::Failed
+            || !self.resumable
+            || !failure.recoverable
+            || failure.stage.is_none()
+            || failure.stage.as_ref() == Some(&PipelineStage::Ingest)
+        {
+            return None;
+        }
+        Some(RetryCheckpoint::Ingested)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineEvent {
     pub event_id: String,
@@ -132,6 +147,19 @@ pub struct PipelineEvent {
     pub stage: Option<PipelineStage>,
     pub work_unit_id: Option<String>,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RetryCheckpoint {
+    Ingested,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryLineage {
+    pub retry_run_id: String,
+    pub source_run_id: String,
+    pub checkpoint: RetryCheckpoint,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

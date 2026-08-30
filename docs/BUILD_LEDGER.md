@@ -804,3 +804,92 @@ future work
   it did not visually assert that the existing window took focus.
 - The existing stale Connect registration-file cleanup and live UI citation
   click remain separate deferred hardening.
+
+## Slice 9 — Explicit New-Run Retry and Recovery Visibility
+
+**Status**: Implemented and locally accepted
+
+**Retry and lineage contract**:
+- An eligible `FAILED` run can create one direct child attempt from the durable
+  `INGESTED` checkpoint. Eligibility requires `resumable = true`, a structured
+  recoverable failure from a post-ingestion stage, the caller's current source
+  state version, and no existing direct child.
+- Retry never transitions a terminal run backward. The child shares the
+  durable `document_id` but receives its own `run_id`, state versions, events,
+  downstream artifacts, and final outcome. A failed child may become the
+  source of another attempt, preserving the full retry chain.
+- Explicit schema v12 adds `pipeline_run_retries`, including source uniqueness,
+  same-row source/child rejection, foreign keys, and update/delete rejection
+  triggers. Reads validate that both attempts belong to the same document and
+  that lineage time matches child creation time.
+
+**State, source, and transaction behavior**:
+- Child creation reuses the ordinary centralized state transition boundary to
+  persist `RECEIVED -> INGESTING -> INGESTED -> PARSING`. Its creation event is
+  labeled `retry_run_created`; both checkpoint transitions are labeled
+  `retry_checkpoint_reused`, and parser admission is labeled
+  `retry_processing_started`.
+- The child run, four immutable events, active parser state, and lineage
+  relation commit in one immediate SQLite transaction. Injected lineage failure
+  rolls all of them back. Committing an active state also ensures a crash before
+  parser work is reconciled on restart instead of stranding an inaccessible
+  `INGESTED` child. The source run and its existing event history are never
+  written.
+- Processing after atomic parser admission uses the existing parser-neutral
+  pipeline. The parser rereads the persisted source, validates its exact byte
+  size and SHA-256, and durably fails only the child when the source is missing
+  or has changed. Restoring the bytes permits a new attempt sourced from that
+  failed child; no duplicate document row is created.
+
+**Desktop behavior**:
+- Recent-work projections expose only retry lineage IDs and an application-
+  derived `canRetry` decision. The frontend does not choose a checkpoint or
+  mutate state; it supplies source run ID plus expected version to one thin
+  Tauri command.
+- Startup-reconciled attempts render a durable recovery notice and an
+  `Interrupted · retry available` history state. Opening an eligible failure
+  offers `Retry as new attempt`; an already-retried parent points the operator
+  back to Recent work. Runtime-unavailable state disables execution without
+  changing either attempt.
+
+**Automated proof**:
+- Focused service probes cover parent immutability, child completion, durable
+  lineage and summary retrieval after independent database reopen, stale CAS,
+  non-failed and non-recoverable rejection, one-child enforcement, lineage-
+  insert rollback, crash-before-parser recovery, exact source-mutation failure,
+  byte restoration, and chained retry. The schema migration probe covers
+  v11-to-v12 preservation, immutable lineage, repeated initialization, reopen,
+  and SQLite `quick_check`.
+- The standard Rust suite executed 118 tests: 117 passed and the opt-in live
+  Ollama test was ignored. Strict Rust formatting, all-target/all-feature
+  Clippy, the TypeScript/Vite production build, and the no-bundle Tauri release
+  build passed.
+
+**Real process and UI proof**:
+- A schema-v12 database in a fresh isolated application-data directory was
+  seeded with a coherent `PARSING` run at version 4 and four ordered events.
+  The release executable's real Tauri setup path reported one reconciliation;
+  an independent SQLite read observed `FAILED` at version 5, recoverable
+  `PROCESS_INTERRUPTED`, the sequence-4 `PARSING -> FAILED` event, and
+  `quick_check = ok`.
+- The release executable was then reopened against the same durable database
+  through the X11 desktop path. A captured 1180-by-780 application window
+  displayed the recovery notice and marked the source item
+  `Interrupted · retry available`.
+
+**Evidence boundary and deferred work**:
+- Retry execution is proven through the application service with deterministic
+  parser and runtime boundaries; this checkpoint did not click the live Tauri
+  retry button or rerun the selected Ollama model. The runtime and full summary
+  pipeline were unchanged by this slice.
+- Slice 9 deliberately reuses only `INGESTED`, so parsing and every downstream
+  stage are recomputed. It does not copy parser/model artifacts, mutate a failed
+  attempt, auto-replay work, add cancellation, or change Connect's job retry
+  contract.
+- A retry still requires the privately owned source path to remain readable
+  with its original bytes. Background job execution, cancellation UI, visual
+  analysis, OCR, and stale Connect registration cleanup remain deferred.
+- Stable inter-stage checkpoints reached just before a later stage starts are
+  still preserved as truthful incomplete runs rather than auto-replayed on
+  startup. A future explicit checkpoint-resume policy may make those runs
+  actionable; this slice closes only the retry-child creation-to-parser handoff.

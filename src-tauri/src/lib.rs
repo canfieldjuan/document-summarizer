@@ -19,7 +19,9 @@ use pipeline::parser::{
     parse_document as parse_pipeline_document, ParsePipelineError, PdfExtractParser,
 };
 use pipeline::recovery::reconcile_interrupted_runs;
-use pipeline::service::{process_pdf_to_summary, DocumentServiceError, SummaryComponents};
+use pipeline::service::{
+    process_pdf_to_summary, retry_failed_run_to_summary, DocumentServiceError, SummaryComponents,
+};
 use pipeline::structure::{
     structure_document as structure_pipeline_document, DeterministicStructureInterpreter,
     StructurePipelineError,
@@ -215,6 +217,36 @@ fn summarize_document(
 }
 
 #[tauri::command]
+fn retry_document(
+    state: State<'_, AppState>,
+    run_id: String,
+    expected_state_version: u32,
+) -> Result<CompletedSummaryView, CommandError> {
+    let runtime = OllamaRuntime::from_environment().map_err(CommandError::from)?;
+    let mut conn = state.db.lock().map_err(|_| {
+        CommandError::new(
+            "DATABASE_LOCK_UNAVAILABLE",
+            "The local database lock is unavailable",
+        )
+    })?;
+    let completed = retry_failed_run_to_summary(
+        &mut conn,
+        &run_id,
+        expected_state_version,
+        SummaryComponents {
+            parser: &PdfExtractParser::new(),
+            normalizer: &CanonicalNormalizer::new(),
+            interpreter: &DeterministicStructureInterpreter::new(),
+            chunker: &DeterministicDocumentChunker::new(),
+            runtime: &runtime,
+        },
+    )
+    .map_err(CommandError::from)?;
+    let persisted = load_persisted_summary(&conn, &completed.run_id).map_err(CommandError::from)?;
+    Ok(CompletedSummaryView::from(persisted))
+}
+
+#[tauri::command]
 fn get_runtime_status() -> RuntimeStatus {
     ollama_runtime_status()
 }
@@ -292,6 +324,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             structure_document,
             chunk_document,
             summarize_document,
+            retry_document,
             get_runtime_status,
             list_recent_runs,
             get_persisted_summary

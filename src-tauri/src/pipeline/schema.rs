@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 11;
+pub const CURRENT_SCHEMA_VERSION: u32 = 12;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -238,6 +238,33 @@ CREATE INDEX citation_artifacts_document_id_idx
 ON citation_artifacts(document_id);
 "#;
 
+const V11_TO_V12: &str = r#"
+CREATE TABLE pipeline_run_retries (
+    retry_run_id TEXT PRIMARY KEY,
+    source_run_id TEXT NOT NULL,
+    checkpoint TEXT NOT NULL CHECK (checkpoint = '"Ingested"'),
+    created_at TEXT NOT NULL,
+    CHECK (retry_run_id <> source_run_id),
+    FOREIGN KEY(retry_run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(source_run_id) REFERENCES pipeline_runs(run_id)
+);
+
+CREATE UNIQUE INDEX pipeline_run_retries_source_run_id_uq
+ON pipeline_run_retries(source_run_id);
+
+CREATE TRIGGER pipeline_run_retries_no_update
+BEFORE UPDATE ON pipeline_run_retries
+BEGIN
+    SELECT RAISE(ABORT, 'pipeline_run_retries are immutable');
+END;
+
+CREATE TRIGGER pipeline_run_retries_no_delete
+BEFORE DELETE ON pipeline_run_retries
+BEGIN
+    SELECT RAISE(ABORT, 'pipeline_run_retries are immutable');
+END;
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -419,6 +446,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V8_TO_V9)?;
         tx.execute_batch(V9_TO_V10)?;
         tx.execute_batch(V10_TO_V11)?;
+        tx.execute_batch(V11_TO_V12)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -462,6 +490,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 10 {
         migrate_v10_to_v11(conn)?;
+        current_version = 11;
+    }
+    if current_version == 11 {
+        migrate_v11_to_v12(conn)?;
     }
     validate(conn)
 }
@@ -533,6 +565,10 @@ fn migrate_v9_to_v10(conn: &mut Connection) -> Result<(), MigrationError> {
 
 fn migrate_v10_to_v11(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V10_TO_V11, 11)
+}
+
+fn migrate_v11_to_v12(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V11_TO_V12, 12)
 }
 
 fn migrate_additive(
@@ -683,6 +719,43 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         return Err(MigrationError::Invariant(
             "connect_jobs single-active-job index is missing".to_string(),
         ));
+    }
+
+    for column in ["retry_run_id", "source_run_id", "checkpoint", "created_at"] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('pipeline_run_retries') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!(
+                "pipeline_run_retries.{column} is missing"
+            )));
+        }
+    }
+    let retry_source_index: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'index' AND name = 'pipeline_run_retries_source_run_id_uq'",
+        [],
+        |row| row.get(0),
+    )?;
+    if retry_source_index != 1 {
+        return Err(MigrationError::Invariant(
+            "pipeline_run_retries source-run uniqueness index is missing".to_string(),
+        ));
+    }
+    for trigger in [
+        "pipeline_run_retries_no_update",
+        "pipeline_run_retries_no_delete",
+    ] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [trigger],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!("{trigger} is missing")));
+        }
     }
 
     let foreign_key_violation: Option<String> = conn
@@ -1050,6 +1123,111 @@ mod tests {
         assert_eq!(
             version(&reopened).expect("version should load"),
             CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn schema_v11_adds_immutable_retry_lineage_without_rewriting_runs() {
+        let database = TestDatabase::new();
+        {
+            let conn = Connection::open(&database.0).expect("v11 database should open");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            for migration in [
+                SCHEMA_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5, V5_TO_V6, V6_TO_V7, V7_TO_V8, V8_TO_V9,
+                V9_TO_V10, V10_TO_V11,
+            ] {
+                conn.execute_batch(migration)
+                    .expect("schema through v11 should initialize");
+            }
+            conn.pragma_update(None, "user_version", 11)
+                .expect("v11 version should persist");
+            conn.execute_batch(
+                r#"
+                INSERT INTO documents VALUES (
+                    'retry-document', 'retry.pdf', 'pdf', 12, 'retry-hash',
+                    '/retry.pdf', '2026-08-29T00:00:00+00:00'
+                );
+                INSERT INTO pipeline_runs VALUES (
+                    'failed-run', 'retry-document', '"Failed"', 5, '1.0',
+                    '2026-08-29T00:00:00+00:00', '2026-08-29T00:00:01+00:00',
+                    '2026-08-29T00:00:02+00:00', '2026-08-29T00:00:02+00:00', '"Parse"',
+                    '{"total_units":0,"completed_units":0,"failed_units":0}',
+                    '[]', '{"code":"PROCESS_INTERRUPTED","message":"stopped","stage":"Parse","recoverable":true}',
+                    0, 1
+                );
+                INSERT INTO pipeline_runs VALUES (
+                    'retry-run', 'retry-document', '"Ingested"', 3, '1.0',
+                    '2026-08-29T00:00:03+00:00', '2026-08-29T00:00:03+00:00',
+                    '2026-08-29T00:00:03+00:00', NULL, '"Ingest"',
+                    '{"total_units":0,"completed_units":0,"failed_units":0}',
+                    '[]', NULL, 0, 1
+                );
+                "#,
+            )
+            .expect("v11 runs should persist");
+        }
+
+        {
+            let mut conn = Connection::open(&database.0).expect("database should reopen");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            migrate(&mut conn).expect("v11 schema should migrate");
+            assert_eq!(
+                version(&conn).expect("version should load"),
+                CURRENT_SCHEMA_VERSION
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM pipeline_runs", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("existing runs should survive"),
+                2
+            );
+            conn.execute(
+                "INSERT INTO pipeline_run_retries (
+                    retry_run_id, source_run_id, checkpoint, created_at
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                [
+                    "retry-run",
+                    "failed-run",
+                    "\"Ingested\"",
+                    "2026-08-29T00:00:03+00:00",
+                ],
+            )
+            .expect("retry lineage should persist");
+            assert!(conn
+                .execute(
+                    "UPDATE pipeline_run_retries SET checkpoint = checkpoint
+                     WHERE retry_run_id = 'retry-run'",
+                    [],
+                )
+                .is_err());
+            assert!(conn
+                .execute(
+                    "DELETE FROM pipeline_run_retries WHERE retry_run_id = 'retry-run'",
+                    [],
+                )
+                .is_err());
+            assert_eq!(
+                conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                    .expect("quick check should run"),
+                "ok"
+            );
+        }
+
+        let mut reopened = Connection::open(&database.0).expect("migrated database should reopen");
+        reopened
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        migrate(&mut reopened).expect("repeated initialization should be deterministic");
+        assert_eq!(
+            reopened
+                .query_row("SELECT COUNT(*) FROM pipeline_run_retries", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("retry lineage should survive reopen"),
+            1
         );
     }
 }

@@ -1,7 +1,8 @@
 use crate::pipeline::contracts::{
     AnalyzedDocument, ChunkedDocument, CitationArtifact, IngestedDocument, NormalizedDocument,
     ParsedDocument, PipelineEvent, PipelineFailure, PipelineRun, PipelineStage, PipelineState,
-    PipelineWarning, StructuredDocument, SummaryArtifact, SynthesizedDocument, VerifiedDocument,
+    PipelineWarning, RetryCheckpoint, RetryLineage, StructuredDocument, SummaryArtifact,
+    SynthesizedDocument, VerifiedDocument,
 };
 use crate::pipeline::schema::{self, MigrationError};
 use crate::pipeline::state::{StateMachine, TransitionError};
@@ -102,6 +103,15 @@ pub enum StoreError {
     StaleWrite { run_id: String },
     #[error("Invalid interrupted-run recovery transition from {state:?}")]
     InvalidRecoveryTransition { state: PipelineState },
+    #[error("Pipeline run {run_id} cannot be retried: {reason}")]
+    InvalidRetrySource { run_id: String, reason: String },
+    #[error("Pipeline run {source_run_id} already has retry run {retry_run_id}")]
+    RetryAlreadyExists {
+        source_run_id: String,
+        retry_run_id: String,
+    },
+    #[error("Retry lineage metadata is inconsistent for run {retry_run_id}")]
+    RetryLineageMismatch { retry_run_id: String },
     #[error(transparent)]
     Migration(#[from] MigrationError),
     #[error(transparent)]
@@ -321,6 +331,80 @@ pub fn get_pipeline_run(
                 cancellation_requested,
                 resumable,
             })
+        },
+    )
+    .transpose()
+}
+
+pub fn get_retry_lineage_for_retry(
+    conn: &Connection,
+    retry_run_id: &str,
+) -> Result<Option<RetryLineage>, StoreError> {
+    load_retry_lineage(conn, "WHERE retry_lineage.retry_run_id = ?1", retry_run_id)
+}
+
+pub fn get_retry_lineage_for_source(
+    conn: &Connection,
+    source_run_id: &str,
+) -> Result<Option<RetryLineage>, StoreError> {
+    load_retry_lineage(
+        conn,
+        "WHERE retry_lineage.source_run_id = ?1",
+        source_run_id,
+    )
+}
+
+fn load_retry_lineage(
+    conn: &Connection,
+    predicate: &str,
+    run_id: &str,
+) -> Result<Option<RetryLineage>, StoreError> {
+    let query = format!(
+        "SELECT retry_lineage.retry_run_id, retry_lineage.source_run_id,
+                retry_lineage.checkpoint, retry_lineage.created_at,
+                retry_run.document_id, source_run.document_id, retry_run.created_at
+         FROM pipeline_run_retries AS retry_lineage
+         JOIN pipeline_runs AS retry_run ON retry_run.run_id = retry_lineage.retry_run_id
+         JOIN pipeline_runs AS source_run ON source_run.run_id = retry_lineage.source_run_id
+         {predicate}"
+    );
+    let row = conn
+        .query_row(&query, [run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .optional()?;
+
+    row.map(
+        |(
+            retry_run_id,
+            source_run_id,
+            checkpoint,
+            created_at,
+            retry_document_id,
+            source_document_id,
+            retry_created_at,
+        )| {
+            let lineage = RetryLineage {
+                retry_run_id: retry_run_id.clone(),
+                source_run_id,
+                checkpoint: from_json(&checkpoint)?,
+                created_at: parse_timestamp(created_at)?,
+            };
+            if lineage.checkpoint != RetryCheckpoint::Ingested
+                || retry_document_id != source_document_id
+                || lineage.created_at != parse_timestamp(retry_created_at)?
+            {
+                return Err(StoreError::RetryLineageMismatch { retry_run_id });
+            }
+            Ok(lineage)
         },
     )
     .transpose()
@@ -886,6 +970,15 @@ pub(crate) fn persist_ingestion_in_transaction(
     }
 
     insert_document(tx, document)?;
+    persist_received_run_to_ingested(tx, run, "run_created", None)
+}
+
+fn persist_received_run_to_ingested(
+    tx: &Transaction<'_>,
+    run: &PipelineRun,
+    creation_reason: &str,
+    transition_reason: Option<&str>,
+) -> Result<PipelineRun, StoreError> {
     insert_pipeline_run(tx, run)?;
     insert_pipeline_event(
         tx,
@@ -898,7 +991,7 @@ pub(crate) fn persist_ingestion_in_transaction(
             timestamp: run.created_at,
             stage: None,
             work_unit_id: None,
-            reason: Some("run_created".to_string()),
+            reason: Some(creation_reason.to_string()),
         },
     )?;
 
@@ -909,7 +1002,7 @@ pub(crate) fn persist_ingestion_in_transaction(
         1,
         PipelineState::Ingesting,
         Some(PipelineStage::Ingest),
-        None,
+        transition_reason.map(str::to_string),
         TransitionPatch::default(),
     )?;
     let ingested = transition_in_tx(
@@ -919,10 +1012,97 @@ pub(crate) fn persist_ingestion_in_transaction(
         ingesting.state_version,
         PipelineState::Ingested,
         Some(PipelineStage::Ingest),
-        None,
+        transition_reason.map(str::to_string),
         TransitionPatch::default(),
     )?;
     Ok(ingested)
+}
+
+pub(super) fn create_retry_run(
+    conn: &mut Connection,
+    source_run_id: &str,
+    expected_source_version: u32,
+    retry_run: &PipelineRun,
+) -> Result<(PipelineRun, IngestedDocument, RetryLineage), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let source_run = get_pipeline_run(&tx, source_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(source_run_id.to_string()))?;
+    if source_run.state != PipelineState::Failed {
+        return Err(StoreError::InvalidRetrySource {
+            run_id: source_run_id.to_string(),
+            reason: "only a failed run can create a retry".to_string(),
+        });
+    }
+    if source_run.state_version != expected_source_version {
+        return Err(StoreError::Transition(
+            TransitionError::ConcurrentModification {
+                expected: expected_source_version,
+                found: source_run.state_version,
+            },
+        ));
+    }
+    let checkpoint =
+        source_run
+            .retry_checkpoint()
+            .ok_or_else(|| StoreError::InvalidRetrySource {
+                run_id: source_run_id.to_string(),
+                reason: "the failure has no reusable checkpoint".to_string(),
+            })?;
+    if let Some(existing) = get_retry_lineage_for_source(&tx, source_run_id)? {
+        return Err(StoreError::RetryAlreadyExists {
+            source_run_id: source_run_id.to_string(),
+            retry_run_id: existing.retry_run_id,
+        });
+    }
+    if retry_run.document_id != source_run.document_id
+        || retry_run.state != PipelineState::Received
+        || retry_run.state_version != 1
+        || retry_run.failure.is_some()
+        || retry_run.completed_at.is_some()
+    {
+        return Err(StoreError::InvalidRetrySource {
+            run_id: source_run_id.to_string(),
+            reason: "new retry must reference the source document at RECEIVED version 1"
+                .to_string(),
+        });
+    }
+    let document = get_document(&tx, &source_run.document_id)?
+        .ok_or_else(|| StoreError::DocumentNotFound(source_run.document_id.clone()))?;
+    let ingested = persist_received_run_to_ingested(
+        &tx,
+        retry_run,
+        "retry_run_created",
+        Some("retry_checkpoint_reused"),
+    )?;
+    let parsing = transition_in_tx(
+        &tx,
+        &retry_run.run_id,
+        PipelineState::Ingested,
+        ingested.state_version,
+        PipelineState::Parsing,
+        Some(PipelineStage::Parse),
+        Some("retry_processing_started".to_string()),
+        TransitionPatch::default(),
+    )?;
+    let lineage = RetryLineage {
+        retry_run_id: retry_run.run_id.clone(),
+        source_run_id: source_run_id.to_string(),
+        checkpoint,
+        created_at: retry_run.created_at,
+    };
+    tx.execute(
+        "INSERT INTO pipeline_run_retries (
+            retry_run_id, source_run_id, checkpoint, created_at
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            lineage.retry_run_id,
+            lineage.source_run_id,
+            to_json(&lineage.checkpoint)?,
+            lineage.created_at.to_rfc3339(),
+        ],
+    )?;
+    tx.commit()?;
+    Ok((parsing, document, lineage))
 }
 
 #[cfg(test)]

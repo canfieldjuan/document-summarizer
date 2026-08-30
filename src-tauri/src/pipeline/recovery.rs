@@ -25,7 +25,7 @@ fn interruption_failure(stage: PipelineStage) -> PipelineFailure {
     PipelineFailure {
         code: INTERRUPTION_FAILURE_CODE.to_string(),
         message: format!(
-            "The application stopped while {} was in progress. Submit the document again to retry.",
+            "The application stopped while {} was in progress. Create a separate retry attempt to continue.",
             stage_label(&stage)
         ),
         stage: Some(stage),
