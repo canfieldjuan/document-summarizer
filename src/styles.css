@@ -441,6 +441,34 @@ h1 {
   animation: progress-sweep 1.5s ease-in-out infinite;
 }
 
+.cancel-action {
+  width: min(420px, 90%);
+  margin: 18px auto 0;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+}
+
+.cancel-action .action-hint {
+  margin: 0;
+  text-align: center;
+}
+
+.cancel-button {
+  border-color: rgba(168, 76, 55, 0.42);
+  color: var(--copper);
+}
+
+.cancel-button:hover:not(:disabled) {
+  border-color: var(--copper);
+  color: var(--copper);
+}
+
+.cancel-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .summary-view {
   padding-top: 34px;
 }

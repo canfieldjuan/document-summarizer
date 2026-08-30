@@ -59,9 +59,32 @@ COMPLETE / COMPLETE_WITH_WARNINGS
 ## Exceptions & Interruptions
 
 ### Cancellation
-The domain state graph reserves `CANCELLING -> CANCELLED`, but no cancellation
-command, safe-work-unit coordination, or cancelled-run resume path is
-implemented. `CANCELLED` is currently terminal.
+An application-owned desktop worker may be cancelled from any implemented
+active state or durable checkpoint through `VERIFIED`:
+
+```text
+active state or durable checkpoint
+  -> CANCELLING
+  -> CANCELLED
+```
+
+The request requires the caller's observed `state_version`. The transition to
+`CANCELLING`, version increment, durable `cancellation_requested = true`, and
+immutable `cancellation_requested` event are one transaction. A stale request
+changes nothing. After that commit, an in-memory token tells the matching worker
+to stop at a safe boundary. Worker acknowledgement commits `CANCELLED`, its next
+version, completion timestamp, and event atomically. `CANCELLED` is terminal.
+
+Checks occur between stages, around model health/generation calls, per analysis
+chunk, and per verification batch. The application does not forcibly terminate
+an in-flight parser, deterministic transformation, database transaction, or
+Ollama HTTP request. The compare-and-set artifact transaction is the final
+guard: if cancellation commits first, unfinished output and its success event
+cannot commit. If it commits between a worker finalizer's read and failure
+write, that finalization transaction acknowledges `CANCELLED` instead of
+recording a conflicting failure. Already-durable checkpoint artifacts remain
+unchanged. A stale worker that has lost state/version ownership does not mutate
+the newer owner's state.
 
 ### Failure
 Any active state can transition to `FAILED`. Parser failures, encrypted PDFs,
@@ -182,7 +205,9 @@ reconciles runs left in the implemented active states `INGESTING`, `PARSING`,
 `NORMALIZING`, `STRUCTURING`, `CHUNKING`, `ANALYZING`, `SYNTHESIZING`, or
 `VERIFYING`. Each active state transitions through the existing expected-state
 and expected-version boundary to `FAILED` with a structured, recoverable
-`PROCESS_INTERRUPTED` failure and a stage-matched immutable event.
+`PROCESS_INTERRUPTED` failure and a stage-matched immutable event. A run left
+in `CANCELLING` with its durable request marker transitions to `CANCELLED`; an
+inconsistent row without that marker is rejected rather than falsely completed.
 
 The full recovery batch is one SQLite transaction. State, version, failure, and
 events therefore all commit or all roll back. Stable/terminal runs are ignored,
@@ -193,9 +218,9 @@ before Connect performs its separate job-status restart reconciliation.
 
 This is truthful interruption reconciliation, not work replay. It preserves
 completed checkpoint artifacts and prior history but does not automatically
-rerun parsing or model requests. There is still no same-run resume command.
-Reserved `VISUAL_ANALYZING` and `CANCELLING` execution recovery remains deferred
-because those execution paths are not implemented.
+rerun parsing or model requests. Explicit stable-checkpoint continuation and
+new-run retry remain user actions. Reserved `VISUAL_ANALYZING` recovery remains
+deferred because that execution path is not implemented.
 
 ### Explicit retry lifecycle
 

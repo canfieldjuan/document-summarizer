@@ -73,8 +73,14 @@
               <div class="processing-mark" aria-hidden="true"><span></span></div>
               <p class="stage-kicker">Processing locally</p>
               <h3 id="processing-filename">Preparing document…</h3>
-              <p>Reading, organizing, and summarizing the source without changing it.</p>
+              <p id="processing-status">Preparing the durable pipeline run…</p>
               <div class="progress-track" aria-hidden="true"><span></span></div>
+              <div class="cancel-action">
+                <button id="cancel-btn" class="quiet-button cancel-button" type="button" hidden>
+                  Cancel processing
+                </button>
+                <p id="cancel-hint" class="action-hint" hidden></p>
+              </div>
             </div>
 
             <article id="summary-view" class="stage-view summary-view" hidden>

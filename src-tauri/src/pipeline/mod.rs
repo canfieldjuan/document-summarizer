@@ -1,5 +1,6 @@
 pub mod chunk;
 pub mod contracts;
+pub mod control;
 pub mod db;
 pub mod ingest;
 pub mod model;

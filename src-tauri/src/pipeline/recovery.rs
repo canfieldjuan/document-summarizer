@@ -1,5 +1,5 @@
 use crate::pipeline::contracts::{PipelineFailure, PipelineRun, PipelineStage};
-use crate::pipeline::db::{self, InterruptedRunTransition, StoreError};
+use crate::pipeline::db::{self, InterruptedRunAction, InterruptedRunTransition, StoreError};
 use rusqlite::Connection;
 
 pub const INTERRUPTION_FAILURE_CODE: &str = "PROCESS_INTERRUPTED";
@@ -8,17 +8,21 @@ pub fn reconcile_interrupted_runs(conn: &mut Connection) -> Result<Vec<PipelineR
     let candidates = db::list_pipeline_runs_for_recovery(conn)?
         .into_iter()
         .filter_map(|run| {
-            let stage = run.state.active_stage()?;
+            let action = if run.state == crate::pipeline::contracts::PipelineState::Cancelling {
+                InterruptedRunAction::CompleteCancellation
+            } else {
+                InterruptedRunAction::Fail(interruption_failure(run.state.active_stage()?))
+            };
             Some(InterruptedRunTransition {
                 run_id: run.run_id,
                 expected_state: run.state,
                 expected_version: run.state_version,
-                failure: interruption_failure(stage),
+                action,
             })
         })
         .collect::<Vec<_>>();
 
-    db::fail_interrupted_runs(conn, &candidates)
+    db::reconcile_interrupted_runs_in_transaction(conn, &candidates)
 }
 
 fn interruption_failure(stage: PipelineStage) -> PipelineFailure {
@@ -229,6 +233,88 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_cancellation_completes_once_after_independent_reopen() {
+        let source = TestPath::new("pdf", b"%PDF-1.4\nCANCELLATION_RECOVERY_BYTES");
+        let database = TestPath::empty("db");
+        let cancelling = {
+            let mut conn = init_db(&database.0).expect("database should initialize");
+            let parsing = start_parsing_run(&mut conn, &source);
+            db::request_cancellation(&mut conn, &parsing.run_id, parsing.state_version)
+                .expect("cancellation request should persist")
+        };
+
+        let mut reopened = init_db(&database.0).expect("database should reopen independently");
+        let recovered = reconcile_interrupted_runs(&mut reopened)
+            .expect("interrupted cancellation should reconcile");
+        assert_eq!(recovered.len(), 1);
+        let cancelled = &recovered[0];
+        assert_eq!(cancelled.run_id, cancelling.run_id);
+        assert_eq!(cancelled.state, PipelineState::Cancelled);
+        assert_eq!(cancelled.state_version, cancelling.state_version + 1);
+        assert!(cancelled.cancellation_requested);
+        assert!(cancelled.completed_at.is_some());
+        let events = list_pipeline_events(&reopened, &cancelled.run_id)
+            .expect("cancellation history should survive reopen");
+        let event = events.last().expect("recovery event should exist");
+        assert_eq!(event.previous_state, Some(PipelineState::Cancelling));
+        assert_eq!(event.next_state, PipelineState::Cancelled);
+        assert_eq!(
+            event.reason.as_deref(),
+            Some("cancellation_completed_after_restart")
+        );
+
+        let second = reconcile_interrupted_runs(&mut reopened)
+            .expect("repeated recovery should be idempotent");
+        assert!(second.is_empty());
+        assert_eq!(
+            list_pipeline_events(&reopened, &cancelled.run_id)
+                .expect("events should remain readable"),
+            events
+        );
+    }
+
+    #[test]
+    fn recovery_rejects_cancelling_state_without_durable_request_flag() {
+        let source = TestPath::new("pdf", b"%PDF-1.4\nINVALID_CANCELLATION_RECOVERY");
+        let database = TestPath::empty("db");
+        let cancelling = {
+            let mut conn = init_db(&database.0).expect("database should initialize");
+            let parsing = start_parsing_run(&mut conn, &source);
+            let cancelling =
+                db::request_cancellation(&mut conn, &parsing.run_id, parsing.state_version)
+                    .expect("cancellation request should persist");
+            conn.execute(
+                "UPDATE pipeline_runs SET cancellation_requested = 0 WHERE run_id = ?1",
+                [&cancelling.run_id],
+            )
+            .expect("test should create an inconsistent durable row");
+            cancelling
+        };
+
+        let mut reopened = init_db(&database.0).expect("database should reopen independently");
+        let events_before = list_pipeline_events(&reopened, &cancelling.run_id)
+            .expect("events should load before recovery");
+        let rejected = reconcile_interrupted_runs(&mut reopened);
+        assert!(matches!(
+            rejected,
+            Err(StoreError::InvalidRecoveryTransition {
+                state: PipelineState::Cancelling
+            })
+        ));
+        let persisted = get_pipeline_run(&reopened, &cancelling.run_id)
+            .expect("run should reload")
+            .expect("run should remain present");
+        assert_eq!(persisted.state, PipelineState::Cancelling);
+        assert_eq!(persisted.state_version, cancelling.state_version);
+        assert!(!persisted.cancellation_requested);
+        assert_eq!(
+            list_pipeline_events(&reopened, &cancelling.run_id)
+                .expect("rejected recovery must not add an event"),
+            events_before
+        );
+    }
+
+    #[test]
     fn recovery_event_failure_rolls_back_the_entire_batch() {
         let source = TestPath::new("pdf", b"%PDF-1.4\nRECOVERY_BATCH_BYTES");
         let mut conn = init_db(":memory:").expect("database should initialize");
@@ -299,16 +385,19 @@ mod tests {
             run_id: parsing.run_id.clone(),
             expected_state: parsing.state.clone(),
             expected_version: parsing.state_version,
-            failure: interruption_failure(PipelineStage::Parse),
+            action: InterruptedRunAction::Fail(interruption_failure(PipelineStage::Parse)),
         };
         let invalid_stable = InterruptedRunTransition {
             run_id: stable.run_id.clone(),
             expected_state: stable.state.clone(),
             expected_version: stable.state_version,
-            failure: interruption_failure(PipelineStage::Ingest),
+            action: InterruptedRunAction::Fail(interruption_failure(PipelineStage::Ingest)),
         };
 
-        let mixed = db::fail_interrupted_runs(&mut conn, &[valid.clone(), invalid_stable]);
+        let mixed = db::reconcile_interrupted_runs_in_transaction(
+            &mut conn,
+            &[valid.clone(), invalid_stable],
+        );
         assert!(matches!(
             mixed,
             Err(StoreError::InvalidRecoveryTransition {
@@ -332,9 +421,16 @@ mod tests {
             stable
         );
 
-        let mut malformed = valid;
-        malformed.failure.code = "OTHER_FAILURE".to_string();
-        let rejected = db::fail_interrupted_runs(&mut conn, &[malformed]);
+        let malformed = InterruptedRunTransition {
+            action: InterruptedRunAction::Fail(PipelineFailure {
+                code: "OTHER_FAILURE".to_string(),
+                message: "Malformed recovery candidate".to_string(),
+                stage: Some(PipelineStage::Parse),
+                recoverable: true,
+            }),
+            ..valid
+        };
+        let rejected = db::reconcile_interrupted_runs_in_transaction(&mut conn, &[malformed]);
         assert!(matches!(
             rejected,
             Err(StoreError::InvalidRecoveryTransition {
@@ -363,7 +459,7 @@ mod tests {
             run_id: observed.run_id.clone(),
             expected_state: observed.state.clone(),
             expected_version: observed.state_version,
-            failure: interruption_failure(PipelineStage::Parse),
+            action: InterruptedRunAction::Fail(interruption_failure(PipelineStage::Parse)),
         };
 
         let newer_failure = PipelineFailure {
@@ -382,7 +478,7 @@ mod tests {
         let events_after_first = list_pipeline_events(&caller_a, &parsing.run_id)
             .expect("first caller events should load");
 
-        let stale = db::fail_interrupted_runs(&mut caller_b, &[candidate]);
+        let stale = db::reconcile_interrupted_runs_in_transaction(&mut caller_b, &[candidate]);
         assert!(matches!(
             stale,
             Err(StoreError::Transition(

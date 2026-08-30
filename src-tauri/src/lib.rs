@@ -1,7 +1,9 @@
 pub mod connect;
+mod desktop;
 pub mod pipeline;
 
 use connect::provider::ConnectProvider;
+use desktop::{BackgroundRunAccepted, DesktopJobError, DesktopJobManager};
 use pipeline::chunk::{
     chunk_document as chunk_pipeline_document, ChunkPipelineError, DeterministicDocumentChunker,
 };
@@ -9,9 +11,8 @@ use pipeline::contracts::{
     ChunkedDocument, IngestedDocument, ModelRuntimeFailure, NormalizedDocument, ParsedDocument,
     PipelineRun, StructuredDocument,
 };
-use pipeline::db::init_db;
+use pipeline::db::{init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, IngestError};
-use pipeline::model::OllamaRuntime;
 use pipeline::normalize::{
     normalize_document as normalize_pipeline_document, CanonicalNormalizer, NormalizePipelineError,
 };
@@ -19,27 +20,23 @@ use pipeline::parser::{
     parse_document as parse_pipeline_document, ParsePipelineError, PdfExtractParser,
 };
 use pipeline::recovery::reconcile_interrupted_runs;
-use pipeline::service::{
-    continuation_plan, continue_run_to_summary, process_pdf_to_summary,
-    retry_failed_run_to_summary, ContinuationComponents, DocumentServiceError, SummaryComponents,
-};
+use pipeline::service::DocumentServiceError;
 use pipeline::structure::{
     structure_document as structure_pipeline_document, DeterministicStructureInterpreter,
     StructurePipelineError,
 };
 use pipeline::workspace::{
-    get_persisted_summary as load_persisted_summary, list_recent_runs as load_recent_runs,
-    ollama_runtime_status, CompletedSummaryView, PersistedSummary, RunHistoryItem, RuntimeStatus,
-    WorkspaceError,
+    get_persisted_summary as load_persisted_summary, get_run as load_run,
+    list_recent_runs as load_recent_runs, ollama_runtime_status, PersistedSummary, RunHistoryItem,
+    RuntimeStatus, WorkspaceError,
 };
 use rusqlite::Connection;
 use serde::Serialize;
 use std::error::Error;
-use std::sync::Mutex;
 use tauri::{Manager, State};
 
 struct AppState {
-    db: Mutex<Connection>,
+    jobs: DesktopJobManager,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,17 +108,29 @@ impl From<WorkspaceError> for CommandError {
     }
 }
 
+impl From<StoreError> for CommandError {
+    fn from(error: StoreError) -> Self {
+        Self::new("PIPELINE_STORE_ERROR", error.to_string())
+    }
+}
+
+impl From<DesktopJobError> for CommandError {
+    fn from(error: DesktopJobError) -> Self {
+        let code = error.code().to_string();
+        Self::new(code, error.to_string())
+    }
+}
+
+fn open_database(state: &AppState) -> Result<Connection, CommandError> {
+    init_db(state.jobs.db_path()).map_err(CommandError::from)
+}
+
 #[tauri::command]
 fn ingest_document(
     state: State<'_, AppState>,
     file_path: String,
 ) -> Result<(IngestedDocument, PipelineRun), CommandError> {
-    let mut conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
+    let mut conn = open_database(&state)?;
     ingest_pdf(&mut conn, &file_path).map_err(CommandError::from)
 }
 
@@ -130,12 +139,7 @@ fn parse_document(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<ParsedDocument, CommandError> {
-    let mut conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
+    let mut conn = open_database(&state)?;
     parse_pipeline_document(&mut conn, &PdfExtractParser::new(), &run_id)
         .map_err(CommandError::from)
 }
@@ -145,12 +149,7 @@ fn normalize_document(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<NormalizedDocument, CommandError> {
-    let mut conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
+    let mut conn = open_database(&state)?;
     normalize_pipeline_document(&mut conn, &CanonicalNormalizer::new(), &run_id)
         .map_err(CommandError::from)
 }
@@ -160,12 +159,7 @@ fn structure_document(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<StructuredDocument, CommandError> {
-    let mut conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
+    let mut conn = open_database(&state)?;
     structure_pipeline_document(
         &mut conn,
         &DeterministicStructureInterpreter::new(),
@@ -179,12 +173,7 @@ fn chunk_document(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<ChunkedDocument, CommandError> {
-    let mut conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
+    let mut conn = open_database(&state)?;
     chunk_pipeline_document(&mut conn, &DeterministicDocumentChunker::new(), &run_id)
         .map_err(CommandError::from)
 }
@@ -193,28 +182,8 @@ fn chunk_document(
 fn summarize_document(
     state: State<'_, AppState>,
     file_path: String,
-) -> Result<CompletedSummaryView, CommandError> {
-    let runtime = OllamaRuntime::from_environment().map_err(CommandError::from)?;
-    let mut conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
-    let completed = process_pdf_to_summary(
-        &mut conn,
-        &file_path,
-        SummaryComponents {
-            parser: &PdfExtractParser::new(),
-            normalizer: &CanonicalNormalizer::new(),
-            interpreter: &DeterministicStructureInterpreter::new(),
-            chunker: &DeterministicDocumentChunker::new(),
-            runtime: &runtime,
-        },
-    )
-    .map_err(CommandError::from)?;
-    let persisted = load_persisted_summary(&conn, &completed.run_id).map_err(CommandError::from)?;
-    Ok(CompletedSummaryView::from(persisted))
+) -> Result<BackgroundRunAccepted, CommandError> {
+    state.jobs.start_pdf(&file_path).map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -222,29 +191,11 @@ fn retry_document(
     state: State<'_, AppState>,
     run_id: String,
     expected_state_version: u32,
-) -> Result<CompletedSummaryView, CommandError> {
-    let runtime = OllamaRuntime::from_environment().map_err(CommandError::from)?;
-    let mut conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
-    let completed = retry_failed_run_to_summary(
-        &mut conn,
-        &run_id,
-        expected_state_version,
-        SummaryComponents {
-            parser: &PdfExtractParser::new(),
-            normalizer: &CanonicalNormalizer::new(),
-            interpreter: &DeterministicStructureInterpreter::new(),
-            chunker: &DeterministicDocumentChunker::new(),
-            runtime: &runtime,
-        },
-    )
-    .map_err(CommandError::from)?;
-    let persisted = load_persisted_summary(&conn, &completed.run_id).map_err(CommandError::from)?;
-    Ok(CompletedSummaryView::from(persisted))
+) -> Result<BackgroundRunAccepted, CommandError> {
+    state
+        .jobs
+        .start_retry(&run_id, expected_state_version)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -252,42 +203,23 @@ fn continue_document(
     state: State<'_, AppState>,
     run_id: String,
     expected_state_version: u32,
-) -> Result<CompletedSummaryView, CommandError> {
-    let mut conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
-    let plan = continuation_plan(&conn, &run_id, expected_state_version)
-        .map_err(DocumentServiceError::from)
-        .map_err(CommandError::from)?;
-    let runtime = if plan.requires_runtime {
-        Some(OllamaRuntime::from_environment().map_err(CommandError::from)?)
-    } else {
-        None
-    };
-    let parser = PdfExtractParser::new();
-    let normalizer = CanonicalNormalizer::new();
-    let interpreter = DeterministicStructureInterpreter::new();
-    let chunker = DeterministicDocumentChunker::new();
-    let completed = continue_run_to_summary(
-        &mut conn,
-        &run_id,
-        expected_state_version,
-        ContinuationComponents {
-            parser: &parser,
-            normalizer: &normalizer,
-            interpreter: &interpreter,
-            chunker: &chunker,
-            runtime: runtime
-                .as_ref()
-                .map(|runtime| runtime as &dyn pipeline::contracts::ModelRuntime),
-        },
-    )
-    .map_err(CommandError::from)?;
-    let persisted = load_persisted_summary(&conn, &completed.run_id).map_err(CommandError::from)?;
-    Ok(CompletedSummaryView::from(persisted))
+) -> Result<BackgroundRunAccepted, CommandError> {
+    state
+        .jobs
+        .start_continuation(&run_id, expected_state_version)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn cancel_document(
+    state: State<'_, AppState>,
+    run_id: String,
+    expected_state_version: u32,
+) -> Result<RunHistoryItem, CommandError> {
+    state
+        .jobs
+        .request_cancellation(&run_id, expected_state_version)?;
+    get_run_status(state, run_id)
 }
 
 #[tauri::command]
@@ -297,13 +229,30 @@ fn get_runtime_status() -> RuntimeStatus {
 
 #[tauri::command]
 fn list_recent_runs(state: State<'_, AppState>) -> Result<Vec<RunHistoryItem>, CommandError> {
-    let conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
-    load_recent_runs(&conn).map_err(CommandError::from)
+    let conn = open_database(&state)?;
+    let mut runs = load_recent_runs(&conn).map_err(CommandError::from)?;
+    for run in &mut runs {
+        let active = state
+            .jobs
+            .is_active(&run.run_id)
+            .map_err(CommandError::from)?;
+        run.background_active = active;
+        run.can_cancel = run.state.can_request_cancellation() && active;
+    }
+    Ok(runs)
+}
+
+#[tauri::command]
+fn get_run_status(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<RunHistoryItem, CommandError> {
+    let active = state.jobs.is_active(&run_id).map_err(CommandError::from)?;
+    let conn = open_database(&state)?;
+    let mut run = load_run(&conn, &run_id).map_err(CommandError::from)?;
+    run.background_active = active;
+    run.can_cancel = run.state.can_request_cancellation() && active;
+    Ok(run)
 }
 
 #[tauri::command]
@@ -311,12 +260,7 @@ fn get_persisted_summary(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<PersistedSummary, CommandError> {
-    let conn = state.db.lock().map_err(|_| {
-        CommandError::new(
-            "DATABASE_LOCK_UNAVAILABLE",
-            "The local database lock is unavailable",
-        )
-    })?;
+    let conn = open_database(&state)?;
     load_persisted_summary(&conn, &run_id).map_err(CommandError::from)
 }
 
@@ -345,9 +289,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     recovered.len()
                 );
             }
+            drop(conn);
 
             app.manage(AppState {
-                db: Mutex::new(conn),
+                jobs: DesktopJobManager::new(db_path.clone()),
             });
             match ConnectProvider::start(db_path, app_data_dir) {
                 Ok(provider) => {
@@ -370,8 +315,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             summarize_document,
             retry_document,
             continue_document,
+            cancel_document,
             get_runtime_status,
             list_recent_runs,
+            get_run_status,
             get_persisted_summary
         ])
         .run(tauri::generate_context!())?;
