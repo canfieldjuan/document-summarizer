@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -195,7 +195,7 @@ impl JobRequest {
             ));
         }
         self.as_internal()
-            .validate_allowing_empty_input(max_input_bytes)
+            .validate_v2_input_descriptor(max_input_bytes)
     }
 
     pub fn canonical_hash(&self) -> Result<String, serde_json::Error> {
@@ -215,6 +215,18 @@ impl JobRequest {
 impl JobStatus {
     pub fn from_v1(status: v1::JobStatus) -> Result<Self, ContractBuildError> {
         let result = status.result.map(JobResult::from_v1).transpose()?;
+        let mut artifact_ids = status
+            .input_artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_id.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(result) = &result {
+            for output in &result.outputs {
+                if !artifact_ids.insert(output.artifact_id.clone()) {
+                    return Err(ContractBuildError::OutputIntegrity);
+                }
+            }
+        }
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
             job_id: status.job_id,
@@ -327,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_accepts_zero_byte_wire_artifacts_without_changing_v1() {
+    fn v2_accepts_empty_and_extensionless_artifacts_without_changing_v1() {
         let mut empty = request();
         empty.inputs[0].byte_size = 0;
         empty.inputs[0].sha256 =
@@ -338,6 +350,54 @@ mod tests {
             .as_internal()
             .validate(v1::DEFAULT_MAX_INPUT_BYTES)
             .is_err());
+
+        let mut extensionless = request();
+        extensionless.inputs[0].display_name = "scan".to_string();
+        assert!(extensionless.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_ok());
+        assert!(extensionless
+            .as_internal()
+            .validate(v1::DEFAULT_MAX_INPUT_BYTES)
+            .is_err());
+
+        extensionless.inputs[0].display_name = "../scan".to_string();
+        assert!(extensionless.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_err());
+    }
+
+    #[test]
+    fn v2_input_count_and_size_boundaries_are_exact() {
+        let mut at_limit = request();
+        at_limit.inputs[0].byte_size = v1::DEFAULT_MAX_INPUT_BYTES;
+        assert!(at_limit.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_ok());
+
+        let mut over_limit = at_limit.clone();
+        over_limit.inputs[0].byte_size += 1;
+        assert_eq!(
+            over_limit
+                .validate(v1::DEFAULT_MAX_INPUT_BYTES)
+                .unwrap_err()
+                .code,
+            "INPUT_ARTIFACT_INVALID"
+        );
+
+        let mut missing = request();
+        missing.inputs.clear();
+        assert_eq!(
+            missing
+                .validate(v1::DEFAULT_MAX_INPUT_BYTES)
+                .unwrap_err()
+                .code,
+            "INPUT_COUNT_INVALID"
+        );
+
+        let mut multiple = request();
+        multiple.inputs.push(multiple.inputs[0].clone());
+        assert_eq!(
+            multiple
+                .validate(v1::DEFAULT_MAX_INPUT_BYTES)
+                .unwrap_err()
+                .code,
+            "INPUT_COUNT_INVALID"
+        );
     }
 
     #[test]
@@ -364,5 +424,44 @@ mod tests {
         let bytes = BASE64.decode(&output.payload_base64).unwrap();
         assert_eq!(bytes.len() as u64, output.byte_size);
         assert_eq!(format!("{:x}", Sha256::digest(bytes)), output.sha256);
+    }
+
+    #[test]
+    fn v2_output_identity_cannot_alias_its_input() {
+        let request = request();
+        let mut result = v1::JobResult::from_summary(
+            &request.inputs[0],
+            &SummaryArtifact {
+                document_id: "44444444-4444-4444-8444-444444444444".to_string(),
+                summary_version: "1.0.0".to_string(),
+                text: "Invoice due Friday.".to_string(),
+                warnings: vec![],
+                created_at: Utc::now(),
+                integrity_hash: "unused-by-wire-contract".to_string(),
+            },
+        )
+        .unwrap();
+        result.outputs[0].artifact_id = request.inputs[0].artifact_id.clone();
+        let timestamp = Utc::now();
+        let status = v1::JobStatus {
+            protocol_version: v1::PROTOCOL_VERSION,
+            job_id: request.job_id,
+            capability: request.capability,
+            provider: ProviderRef {
+                app_id: APP_ID.to_string(),
+                instance_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            },
+            status: JobState::Completed,
+            created_at: timestamp,
+            updated_at: timestamp,
+            input_artifacts: vec![ArtifactProvenance::from_input(&request.inputs[0])],
+            result: Some(result),
+            error: None,
+        };
+
+        assert!(matches!(
+            JobStatus::from_v1(status),
+            Err(ContractBuildError::OutputIntegrity)
+        ));
     }
 }

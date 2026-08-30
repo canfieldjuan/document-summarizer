@@ -1556,7 +1556,8 @@ mod tests {
             StatusCode::NOT_FOUND
         );
 
-        let request_v2 = fixture_request_v2(&bytes);
+        let mut request_v2 = fixture_request_v2(&bytes);
+        request_v2.inputs[0].display_name = "quarterly-report".to_string();
         let accepted_v2 = client
             .post(format!("{}v2/jobs", provider.base_url()))
             .bearer_auth(&registration_v2.auth.token)
@@ -1635,6 +1636,13 @@ mod tests {
             .unwrap()
             .expect("v2 job should persist");
         assert_eq!(stored_v2.protocol_version, v2::PROTOCOL_VERSION);
+        let run_v2 = db::get_pipeline_run(&conn, &stored_v2.pipeline_run_id)
+            .unwrap()
+            .expect("v2 pipeline run should persist");
+        let document_v2 = db::get_document(&conn, &run_v2.document_id)
+            .unwrap()
+            .expect("v2 document should persist");
+        assert_eq!(document_v2.original_filename, "quarterly-report");
         drop(conn);
 
         let malformed_bytes = b"%PDF-1.4\nnot a structurally valid PDF".to_vec();
