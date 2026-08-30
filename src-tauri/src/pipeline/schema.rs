@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 12;
+pub const CURRENT_SCHEMA_VERSION: u32 = 13;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -265,6 +265,12 @@ BEGIN
 END;
 "#;
 
+const V12_TO_V13: &str = r#"
+ALTER TABLE connect_jobs
+ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 1
+CHECK (protocol_version IN (1, 2));
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -447,6 +453,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V9_TO_V10)?;
         tx.execute_batch(V10_TO_V11)?;
         tx.execute_batch(V11_TO_V12)?;
+        tx.execute_batch(V12_TO_V13)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -494,6 +501,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 11 {
         migrate_v11_to_v12(conn)?;
+        current_version = 12;
+    }
+    if current_version == 12 {
+        migrate_v12_to_v13(conn)?;
     }
     validate(conn)
 }
@@ -569,6 +580,10 @@ fn migrate_v10_to_v11(conn: &mut Connection) -> Result<(), MigrationError> {
 
 fn migrate_v11_to_v12(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V11_TO_V12, 12)
+}
+
+fn migrate_v12_to_v13(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V12_TO_V13, 13)
 }
 
 fn migrate_additive(
@@ -689,6 +704,7 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
     }
 
     for column in [
+        "protocol_version",
         "request_hash",
         "input_artifact_id",
         "input_sha256",
@@ -1227,6 +1243,107 @@ mod tests {
                     row.get::<_, u32>(0)
                 })
                 .expect("retry lineage should survive reopen"),
+            1
+        );
+    }
+
+    #[test]
+    fn schema_v12_adds_protocol_provenance_without_rewriting_connect_jobs() {
+        let database = TestDatabase::new();
+        {
+            let conn = Connection::open(&database.0).expect("v12 database should open");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            for migration in [
+                SCHEMA_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5, V5_TO_V6, V6_TO_V7, V7_TO_V8, V8_TO_V9,
+                V9_TO_V10, V10_TO_V11, V11_TO_V12,
+            ] {
+                conn.execute_batch(migration)
+                    .expect("schema through v12 should initialize");
+            }
+            conn.pragma_update(None, "user_version", 12)
+                .expect("v12 version should persist");
+            conn.execute_batch(
+                r#"
+                INSERT INTO documents VALUES (
+                    'connect-document', 'connect.pdf', 'pdf', 12, 'connect-hash',
+                    '/connect.pdf', '2026-08-30T00:00:00+00:00'
+                );
+                INSERT INTO pipeline_runs VALUES (
+                    'connect-run', 'connect-document', '"Ingested"', 3, '1.0',
+                    '2026-08-30T00:00:00+00:00', '2026-08-30T00:00:01+00:00',
+                    '2026-08-30T00:00:02+00:00', NULL, '"Ingest"',
+                    '{"total_units":0,"completed_units":0,"failed_units":0}',
+                    '[]', NULL, 0, 1
+                );
+                INSERT INTO connect_jobs (
+                    job_id, request_hash, capability_id, capability_version,
+                    input_artifact_id, input_media_type, input_byte_size, input_sha256,
+                    input_display_name, source_app_id, import_path, pipeline_run_id,
+                    provider_instance_id, status, result_json, error_json, created_at, updated_at
+                ) VALUES (
+                    '22222222-2222-4222-8222-222222222222', 'legacy-request-hash',
+                    'document.summarize', '1.0',
+                    '33333333-3333-4333-8333-333333333333', 'application/pdf', 12,
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'connect.pdf', 'email-watcher', '/connect.pdf', 'connect-run',
+                    '11111111-1111-4111-8111-111111111111', 'accepted', NULL, NULL,
+                    '2026-08-30T00:00:02+00:00', '2026-08-30T00:00:02+00:00'
+                );
+                "#,
+            )
+            .expect("v12 Connect job should persist");
+        }
+
+        {
+            let mut conn = Connection::open(&database.0).expect("database should reopen");
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys should enable");
+            migrate(&mut conn).expect("v12 schema should migrate");
+            assert_eq!(
+                version(&conn).expect("version should load"),
+                CURRENT_SCHEMA_VERSION
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT protocol_version FROM connect_jobs
+                     WHERE job_id = '22222222-2222-4222-8222-222222222222'",
+                    [],
+                    |row| row.get::<_, u32>(0),
+                )
+                .expect("legacy Connect job should survive"),
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT request_hash FROM connect_jobs
+                     WHERE job_id = '22222222-2222-4222-8222-222222222222'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("legacy request identity should survive"),
+                "legacy-request-hash"
+            );
+            assert!(conn
+                .execute(
+                    "UPDATE connect_jobs SET protocol_version = 3
+                     WHERE job_id = '22222222-2222-4222-8222-222222222222'",
+                    [],
+                )
+                .is_err());
+        }
+
+        let mut reopened = Connection::open(&database.0).expect("migrated database should reopen");
+        reopened
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        migrate(&mut reopened).expect("repeated initialization should be deterministic");
+        assert_eq!(
+            reopened
+                .query_row("SELECT COUNT(*) FROM connect_jobs", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("legacy Connect job should survive reopen"),
             1
         );
     }

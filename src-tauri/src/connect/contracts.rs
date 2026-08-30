@@ -238,6 +238,22 @@ impl AppManifest {
 
 impl JobRequest {
     pub fn validate(&self, max_input_bytes: u64) -> Result<(), JobError> {
+        self.validate_input(max_input_bytes, false, true)
+    }
+
+    pub(crate) fn validate_v2_input_descriptor(
+        &self,
+        max_input_bytes: u64,
+    ) -> Result<(), JobError> {
+        self.validate_input(max_input_bytes, true, false)
+    }
+
+    fn validate_input(
+        &self,
+        max_input_bytes: u64,
+        allow_empty_input: bool,
+        require_pdf_extension: bool,
+    ) -> Result<(), JobError> {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(job_error(
                 "PROTOCOL_VERSION_UNSUPPORTED",
@@ -269,10 +285,10 @@ impl JobRequest {
         let input = &self.inputs[0];
         if !valid_uuid_v4(&input.artifact_id)
             || input.media_type != INPUT_MEDIA_TYPE
-            || input.byte_size == 0
+            || (!allow_empty_input && input.byte_size == 0)
             || input.byte_size > max_input_bytes
             || !valid_sha256(&input.sha256)
-            || !valid_display_name(&input.display_name)
+            || !valid_display_name(&input.display_name, require_pdf_extension)
             || !valid_identifier(&input.source_app_id)
         {
             return Err(job_error(
@@ -395,16 +411,17 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-fn valid_display_name(value: &str) -> bool {
+fn valid_display_name(value: &str, require_pdf_extension: bool) -> bool {
     let trimmed = value.trim();
     !trimmed.is_empty()
         && trimmed.len() <= 255
         && trimmed != "."
         && trimmed != ".."
         && !trimmed.contains(['/', '\\', '\0'])
-        && trimmed
-            .rsplit_once('.')
-            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("pdf"))
+        && (!require_pdf_extension
+            || trimmed
+                .rsplit_once('.')
+                .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("pdf")))
         && !trimmed.chars().any(char::is_control)
 }
 

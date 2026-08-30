@@ -31,6 +31,7 @@ pub enum ConnectStoreError {
 pub struct StoredConnectJob {
     pub job_id: String,
     pub request_hash: String,
+    pub protocol_version: u32,
     pub input: InputArtifact,
     pub import_path: String,
     pub pipeline_run_id: String,
@@ -81,17 +82,18 @@ pub fn accept_job_with_ingestion(
     let ingested_run = db::persist_ingestion_in_transaction(&tx, document, run)?;
     tx.execute(
         "INSERT INTO connect_jobs (
-            job_id, request_hash, capability_id, capability_version,
+            job_id, request_hash, protocol_version, capability_id, capability_version,
             input_artifact_id, input_media_type, input_byte_size, input_sha256,
             input_display_name, source_app_id, import_path, pipeline_run_id,
             provider_instance_id, status, result_json, error_json, created_at, updated_at
          ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-            'accepted', NULL, NULL, ?14, ?14
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+            'accepted', NULL, NULL, ?15, ?15
          )",
         params![
             request.job_id,
             request_hash,
+            request.protocol_version,
             request.capability.id,
             request.capability.version,
             input.artifact_id,
@@ -119,7 +121,7 @@ pub fn get_job(
 ) -> Result<Option<StoredConnectJob>, ConnectStoreError> {
     let row = conn
         .query_row(
-            "SELECT job_id, request_hash, input_artifact_id, input_media_type,
+            "SELECT job_id, request_hash, protocol_version, input_artifact_id, input_media_type,
                     input_byte_size, input_sha256, input_display_name, source_app_id,
                     import_path, pipeline_run_id, provider_instance_id, status,
                     result_json, error_json, created_at, updated_at
@@ -129,20 +131,21 @@ pub fn get_job(
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, u32>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, String>(9)?,
                     row.get::<_, String>(10)?,
                     row.get::<_, String>(11)?,
-                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, String>(12)?,
                     row.get::<_, Option<String>>(13)?,
-                    row.get::<_, String>(14)?,
+                    row.get::<_, Option<String>>(14)?,
                     row.get::<_, String>(15)?,
+                    row.get::<_, String>(16)?,
                 ))
             },
         )
@@ -152,6 +155,7 @@ pub fn get_job(
         |(
             job_id,
             request_hash,
+            protocol_version,
             artifact_id,
             media_type,
             byte_size,
@@ -185,6 +189,7 @@ pub fn get_job(
             Ok(StoredConnectJob {
                 job_id,
                 request_hash,
+                protocol_version,
                 input: InputArtifact {
                     artifact_id,
                     media_type,
@@ -388,7 +393,7 @@ mod tests {
             Some(&first.inputs[0].display_name),
         )
         .expect("ingestion should prepare");
-        accept_job_with_ingestion(
+        let (_, stored) = accept_job_with_ingestion(
             &mut conn,
             &first,
             &first.canonical_hash().unwrap(),
@@ -398,6 +403,7 @@ mod tests {
             &run,
         )
         .expect("first job should atomically accept");
+        assert_eq!(stored.protocol_version, PROTOCOL_VERSION);
 
         let second = request(&bytes);
         let (second_document, second_run) = prepare_pdf_ingestion(

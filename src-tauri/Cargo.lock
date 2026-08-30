@@ -951,6 +951,7 @@ name = "document-summarizer"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "chrono",
  "pdf-extract",
  "reqwest 0.12.28",
