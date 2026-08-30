@@ -377,3 +377,27 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .run(tauri::generate_context!())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod capability_tests {
+    use serde_json::Value;
+
+    #[test]
+    fn main_window_can_open_files_without_broader_dialog_permissions() {
+        let capability: Value = serde_json::from_str(include_str!("../capabilities/default.json"))
+            .expect("main-window capability should be valid JSON");
+        let permissions = capability["permissions"]
+            .as_array()
+            .expect("main-window permissions should be an array");
+        let has_permission = |expected: &str| {
+            permissions
+                .iter()
+                .any(|permission| permission.as_str() == Some(expected))
+        };
+
+        assert!(has_permission("dialog:allow-open"));
+        assert!(!has_permission("dialog:default"));
+        assert!(!has_permission("dialog:allow-save"));
+        assert!(!has_permission("dialog:allow-message"));
+    }
+}
