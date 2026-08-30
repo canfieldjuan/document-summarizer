@@ -768,30 +768,45 @@ async fn receive_artifact(
         return Err(error);
     }
 
-    if tokio::fs::try_exists(&final_path)
-        .await
-        .map_err(ProviderHttpError::io)?
-    {
-        let (existing_size, existing_hash) = hash_file(&final_path).await?;
-        if existing_size == input.byte_size && existing_hash == input.sha256 {
-            remove_file_quietly(&staging).await;
-            return Ok(final_path);
+    promote_staged_artifact(&staging, &final_path, input, &state.imports_dir).await
+}
+
+async fn promote_staged_artifact(
+    staging: &Path,
+    final_path: &Path,
+    input: &InputArtifact,
+    imports_dir: &Path,
+) -> Result<PathBuf, ProviderHttpError> {
+    match tokio::fs::hard_link(staging, final_path).await {
+        Ok(()) => {
+            remove_file_quietly(staging).await;
+            sync_directory(imports_dir)
+                .await
+                .map_err(ProviderHttpError::io)?;
+            Ok(final_path.to_path_buf())
         }
-        remove_file_quietly(&staging).await;
-        return Err(ProviderHttpError::new(
-            StatusCode::CONFLICT,
-            "ARTIFACT_STORAGE_CONFLICT",
-            "Provider storage already contains different bytes for this artifact.",
-            false,
-        ));
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let existing = hash_file(final_path).await;
+            remove_file_quietly(staging).await;
+            let (existing_size, existing_hash) = existing?;
+            if existing_size != input.byte_size || existing_hash != input.sha256 {
+                return Err(ProviderHttpError::new(
+                    StatusCode::CONFLICT,
+                    "ARTIFACT_STORAGE_CONFLICT",
+                    "Provider storage already contains different bytes for this artifact.",
+                    false,
+                ));
+            }
+            sync_directory(imports_dir)
+                .await
+                .map_err(ProviderHttpError::io)?;
+            Ok(final_path.to_path_buf())
+        }
+        Err(error) => {
+            remove_file_quietly(staging).await;
+            Err(ProviderHttpError::io(error))
+        }
     }
-    tokio::fs::rename(&staging, &final_path)
-        .await
-        .map_err(ProviderHttpError::io)?;
-    sync_directory(&state.imports_dir)
-        .await
-        .map_err(ProviderHttpError::io)?;
-    Ok(final_path)
 }
 
 async fn read_field_limited(
@@ -1102,6 +1117,65 @@ mod tests {
             shared.to_str().unwrap(),
             &loser_only
         ));
+    }
+
+    #[test]
+    fn staged_artifact_promotion_never_overwrites_existing_bytes() {
+        let root = TestDirectory::new("doc-sum-connect-promotion-race");
+        let imports = root.0.join("imports");
+        fs::create_dir_all(&imports).unwrap();
+        let final_path = imports.join("job-artifact.pdf");
+        let staging = imports.join(".job-artifact.part");
+        let winner = b"winner bytes";
+        let loser = b"different loser bytes";
+        fs::write(&final_path, winner).unwrap();
+        fs::write(&staging, loser).unwrap();
+        let input = InputArtifact {
+            artifact_id: Uuid::new_v4().to_string(),
+            media_type: INPUT_MEDIA_TYPE.to_string(),
+            byte_size: loser.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(loser)),
+            display_name: "report.pdf".to_string(),
+            source_app_id: "email-watcher".to_string(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let error = runtime
+            .block_on(promote_staged_artifact(
+                &staging,
+                &final_path,
+                &input,
+                &imports,
+            ))
+            .expect_err("conflicting promotion should fail");
+
+        assert_eq!(error.error.code, "ARTIFACT_STORAGE_CONFLICT");
+        assert_eq!(fs::read(&final_path).unwrap(), winner);
+        assert!(!staging.exists());
+
+        let matching_staging = imports.join(".job-artifact-retry.part");
+        fs::write(&matching_staging, winner).unwrap();
+        let matching_input = InputArtifact {
+            byte_size: winner.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(winner)),
+            ..input
+        };
+        let promoted = match runtime.block_on(promote_staged_artifact(
+            &matching_staging,
+            &final_path,
+            &matching_input,
+            &imports,
+        )) {
+            Ok(path) => path,
+            Err(_) => panic!("matching promotion should reuse the existing import"),
+        };
+
+        assert_eq!(promoted, final_path);
+        assert_eq!(fs::read(&promoted).unwrap(), winner);
+        assert!(!matching_staging.exists());
     }
 
     struct TestDirectory(PathBuf);
