@@ -65,6 +65,9 @@ interface RunHistoryItem {
   retryOfRunId: string | null;
   retryRunId: string | null;
   canRetry: boolean;
+  continuationCheckpoint: PipelineState | null;
+  canContinue: boolean;
+  continuationRequiresRuntime: boolean;
 }
 
 interface SummaryArtifact {
@@ -132,8 +135,11 @@ const evidenceQuote = element<HTMLQuoteElement>("#evidence-quote");
 const warningSection = element<HTMLElement>("#warning-section");
 const warningList = element<HTMLUListElement>("#warning-list");
 const failureTitle = element<HTMLHeadingElement>("#failure-title");
+const failureKicker = element<HTMLParagraphElement>("#failure-kicker");
 const failureMessage = element<HTMLParagraphElement>("#failure-message");
 const failureCode = element<HTMLParagraphElement>("#failure-code");
+const continueButton = element<HTMLButtonElement>("#continue-btn");
+const continueHint = element<HTMLParagraphElement>("#continue-hint");
 const retryButton = element<HTMLButtonElement>("#retry-btn");
 const retryHint = element<HTMLParagraphElement>("#retry-hint");
 
@@ -142,6 +148,7 @@ let processing = false;
 let activeRunId: string | null = null;
 let recentRuns: RunHistoryItem[] = [];
 let retrySourceRun: RunHistoryItem | null = null;
+let continuationRun: RunHistoryItem | null = null;
 
 function element<T extends HTMLElement>(selector: string): T {
   const match = document.querySelector<T>(selector);
@@ -181,6 +188,16 @@ function syncPrimaryAction(): void {
       : runtimeReady
         ? "A new attempt will reuse the durable document identity. This failed record stays unchanged."
         : "Start Ollama before retrying this document.";
+  }
+
+  if (continuationRun) {
+    const runtimeAvailable = !continuationRun.continuationRequiresRuntime || runtimeReady;
+    continueButton.disabled = !runtimeAvailable || processing;
+    continueHint.textContent = processing
+      ? "Continuing from the durable checkpoint…"
+      : runtimeAvailable
+        ? `Continue this run from ${stateLabel(continuationRun.state).toLowerCase()} without repeating completed stages.`
+        : "Start Ollama before continuing this checkpoint.";
   }
 }
 
@@ -424,8 +441,61 @@ async function retrySelectedRun(): Promise<void> {
   showFailure(source.originalFilename, failure.message, failure.code, source);
 }
 
+async function continueSelectedRun(): Promise<void> {
+  const source = continuationRun;
+  const runtimeAvailable = source
+    && (!source.continuationRequiresRuntime || runtimeReady);
+  if (!source || !source.canContinue || !runtimeAvailable || processing) {
+    return;
+  }
+
+  processing = true;
+  activeRunId = source.runId;
+  processingFilename.textContent = `Continuing ${source.originalFilename}`;
+  showStage("processing");
+  syncPrimaryAction();
+
+  let completed: CompletedSummary | null = null;
+  let commandError: CommandError | null = null;
+  try {
+    completed = await invoke<CompletedSummary>("continue_document", {
+      runId: source.runId,
+      expectedStateVersion: source.stateVersion,
+    });
+  } catch (error) {
+    commandError = normalizeCommandError(error);
+  } finally {
+    processing = false;
+    await refreshHistory();
+    syncPrimaryAction();
+  }
+
+  if (completed) {
+    activeRunId = completed.runId;
+    renderHistory();
+    renderSummary(
+      completed.originalFilename,
+      completed.byteSize,
+      completed.summary,
+    );
+    return;
+  }
+
+  const updated = recentRuns.find((run) => run.runId === source.runId);
+  if (updated) {
+    await openHistoryRun(updated);
+    return;
+  }
+  const failure = commandError ?? {
+    code: "CONTINUATION_FAILED",
+    message: "The durable checkpoint could not be continued.",
+  };
+  showFailure(source.originalFilename, failure.message, failure.code, source);
+}
+
 function renderSummary(filename: string, byteSize: number, summary: SummaryArtifact): void {
   retrySourceRun = null;
+  continuationRun = null;
   summaryFilename.textContent = filename;
   const citedClaimCount = summary.claims.length;
   summaryMeta.textContent = citedClaimCount > 0
@@ -514,11 +584,17 @@ function showFailure(
   run: RunHistoryItem | null = null,
 ): void {
   retrySourceRun = run?.canRetry ? run : null;
+  continuationRun = run?.canContinue ? run : null;
+  failureKicker.textContent = continuationRun
+    ? "Durable checkpoint ready"
+    : "Could not complete this document";
   failureTitle.textContent = title;
   failureMessage.textContent = message;
   failureCode.textContent = code;
   retryButton.hidden = retrySourceRun === null;
   retryHint.hidden = retrySourceRun === null && !run?.retryRunId;
+  continueButton.hidden = continuationRun === null;
+  continueHint.hidden = continuationRun === null;
   if (!retrySourceRun && run?.retryRunId) {
     retryHint.textContent = "A separate retry attempt already exists in Recent work.";
   }
@@ -599,12 +675,14 @@ function historyStateLabel(run: RunHistoryItem): string {
     return "Interrupted safely";
   }
   const label = stateLabel(run.state);
+  if (run.canContinue) return `${label} · continue available`;
   return run.retryOfRunId ? `${label} · retry` : label;
 }
 
 async function initialize(): Promise<void> {
   selectButton.addEventListener("click", () => void selectAndSummarize());
   runtimeRetry.addEventListener("click", () => void refreshRuntimeStatus());
+  continueButton.addEventListener("click", () => void continueSelectedRun());
   retryButton.addEventListener("click", () => void retrySelectedRun());
   historyRefresh.addEventListener("click", () => void refreshHistory());
   await Promise.all([refreshRuntimeStatus(), refreshHistory()]);

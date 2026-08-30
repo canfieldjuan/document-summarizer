@@ -1,17 +1,17 @@
 use crate::pipeline::chunk::{chunk_document, ChunkPipelineError};
 use crate::pipeline::contracts::{
-    CompletedSummary, DocumentChunker, DocumentNormalizer, DocumentParser, ModelRuntime,
-    StructureInterpreter,
+    CompletedSummary, ContinuationCheckpoint, DocumentChunker, DocumentNormalizer, DocumentParser,
+    ModelRuntime, PipelineState, StructureInterpreter,
 };
+use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::ingest::prepare_received_run;
 use crate::pipeline::ingest::{ingest_pdf, IngestError};
 use crate::pipeline::normalize::{normalize_document, NormalizePipelineError};
 use crate::pipeline::parser::{parse_document, parse_started_document, ParsePipelineError};
 use crate::pipeline::structure::{structure_document, StructurePipelineError};
-use crate::pipeline::summary::{summarize_chunked_document, SummaryPipelineError};
-use crate::pipeline::{
-    contracts::PipelineState,
-    db::{self, StoreError},
+use crate::pipeline::summary::{
+    analyze_chunked_document, complete_verified_document, synthesize_analyzed_document,
+    verify_synthesized_document, SummaryPipelineError,
 };
 use chrono::Utc;
 use rusqlite::Connection;
@@ -33,6 +33,8 @@ pub enum DocumentServiceError {
     Summary(#[from] SummaryPipelineError),
     #[error(transparent)]
     Retry(#[from] RetryPipelineError),
+    #[error(transparent)]
+    Continuation(#[from] ContinuationPipelineError),
 }
 
 impl DocumentServiceError {
@@ -45,6 +47,46 @@ impl DocumentServiceError {
             Self::Chunk(error) => error.code(),
             Self::Summary(error) => error.code(),
             Self::Retry(error) => error.code(),
+            Self::Continuation(error) => error.code(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContinuationPlan {
+    pub checkpoint: ContinuationCheckpoint,
+    pub requires_runtime: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum ContinuationPipelineError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(
+        "Pipeline run {run_id} changed: expected state version {expected_version}, found {found_version}"
+    )]
+    StaleState {
+        run_id: String,
+        expected_version: u32,
+        found_version: u32,
+    },
+    #[error("Pipeline run {run_id} cannot continue from {state:?}")]
+    NotAllowed {
+        run_id: String,
+        state: PipelineState,
+    },
+    #[error("Pipeline run {run_id} requires the local model runtime to continue")]
+    RuntimeRequired { run_id: String },
+}
+
+impl ContinuationPipelineError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Store(StoreError::RunNotFound(_)) => "CONTINUATION_RUN_NOT_FOUND",
+            Self::Store(_) => "PIPELINE_STORE_ERROR",
+            Self::StaleState { .. } => "CONTINUATION_STALE_STATE",
+            Self::NotAllowed { .. } => "CONTINUATION_NOT_ALLOWED",
+            Self::RuntimeRequired { .. } => "CONTINUATION_RUNTIME_REQUIRED",
         }
     }
 }
@@ -75,6 +117,124 @@ pub struct SummaryComponents<'a> {
     pub interpreter: &'a dyn StructureInterpreter,
     pub chunker: &'a dyn DocumentChunker,
     pub runtime: &'a dyn ModelRuntime,
+}
+
+#[derive(Clone, Copy)]
+pub struct ContinuationComponents<'a> {
+    pub parser: &'a dyn DocumentParser,
+    pub normalizer: &'a dyn DocumentNormalizer,
+    pub interpreter: &'a dyn StructureInterpreter,
+    pub chunker: &'a dyn DocumentChunker,
+    pub runtime: Option<&'a dyn ModelRuntime>,
+}
+
+pub fn continuation_plan(
+    conn: &Connection,
+    run_id: &str,
+    expected_state_version: u32,
+) -> Result<ContinuationPlan, ContinuationPipelineError> {
+    let run = db::get_pipeline_run(conn, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    if run.state_version != expected_state_version {
+        return Err(ContinuationPipelineError::StaleState {
+            run_id: run_id.to_string(),
+            expected_version: expected_state_version,
+            found_version: run.state_version,
+        });
+    }
+    let checkpoint =
+        run.continuation_checkpoint()
+            .ok_or_else(|| ContinuationPipelineError::NotAllowed {
+                run_id: run_id.to_string(),
+                state: run.state,
+            })?;
+    Ok(ContinuationPlan {
+        checkpoint,
+        requires_runtime: checkpoint.requires_runtime(),
+    })
+}
+
+pub fn continue_run_to_summary(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_state_version: u32,
+    components: ContinuationComponents<'_>,
+) -> Result<CompletedSummary, DocumentServiceError> {
+    let plan = continuation_plan(conn, run_id, expected_state_version)?;
+    let run = db::get_pipeline_run(conn, run_id)
+        .map_err(ContinuationPipelineError::from)?
+        .ok_or_else(|| {
+            ContinuationPipelineError::Store(StoreError::RunNotFound(run_id.to_string()))
+        })?;
+    let document = db::get_document(conn, &run.document_id)
+        .map_err(ContinuationPipelineError::from)?
+        .ok_or_else(|| {
+            ContinuationPipelineError::Store(StoreError::DocumentNotFound(run.document_id.clone()))
+        })?;
+
+    let summary = match plan.checkpoint {
+        ContinuationCheckpoint::Ingested => process_ingested_to_summary(
+            conn,
+            run_id,
+            continuation_summary_components(run_id, components)?,
+        )?,
+        ContinuationCheckpoint::Parsed => process_parsed_to_summary(
+            conn,
+            run_id,
+            continuation_summary_components(run_id, components)?,
+        )?,
+        ContinuationCheckpoint::Normalized => process_normalized_to_summary(
+            conn,
+            run_id,
+            continuation_summary_components(run_id, components)?,
+        )?,
+        ContinuationCheckpoint::Structured => process_structured_to_summary(
+            conn,
+            run_id,
+            continuation_summary_components(run_id, components)?,
+        )?,
+        ContinuationCheckpoint::Chunked => process_chunked_to_summary(
+            conn,
+            run_id,
+            required_continuation_runtime(run_id, components.runtime)?,
+        )?,
+        ContinuationCheckpoint::Analyzed => process_analyzed_to_summary(
+            conn,
+            run_id,
+            required_continuation_runtime(run_id, components.runtime)?,
+        )?,
+        ContinuationCheckpoint::Synthesized => process_synthesized_to_summary(conn, run_id)?,
+        ContinuationCheckpoint::Verified => complete_verified_document(conn, run_id)?,
+    };
+
+    Ok(CompletedSummary {
+        run_id: run_id.to_string(),
+        document,
+        summary: summary.summary,
+        citations: summary.citations,
+    })
+}
+
+fn continuation_summary_components<'a>(
+    run_id: &str,
+    components: ContinuationComponents<'a>,
+) -> Result<SummaryComponents<'a>, ContinuationPipelineError> {
+    Ok(SummaryComponents {
+        parser: components.parser,
+        normalizer: components.normalizer,
+        interpreter: components.interpreter,
+        chunker: components.chunker,
+        runtime: required_continuation_runtime(run_id, components.runtime)?,
+    })
+}
+
+fn required_continuation_runtime<'a>(
+    run_id: &str,
+    runtime: Option<&'a dyn ModelRuntime>,
+) -> Result<&'a dyn ModelRuntime, ContinuationPipelineError> {
+    runtime.ok_or_else(|| ContinuationPipelineError::RuntimeRequired {
+        run_id: run_id.to_string(),
+    })
 }
 
 pub fn process_pdf_to_summary(
@@ -144,13 +304,51 @@ fn process_parsed_to_summary(
     components: SummaryComponents<'_>,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     normalize_document(conn, components.normalizer, run_id)?;
+    process_normalized_to_summary(conn, run_id, components)
+}
+
+fn process_normalized_to_summary(
+    conn: &mut Connection,
+    run_id: &str,
+    components: SummaryComponents<'_>,
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     structure_document(conn, components.interpreter, run_id)?;
+    process_structured_to_summary(conn, run_id, components)
+}
+
+fn process_structured_to_summary(
+    conn: &mut Connection,
+    run_id: &str,
+    components: SummaryComponents<'_>,
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     chunk_document(conn, components.chunker, run_id)?;
-    Ok(summarize_chunked_document(
-        conn,
-        components.runtime,
-        run_id,
-    )?)
+    process_chunked_to_summary(conn, run_id, components.runtime)
+}
+
+fn process_chunked_to_summary(
+    conn: &mut Connection,
+    run_id: &str,
+    runtime: &dyn ModelRuntime,
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    analyze_chunked_document(conn, runtime, run_id)?;
+    process_analyzed_to_summary(conn, run_id, runtime)
+}
+
+fn process_analyzed_to_summary(
+    conn: &mut Connection,
+    run_id: &str,
+    runtime: &dyn ModelRuntime,
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    synthesize_analyzed_document(conn, runtime, run_id)?;
+    process_synthesized_to_summary(conn, run_id)
+}
+
+fn process_synthesized_to_summary(
+    conn: &mut Connection,
+    run_id: &str,
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    verify_synthesized_document(conn, run_id)?;
+    Ok(complete_verified_document(conn, run_id)?)
 }
 
 #[cfg(test)]
@@ -162,9 +360,11 @@ mod tests {
         RetryCheckpoint,
     };
     use crate::pipeline::db::{
-        get_citation_artifact, get_normalized_document, get_pipeline_run,
-        get_retry_lineage_for_retry, get_retry_lineage_for_source, get_summary_artifact,
-        get_synthesized_document, init_db, list_pipeline_events,
+        get_analyzed_document, get_chunked_document, get_citation_artifact, get_document,
+        get_normalized_document, get_parsed_document, get_pipeline_run,
+        get_retry_lineage_for_retry, get_retry_lineage_for_source, get_structured_document,
+        get_summary_artifact, get_synthesized_document, get_verified_document, init_db,
+        list_pipeline_events,
     };
     use crate::pipeline::model::OllamaRuntime;
     use crate::pipeline::normalize::CanonicalNormalizer;
@@ -173,6 +373,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use uuid::Uuid;
 
     struct TestDatabase(PathBuf);
@@ -260,6 +461,43 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct CountingFixtureRuntime {
+        generate_calls: AtomicU32,
+        health_calls: AtomicU32,
+    }
+
+    impl CountingFixtureRuntime {
+        fn reset(&self) {
+            self.generate_calls.store(0, Ordering::Relaxed);
+            self.health_calls.store(0, Ordering::Relaxed);
+        }
+    }
+
+    impl ModelRuntime for CountingFixtureRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            self.generate_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(ModelResponse {
+                text: crate::pipeline::summary::fixture_model_output(request),
+                runtime_id: self.runtime_id().to_string(),
+                model_id: self.model_id().to_string(),
+            })
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            self.health_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "fixture-model"
+        }
+    }
+
+    #[derive(Default)]
     struct TestPipeline {
         parser: PdfExtractParser,
         normalizer: CanonicalNormalizer,
@@ -277,6 +515,140 @@ mod tests {
                 runtime,
             }
         }
+
+        fn continuation_components<'a>(
+            &'a self,
+            runtime: Option<&'a dyn ModelRuntime>,
+        ) -> ContinuationComponents<'a> {
+            ContinuationComponents {
+                parser: &self.parser,
+                normalizer: &self.normalizer,
+                interpreter: &self.interpreter,
+                chunker: &self.chunker,
+                runtime,
+            }
+        }
+    }
+
+    fn prepare_checkpoint(
+        conn: &mut Connection,
+        source: &TestSource,
+        pipeline: &TestPipeline,
+        runtime: &dyn ModelRuntime,
+        checkpoint: ContinuationCheckpoint,
+    ) -> crate::pipeline::contracts::PipelineRun {
+        let (_, ingested) = ingest_pdf(
+            conn,
+            source.0.to_str().expect("fixture path should be UTF-8"),
+        )
+        .expect("fixture should ingest");
+        if checkpoint == ContinuationCheckpoint::Ingested {
+            return ingested;
+        }
+
+        parse_document(conn, &pipeline.parser, &ingested.run_id)
+            .expect("fixture should parse to checkpoint");
+        if checkpoint == ContinuationCheckpoint::Parsed {
+            return get_pipeline_run(conn, &ingested.run_id)
+                .expect("run should load")
+                .expect("run should exist");
+        }
+
+        normalize_document(conn, &pipeline.normalizer, &ingested.run_id)
+            .expect("fixture should normalize to checkpoint");
+        if checkpoint == ContinuationCheckpoint::Normalized {
+            return get_pipeline_run(conn, &ingested.run_id)
+                .expect("run should load")
+                .expect("run should exist");
+        }
+
+        structure_document(conn, &pipeline.interpreter, &ingested.run_id)
+            .expect("fixture should structure to checkpoint");
+        if checkpoint == ContinuationCheckpoint::Structured {
+            return get_pipeline_run(conn, &ingested.run_id)
+                .expect("run should load")
+                .expect("run should exist");
+        }
+
+        chunk_document(conn, &pipeline.chunker, &ingested.run_id)
+            .expect("fixture should chunk to checkpoint");
+        if checkpoint == ContinuationCheckpoint::Chunked {
+            return get_pipeline_run(conn, &ingested.run_id)
+                .expect("run should load")
+                .expect("run should exist");
+        }
+
+        analyze_chunked_document(conn, runtime, &ingested.run_id)
+            .expect("fixture should analyze to checkpoint");
+        if checkpoint == ContinuationCheckpoint::Analyzed {
+            return get_pipeline_run(conn, &ingested.run_id)
+                .expect("run should load")
+                .expect("run should exist");
+        }
+
+        synthesize_analyzed_document(conn, runtime, &ingested.run_id)
+            .expect("fixture should synthesize to checkpoint");
+        if checkpoint == ContinuationCheckpoint::Synthesized {
+            return get_pipeline_run(conn, &ingested.run_id)
+                .expect("run should load")
+                .expect("run should exist");
+        }
+
+        verify_synthesized_document(conn, &ingested.run_id)
+            .expect("fixture should verify to checkpoint");
+        get_pipeline_run(conn, &ingested.run_id)
+            .expect("run should load")
+            .expect("run should exist")
+    }
+
+    fn checkpoint_artifact(
+        conn: &Connection,
+        run: &crate::pipeline::contracts::PipelineRun,
+        checkpoint: ContinuationCheckpoint,
+    ) -> serde_json::Value {
+        match checkpoint {
+            ContinuationCheckpoint::Ingested => serde_json::to_value(
+                get_document(conn, &run.document_id)
+                    .expect("document should load")
+                    .expect("document should exist"),
+            ),
+            ContinuationCheckpoint::Parsed => serde_json::to_value(
+                get_parsed_document(conn, &run.run_id)
+                    .expect("parsed artifact should load")
+                    .expect("parsed artifact should exist"),
+            ),
+            ContinuationCheckpoint::Normalized => serde_json::to_value(
+                get_normalized_document(conn, &run.run_id)
+                    .expect("normalized artifact should load")
+                    .expect("normalized artifact should exist"),
+            ),
+            ContinuationCheckpoint::Structured => serde_json::to_value(
+                get_structured_document(conn, &run.run_id)
+                    .expect("structured artifact should load")
+                    .expect("structured artifact should exist"),
+            ),
+            ContinuationCheckpoint::Chunked => serde_json::to_value(
+                get_chunked_document(conn, &run.run_id)
+                    .expect("chunked artifact should load")
+                    .expect("chunked artifact should exist"),
+            ),
+            ContinuationCheckpoint::Analyzed => serde_json::to_value(
+                get_analyzed_document(conn, &run.run_id)
+                    .expect("analyzed artifact should load")
+                    .expect("analyzed artifact should exist"),
+            ),
+            ContinuationCheckpoint::Synthesized => serde_json::to_value(
+                get_synthesized_document(conn, &run.run_id)
+                    .expect("synthesized artifact should load")
+                    .expect("synthesized artifact should exist"),
+            ),
+            ContinuationCheckpoint::Verified => serde_json::to_value(
+                get_verified_document(conn, &run.run_id)
+                    .expect("verified artifact should load")
+                    .expect("verified artifact should exist"),
+            ),
+        }
+        .expect("checkpoint artifact should serialize")
     }
 
     fn create_recoverable_failed_run(
@@ -347,6 +719,363 @@ mod tests {
                 .expect("citations should load")
                 .expect("citations should exist"),
             result.citations
+        );
+    }
+
+    #[test]
+    fn every_stable_checkpoint_continues_the_same_run_without_repeating_completed_work() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let checkpoints = [
+            ContinuationCheckpoint::Ingested,
+            ContinuationCheckpoint::Parsed,
+            ContinuationCheckpoint::Normalized,
+            ContinuationCheckpoint::Structured,
+            ContinuationCheckpoint::Chunked,
+            ContinuationCheckpoint::Analyzed,
+            ContinuationCheckpoint::Synthesized,
+            ContinuationCheckpoint::Verified,
+        ];
+
+        for checkpoint in checkpoints {
+            let mut conn = init_db(":memory:").expect("schema should initialize");
+            let runtime = CountingFixtureRuntime::default();
+            let before = prepare_checkpoint(&mut conn, &source, &pipeline, &runtime, checkpoint);
+            let before_events =
+                list_pipeline_events(&conn, &before.run_id).expect("events should load");
+            let before_artifact = checkpoint_artifact(&conn, &before, checkpoint);
+            let plan = continuation_plan(&conn, &before.run_id, before.state_version)
+                .expect("stable checkpoint should produce a continuation plan");
+            assert_eq!(plan.checkpoint, checkpoint);
+            assert_eq!(plan.requires_runtime, checkpoint.requires_runtime());
+
+            let history = crate::pipeline::workspace::list_recent_runs(&conn)
+                .expect("checkpoint history should load");
+            assert_eq!(history.len(), 1);
+            assert!(history[0].can_continue);
+            assert_eq!(history[0].continuation_checkpoint, Some(checkpoint));
+            assert_eq!(
+                history[0].continuation_requires_runtime,
+                checkpoint.requires_runtime()
+            );
+            let serialized =
+                serde_json::to_value(&history[0]).expect("history contract should serialize");
+            assert_eq!(serialized["canContinue"], true);
+            assert_eq!(
+                serialized["continuationRequiresRuntime"],
+                checkpoint.requires_runtime()
+            );
+
+            runtime.reset();
+            let runtime_component = checkpoint
+                .requires_runtime()
+                .then_some(&runtime as &dyn ModelRuntime);
+            let completed = continue_run_to_summary(
+                &mut conn,
+                &before.run_id,
+                before.state_version,
+                pipeline.continuation_components(runtime_component),
+            )
+            .expect("stable checkpoint should continue to a summary");
+
+            assert_eq!(completed.run_id, before.run_id);
+            assert_eq!(completed.document.document_id, before.document_id);
+            assert_eq!(
+                checkpoint_artifact(&conn, &before, checkpoint),
+                before_artifact
+            );
+            let completed_run = get_pipeline_run(&conn, &before.run_id)
+                .expect("completed run should load")
+                .expect("completed run should exist");
+            assert_eq!(completed_run.state, PipelineState::CompleteWithWarnings);
+            let after_events =
+                list_pipeline_events(&conn, &before.run_id).expect("events should reload");
+            assert_eq!(
+                &after_events[..before_events.len()],
+                before_events.as_slice()
+            );
+            assert_eq!(
+                after_events[before_events.len()].previous_state,
+                Some(before.state.clone())
+            );
+            assert_eq!(after_events.len(), completed_run.state_version as usize);
+            assert!(get_summary_artifact(&conn, &before.run_id)
+                .expect("summary should load")
+                .is_some());
+            assert!(get_citation_artifact(&conn, &before.run_id)
+                .expect("citation should load")
+                .is_some());
+
+            match checkpoint {
+                ContinuationCheckpoint::Analyzed => {
+                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 1);
+                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 0);
+                }
+                ContinuationCheckpoint::Synthesized | ContinuationCheckpoint::Verified => {
+                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 0);
+                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 0);
+                }
+                _ => {
+                    assert!(runtime.generate_calls.load(Ordering::Relaxed) > 1);
+                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn continuation_rejects_stale_missing_runtime_active_failed_and_terminal_runs() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let runtime = CountingFixtureRuntime::default();
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let ingested = prepare_checkpoint(
+            &mut conn,
+            &source,
+            &pipeline,
+            &runtime,
+            ContinuationCheckpoint::Ingested,
+        );
+        let before_events =
+            list_pipeline_events(&conn, &ingested.run_id).expect("events should load");
+
+        let stale = continue_run_to_summary(
+            &mut conn,
+            &ingested.run_id,
+            ingested.state_version - 1,
+            pipeline.continuation_components(Some(&runtime)),
+        )
+        .expect_err("stale continuation must fail");
+        assert_eq!(stale.code(), "CONTINUATION_STALE_STATE");
+
+        let missing_runtime = continue_run_to_summary(
+            &mut conn,
+            &ingested.run_id,
+            ingested.state_version,
+            pipeline.continuation_components(None),
+        )
+        .expect_err("model-dependent checkpoint must require a runtime");
+        assert_eq!(missing_runtime.code(), "CONTINUATION_RUNTIME_REQUIRED");
+        assert_eq!(
+            get_pipeline_run(&conn, &ingested.run_id)
+                .expect("run should load")
+                .expect("run should exist"),
+            ingested
+        );
+        assert_eq!(
+            list_pipeline_events(&conn, &ingested.run_id).expect("events should reload"),
+            before_events
+        );
+
+        let (parsing, _) = db::start_parsing(&mut conn, &ingested.run_id, ingested.state_version)
+            .expect("parser admission should succeed");
+        let active = continuation_plan(&conn, &parsing.run_id, parsing.state_version)
+            .expect_err("active run must not expose continuation");
+        assert_eq!(active.code(), "CONTINUATION_NOT_ALLOWED");
+
+        let mut failed_conn = init_db(":memory:").expect("schema should initialize");
+        let failed = create_recoverable_failed_run(&mut failed_conn, &source, &pipeline);
+        let failed_error = continuation_plan(&failed_conn, &failed.run_id, failed.state_version)
+            .expect_err("failed run must use new-run retry instead");
+        assert_eq!(failed_error.code(), "CONTINUATION_NOT_ALLOWED");
+
+        let mut completed_conn = init_db(":memory:").expect("schema should initialize");
+        let verified = prepare_checkpoint(
+            &mut completed_conn,
+            &source,
+            &pipeline,
+            &runtime,
+            ContinuationCheckpoint::Verified,
+        );
+        continue_run_to_summary(
+            &mut completed_conn,
+            &verified.run_id,
+            verified.state_version,
+            pipeline.continuation_components(None),
+        )
+        .expect("verified checkpoint should complete without runtime");
+        let completed = get_pipeline_run(&completed_conn, &verified.run_id)
+            .expect("completed run should load")
+            .expect("completed run should exist");
+        let terminal =
+            continuation_plan(&completed_conn, &completed.run_id, completed.state_version)
+                .expect_err("completed run must not continue again");
+        assert_eq!(terminal.code(), "CONTINUATION_NOT_ALLOWED");
+    }
+
+    #[test]
+    fn corrupt_checkpoint_and_atomic_completion_failure_never_claim_success() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let runtime = CountingFixtureRuntime::default();
+        let mut corrupt_conn = init_db(":memory:").expect("schema should initialize");
+        let normalized = prepare_checkpoint(
+            &mut corrupt_conn,
+            &source,
+            &pipeline,
+            &runtime,
+            ContinuationCheckpoint::Normalized,
+        );
+        let before_events = list_pipeline_events(&corrupt_conn, &normalized.run_id)
+            .expect("events should load before corruption probe");
+        corrupt_conn
+            .execute(
+                "UPDATE normalized_documents SET artifact_hash = 'corrupt' WHERE run_id = ?1",
+                [&normalized.run_id],
+            )
+            .expect("corruption probe should alter the test database");
+        let corrupt = continue_run_to_summary(
+            &mut corrupt_conn,
+            &normalized.run_id,
+            normalized.state_version,
+            pipeline.continuation_components(Some(&runtime)),
+        )
+        .expect_err("corrupt checkpoint must fail closed");
+        assert_eq!(corrupt.code(), "PIPELINE_STORE_ERROR");
+        assert_eq!(
+            get_pipeline_run(&corrupt_conn, &normalized.run_id)
+                .expect("run should load")
+                .expect("run should exist"),
+            normalized
+        );
+        assert_eq!(
+            list_pipeline_events(&corrupt_conn, &normalized.run_id)
+                .expect("events should remain readable"),
+            before_events
+        );
+        assert!(get_structured_document(&corrupt_conn, &normalized.run_id)
+            .expect("structured artifact query should succeed")
+            .is_none());
+
+        let mut atomic_conn = init_db(":memory:").expect("schema should initialize");
+        let verified = prepare_checkpoint(
+            &mut atomic_conn,
+            &source,
+            &pipeline,
+            &runtime,
+            ContinuationCheckpoint::Verified,
+        );
+        let verified_events = list_pipeline_events(&atomic_conn, &verified.run_id)
+            .expect("verified events should load");
+        atomic_conn
+            .execute_batch(
+                "CREATE TRIGGER fail_continued_citation
+                 BEFORE INSERT ON citation_artifacts
+                 BEGIN SELECT RAISE(ABORT, 'injected continued citation failure'); END;",
+            )
+            .expect("failure trigger should install");
+        let persistence = continue_run_to_summary(
+            &mut atomic_conn,
+            &verified.run_id,
+            verified.state_version,
+            pipeline.continuation_components(None),
+        )
+        .expect_err("injected final artifact failure must fail continuation");
+        assert_eq!(persistence.code(), "SUMMARY_ARTIFACT_PERSISTENCE_FAILED");
+        assert!(get_summary_artifact(&atomic_conn, &verified.run_id)
+            .expect("summary query should succeed")
+            .is_none());
+        assert!(get_citation_artifact(&atomic_conn, &verified.run_id)
+            .expect("citation query should succeed")
+            .is_none());
+        assert!(get_verified_document(&atomic_conn, &verified.run_id)
+            .expect("verified artifact should load")
+            .is_some());
+        let failed = get_pipeline_run(&atomic_conn, &verified.run_id)
+            .expect("run should load")
+            .expect("run should exist");
+        assert_eq!(failed.state, PipelineState::Failed);
+        assert_eq!(failed.state_version, verified.state_version + 1);
+        let failed_events = list_pipeline_events(&atomic_conn, &verified.run_id)
+            .expect("failed events should load");
+        assert_eq!(failed_events.len(), verified_events.len() + 1);
+        assert_eq!(
+            failed_events.last().map(|event| &event.next_state),
+            Some(&PipelineState::Failed)
+        );
+        assert!(!failed_events.iter().any(|event| matches!(
+            event.next_state,
+            PipelineState::Complete | PipelineState::CompleteWithWarnings
+        )));
+    }
+
+    #[test]
+    fn stable_checkpoint_continuation_survives_independent_database_reopen() {
+        let database = TestDatabase::new();
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let runtime = CountingFixtureRuntime::default();
+        let (checkpoint_run, expected_checkpoint_artifact, checkpoint_events) = {
+            let mut conn = init_db(&database.0).expect("schema should initialize");
+            let run = prepare_checkpoint(
+                &mut conn,
+                &source,
+                &pipeline,
+                &runtime,
+                ContinuationCheckpoint::Synthesized,
+            );
+            let artifact = checkpoint_artifact(&conn, &run, ContinuationCheckpoint::Synthesized);
+            let events =
+                list_pipeline_events(&conn, &run.run_id).expect("checkpoint events should load");
+            (run, artifact, events)
+        };
+
+        let completed = {
+            let mut reopened = init_db(&database.0).expect("database should independently reopen");
+            assert_eq!(
+                checkpoint_artifact(
+                    &reopened,
+                    &checkpoint_run,
+                    ContinuationCheckpoint::Synthesized,
+                ),
+                expected_checkpoint_artifact
+            );
+            continue_run_to_summary(
+                &mut reopened,
+                &checkpoint_run.run_id,
+                checkpoint_run.state_version,
+                pipeline.continuation_components(None),
+            )
+            .expect("reopened synthesized checkpoint should complete without runtime")
+        };
+
+        let reopened = init_db(&database.0).expect("completed database should reopen again");
+        assert_eq!(
+            reopened
+                .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .expect("quick check should run"),
+            "ok"
+        );
+        assert_eq!(completed.run_id, checkpoint_run.run_id);
+        assert_eq!(
+            checkpoint_artifact(
+                &reopened,
+                &checkpoint_run,
+                ContinuationCheckpoint::Synthesized,
+            ),
+            expected_checkpoint_artifact
+        );
+        let persisted_run = get_pipeline_run(&reopened, &checkpoint_run.run_id)
+            .expect("run should load after reopen")
+            .expect("run should persist");
+        assert_eq!(persisted_run.state, PipelineState::CompleteWithWarnings);
+        let persisted_events =
+            list_pipeline_events(&reopened, &checkpoint_run.run_id).expect("events should persist");
+        assert_eq!(
+            &persisted_events[..checkpoint_events.len()],
+            checkpoint_events.as_slice()
+        );
+        assert_eq!(
+            get_summary_artifact(&reopened, &checkpoint_run.run_id)
+                .expect("summary should load")
+                .expect("summary should persist"),
+            completed.summary
+        );
+        assert_eq!(
+            get_citation_artifact(&reopened, &checkpoint_run.run_id)
+                .expect("citation should load")
+                .expect("citation should persist"),
+            completed.citations
         );
     }
 

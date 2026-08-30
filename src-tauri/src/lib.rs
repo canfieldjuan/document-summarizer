@@ -20,7 +20,8 @@ use pipeline::parser::{
 };
 use pipeline::recovery::reconcile_interrupted_runs;
 use pipeline::service::{
-    process_pdf_to_summary, retry_failed_run_to_summary, DocumentServiceError, SummaryComponents,
+    continuation_plan, continue_run_to_summary, process_pdf_to_summary,
+    retry_failed_run_to_summary, ContinuationComponents, DocumentServiceError, SummaryComponents,
 };
 use pipeline::structure::{
     structure_document as structure_pipeline_document, DeterministicStructureInterpreter,
@@ -247,6 +248,49 @@ fn retry_document(
 }
 
 #[tauri::command]
+fn continue_document(
+    state: State<'_, AppState>,
+    run_id: String,
+    expected_state_version: u32,
+) -> Result<CompletedSummaryView, CommandError> {
+    let mut conn = state.db.lock().map_err(|_| {
+        CommandError::new(
+            "DATABASE_LOCK_UNAVAILABLE",
+            "The local database lock is unavailable",
+        )
+    })?;
+    let plan = continuation_plan(&conn, &run_id, expected_state_version)
+        .map_err(DocumentServiceError::from)
+        .map_err(CommandError::from)?;
+    let runtime = if plan.requires_runtime {
+        Some(OllamaRuntime::from_environment().map_err(CommandError::from)?)
+    } else {
+        None
+    };
+    let parser = PdfExtractParser::new();
+    let normalizer = CanonicalNormalizer::new();
+    let interpreter = DeterministicStructureInterpreter::new();
+    let chunker = DeterministicDocumentChunker::new();
+    let completed = continue_run_to_summary(
+        &mut conn,
+        &run_id,
+        expected_state_version,
+        ContinuationComponents {
+            parser: &parser,
+            normalizer: &normalizer,
+            interpreter: &interpreter,
+            chunker: &chunker,
+            runtime: runtime
+                .as_ref()
+                .map(|runtime| runtime as &dyn pipeline::contracts::ModelRuntime),
+        },
+    )
+    .map_err(CommandError::from)?;
+    let persisted = load_persisted_summary(&conn, &completed.run_id).map_err(CommandError::from)?;
+    Ok(CompletedSummaryView::from(persisted))
+}
+
+#[tauri::command]
 fn get_runtime_status() -> RuntimeStatus {
     ollama_runtime_status()
 }
@@ -325,6 +369,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             chunk_document,
             summarize_document,
             retry_document,
+            continue_document,
             get_runtime_status,
             list_recent_runs,
             get_persisted_summary

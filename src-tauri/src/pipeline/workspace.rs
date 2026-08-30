@@ -1,6 +1,6 @@
 use crate::pipeline::contracts::{
-    CitationArtifact, ModelRuntime, ModelRuntimeFailure, PipelineFailure, PipelineRun,
-    PipelineState, PipelineWarning, SummaryArtifact,
+    CitationArtifact, ContinuationCheckpoint, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
+    PipelineRun, PipelineState, PipelineWarning, SummaryArtifact,
 };
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::model::OllamaRuntime;
@@ -42,6 +42,9 @@ pub struct RunHistoryItem {
     pub retry_of_run_id: Option<String>,
     pub retry_run_id: Option<String>,
     pub can_retry: bool,
+    pub continuation_checkpoint: Option<ContinuationCheckpoint>,
+    pub can_continue: bool,
+    pub continuation_requires_runtime: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -171,6 +174,7 @@ fn run_history_item(
     let retry_of = db::get_retry_lineage_for_retry(conn, &run.run_id)?;
     let retry_child = db::get_retry_lineage_for_source(conn, &run.run_id)?;
     let can_retry = run.retry_checkpoint().is_some() && retry_child.is_none();
+    let continuation_checkpoint = run.continuation_checkpoint();
     Ok(RunHistoryItem {
         run_id: run.run_id,
         document_id: document.document_id,
@@ -187,6 +191,10 @@ fn run_history_item(
         retry_of_run_id: retry_of.map(|lineage| lineage.source_run_id),
         retry_run_id: retry_child.map(|lineage| lineage.retry_run_id),
         can_retry,
+        continuation_checkpoint,
+        can_continue: continuation_checkpoint.is_some(),
+        continuation_requires_runtime: continuation_checkpoint
+            .is_some_and(ContinuationCheckpoint::requires_runtime),
     })
 }
 

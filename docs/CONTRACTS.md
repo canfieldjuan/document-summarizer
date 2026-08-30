@@ -460,8 +460,39 @@ an input beyond those limits fails with a structured domain error; no summary
 text is invented. Analysis evidence, summary claims, quotation length, evidence
 references per claim, response schemas, and model response bytes are also
 bounded. Semantic entailment/fact verification, hierarchical synthesis,
-same-run resume, OCR/vision routing, PDF-viewer navigation, and citations for
-visual-only pages remain deferred.
+OCR/vision routing, PDF-viewer navigation, and citations for visual-only pages
+remain deferred.
+
+## Stable checkpoint continuation
+
+A nonterminal run at `INGESTED`, `PARSED`, `NORMALIZED`, `STRUCTURED`,
+`CHUNKED`, `ANALYZED`, `SYNTHESIZED`, or `VERIFIED` may be continued explicitly
+on the same `run_id`. The core derives the checkpoint from persisted state and
+requires the caller's exact `state_version`; callers cannot select a different
+checkpoint or request a backward transition. Failed runs remain terminal and
+use the separate new-run retry contract.
+
+Continuation executes only the ordinary forward stages that follow the durable
+checkpoint. It does not copy or rewrite completed artifacts, create retry
+lineage, or add state-machine edges. Each next stage loads and integrity-checks
+its required persisted inputs before entering its active state, then continues
+to use the existing atomic artifact/state/version/event transactions. A stale
+version, unsupported state, missing runtime, or corrupt/missing checkpoint
+artifact is rejected without pretending that downstream work completed.
+
+Continuation through `ANALYZED` requires `ModelRuntime` because analysis or
+synthesis remains. `SYNTHESIZED` and `VERIFIED` continuation is deterministic
+and does not construct or require Ollama: verification and final artifact
+assembly use already-persisted evidence and claims. Summary-stage entry points
+are independently callable at `CHUNKED`, `ANALYZED`, `SYNTHESIZED`, and
+`VERIFIED`, so completed model work is not repeated.
+
+The recent-work read model exposes the core-derived checkpoint, `canContinue`,
+and whether a runtime is required. This is an availability projection from
+authoritative run state; command admission rechecks the state/version and the
+stage boundary validates the actual artifact. The frontend supplies only the
+run ID and expected version. Startup still performs no automatic replay: a
+stable run changes only after an explicit continuation request.
 
 ## Connect v1 provider
 
