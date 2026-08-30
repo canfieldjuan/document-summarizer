@@ -122,6 +122,28 @@ pub struct PipelineRun {
 }
 
 impl PipelineRun {
+    pub(crate) fn continuation_checkpoint(&self) -> Option<ContinuationCheckpoint> {
+        if self.failure.is_some()
+            || self.completed_at.is_some()
+            || self.cancellation_requested
+            || !self.resumable
+        {
+            return None;
+        }
+
+        match self.state {
+            PipelineState::Ingested => Some(ContinuationCheckpoint::Ingested),
+            PipelineState::Parsed => Some(ContinuationCheckpoint::Parsed),
+            PipelineState::Normalized => Some(ContinuationCheckpoint::Normalized),
+            PipelineState::Structured => Some(ContinuationCheckpoint::Structured),
+            PipelineState::Chunked => Some(ContinuationCheckpoint::Chunked),
+            PipelineState::Analyzed => Some(ContinuationCheckpoint::Analyzed),
+            PipelineState::Synthesized => Some(ContinuationCheckpoint::Synthesized),
+            PipelineState::Verified => Some(ContinuationCheckpoint::Verified),
+            _ => None,
+        }
+    }
+
     pub(crate) fn retry_checkpoint(&self) -> Option<RetryCheckpoint> {
         let failure = self.failure.as_ref()?;
         if self.state != PipelineState::Failed
@@ -133,6 +155,24 @@ impl PipelineRun {
             return None;
         }
         Some(RetryCheckpoint::Ingested)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContinuationCheckpoint {
+    Ingested,
+    Parsed,
+    Normalized,
+    Structured,
+    Chunked,
+    Analyzed,
+    Synthesized,
+    Verified,
+}
+
+impl ContinuationCheckpoint {
+    pub fn requires_runtime(self) -> bool {
+        !matches!(self, Self::Synthesized | Self::Verified)
     }
 }
 

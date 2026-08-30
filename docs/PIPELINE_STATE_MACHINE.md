@@ -227,3 +227,39 @@ checkpoints or mutate state. A summary can be opened only when its
 integrity-valid artifact exists and the authoritative run is `COMPLETE` or
 `COMPLETE_WITH_WARNINGS`. Runtime readiness and frontend display state never
 mutate the pipeline state machine or its event ledger.
+
+### Explicit stable-checkpoint continuation
+
+Stable incomplete runs continue on their existing identity:
+
+```text
+INGESTED -> PARSING -> ... -> COMPLETE_WITH_WARNINGS
+PARSED -> NORMALIZING -> ... -> COMPLETE_WITH_WARNINGS
+NORMALIZED -> STRUCTURING -> ... -> COMPLETE_WITH_WARNINGS
+STRUCTURED -> CHUNKING -> ... -> COMPLETE_WITH_WARNINGS
+CHUNKED -> ANALYZING -> ... -> COMPLETE_WITH_WARNINGS
+ANALYZED -> SYNTHESIZING -> ... -> COMPLETE_WITH_WARNINGS
+SYNTHESIZED -> VERIFYING -> VERIFIED -> COMPLETE_WITH_WARNINGS
+VERIFIED -> COMPLETE_WITH_WARNINGS
+```
+
+The request includes `run_id` and expected `state_version`. Rust reloads the
+authoritative run, derives its checkpoint, rejects stale or non-stable states,
+and invokes only the existing forward stage boundaries. No new transition edge
+or backward mutation exists. Previously committed events remain the unchanged
+prefix of the same run's history, and state versions continue increasing once
+per successful transition.
+
+Required checkpoint artifacts are loaded and integrity-checked before the next
+active state commits. Corruption or absence therefore leaves the stable state
+and event prefix unchanged. Once a stage enters its active state, its existing
+success/failure rules apply: successful artifact/state/event writes remain
+atomic, and an ordinary stage or persistence failure is recorded as `FAILED`
+when SQLite can persist that truth.
+
+Continuation from `INGESTED` through `ANALYZED` requires a model runtime to
+eventually analyze or synthesize. Continuation from `SYNTHESIZED` or `VERIFIED`
+does not require a runtime and cannot repeat model calls. Failed runs never use
+this path; explicit retry creates a new child run under the preceding contract.
+Desktop startup preserves stable checkpoints without replay, and the UI offers
+continuation only as an explicit operator action.

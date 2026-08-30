@@ -101,11 +101,16 @@
             </article>
 
             <div id="failure-view" class="stage-view failure-view" hidden>
-              <p class="stage-kicker">Could not complete this document</p>
+              <p id="failure-kicker" class="stage-kicker">Could not complete this document</p>
               <h3 id="failure-title">Processing stopped safely.</h3>
               <p id="failure-message"></p>
               <p id="failure-code" class="failure-code"></p>
               <div class="retry-action">
+                <button id="continue-btn" class="primary-button retry-button" type="button" hidden>
+                  <span>Continue processing</span>
+                  <span aria-hidden="true">→</span>
+                </button>
+                <p id="continue-hint" class="action-hint" hidden></p>
                 <button id="retry-btn" class="primary-button retry-button" type="button" hidden>
                   <span>Retry as new attempt</span>
                   <span aria-hidden="true">↻</span>

@@ -142,6 +142,17 @@ pub fn summarize_chunked_document(
     runtime: &dyn ModelRuntime,
     run_id: &str,
 ) -> Result<SummaryArtifacts, SummaryPipelineError> {
+    analyze_chunked_document(conn, runtime, run_id)?;
+    synthesize_analyzed_document(conn, runtime, run_id)?;
+    verify_synthesized_document(conn, run_id)?;
+    complete_verified_document(conn, run_id)
+}
+
+pub fn analyze_chunked_document(
+    conn: &mut Connection,
+    runtime: &dyn ModelRuntime,
+    run_id: &str,
+) -> Result<AnalyzedDocument, SummaryPipelineError> {
     let run = db::get_pipeline_run(conn, run_id)?
         .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
     let normalized = db::get_normalized_document(conn, run_id)?
@@ -159,10 +170,24 @@ pub fn summarize_chunked_document(
             ));
         }
     };
-    let analyzed_run = complete_analysis(conn, run_id, analyzing_run.state_version, &analyzed)?;
+    complete_analysis(conn, run_id, analyzing_run.state_version, &analyzed)?;
+    Ok(analyzed)
+}
+
+pub fn synthesize_analyzed_document(
+    conn: &mut Connection,
+    runtime: &dyn ModelRuntime,
+    run_id: &str,
+) -> Result<SynthesizedDocument, SummaryPipelineError> {
+    let run = db::get_pipeline_run(conn, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    let normalized = db::get_normalized_document(conn, run_id)?
+        .ok_or_else(|| StoreError::NormalizedArtifactNotFound(run_id.to_string()))?;
+    let chunked = db::get_chunked_document(conn, run_id)?
+        .ok_or_else(|| StoreError::ChunkedArtifactNotFound(run_id.to_string()))?;
 
     let (synthesizing_run, persisted_analysis) =
-        db::start_synthesis(conn, run_id, analyzed_run.state_version)?;
+        db::start_synthesis(conn, run_id, run.state_version)?;
     let synthesized = match synthesize(runtime, &persisted_analysis, &chunked, &normalized) {
         Ok(synthesized) => synthesized,
         Err(failure) => {
@@ -175,11 +200,29 @@ pub fn summarize_chunked_document(
             ));
         }
     };
-    let synthesized_run =
-        complete_synthesis(conn, run_id, synthesizing_run.state_version, &synthesized)?;
+    complete_synthesis(conn, run_id, synthesizing_run.state_version, &synthesized)?;
+    Ok(synthesized)
+}
+
+pub fn verify_synthesized_document(
+    conn: &mut Connection,
+    run_id: &str,
+) -> Result<VerifiedDocument, SummaryPipelineError> {
+    let run = db::get_pipeline_run(conn, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    let normalized = db::get_normalized_document(conn, run_id)?
+        .ok_or_else(|| StoreError::NormalizedArtifactNotFound(run_id.to_string()))?;
+    let chunked = db::get_chunked_document(conn, run_id)?
+        .ok_or_else(|| StoreError::ChunkedArtifactNotFound(run_id.to_string()))?;
+    let persisted_analysis = db::get_analyzed_document(conn, run_id)?.ok_or_else(|| {
+        StoreError::DownstreamArtifactNotFound {
+            artifact_kind: "analyzed".to_string(),
+            run_id: run_id.to_string(),
+        }
+    })?;
 
     let (verifying_run, persisted_synthesis) =
-        db::start_verification(conn, run_id, synthesized_run.state_version)?;
+        db::start_verification(conn, run_id, run.state_version)?;
     let verified = match verify(
         &persisted_synthesis,
         &persisted_analysis,
@@ -197,7 +240,52 @@ pub fn summarize_chunked_document(
             ));
         }
     };
-    let verified_run = complete_verification(conn, run_id, verifying_run.state_version, &verified)?;
+    complete_verification(conn, run_id, verifying_run.state_version, &verified)?;
+    Ok(verified)
+}
+
+pub fn complete_verified_document(
+    conn: &mut Connection,
+    run_id: &str,
+) -> Result<SummaryArtifacts, SummaryPipelineError> {
+    let run = db::get_pipeline_run(conn, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    let normalized = db::get_normalized_document(conn, run_id)?
+        .ok_or_else(|| StoreError::NormalizedArtifactNotFound(run_id.to_string()))?;
+    let chunked = db::get_chunked_document(conn, run_id)?
+        .ok_or_else(|| StoreError::ChunkedArtifactNotFound(run_id.to_string()))?;
+    let persisted_analysis = db::get_analyzed_document(conn, run_id)?.ok_or_else(|| {
+        StoreError::DownstreamArtifactNotFound {
+            artifact_kind: "analyzed".to_string(),
+            run_id: run_id.to_string(),
+        }
+    })?;
+    let persisted_synthesis = db::get_synthesized_document(conn, run_id)?.ok_or_else(|| {
+        StoreError::DownstreamArtifactNotFound {
+            artifact_kind: "synthesized".to_string(),
+            run_id: run_id.to_string(),
+        }
+    })?;
+    let verified = db::get_verified_document(conn, run_id)?.ok_or_else(|| {
+        StoreError::DownstreamArtifactNotFound {
+            artifact_kind: "verified".to_string(),
+            run_id: run_id.to_string(),
+        }
+    })?;
+    if let Err(failure) = validate_verified_document(
+        &verified,
+        &persisted_synthesis,
+        &persisted_analysis,
+        &chunked,
+        &normalized,
+    ) {
+        return Err(persist_final_failure(
+            conn,
+            run_id,
+            run.state_version,
+            failure,
+        ));
+    }
 
     let mut summary = SummaryArtifact {
         document_id: verified.document_id.clone(),
@@ -219,7 +307,7 @@ pub fn summarize_chunked_document(
             return Err(persist_final_failure(
                 conn,
                 run_id,
-                verified_run.state_version,
+                run.state_version,
                 failure,
             ));
         }
@@ -236,25 +324,20 @@ pub fn summarize_chunked_document(
             return Err(persist_final_failure(
                 conn,
                 run_id,
-                verified_run.state_version,
+                run.state_version,
                 failure,
             ));
         }
     };
-    if let Err(source) = db::complete_summary(
-        conn,
-        run_id,
-        verified_run.state_version,
-        &summary,
-        &citations,
-    ) {
+    if let Err(source) = db::complete_summary(conn, run_id, run.state_version, &summary, &citations)
+    {
         let failure = stage_failure(
             PipelineStage::Verify,
             "SUMMARY_ARTIFACT_PERSISTENCE_FAILED",
             "The final summary artifact could not be committed atomically",
             true,
         );
-        return match db::fail_summary(conn, run_id, verified_run.state_version, failure) {
+        return match db::fail_summary(conn, run_id, run.state_version, failure) {
             Ok(_) => Err(SummaryPipelineError::ArtifactPersistence {
                 stage: "summary",
                 source,

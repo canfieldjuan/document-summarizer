@@ -893,3 +893,62 @@ future work
   still preserved as truthful incomplete runs rather than auto-replayed on
   startup. A future explicit checkpoint-resume policy may make those runs
   actionable; this slice closes only the retry-child creation-to-parser handoff.
+
+## Slice 10 — Explicit Stable-Checkpoint Continuation
+
+**Status**: Implemented and locally accepted
+
+**Continuation contract**:
+- Stable `INGESTED`, `PARSED`, `NORMALIZED`, `STRUCTURED`, `CHUNKED`,
+  `ANALYZED`, `SYNTHESIZED`, and `VERIFIED` runs expose a core-derived
+  continuation plan. The caller supplies the run ID and exact state version but
+  cannot select a checkpoint.
+- Continuation keeps the same run/document identity and follows only existing
+  forward transitions. It neither rewrites prior artifacts/events nor creates
+  retry lineage. `FAILED` remains terminal and continues to use Slice 9's
+  separate child-attempt contract.
+- Summary processing now has durable entry points at `CHUNKED`, `ANALYZED`,
+  `SYNTHESIZED`, and `VERIFIED`. Completed analysis is not requested again;
+  completed synthesis and verification can finish without constructing an
+  Ollama runtime.
+
+**Desktop behavior**:
+- Recent-work projections expose `canContinue`, the stable checkpoint, and the
+  runtime requirement. Opening an incomplete stable run offers a contextual
+  `Continue processing` action. The frontend sends only run ID and expected
+  version; Rust owns checkpoint selection and all state/artifact work.
+- Ollama readiness gates checkpoints through `ANALYZED`. `SYNTHESIZED` and
+  `VERIFIED` remain actionable while Ollama is unavailable because their
+  remaining operations are deterministic.
+
+**Focused proof completed**:
+- All eight stable checkpoints continued to one durable summary on the same
+  run while preserving their checkpoint artifact and immutable event prefix.
+  Runtime call counters proved `ANALYZED` invokes only synthesis and
+  `SYNTHESIZED`/`VERIFIED` invoke no model operations.
+- Stale versions, missing required runtime, active runs, failed runs, and
+  completed runs were rejected. A deliberately corrupted normalized artifact
+  produced no next artifact, state mutation, version increment, or event.
+- An injected final citation-write failure rolled back both final artifacts and
+  the completion transition/event, then durably recorded failure. A synthesized
+  checkpoint survived connection close/reopen, completed without a runtime,
+  and its summary, citations, original artifact, and event prefix survived a
+  second independent connection reopen with SQLite `quick_check = ok`.
+
+**Verification boundary and deferred work**:
+- The full Rust suite executed 122 tests: 121 passed and the unchanged opt-in
+  live Ollama test was ignored. Strict formatting and all-target/all-feature
+  Clippy passed. The TypeScript/Vite production build and no-bundle Tauri
+  release build passed, producing the release executable with the new command
+  and UI embedded.
+- The release executable was launched with an isolated application-data
+  directory through the available X11 desktop path, remained active, and its
+  rendered standalone workspace was captured and inspected. Ollama was
+  unavailable in that isolated smoke run, so the ordinary new-PDF action was
+  correctly disabled. No stable checkpoint was seeded into that application
+  database, so the live `Continue processing` button was not clicked; its
+  rendering/dispatch path is TypeScript-compiled and its Rust read/command
+  contracts are covered by the focused tests above.
+- Startup remains non-replaying. Automatic scheduling, background jobs,
+  cancellation, visual/OCR routing, Connect retry/resume, and cross-process
+  continuation races beyond SQLite CAS remain deferred.
