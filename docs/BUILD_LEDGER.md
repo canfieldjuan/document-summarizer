@@ -1260,3 +1260,80 @@ future work
   RPM, macOS, and Windows packaging/install lifecycle tests remain deferred to
   their target environments. OCR/vision and additional document formats remain
   outside the native-text PDF v1 boundary.
+
+## Slice 15 — Selected-Runtime Default and v1 Acceptance Closure
+
+**Status**: Implemented; locally and cross-process verified
+
+**Runtime contract and fix**:
+- The selected Ollama/Qwen deployment previously shipped a 60-second generation
+  deadline even though Slice 14's real desktop run required the documented
+  300-second override. The supported default is now 300 seconds, so bounded
+  multi-stage document work does not require hidden launch configuration.
+- `DOC_SUM_MODEL_TIMEOUT_SECONDS` remains a deployment override. A pure boundary
+  test proves the default, accepts the minimum positive value and `u64::MAX`,
+  and rejects empty, zero, negative, fractional, non-numeric, and past-`u64`
+  values.
+- The change affects only model-generation requests. The separate three-second
+  connection timeout, five-second health timeout, loopback-only endpoint rule,
+  response-size limits, prompt bounds, and cooperative cancellation contract are
+  unchanged.
+
+**No-override live proof**:
+- With `DOC_SUM_MODEL_TIMEOUT_SECONDS` explicitly absent, the ignored real
+  Ollama service test ran the repository's native-text PDF through the complete
+  pipeline using `qwen3-30b-a3b:latest`. It passed in 169.53 seconds, persisted
+  the summary and exact citations, closed the database connection, and verified
+  them after an independent reopen. This closes the exact default-timeout gap
+  observed in Slice 14.
+
+**Fresh package and current-consumer proof**:
+- `npm run desktop:build` used a newly created empty Cargo target and completed
+  in release mode. It produced the `document-summarizer` executable and one
+  Debian bundle, `Document Summarizer_0.1.0_amd64.deb`.
+- Email Watcher `origin/main` was fetched and exercised at commit
+  `2a1596b200c339c4457a0358ac5e9a4e7748ed1b`. Its exact archived
+  `connect-local-proof.py` and current source modules drove the extracted binary
+  from that fresh Debian package. A launch wrapper removed the harness-provided
+  timeout variable immediately before `exec`, forcing the packaged provider to
+  use its shipped 300-second default.
+- The synthetic Gmail-attachment proof observed capability availability
+  `0 -> 1 -> 0 -> 1` across provider absence, launch, stop, and restart without
+  changing Email Watcher. The live Qwen Connect job completed; Email Watcher's
+  input SHA-256, persisted completed status, and persisted summary matched the
+  response, and a separate connection to its schema-v5 database returned
+  `quick_check = ok`.
+
+**Provider persistence and integrity proof**:
+- A second run retained the packaged provider's private application-data
+  directory across process stop/restart. A new SQLite CLI process reopened
+  schema version 12 with `quick_check = ok` and found one completed
+  `CompleteWithWarnings` run at state version 18, all 18 ordered lifecycle
+  events, and one summary plus one citation artifact.
+- The stored summary-artifact SHA-256 recomputed exactly as
+  `e3fc40ad24b368e729a13b31036684b1005ab7b4a0b7b8d27ad83f9ff0076fd9`;
+  the citation-artifact hash recomputed exactly as
+  `1ba9fab544758fc1c8d9539098dd2c0afd840f4b7abb5607c3f497bc284b34e4`.
+  The provider-owned PDF and repository fixture were both 5,443 bytes and both
+  hashed to
+  `34aa217d7a21a0ec31abd90d0d7700d42924f334ce107912850398ac3f23d7ea`.
+
+**Regression gate**:
+- `cargo test --all-targets --all-features` ran 154 library tests: 152 passed,
+  none failed, and the two opt-in live Ollama tests were ignored at this gate;
+  the release-contract target then passed all three tests. The full real Ollama
+  pipeline test passed separately with the default timeout.
+- `cargo fmt --all -- --check`, strict all-target/all-feature Clippy, the
+  TypeScript/Vite production build, `git diff --check`, and the fresh-target
+  Debian package build all passed.
+
+**Evidence boundary and deferred work**:
+- Slice 14 already exercised the real native file picker, rendered citations,
+  retry, and process reopen. This slice exercised the current cross-app consumer
+  with synthetic Gmail attachment bytes; it did not perform live Gmail OAuth or
+  install/uninstall the Debian package through the system package manager.
+- A cooperative cancellation request may still wait for the current bounded
+  model HTTP request to return; request preemption/streaming is deferred. Linux
+  Debian remains the only verified bundle target. OCR/vision, additional source
+  formats, remote inference, workflow automation, and cross-machine Connect
+  remain outside the native-text PDF v1 release boundary.
