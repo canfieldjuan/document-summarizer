@@ -219,12 +219,15 @@ fn validate_citations_against_sources(
         .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
     let analyzed = db::get_analyzed_document(conn, run_id)?
         .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
+    let synthesized = db::get_synthesized_document(conn, run_id)?
+        .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
     let verified = db::get_verified_document(conn, run_id)?
         .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
     crate::pipeline::summary::validate_citation_artifact(
         citations,
         summary,
         &verified,
+        &synthesized,
         &analyzed,
         &chunked,
         &normalized,
@@ -242,7 +245,8 @@ fn summary_view(
     let claims = match citations {
         Some(citations) => {
             if citations.document_id != summary.document_id
-                || citations.citation_version != crate::pipeline::summary::CITATION_VERSION
+                || crate::pipeline::summary::expected_citation_version(&summary.summary_version)
+                    != Some(citations.citation_version.as_str())
                 || citations.summary_integrity_hash != summary.integrity_hash
                 || citations.rendered_text != summary.text
                 || citations.claims.is_empty()

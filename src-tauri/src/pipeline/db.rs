@@ -1685,14 +1685,37 @@ pub(super) fn complete_summary(
     }
     insert_summary_artifact(&tx, run_id, summary)?;
     insert_citation_artifact(&tx, run_id, citations)?;
+    let (next_state, reason) = if summary.warnings.is_empty() {
+        (PipelineState::Complete, None)
+    } else {
+        let reason = if summary
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "SEMANTIC_VERIFICATION_DEFERRED")
+        {
+            "semantic_verification_deferred"
+        } else if summary
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "SEMANTIC_CLAIMS_WITHHELD")
+        {
+            "semantic_claims_withheld"
+        } else {
+            "completed_with_warnings"
+        };
+        (
+            PipelineState::CompleteWithWarnings,
+            Some(reason.to_string()),
+        )
+    };
     let completed_run = transition_in_tx(
         &tx,
         run_id,
         PipelineState::Verified,
         expected_version,
-        PipelineState::CompleteWithWarnings,
+        next_state,
         Some(PipelineStage::Verify),
-        Some("semantic_verification_deferred".to_string()),
+        reason,
         TransitionPatch {
             warnings: Some(summary.warnings.clone()),
             failure: None,

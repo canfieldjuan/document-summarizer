@@ -115,20 +115,30 @@ and deterministic IDs come from authoritative Rust state, not model output.
 
 Synthesis loads the persisted analysis artifact, accepts only claims with known
 evidence IDs, and deterministically renders page labels from their exact source
-spans before committing `SYNTHESIZING -> SYNTHESIZED`. Verification checks the
-claim/evidence graph, exact quotations, normalized provenance, runtime identity,
-ordered source-chunk coverage, deterministic rendered text, and artifact
-integrity. It does not claim semantic entailment or factual correctness. Its
-artifact commits with `VERIFYING -> VERIFIED` and records
-`SEMANTIC_VERIFICATION_DEFERRED`.
+spans before committing `SYNTHESIZING -> SYNTHESIZED`. Verification then uses
+`ModelRuntime` to classify every claim against only its validated exact
+quotations. Rust requires complete, unique claim-ID coverage; restores each
+claim's evidence IDs from the persisted synthesis; and rejects malformed,
+partial, duplicate, or foreign verdicts. The complete verdict artifact and its
+runtime/model identity commit atomically with `VERIFYING -> VERIFIED`.
 
-The final summary artifact, independently persisted citation artifact,
+Only claims classified as `supported` enter the final summary and citation
+artifact. Unsupported and ambiguous claims remain in the durable verification
+artifact and add `SEMANTIC_CLAIMS_WITHHELD`. This is an evidence-entailment
+classification, not certification that the source itself is factually true.
+If at least one claim is supported, the final summary artifact, independently
+persisted citation artifact, `VERIFIED -> COMPLETE` or
 `VERIFIED -> COMPLETE_WITH_WARNINGS` transition, state-version increment, and
-event append share one transaction. A failed summary insert, citation insert,
-transition, or event therefore rolls back both artifacts and cannot create a
-false completion event. A model, validation, or ordinary artifact-write failure
-persists `FAILED` from the active stage. If SQLite itself cannot record the
-failure, the active state remains truthful evidence of interrupted work. A
+event append share one transaction. Warnings select `COMPLETE_WITH_WARNINGS`;
+an otherwise warning-free result selects `COMPLETE`.
+
+If no claim is supported, `VERIFYING -> VERIFIED` first preserves all verdicts
+for audit, then `VERIFIED -> FAILED` records
+`NO_SEMANTICALLY_SUPPORTED_CLAIMS`; no final summary or citation artifact is
+created. A failed verdict, summary, citation, transition, or event write cannot
+create a false success event. A model, validation, or ordinary artifact-write
+failure persists `FAILED` from the active stage. If SQLite itself cannot record
+the failure, the active state remains truthful evidence of interrupted work. A
 zero-chunk visual-only document fails analysis with
 `NO_NATIVE_TEXT_FOR_SUMMARY`; OCR and visual analysis are not implicitly
 attempted.
@@ -233,14 +243,14 @@ mutate the pipeline state machine or its event ledger.
 Stable incomplete runs continue on their existing identity:
 
 ```text
-INGESTED -> PARSING -> ... -> COMPLETE_WITH_WARNINGS
-PARSED -> NORMALIZING -> ... -> COMPLETE_WITH_WARNINGS
-NORMALIZED -> STRUCTURING -> ... -> COMPLETE_WITH_WARNINGS
-STRUCTURED -> CHUNKING -> ... -> COMPLETE_WITH_WARNINGS
-CHUNKED -> ANALYZING -> ... -> COMPLETE_WITH_WARNINGS
-ANALYZED -> SYNTHESIZING -> ... -> COMPLETE_WITH_WARNINGS
-SYNTHESIZED -> VERIFYING -> VERIFIED -> COMPLETE_WITH_WARNINGS
-VERIFIED -> COMPLETE_WITH_WARNINGS
+INGESTED -> PARSING -> ... -> COMPLETE | COMPLETE_WITH_WARNINGS
+PARSED -> NORMALIZING -> ... -> COMPLETE | COMPLETE_WITH_WARNINGS
+NORMALIZED -> STRUCTURING -> ... -> COMPLETE | COMPLETE_WITH_WARNINGS
+STRUCTURED -> CHUNKING -> ... -> COMPLETE | COMPLETE_WITH_WARNINGS
+CHUNKED -> ANALYZING -> ... -> COMPLETE | COMPLETE_WITH_WARNINGS
+ANALYZED -> SYNTHESIZING -> ... -> COMPLETE | COMPLETE_WITH_WARNINGS
+SYNTHESIZED -> VERIFYING -> VERIFIED -> COMPLETE | COMPLETE_WITH_WARNINGS
+VERIFIED -> COMPLETE | COMPLETE_WITH_WARNINGS
 ```
 
 The request includes `run_id` and expected `state_version`. Rust reloads the
@@ -257,9 +267,9 @@ success/failure rules apply: successful artifact/state/event writes remain
 atomic, and an ordinary stage or persistence failure is recorded as `FAILED`
 when SQLite can persist that truth.
 
-Continuation from `INGESTED` through `ANALYZED` requires a model runtime to
-eventually analyze or synthesize. Continuation from `SYNTHESIZED` or `VERIFIED`
-does not require a runtime and cannot repeat model calls. Failed runs never use
-this path; explicit retry creates a new child run under the preceding contract.
-Desktop startup preserves stable checkpoints without replay, and the UI offers
-continuation only as an explicit operator action.
+Continuation from `INGESTED` through `SYNTHESIZED` requires a model runtime to
+eventually analyze, synthesize, or classify claim support. Continuation from
+`VERIFIED` does not require a runtime and cannot repeat model calls. Failed runs
+never use this path; explicit retry creates a new child run under the preceding
+contract. Desktop startup preserves stable checkpoints without replay, and the
+UI offers continuation only as an explicit operator action.
