@@ -347,4 +347,35 @@ mod capability_tests {
         assert!(!has_permission("dialog:allow-save"));
         assert!(!has_permission("dialog:allow-message"));
     }
+
+    #[test]
+    fn tauri_cli_controls_protocol_mode_through_the_default_feature() {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("Tauri configuration should be valid JSON");
+        let manifest = include_str!("../Cargo.toml");
+        let build = config["build"]
+            .as_object()
+            .expect("Tauri build configuration should be an object");
+
+        assert_eq!(
+            build.get("devUrl").and_then(Value::as_str),
+            Some("http://localhost:1420")
+        );
+        assert_eq!(
+            build.get("frontendDist").and_then(Value::as_str),
+            Some("../dist")
+        );
+        assert!(build
+            .get("features")
+            .and_then(Value::as_array)
+            .is_none_or(|features| features
+                .iter()
+                .all(|feature| feature.as_str() != Some("custom-protocol"))));
+        assert!(manifest
+            .lines()
+            .any(|line| line.trim() == r#"default = ["custom-protocol"]"#));
+        assert!(manifest
+            .lines()
+            .any(|line| line.trim() == r#"custom-protocol = ["tauri/custom-protocol"]"#));
+    }
 }
