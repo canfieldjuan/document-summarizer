@@ -1114,3 +1114,72 @@ future work
   existing pipeline metadata. Automatic replay, scheduler/queue infrastructure,
   cross-process cancellation, Connect cancellation, OCR/vision, and hierarchical
   synthesis remain deferred.
+
+## Slice 13 — Bounded Hierarchical Synthesis
+
+**Status**: Implemented; locally verified
+
+**Synthesis contract**:
+- Synthesis version `3.0.0` preserves the existing small-document direct path
+  when the ordered evidence catalog fits one request. Each synthesis request is
+  capped at eight items and 16,000 Unicode characters.
+- Larger catalogs are partitioned deterministically in source order. Each
+  evidence batch emits at most four intermediate claims; non-final candidate
+  batches must reduce by at least half. The conservative plan and runtime guard
+  cap one synthesis attempt at 256 model requests.
+- Intermediate candidate IDs derive from stable document/version/round/batch,
+  output-order, text, and evidence inputs. Model responses may cite only IDs
+  supplied in that exact request. Rust expands candidate references to unique,
+  canonical original evidence IDs and rejects any claim exceeding the existing
+  16-evidence provenance bound.
+- Only final cited claims are materialized in `SynthesizedDocument`. Candidate
+  artifacts remain ephemeral and never become a checkpoint. Any later synthesis
+  attempt must recompute them under the existing failure/retry policy rather
+  than treating partial reduction work as complete. Historical synthesis
+  version `2.0.0` artifacts remain readable with their original deterministic
+  claim identities.
+
+**State, cancellation, and persistence proof**:
+- Cancellation checkpoints surround every evidence and candidate model request.
+  A focused token test requests cancellation after the first response and proves
+  that no second request begins.
+- The existing completion transaction remains authoritative: final artifact
+  insertion, `SYNTHESIZING -> SYNTHESIZED`, state-version increment, warnings,
+  and immutable event append commit together. An injected event failure rolls
+  back the artifact and success transition before recording `FAILED`.
+- A hierarchical artifact produced from a catalog exceeding the former
+  100,000-character aggregate limit survived an independent SQLite connection
+  close/reopen with the same artifact and run identity. This is a database
+  connection-reopen proof, not a full desktop-process restart.
+
+**Boundary and regression proof**:
+- The summary module ran 36 tests: 35 passed and the opt-in live Ollama test was
+  ignored by default. It covers the one-request direct path,
+  deterministic over-limit hierarchy, exact per-request size/item bounds,
+  original-evidence provenance expansion, known-but-cross-batch evidence
+  rejection, foreign-candidate rejection, cancellation, malformed output,
+  success-event rollback, independent reopen, resource-limit boundaries, and
+  synthesis-version compatibility alongside all prior summary/citation tests.
+- The all-target Rust suite ran 153 tests: 151 passed, no test failed, and the
+  two opt-in live Ollama tests were ignored. Rust formatting, strict
+  all-target/all-feature Clippy, the TypeScript/Vite production build, and the
+  no-bundle Tauri release build passed.
+- The new opt-in hierarchical test forced nine real extracted source lines
+  through the candidate-reduction schema using `qwen3-30b-a3b:latest`. With a
+  test-only 300-second per-request override it passed in 86.00 seconds and the
+  final claims referenced only original evidence IDs. The unchanged 60-second
+  default timed out under the observed shared-machine load, where a separate LM
+  Studio process occupied most GPU memory and Ollama reported predominantly CPU
+  execution. This is live model-contract proof with an explicit timeout
+  override, not proof that the default timeout tolerates concurrent GPU-heavy
+  workloads.
+
+**Known limitations and deferred work**:
+- Request bounds use deterministic Unicode-character and item limits rather than
+  runtime-specific tokenization. The selected runtime still enforces its own
+  context and response limits.
+- Intermediate reductions are intentionally recomputed by any later attempt;
+  persisted per-batch progress and same-stage replay remain deferred.
+- OCR/vision, citations for visual-only pages, finer progress counters,
+  scheduler/queue infrastructure, cross-process or Connect cancellation, and
+  independent source-fact checking remain deferred.

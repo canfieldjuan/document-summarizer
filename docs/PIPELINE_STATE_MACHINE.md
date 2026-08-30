@@ -136,14 +136,22 @@ ANALYZED`. Unknown block IDs, non-contiguous quotations, malformed JSON, and
 mixed valid/invalid evidence fail the entire response. Evidence source spans
 and deterministic IDs come from authoritative Rust state, not model output.
 
-Synthesis loads the persisted analysis artifact, accepts only claims with known
-evidence IDs, and deterministically renders page labels from their exact source
-spans before committing `SYNTHESIZING -> SYNTHESIZED`. Verification then uses
-`ModelRuntime` to classify every claim against only its validated exact
-quotations. Rust requires complete, unique claim-ID coverage; restores each
-claim's evidence IDs from the persisted synthesis; and rejects malformed,
-partial, duplicate, or foreign verdicts. The complete verdict artifact and its
-runtime/model identity commit atomically with `VERIFYING -> VERIFIED`.
+Synthesis loads the persisted analysis artifact. A small evidence catalog uses
+one request; a larger catalog is partitioned and reduced deterministically with
+bounded evidence and candidate requests. Each model response may cite only IDs
+supplied in that request. Candidate references are expanded back to bounded,
+canonically ordered original evidence IDs before final claim IDs and page labels
+are derived. Cancellation is observed before and after every model request.
+Intermediate reductions are not durable and cannot advance state. Only the
+validated final artifact, `SYNTHESIZING -> SYNTHESIZED`, state-version update,
+and event append share the completion transaction.
+
+Verification then uses `ModelRuntime` to classify every claim against only its
+validated exact quotations. Rust requires complete, unique claim-ID coverage;
+restores each claim's evidence IDs from the persisted synthesis; and rejects
+malformed, partial, duplicate, or foreign verdicts. The complete verdict
+artifact and its runtime/model identity commit atomically with `VERIFYING ->
+VERIFIED`.
 
 Only claims classified as `supported` enter the final summary and citation
 artifact. Unsupported and ambiguous claims remain in the durable verification
