@@ -2,13 +2,14 @@ use crate::connect::contracts::valid_uuid_v4;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use ring::signature::{UnparsedPublicKey, ED25519};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Take};
+use std::io::{Read, Take, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -16,10 +17,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 pub const FEATURE_ID: &str = "connect.capability_exchange";
 pub const ENTITLEMENT_FILE_NAME: &str = "entitlement-v1.json";
+pub const ENTITLEMENT_LOCK_FILE_NAME: &str = ".entitlement-v1.lock";
 const FORMAT_VERSION: u32 = 1;
 const MAX_ENTITLEMENT_BYTES: u64 = 16 * 1024;
 const MAX_PAYLOAD_BASE64URL_CHARS: usize = 8192;
@@ -33,10 +37,12 @@ const COMPILED_KEYRING: &str = include_str!(concat!(
     env!("OUT_DIR"),
     "/connect-entitlement-keyring.json"
 ));
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync + 'static>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EntitlementDecision {
     Active,
     AuthorityUnavailable,
@@ -45,6 +51,22 @@ pub enum EntitlementDecision {
     NotYetValid,
     Expired,
     FeatureMissing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntitlementStatus {
+    pub state: EntitlementDecision,
+    pub active: bool,
+}
+
+impl From<EntitlementDecision> for EntitlementStatus {
+    fn from(state: EntitlementDecision) -> Self {
+        Self {
+            active: state.is_active(),
+            state,
+        }
+    }
 }
 
 impl EntitlementDecision {
@@ -59,6 +81,35 @@ pub enum EntitlementConfigurationError {
     InvalidKeyring,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum EntitlementInstallError {
+    #[error("this build has no trusted Connect entitlement authority")]
+    AuthorityUnavailable,
+    #[error("the selected Connect entitlement is not a safe, valid license file")]
+    SourceInvalid,
+    #[error("the selected Connect entitlement is not currently active")]
+    NotActive,
+    #[error("the private Connect entitlement directory is unavailable or unsafe")]
+    StorageUnavailable,
+    #[error("another Connect entitlement activation is already in progress")]
+    ActivationBusy,
+    #[error("the Connect entitlement could not be installed safely")]
+    InstallFailed,
+}
+
+impl EntitlementInstallError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::AuthorityUnavailable => "CONNECT_ENTITLEMENT_AUTHORITY_UNAVAILABLE",
+            Self::SourceInvalid => "CONNECT_ENTITLEMENT_SOURCE_INVALID",
+            Self::NotActive => "CONNECT_ENTITLEMENT_NOT_ACTIVE",
+            Self::StorageUnavailable => "CONNECT_ENTITLEMENT_STORAGE_UNAVAILABLE",
+            Self::ActivationBusy => "CONNECT_ENTITLEMENT_ACTIVATION_BUSY",
+            Self::InstallFailed => "CONNECT_ENTITLEMENT_INSTALL_FAILED",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EntitlementGate {
     path: Option<PathBuf>,
@@ -66,6 +117,8 @@ pub struct EntitlementGate {
     clock: Clock,
     #[cfg(test)]
     forced: Option<EntitlementDecision>,
+    #[cfg(test)]
+    fail_before_replace: bool,
 }
 
 #[derive(Deserialize)]
@@ -112,6 +165,8 @@ impl EntitlementGate {
             clock: Arc::new(Utc::now),
             #[cfg(test)]
             forced: None,
+            #[cfg(test)]
+            fail_before_replace: false,
         })
     }
 
@@ -132,6 +187,44 @@ impl EntitlementGate {
         evaluate_entitlement(&bytes, &self.keys, (self.clock)())
     }
 
+    pub fn status(&self) -> EntitlementStatus {
+        self.decision().into()
+    }
+
+    pub fn install(&self, source: &Path) -> Result<EntitlementStatus, EntitlementInstallError> {
+        if self.keys.is_empty() {
+            return Err(EntitlementInstallError::AuthorityUnavailable);
+        }
+        let Some(destination) = &self.path else {
+            return Err(EntitlementInstallError::StorageUnavailable);
+        };
+
+        #[cfg(unix)]
+        {
+            let candidate = read_candidate_entitlement(source)?;
+            require_active_candidate(&candidate, &self.keys, (self.clock)())?;
+            let parent = destination
+                .parent()
+                .ok_or(EntitlementInstallError::StorageUnavailable)?;
+            ensure_private_directory(parent)?;
+            let _lock = acquire_activation_lock(parent)?;
+            validate_existing_destination(destination)?;
+            require_active_candidate(&candidate, &self.keys, (self.clock)())?;
+            install_candidate(self, destination, &candidate)?;
+            let status = self.status();
+            if !status.active {
+                return Err(EntitlementInstallError::InstallFailed);
+            }
+            Ok(status)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = source;
+            Err(EntitlementInstallError::StorageUnavailable)
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn always_active_for_test() -> Self {
         Self {
@@ -139,6 +232,7 @@ impl EntitlementGate {
             keys: Arc::new(BTreeMap::new()),
             clock: Arc::new(Utc::now),
             forced: Some(EntitlementDecision::Active),
+            fail_before_replace: false,
         }
     }
 
@@ -165,6 +259,26 @@ impl EntitlementGate {
             keys: Arc::new(keys),
             clock: Arc::new(clock),
             forced: None,
+            fail_before_replace: false,
+        }
+    }
+}
+
+fn require_active_candidate(
+    bytes: &[u8],
+    keys: &BTreeMap<String, Vec<u8>>,
+    now: DateTime<Utc>,
+) -> Result<(), EntitlementInstallError> {
+    match evaluate_entitlement(bytes, keys, now) {
+        EntitlementDecision::Active => Ok(()),
+        EntitlementDecision::NotYetValid
+        | EntitlementDecision::Expired
+        | EntitlementDecision::FeatureMissing => Err(EntitlementInstallError::NotActive),
+        EntitlementDecision::Invalid | EntitlementDecision::Missing => {
+            Err(EntitlementInstallError::SourceInvalid)
+        }
+        EntitlementDecision::AuthorityUnavailable => {
+            Err(EntitlementInstallError::AuthorityUnavailable)
         }
     }
 }
@@ -325,6 +439,235 @@ fn decode_base64url(value: &str, max_decoded_bytes: usize) -> Option<Vec<u8>> {
 }
 
 #[cfg(unix)]
+fn read_candidate_entitlement(path: &Path) -> Result<Vec<u8>, EntitlementInstallError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| EntitlementInstallError::SourceInvalid)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_ENTITLEMENT_BYTES
+    {
+        return Err(EntitlementInstallError::SourceInvalid);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| EntitlementInstallError::SourceInvalid)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| EntitlementInstallError::SourceInvalid)?;
+    if !opened.is_file()
+        || opened.len() == 0
+        || opened.len() > MAX_ENTITLEMENT_BYTES
+        || opened.dev() != metadata.dev()
+        || opened.ino() != metadata.ino()
+    {
+        return Err(EntitlementInstallError::SourceInvalid);
+    }
+    read_bounded(file.take(MAX_ENTITLEMENT_BYTES + 1))
+        .filter(|bytes| !bytes.is_empty())
+        .ok_or(EntitlementInstallError::SourceInvalid)
+}
+
+#[cfg(unix)]
+fn ensure_private_directory(path: &Path) -> Result<(), EntitlementInstallError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder
+                .create(path)
+                .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+        }
+        Err(_) => return Err(EntitlementInstallError::StorageUnavailable),
+    }
+
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+    let current_uid = unsafe { libc::geteuid() };
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != current_uid
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(EntitlementInstallError::StorageUnavailable);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_existing_destination(path: &Path) -> Result<(), EntitlementInstallError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(EntitlementInstallError::StorageUnavailable),
+    };
+    let current_uid = unsafe { libc::geteuid() };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != current_uid
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(EntitlementInstallError::StorageUnavailable);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+struct ActivationLock {
+    _file: File,
+}
+
+#[cfg(unix)]
+fn acquire_activation_lock(parent: &Path) -> Result<ActivationLock, EntitlementInstallError> {
+    let path = parent.join(ENTITLEMENT_LOCK_FILE_NAME);
+    validate_lock_path(&path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&path)
+        .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+    let current_uid = unsafe { libc::geteuid() };
+    if !metadata.is_file() || metadata.uid() != current_uid || metadata.mode() & 0o077 != 0 {
+        return Err(EntitlementInstallError::StorageUnavailable);
+    }
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        let code = error.raw_os_error();
+        return if code == Some(libc::EAGAIN) || code == Some(libc::EWOULDBLOCK) {
+            Err(EntitlementInstallError::ActivationBusy)
+        } else {
+            Err(EntitlementInstallError::StorageUnavailable)
+        };
+    }
+    Ok(ActivationLock { _file: file })
+}
+
+#[cfg(unix)]
+fn validate_lock_path(path: &Path) -> Result<(), EntitlementInstallError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(EntitlementInstallError::StorageUnavailable),
+    };
+    let current_uid = unsafe { libc::geteuid() };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != current_uid
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(EntitlementInstallError::StorageUnavailable);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn install_candidate(
+    _gate: &EntitlementGate,
+    destination: &Path,
+    candidate: &[u8],
+) -> Result<(), EntitlementInstallError> {
+    let parent = destination
+        .parent()
+        .ok_or(EntitlementInstallError::StorageUnavailable)?;
+    let (mut temporary, temporary_path) = create_temporary_entitlement(parent)?;
+    let mut replaced = false;
+    let result = (|| {
+        temporary
+            .write_all(candidate)
+            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+        temporary
+            .sync_all()
+            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+        #[cfg(test)]
+        if _gate.fail_before_replace {
+            return Err(EntitlementInstallError::InstallFailed);
+        }
+        fs::rename(&temporary_path, destination)
+            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+        replaced = true;
+        sync_directory(parent)?;
+        Ok(())
+    })();
+    drop(temporary);
+    if !replaced {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn create_temporary_entitlement(parent: &Path) -> Result<(File, PathBuf), EntitlementInstallError> {
+    for _ in 0..64 {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(
+            ".{ENTITLEMENT_FILE_NAME}.tmp.{}.{}",
+            std::process::id(),
+            sequence
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(file) => {
+                let prepared = (|| {
+                    file.set_permissions(fs::Permissions::from_mode(0o600))
+                        .map_err(|_| EntitlementInstallError::InstallFailed)?;
+                    let metadata = file
+                        .metadata()
+                        .map_err(|_| EntitlementInstallError::InstallFailed)?;
+                    if !metadata.is_file()
+                        || metadata.uid() != unsafe { libc::geteuid() }
+                        || metadata.mode() & 0o777 != 0o600
+                    {
+                        return Err(EntitlementInstallError::InstallFailed);
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = prepared {
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                    return Err(error);
+                }
+                return Ok((file, path));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(EntitlementInstallError::InstallFailed),
+        }
+    }
+    Err(EntitlementInstallError::InstallFailed)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), EntitlementInstallError> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(path)
+        .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+    directory
+        .sync_all()
+        .map_err(|_| EntitlementInstallError::StorageUnavailable)
+}
+
+#[cfg(unix)]
 fn read_private_entitlement(path: &Path) -> Option<Vec<u8>> {
     let parent = path.parent()?;
     let directory = fs::symlink_metadata(parent).ok()?;
@@ -385,7 +728,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
 
-    const CONTRACTS_REVISION: &str = "3851b4c55901ef18470c63b92a99a8348e2f1459";
+    const CONTRACTS_REVISION: &str = "c5405935bd1354cf6a4c8539425a53dfd7f52949";
 
     struct TestDirectory(PathBuf);
 
@@ -453,6 +796,18 @@ mod tests {
         fs::write(path, bytes).unwrap();
         #[cfg(unix)]
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn active_license(key: &Ed25519KeyPair) -> Vec<u8> {
+        signed_entitlement(
+            key,
+            "test-key",
+            &claims(
+                "2026-01-01T00:00:00Z",
+                "2027-01-01T00:00:00Z",
+                vec![FEATURE_ID],
+            ),
+        )
     }
 
     #[test]
@@ -638,6 +993,271 @@ mod tests {
             Some(PathBuf::from(
                 "/home/test-user/.config/local-connect/entitlement-v1.json"
             ))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_entitlement_install_is_exact_private_atomic_and_visible_to_a_new_gate() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let source = root.0.join("purchased-license.json");
+        let destination = root.0.join(ENTITLEMENT_FILE_NAME);
+        let license = active_license(&key);
+        write_private(&source, &license);
+        let source_before = fs::read(&source).unwrap();
+        let entitlement_gate = gate(&root, &key, "2026-08-31T00:00:00Z");
+
+        assert_eq!(
+            entitlement_gate.status().state,
+            EntitlementDecision::Missing
+        );
+        assert_eq!(
+            entitlement_gate.install(&source).unwrap(),
+            EntitlementStatus {
+                state: EntitlementDecision::Active,
+                active: true,
+            }
+        );
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert_eq!(fs::read(&destination).unwrap(), license);
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(root.0.join(ENTITLEMENT_LOCK_FILE_NAME))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(fs::read_dir(&root.0).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!(".{ENTITLEMENT_FILE_NAME}.tmp."))
+        }));
+
+        let reopened = gate(&root, &key, "2026-08-31T00:00:00Z");
+        assert_eq!(reopened.status().state, EntitlementDecision::Active);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_sets_exact_private_modes_under_restrictive_umask() {
+        const CHILD_ENV: &str = "DOC_SUM_RESTRICTIVE_UMASK_CHILD";
+        if env::var_os(CHILD_ENV).is_none() {
+            let status = Command::new(env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(
+                    "connect::entitlement::tests::installer_sets_exact_private_modes_under_restrictive_umask",
+                )
+                .arg("--nocapture")
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        unsafe {
+            libc::umask(0o777);
+        }
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let source = root.0.join("candidate.json");
+        write_private(&source, &active_license(&key));
+        gate(&root, &key, "2026-08-31T00:00:00Z")
+            .install(&source)
+            .unwrap();
+
+        for path in [
+            root.0.join(ENTITLEMENT_FILE_NAME),
+            root.0.join(ENTITLEMENT_LOCK_FILE_NAME),
+        ] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_and_inactive_sources_preserve_the_existing_entitlement() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let destination = root.0.join(ENTITLEMENT_FILE_NAME);
+        let existing = active_license(&key);
+        write_private(&destination, &existing);
+        let gate = gate(&root, &key, "2026-08-31T00:00:00Z");
+
+        let invalid = root.0.join("invalid.json");
+        write_private(&invalid, b"{}");
+        assert_eq!(
+            gate.install(&invalid),
+            Err(EntitlementInstallError::SourceInvalid)
+        );
+        assert_eq!(fs::read(&destination).unwrap(), existing);
+
+        let inactive_cases = [
+            claims(
+                "2025-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                vec![FEATURE_ID],
+            ),
+            claims(
+                "2026-09-01T00:00:00Z",
+                "2027-01-01T00:00:00Z",
+                vec![FEATURE_ID],
+            ),
+            claims(
+                "2026-01-01T00:00:00Z",
+                "2027-01-01T00:00:00Z",
+                vec!["document.local_processing"],
+            ),
+        ];
+        for (index, inactive_claims) in inactive_cases.iter().enumerate() {
+            let source = root.0.join(format!("inactive-{index}.json"));
+            write_private(
+                &source,
+                &signed_entitlement(&key, "test-key", inactive_claims),
+            );
+            assert_eq!(
+                gate.install(&source),
+                Err(EntitlementInstallError::NotActive)
+            );
+            assert_eq!(fs::read(&destination).unwrap(), existing);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_and_destination_safety_boundaries_fail_closed() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let destination = root.0.join(ENTITLEMENT_FILE_NAME);
+        let candidate = root.0.join("candidate.json");
+        let license = active_license(&key);
+        write_private(&candidate, &license);
+        let gate = gate(&root, &key, "2026-08-31T00:00:00Z");
+
+        let linked_source = root.0.join("linked-source.json");
+        symlink(&candidate, &linked_source).unwrap();
+        assert_eq!(
+            gate.install(&linked_source),
+            Err(EntitlementInstallError::SourceInvalid)
+        );
+        assert!(!destination.exists());
+
+        write_private(&destination, b"existing-entitlement");
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(
+            gate.install(&candidate),
+            Err(EntitlementInstallError::StorageUnavailable)
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"existing-entitlement");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_lock_blocks_installer_and_a_child_process() {
+        const CHILD_ENV: &str = "DOC_SUM_ACTIVATION_LOCK_CHILD";
+        if let Some(parent) = env::var_os(CHILD_ENV) {
+            assert!(matches!(
+                acquire_activation_lock(Path::new(&parent)),
+                Err(EntitlementInstallError::ActivationBusy)
+            ));
+            return;
+        }
+
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let source = root.0.join("candidate.json");
+        let destination = root.0.join(ENTITLEMENT_FILE_NAME);
+        write_private(&source, &active_license(&key));
+        let lock = acquire_activation_lock(&root.0).unwrap();
+        let gate = gate(&root, &key, "2026-08-31T00:00:00Z");
+
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::ActivationBusy)
+        );
+        assert!(!destination.exists());
+
+        let child = Command::new(env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("connect::entitlement::tests::held_lock_blocks_installer_and_a_child_process")
+            .arg("--nocapture")
+            .env(CHILD_ENV, &root.0)
+            .status()
+            .unwrap();
+        assert!(child.success());
+
+        drop(lock);
+        assert!(gate.install(&source).unwrap().active);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn injected_pre_replace_failure_preserves_existing_bytes_and_cleans_temporary_file() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let destination = root.0.join(ENTITLEMENT_FILE_NAME);
+        let existing = active_license(&key);
+        write_private(&destination, &existing);
+        let source = root.0.join("replacement.json");
+        write_private(&source, &active_license(&key));
+        let mut failing = gate(&root, &key, "2026-08-31T00:00:00Z");
+        failing.fail_before_replace = true;
+
+        assert_eq!(
+            failing.install(&source),
+            Err(EntitlementInstallError::InstallFailed)
+        );
+        assert_eq!(fs::read(&destination).unwrap(), existing);
+        assert!(fs::read_dir(&root.0).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!(".{ENTITLEMENT_FILE_NAME}.tmp."))
+        }));
+    }
+
+    #[test]
+    fn public_status_and_error_codes_are_stable_and_claim_free() {
+        let status: EntitlementStatus = EntitlementDecision::Expired.into();
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            json!({"state": "expired", "active": false})
+        );
+        assert_eq!(
+            EntitlementInstallError::AuthorityUnavailable.code(),
+            "CONNECT_ENTITLEMENT_AUTHORITY_UNAVAILABLE"
+        );
+        assert_eq!(
+            EntitlementInstallError::SourceInvalid.code(),
+            "CONNECT_ENTITLEMENT_SOURCE_INVALID"
+        );
+        assert_eq!(
+            EntitlementInstallError::NotActive.code(),
+            "CONNECT_ENTITLEMENT_NOT_ACTIVE"
+        );
+        assert_eq!(
+            EntitlementInstallError::StorageUnavailable.code(),
+            "CONNECT_ENTITLEMENT_STORAGE_UNAVAILABLE"
+        );
+        assert_eq!(
+            EntitlementInstallError::ActivationBusy.code(),
+            "CONNECT_ENTITLEMENT_ACTIVATION_BUSY"
+        );
+        assert_eq!(
+            EntitlementInstallError::InstallFailed.code(),
+            "CONNECT_ENTITLEMENT_INSTALL_FAILED"
         );
     }
 

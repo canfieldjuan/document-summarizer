@@ -49,6 +49,20 @@ interface RuntimeStatus {
   recoverable: boolean;
 }
 
+type ConnectEntitlementState =
+  | "active"
+  | "authority_unavailable"
+  | "missing"
+  | "invalid"
+  | "not_yet_valid"
+  | "expired"
+  | "feature_missing";
+
+interface ConnectEntitlementStatus {
+  state: ConnectEntitlementState;
+  active: boolean;
+}
+
 interface RunHistoryItem {
   runId: string;
   documentId: string;
@@ -119,6 +133,10 @@ const runtimeDot = element<HTMLSpanElement>("#runtime-dot");
 const runtimeTitle = element<HTMLParagraphElement>("#runtime-title");
 const runtimeDetail = element<HTMLParagraphElement>("#runtime-detail");
 const runtimeRetry = element<HTMLButtonElement>("#runtime-retry");
+const connectMark = element<HTMLSpanElement>("#connect-mark");
+const connectTitle = element<HTMLParagraphElement>("#connect-title");
+const connectDetail = element<HTMLParagraphElement>("#connect-detail");
+const connectActivate = element<HTMLButtonElement>("#connect-activate");
 const historyRefresh = element<HTMLButtonElement>("#history-refresh");
 const recoveryNotice = element<HTMLElement>("#recovery-notice");
 const recoveryNoticeTitle = element<HTMLParagraphElement>("#recovery-notice-title");
@@ -152,6 +170,8 @@ const retryButton = element<HTMLButtonElement>("#retry-btn");
 const retryHint = element<HTMLParagraphElement>("#retry-hint");
 
 let runtimeReady = false;
+let connectInstalling = false;
+let connectStatusRefreshInFlight = false;
 let processing = false;
 let processingRun: RunHistoryItem | null = null;
 let processingRunId: string | null = null;
@@ -251,6 +271,118 @@ async function refreshRuntimeStatus(): Promise<void> {
     runtimeRetry.hidden = false;
   } finally {
     syncPrimaryAction();
+  }
+}
+
+function renderConnectStatus(status: ConnectEntitlementStatus): void {
+  connectMark.className = status.active
+    ? "connect-mark is-active"
+    : "connect-mark is-unavailable";
+  connectActivate.disabled = connectInstalling;
+  connectActivate.hidden = status.state === "authority_unavailable";
+  connectActivate.textContent = status.active ? "Replace license" : "Activate";
+
+  const content: Record<ConnectEntitlementState, [string, string]> = {
+    active: [
+      "Connect active",
+      "Other installed apps can use compatible document capabilities.",
+    ],
+    authority_unavailable: [
+      "Connect unavailable in this build",
+      "Install an official Connect-enabled build to activate a license.",
+    ],
+    missing: [
+      "Connect not activated",
+      "Install your Connect license to enable app-to-app capabilities.",
+    ],
+    invalid: [
+      "Connect license invalid",
+      "Choose a valid signed Connect license to restore capabilities.",
+    ],
+    not_yet_valid: [
+      "Connect license not active yet",
+      "This license cannot be used before its signed start time.",
+    ],
+    expired: [
+      "Connect license expired",
+      "Install a current signed license to restore capabilities.",
+    ],
+    feature_missing: [
+      "Connect access not included",
+      "This license does not include app-to-app capability exchange.",
+    ],
+  };
+  [connectTitle.textContent, connectDetail.textContent] = content[status.state];
+}
+
+async function refreshConnectStatus(): Promise<void> {
+  if (connectInstalling || connectStatusRefreshInFlight) return;
+  connectStatusRefreshInFlight = true;
+  connectMark.className = "connect-mark is-checking";
+  connectTitle.textContent = "Checking Connect";
+  connectDetail.textContent = "Looking for your license…";
+  connectActivate.hidden = true;
+  try {
+    renderConnectStatus(
+      await invoke<ConnectEntitlementStatus>("get_connect_entitlement_status"),
+    );
+  } catch (error) {
+    const commandError = normalizeCommandError(error);
+    connectMark.className = "connect-mark is-unavailable";
+    connectTitle.textContent = "Connect status unavailable";
+    connectDetail.textContent = commandError.message;
+  } finally {
+    connectStatusRefreshInFlight = false;
+  }
+}
+
+async function selectAndInstallConnectEntitlement(): Promise<void> {
+  if (connectInstalling) return;
+  let selected: string | null;
+  try {
+    selected = await open({
+      multiple: false,
+      filters: [{
+        name: "Connect license",
+        extensions: ["json"],
+      }],
+    });
+  } catch (error) {
+    const commandError = normalizeCommandError(error);
+    connectTitle.textContent = "License selection failed";
+    connectDetail.textContent = commandError.message;
+    return;
+  }
+  if (selected === null) return;
+
+  connectInstalling = true;
+  connectActivate.disabled = true;
+  connectMark.className = "connect-mark is-checking";
+  connectTitle.textContent = "Activating Connect";
+  connectDetail.textContent = "Verifying and installing your signed license…";
+  try {
+    renderConnectStatus(await invoke<ConnectEntitlementStatus>(
+      "install_connect_entitlement",
+      { sourcePath: selected },
+    ));
+  } catch (error) {
+    const commandError = normalizeCommandError(error);
+    try {
+      const current = await invoke<ConnectEntitlementStatus>("get_connect_entitlement_status");
+      renderConnectStatus(current);
+      connectTitle.textContent = current.active
+        ? "Connect active — replacement failed"
+        : "Activation failed";
+      connectDetail.textContent = commandError.message;
+    } catch {
+      connectMark.className = "connect-mark is-unavailable";
+      connectTitle.textContent = "Activation failed";
+      connectDetail.textContent = commandError.message;
+      connectActivate.hidden = false;
+    }
+  } finally {
+    connectInstalling = false;
+    connectActivate.disabled = false;
   }
 }
 
@@ -862,11 +994,19 @@ function historyStateLabel(run: RunHistoryItem): string {
 async function initialize(): Promise<void> {
   selectButton.addEventListener("click", () => void selectAndSummarize());
   runtimeRetry.addEventListener("click", () => void refreshRuntimeStatus());
+  connectActivate.addEventListener("click", () => void selectAndInstallConnectEntitlement());
   continueButton.addEventListener("click", () => void continueSelectedRun());
   retryButton.addEventListener("click", () => void retrySelectedRun());
   cancelButton.addEventListener("click", () => void cancelSelectedRun());
   historyRefresh.addEventListener("click", () => void refreshHistory());
-  await Promise.all([refreshRuntimeStatus(), refreshHistory()]);
+  window.addEventListener("focus", () => void refreshConnectStatus());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void refreshConnectStatus();
+  });
+  window.setInterval(() => {
+    if (document.visibilityState === "visible") void refreshConnectStatus();
+  }, 30_000);
+  await Promise.all([refreshRuntimeStatus(), refreshConnectStatus(), refreshHistory()]);
   const active = recentRuns.find(isMonitoredBackgroundRun);
   if (active) {
     beginProcessing(active, active.originalFilename, processingStatusText(active));

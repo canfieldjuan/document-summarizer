@@ -134,8 +134,16 @@ h1 {
   margin-bottom: 5px;
 }
 
-.runtime-card {
-  min-width: min(410px, 46vw);
+.status-cards {
+  width: min(720px, 66vw);
+  display: grid;
+  grid-template-columns: minmax(260px, 0.95fr) minmax(290px, 1.05fr);
+  gap: 10px;
+}
+
+.runtime-card,
+.connect-card {
+  min-width: 0;
   padding: 12px 13px;
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -145,6 +153,11 @@ h1 {
   border-radius: 12px;
   background: rgba(249, 251, 252, 0.82);
   backdrop-filter: blur(8px);
+}
+
+.connect-card {
+  border-color: rgba(42, 111, 107, 0.34);
+  background: rgba(215, 232, 229, 0.56);
 }
 
 .runtime-dot {
@@ -169,9 +182,61 @@ h1 {
   animation: breathe 1.4s ease-in-out infinite;
 }
 
+.connect-mark {
+  position: relative;
+  width: 22px;
+  height: 16px;
+  color: #83909a;
+}
+
+.connect-mark::before,
+.connect-mark::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  background: var(--paper);
+}
+
+.connect-mark::before {
+  left: 0;
+}
+
+.connect-mark::after {
+  right: 0;
+}
+
+.connect-mark span {
+  position: absolute;
+  top: 7px;
+  left: 8px;
+  width: 6px;
+  height: 2px;
+  background: currentColor;
+}
+
+.connect-mark.is-active {
+  color: var(--lake);
+}
+
+.connect-mark.is-unavailable {
+  color: var(--copper);
+}
+
+.connect-mark.is-checking {
+  animation: breathe 1.4s ease-in-out infinite;
+}
+
 .runtime-title,
 .runtime-detail {
   margin: 0;
+}
+
+.runtime-copy {
+  min-width: 0;
 }
 
 .runtime-title {
@@ -848,9 +913,8 @@ h1 {
     display: flex;
   }
 
-  .runtime-card {
+  .status-cards {
     width: 100%;
-    min-width: 0;
   }
 
   .workspace {
@@ -887,11 +951,17 @@ h1 {
     height: 41px;
   }
 
-  .runtime-card {
-    grid-template-columns: auto 1fr;
+  .status-cards {
+    grid-template-columns: 1fr;
   }
 
-  .runtime-card .quiet-button {
+  .runtime-card,
+  .connect-card {
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .runtime-card .quiet-button,
+  .connect-card .quiet-button {
     grid-column: 2;
     justify-self: start;
   }
