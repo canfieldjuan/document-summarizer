@@ -23,13 +23,13 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::env;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
@@ -42,6 +42,8 @@ const V2_INSTANCE_ID_FILE: &str = "connect-v2-instance-id";
 const MAX_REGISTRATION_BYTES: u64 = 64 * 1024;
 const MAX_PROBED_MANIFEST_BYTES: u64 = 64 * 1024;
 const REGISTRATION_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+const REGISTRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const REGISTRATION_LOCK_RETRY: Duration = Duration::from_millis(10);
 
 #[derive(Clone)]
 struct ProviderState {
@@ -89,6 +91,16 @@ struct RegistrationAuthIdentity {
     token: String,
 }
 
+struct RegistrationLifecycleLock {
+    file: File,
+}
+
+impl Drop for RegistrationLifecycleLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ProviderStartError {
     #[error("Connect requires XDG_RUNTIME_DIR")]
@@ -112,6 +124,7 @@ pub enum ProviderStartError {
 }
 
 pub struct ConnectProvider {
+    registration_lock_path: PathBuf,
     registration_path_v1: PathBuf,
     registration_path_v2: PathBuf,
     base_url: String,
@@ -162,10 +175,15 @@ impl ConnectProvider {
         let providers_dir_v2 = runtime_root.join("local-connect/v2/providers");
         ensure_private_directory(&providers_dir_v1)?;
         ensure_private_directory(&providers_dir_v2)?;
-        let removed_registrations = scavenge_stale_registrations([
-            (&providers_dir_v1, WireVersion::V1),
-            (&providers_dir_v2, WireVersion::V2),
-        ])?;
+        let registration_lock_path = providers_dir_v1.join(format!(".{APP_ID}.lifecycle.lock"));
+        let registration_lock = acquire_registration_lock(&registration_lock_path)?;
+        let removed_registrations = scavenge_stale_registrations(
+            &registration_lock,
+            [
+                (&providers_dir_v1, WireVersion::V1),
+                (&providers_dir_v2, WireVersion::V2),
+            ],
+        )?;
         if removed_registrations > 0 {
             eprintln!("Removed {removed_registrations} stale Connect registration(s)");
         }
@@ -299,12 +317,16 @@ impl ConnectProvider {
         };
         let registration_path_v1 = providers_dir_v1.join(format!("{APP_ID}-{instance_id_v1}.json"));
         let registration_path_v2 = providers_dir_v2.join(format!("{APP_ID}-{instance_id_v2}.json"));
-        if let Err(error) = write_registration(&registration_path_v1, &registration_v1) {
+        if let Err(error) =
+            write_registration(&registration_lock, &registration_path_v1, &registration_v1)
+        {
             let _ = shutdown_tx.send(());
             let _ = server_thread.join();
             return Err(error);
         }
-        if let Err(error) = write_registration(&registration_path_v2, &registration_v2) {
+        if let Err(error) =
+            write_registration(&registration_lock, &registration_path_v2, &registration_v2)
+        {
             let _ = fs::remove_file(&registration_path_v1);
             let _ = shutdown_tx.send(());
             let _ = server_thread.join();
@@ -312,6 +334,7 @@ impl ConnectProvider {
         }
 
         Ok(Self {
+            registration_lock_path,
             registration_path_v1,
             registration_path_v2,
             base_url,
@@ -344,6 +367,13 @@ impl ConnectProvider {
     }
 
     pub(crate) fn unregister(&self) {
+        let registration_lock = match acquire_registration_lock(&self.registration_lock_path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                eprintln!("Connect registration cleanup lock failed: {error}");
+                return;
+            }
+        };
         for (path, version, instance_id) in [
             (
                 &self.registration_path_v1,
@@ -357,6 +387,7 @@ impl ConnectProvider {
             ),
         ] {
             if let Err(error) = remove_registration_if_owned(
+                &registration_lock,
                 path,
                 version,
                 instance_id,
@@ -1106,7 +1137,41 @@ impl IntoResponse for ProviderHttpError {
     }
 }
 
+fn acquire_registration_lock(path: &Path) -> Result<RegistrationLifecycleLock, io::Error> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+
+    let deadline = Instant::now() + REGISTRATION_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(RegistrationLifecycleLock { file }),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(REGISTRATION_LOCK_RETRY);
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for the Connect registration lifecycle lock",
+                ));
+            }
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
+}
+
 fn write_registration<T: Serialize>(
+    _registration_lock: &RegistrationLifecycleLock,
     registration_path: &Path,
     registration: &T,
 ) -> Result<(), ProviderStartError> {
@@ -1132,6 +1197,7 @@ fn write_registration<T: Serialize>(
 }
 
 fn scavenge_stale_registrations(
+    _registration_lock: &RegistrationLifecycleLock,
     provider_directories: [(&Path, WireVersion); 2],
 ) -> Result<usize, ProviderStartError> {
     let client = reqwest::blocking::Client::builder()
@@ -1279,6 +1345,7 @@ fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
 }
 
 fn remove_registration_if_owned(
+    _registration_lock: &RegistrationLifecycleLock,
     path: &Path,
     version: WireVersion,
     expected_instance_id: &str,
@@ -1750,6 +1817,9 @@ mod tests {
         ensure_private_directory(&providers_v1).unwrap();
         ensure_private_directory(&providers_v2).unwrap();
         ensure_private_directory(&app_data).unwrap();
+        let registration_lock =
+            acquire_registration_lock(&providers_v1.join(format!(".{APP_ID}.lifecycle.lock")))
+                .unwrap();
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let dead_base_url = format!(
@@ -1772,6 +1842,7 @@ mod tests {
             token: "stale-registration-token".to_string(),
         };
         write_registration(
+            &registration_lock,
             &stale_v1_path,
             &RuntimeRegistration {
                 protocol_version: PROTOCOL_VERSION,
@@ -1788,6 +1859,7 @@ mod tests {
         )
         .unwrap();
         write_registration(
+            &registration_lock,
             &stale_v2_path,
             &v2::RuntimeRegistration {
                 protocol_version: v2::PROTOCOL_VERSION,
@@ -1815,6 +1887,7 @@ mod tests {
         .unwrap();
         fs::write(&foreign_path, b"foreign-provider").unwrap();
         fs::write(&similar_name_path, b"similar-name").unwrap();
+        drop(registration_lock);
 
         let provider = ConnectProvider::start_at(
             app_data.join("summarizer.db"),
@@ -1838,7 +1911,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_start_refuses_to_replace_a_live_registration() {
+    fn provider_start_preserves_live_and_serializes_replacement_cleanup() {
         let root = TestDirectory::new("doc-sum-connect-live-registration");
         let runtime_root = root.0.join("runtime");
         let app_data = root.0.join("app-data");
@@ -1847,14 +1920,16 @@ mod tests {
         let db_path = app_data.join("summarizer.db");
         let runtime_factory: RuntimeFactory =
             Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>));
-        let first = ConnectProvider::start_at(
-            db_path.clone(),
-            app_data.clone(),
-            runtime_root.clone(),
-            DEFAULT_MAX_INPUT_BYTES,
-            runtime_factory.clone(),
-        )
-        .expect("first provider should start");
+        let first = Arc::new(
+            ConnectProvider::start_at(
+                db_path.clone(),
+                app_data.clone(),
+                runtime_root.clone(),
+                DEFAULT_MAX_INPUT_BYTES,
+                runtime_factory.clone(),
+            )
+            .expect("first provider should start"),
+        );
         let registration_path_v1 = first.registration_path().to_path_buf();
         let registration_path_v2 = first.registration_path_v2().to_path_buf();
         let registration_bytes_v1 = fs::read(&registration_path_v1).unwrap();
@@ -1897,12 +1972,32 @@ mod tests {
             serde_json::from_slice(&registration_bytes_v2).unwrap();
         replacement.transport.base_url = replacement_base_url.to_string();
         replacement.auth.token = replacement_token.to_string();
-        write_registration(&registration_path_v2, &replacement).unwrap();
+        let publication_lock = acquire_registration_lock(&first.registration_lock_path).unwrap();
+        let cleanup_provider = Arc::clone(&first);
+        let (cleanup_started_tx, cleanup_started_rx) = mpsc::sync_channel(1);
+        let (cleanup_finished_tx, cleanup_finished_rx) = mpsc::sync_channel(1);
+        let cleanup_thread = thread::spawn(move || {
+            cleanup_started_tx.send(()).unwrap();
+            cleanup_provider.unregister();
+            cleanup_finished_tx.send(()).unwrap();
+        });
+        cleanup_started_rx.recv().unwrap();
+        assert!(matches!(
+            cleanup_finished_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        write_registration(&publication_lock, &registration_path_v2, &replacement).unwrap();
+        drop(publication_lock);
+        cleanup_finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        cleanup_thread.join().unwrap();
 
-        first.unregister();
         assert!(!registration_path_v1.exists());
         assert!(registration_path_v2.exists());
+        let removal_lock = acquire_registration_lock(&first.registration_lock_path).unwrap();
         assert!(remove_registration_if_owned(
+            &removal_lock,
             &registration_path_v2,
             WireVersion::V2,
             first.instance_id_v2(),

@@ -1518,10 +1518,11 @@ passed; full multi-page live completion remains blocked by concurrent GPU load
   directories are synced before the new endpoint is published. Foreign and
   merely similar filenames remain untouched.
 - Tauri now invokes idempotent unregister logic on final `RunEvent::Exit`.
-  Deletion requires the on-disk protocol, instance ID, endpoint, and bearer
-  token to match the exiting process, preventing an old process from deleting a
-  replacement at protocol v2's stable registration path. `Drop` retains the
-  same guarded cleanup for non-Tauri provider ownership.
+  Publication, scavenging, and cleanup share a bounded owner-only lifecycle
+  lock; deletion then requires the on-disk protocol, instance ID, endpoint, and
+  bearer token to match the exiting process. This closes the replacement race
+  at protocol v2's stable registration path. `Drop` retains the same guarded
+  cleanup for non-Tauri provider ownership.
 - No Connect wire shape, job behavior, entitlement behavior, pipeline state,
   database schema, summary semantics, frontend behavior, or model runtime
   changed.
@@ -1529,8 +1530,8 @@ passed; full multi-page live completion remains blocked by concurrent GPU load
 **Boundary and automated proof**:
 - Focused tests passed for dead v1/v2 and malformed owned registration cleanup,
   foreign/similar filename preservation, a live authenticated provider blocking
-  replacement, replacement-registration ownership protection, and repeated
-  unregister calls.
+  replacement, cleanup blocking behind replacement publication, replacement
+  lease protection, and repeated unregister calls.
 - The full Rust run completed with 174 passing library tests and two opt-in live
   Ollama tests ignored. The default office suite passed its privacy test with
   three external-document tests ignored; all three release-contract tests
@@ -1546,6 +1547,10 @@ passed; full multi-page live completion remains blocked by concurrent GPU load
 - Closing the real `Document Summarizer` window through the desktop window
   manager produced a successful process exit. Independent inspection found zero
   Document Summarizer registrations in both protocol directories afterward.
+- After the concurrency repair, the final head repeated the live launch/close
+  path with an owner-only mode-`600` lifecycle lock. Both authenticated
+  registrations matched while running, both were absent after exit, and the
+  non-advertising lock file remained for future process coordination.
 
 **Known boundary**:
 - An uncatchable termination or power loss cannot execute process-exit cleanup.

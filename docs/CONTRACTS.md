@@ -645,12 +645,15 @@ cleanup local to Document Summarizer without treating a PID or file's presence
 as proof that a capability is available.
 
 On Tauri's final `RunEvent::Exit`, the provider unregisters both protocol files.
-Removal is idempotent and requires the on-disk protocol, instance ID, endpoint,
-and bearer token to match the exiting process, so an older process cannot remove
-a replacement registration. Abrupt termination or power loss cannot run exit
-cleanup; any files left by that boundary are reclaimed on the next provider
-startup and remain non-authoritative to authenticated-manifest discovery in the
-meantime.
+Publication, startup scavenging, and removal share an owner-only lifecycle-file
+lock. While holding that lock, removal requires the on-disk protocol, instance
+ID, endpoint, and bearer token to match the exiting process. This makes cleanup
+idempotent and prevents an older process from unlinking a replacement between
+its ownership check and deletion. Lock acquisition is bounded; a timeout logs
+the cleanup failure and leaves the registration for normal next-start recovery.
+Abrupt termination or power loss cannot run exit cleanup; any files left by that
+boundary are reclaimed on the next provider startup and remain
+non-authoritative to authenticated-manifest discovery in the meantime.
 
 "Optional" in this provider lifecycle means that Connect failure or absence
 cannot disable the standalone application. It is not a user-facing toggle and
