@@ -1502,3 +1502,53 @@ passed; full multi-page live completion remains blocked by concurrent GPU load
 - The combined Email Watcher Connect/engine test invocation was not exercised in
   the detached v2 worktree because that interpreter lacked `google.auth`; the
   self-contained Connect tests and live discovery path were exercised instead.
+
+## Connect Registration Lifecycle Cleanup (2026-08-31)
+
+**Status**: Verified locally
+
+**Lifecycle contract and implementation**:
+- Provider startup examines only exact Document Summarizer registration names
+  with UUIDv4 instance IDs in the v1 and v2 directories. Reads, responses, and
+  loopback probes are bounded. A registration is considered live only when its
+  bearer-authenticated protocol-specific manifest returns the same protocol,
+  app ID, and instance ID.
+- Startup refuses to replace a matching live provider. If no candidate proves
+  live, exact app-owned stale or malformed registrations are removed and both
+  directories are synced before the new endpoint is published. Foreign and
+  merely similar filenames remain untouched.
+- Tauri now invokes idempotent unregister logic on final `RunEvent::Exit`.
+  Deletion requires the on-disk protocol, instance ID, endpoint, and bearer
+  token to match the exiting process, preventing an old process from deleting a
+  replacement at protocol v2's stable registration path. `Drop` retains the
+  same guarded cleanup for non-Tauri provider ownership.
+- No Connect wire shape, job behavior, entitlement behavior, pipeline state,
+  database schema, summary semantics, frontend behavior, or model runtime
+  changed.
+
+**Boundary and automated proof**:
+- Focused tests passed for dead v1/v2 and malformed owned registration cleanup,
+  foreign/similar filename preservation, a live authenticated provider blocking
+  replacement, replacement-registration ownership protection, and repeated
+  unregister calls.
+- The full Rust run completed with 174 passing library tests and two opt-in live
+  Ollama tests ignored. The default office suite passed its privacy test with
+  three external-document tests ignored; all three release-contract tests
+  passed. Strict all-target/all-feature Clippy, Rust formatting, the frontend
+  production build, and the no-bundle Tauri release build passed.
+
+**Real process proof**:
+- Before launch, the real runtime registry contained 14 dead v1 and five dead
+  v2 Document Summarizer files. The patched Tauri startup reported removal of
+  all 19, then published exactly one mode-`600` registration per protocol.
+  Each PID was live and each authenticated manifest matched its registration's
+  instance ID and `document-summarizer` app identity.
+- Closing the real `Document Summarizer` window through the desktop window
+  manager produced a successful process exit. Independent inspection found zero
+  Document Summarizer registrations in both protocol directories afterward.
+
+**Known boundary**:
+- An uncatchable termination or power loss cannot execute process-exit cleanup.
+  Such residue remains non-authoritative to discovery and is deterministically
+  reclaimed on the next provider startup. No signal daemon, broker, or generic
+  third-party registration garbage collector was added.
