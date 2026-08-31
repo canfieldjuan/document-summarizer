@@ -627,17 +627,24 @@ fn create_temporary_entitlement(parent: &Path) -> Result<(File, PathBuf), Entitl
             .open(&path)
         {
             Ok(file) => {
-                file.set_permissions(fs::Permissions::from_mode(0o600))
-                    .map_err(|_| EntitlementInstallError::InstallFailed)?;
-                let metadata = file
-                    .metadata()
-                    .map_err(|_| EntitlementInstallError::InstallFailed)?;
-                if !metadata.is_file()
-                    || metadata.uid() != unsafe { libc::geteuid() }
-                    || metadata.mode() & 0o777 != 0o600
-                {
+                let prepared = (|| {
+                    file.set_permissions(fs::Permissions::from_mode(0o600))
+                        .map_err(|_| EntitlementInstallError::InstallFailed)?;
+                    let metadata = file
+                        .metadata()
+                        .map_err(|_| EntitlementInstallError::InstallFailed)?;
+                    if !metadata.is_file()
+                        || metadata.uid() != unsafe { libc::geteuid() }
+                        || metadata.mode() & 0o777 != 0o600
+                    {
+                        return Err(EntitlementInstallError::InstallFailed);
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = prepared {
+                    drop(file);
                     let _ = fs::remove_file(&path);
-                    return Err(EntitlementInstallError::InstallFailed);
+                    return Err(error);
                 }
                 return Ok((file, path));
             }
