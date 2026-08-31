@@ -171,6 +171,7 @@ const retryHint = element<HTMLParagraphElement>("#retry-hint");
 
 let runtimeReady = false;
 let connectInstalling = false;
+let connectStatusRefreshInFlight = false;
 let processing = false;
 let processingRun: RunHistoryItem | null = null;
 let processingRunId: string | null = null;
@@ -315,6 +316,8 @@ function renderConnectStatus(status: ConnectEntitlementStatus): void {
 }
 
 async function refreshConnectStatus(): Promise<void> {
+  if (connectInstalling || connectStatusRefreshInFlight) return;
+  connectStatusRefreshInFlight = true;
   connectMark.className = "connect-mark is-checking";
   connectTitle.textContent = "Checking Connect";
   connectDetail.textContent = "Looking for your license…";
@@ -328,6 +331,8 @@ async function refreshConnectStatus(): Promise<void> {
     connectMark.className = "connect-mark is-unavailable";
     connectTitle.textContent = "Connect status unavailable";
     connectDetail.textContent = commandError.message;
+  } finally {
+    connectStatusRefreshInFlight = false;
   }
 }
 
@@ -994,6 +999,13 @@ async function initialize(): Promise<void> {
   retryButton.addEventListener("click", () => void retrySelectedRun());
   cancelButton.addEventListener("click", () => void cancelSelectedRun());
   historyRefresh.addEventListener("click", () => void refreshHistory());
+  window.addEventListener("focus", () => void refreshConnectStatus());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void refreshConnectStatus();
+  });
+  window.setInterval(() => {
+    if (document.visibilityState === "visible") void refreshConnectStatus();
+  }, 30_000);
   await Promise.all([refreshRuntimeStatus(), refreshConnectStatus(), refreshHistory()]);
   const active = recentRuns.find(isMonitoredBackgroundRun);
   if (active) {
