@@ -1157,21 +1157,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn held_cross_app_lock_fails_fast_without_destination_mutation() {
+    fn held_lock_blocks_installer_and_a_child_process() {
+        const CHILD_ENV: &str = "DOC_SUM_ACTIVATION_LOCK_CHILD";
+        if let Some(parent) = env::var_os(CHILD_ENV) {
+            assert!(matches!(
+                acquire_activation_lock(Path::new(&parent)),
+                Err(EntitlementInstallError::ActivationBusy)
+            ));
+            return;
+        }
+
         let root = TestDirectory::new();
         let key = signing_key();
         let source = root.0.join("candidate.json");
         let destination = root.0.join(ENTITLEMENT_FILE_NAME);
         write_private(&source, &active_license(&key));
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(root.0.join(ENTITLEMENT_LOCK_FILE_NAME))
-            .unwrap();
-        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let lock = acquire_activation_lock(&root.0).unwrap();
         let gate = gate(&root, &key, "2026-08-31T00:00:00Z");
 
         assert_eq!(
@@ -1179,6 +1180,16 @@ mod tests {
             Err(EntitlementInstallError::ActivationBusy)
         );
         assert!(!destination.exists());
+
+        let child = Command::new(env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("connect::entitlement::tests::held_lock_blocks_installer_and_a_child_process")
+            .arg("--nocapture")
+            .env(CHILD_ENV, &root.0)
+            .status()
+            .unwrap();
+        assert!(child.success());
+
         drop(lock);
         assert!(gate.install(&source).unwrap().active);
     }
