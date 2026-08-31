@@ -171,7 +171,7 @@ fn parse_keyring(value: &str) -> Result<BTreeMap<String, Vec<u8>>, EntitlementCo
     }
     let mut keys = BTreeMap::new();
     for key in parsed.keys {
-        if key.algorithm != "Ed25519" || !valid_identifier(&key.key_id, MAX_KEY_ID_CHARS) {
+        if key.algorithm != "Ed25519" || !valid_key_id(&key.key_id) {
             return Err(EntitlementConfigurationError::InvalidKeyring);
         }
         let public_key = decode_base64url(&key.public_key_base64url, PUBLIC_KEY_BYTES)
@@ -196,7 +196,7 @@ fn evaluate_entitlement(
         return EntitlementDecision::Invalid;
     };
     if envelope.format_version != FORMAT_VERSION
-        || !valid_identifier(&envelope.key_id, MAX_KEY_ID_CHARS)
+        || !valid_key_id(&envelope.key_id)
         || envelope.payload_base64url.len() > MAX_PAYLOAD_BASE64URL_CHARS
     {
         return EntitlementDecision::Invalid;
@@ -237,7 +237,7 @@ fn evaluate_entitlement(
         || claims
             .features
             .iter()
-            .any(|feature| !valid_identifier(feature, MAX_KEY_ID_CHARS))
+            .any(|feature| !valid_feature_id(feature))
         || claims.features.iter().collect::<BTreeSet<_>>().len() != claims.features.len()
     {
         return EntitlementDecision::Invalid;
@@ -275,7 +275,15 @@ fn parse_utc(value: &str) -> Option<DateTime<Utc>> {
         .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
-fn valid_identifier(value: &str, max_chars: usize) -> bool {
+fn valid_key_id(value: &str) -> bool {
+    valid_identifier(value, MAX_KEY_ID_CHARS, false)
+}
+
+fn valid_feature_id(value: &str) -> bool {
+    valid_identifier(value, MAX_KEY_ID_CHARS, true)
+}
+
+fn valid_identifier(value: &str, max_chars: usize, allow_underscore: bool) -> bool {
     if value.is_empty() || value.len() > max_chars || !value.is_ascii() {
         return false;
     }
@@ -283,7 +291,9 @@ fn valid_identifier(value: &str, max_chars: usize) -> bool {
     for byte in value.bytes() {
         if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
             segment_has_character = true;
-        } else if matches!(byte, b'.' | b'-' | b'_') && segment_has_character {
+        } else if (matches!(byte, b'.' | b'-') || (allow_underscore && byte == b'_'))
+            && segment_has_character
+        {
             segment_has_character = false;
         } else {
             return false;
@@ -573,9 +583,14 @@ mod tests {
         )
         .is_err());
         assert!(parse_keyring(
-            r#"{"keys":[{"key_id":"bad_key","algorithm":"RSA","public_key_base64url":"AAAA"}]}"#
+            r#"{"keys":[{"key_id":"bad_key","algorithm":"Ed25519","public_key_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}"#
         )
         .is_err());
+        assert!(parse_keyring(
+            r#"{"keys":[{"key_id":"good-key.v1","algorithm":"Ed25519","public_key_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}"#
+        )
+        .is_ok());
+        assert!(valid_feature_id("document.local_processing"));
         assert_eq!(
             entitlement_path(Some(OsString::from("relative")), None),
             None
