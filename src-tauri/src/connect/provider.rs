@@ -712,6 +712,10 @@ async fn create_job_for(
             false,
         ));
     }
+    if let Err(error) = require_entitlement(&state) {
+        remove_file_quietly(&import_path).await;
+        return Err(error);
+    }
     let provider_instance_id = match version {
         WireVersion::V1 => &state.instance_id_v1,
         WireVersion::V2 => &state.instance_id_v2,
@@ -1637,6 +1641,7 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     #[cfg(unix)]
@@ -1986,6 +1991,77 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(provider.registration_path().exists());
         assert!(provider.registration_path_v2().exists());
+    }
+
+    #[test]
+    fn entitlement_is_rechecked_before_job_persistence() {
+        let root = TestDirectory::new("doc-sum-connect-entitlement-expiry-race");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        let entitlement_dir = root.0.join("entitlement");
+        fs::create_dir_all(&entitlement_dir).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&entitlement_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let entitlement_path = entitlement_dir.join(ENTITLEMENT_FILE_NAME);
+        let key_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(key_document.as_ref()).unwrap();
+        write_private_entitlement(
+            &entitlement_path,
+            &signed_test_entitlement(&key, "2026-01-01T00:00:00Z", "2027-01-01T00:00:00Z"),
+        );
+        let mut keys = BTreeMap::new();
+        keys.insert(
+            "provider-test-key".to_string(),
+            key.public_key().as_ref().to_vec(),
+        );
+        let clock_calls = Arc::new(AtomicUsize::new(0));
+        let entitlement = EntitlementGate::for_test_with_clock(entitlement_path, keys, {
+            let clock_calls = Arc::clone(&clock_calls);
+            move || {
+                let timestamp = if clock_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    "2026-08-31T00:00:00Z"
+                } else {
+                    "2027-01-01T00:00:00Z"
+                };
+                DateTime::parse_from_rfc3339(timestamp)
+                    .unwrap()
+                    .with_timezone(&Utc)
+            }
+        });
+        let runtime_factory: RuntimeFactory =
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>));
+        let provider = ConnectProvider::start_at_with_entitlement(
+            app_data.join("summarizer.db"),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory,
+            entitlement,
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let bytes = b"%PDF-1.4\nentitlement expiry race\n%%EOF".to_vec();
+        let request = fixture_request_v2(&bytes);
+        let response = client()
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form_v2(&request, bytes))
+            .send()
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let error: ErrorEnvelope = response.json().unwrap();
+        assert_eq!(error.error.code, "CONNECT_ENTITLEMENT_REQUIRED");
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 2);
+        let conn = db::init_db(app_data.join("summarizer.db")).unwrap();
+        assert!(store::get_job(&conn, &request.job_id).unwrap().is_none());
+        assert_eq!(
+            fs::read_dir(app_data.join("connect-imports"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     fn form(request: &JobRequest, bytes: Vec<u8>) -> multipart::Form {

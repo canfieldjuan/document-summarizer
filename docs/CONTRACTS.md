@@ -661,8 +661,9 @@ Connect manifest discovery, new-job admission, and Connect job-status access
 require an active signed entitlement containing
 `connect.capability_exchange`. The provider authenticates the caller first and
 then evaluates the entitlement on every request, so expiry or replacement takes
-effect without application restart. A denied provider retains ownership of its
-live registration; authenticated discovery treats the stable public
+effect without application restart. New-job admission rechecks immediately
+before persistence, after the artifact has been received and validated. A
+denied provider retains ownership of its live registration; authenticated discovery treats the stable public
 `CONNECT_ENTITLEMENT_REQUIRED` response as unavailable rather than as a stale
 file, while another provider process cannot replace it.
 
@@ -672,9 +673,9 @@ signature. Issuer public keys are embedded from the build-time-only
 standalone application but fails Connect closed. Runtime environment variables
 cannot replace issuer trust. On the verified Linux boundary, the entitlement is
 read from `$XDG_CONFIG_HOME/local-connect/entitlement-v1.json` or the equivalent
-`$HOME/.config` fallback and must be an owner-only, owner-owned, regular,
+`$HOME/.config` fallback when the XDG value is unset or empty, and must be an owner-only, owner-owned, regular,
 non-symlink file beneath an owner-only directory. The interval is
-`not_before <= now < expires_at`, with no grace period. Invalid signatures,
+`issued_at <= not_before <= now < expires_at`, with no grace period. Invalid signatures,
 unknown keys, malformed claims, missing features, insecure files, and absent
 authority all deny Connect without exposing private claims to callers.
 

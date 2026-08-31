@@ -1595,10 +1595,12 @@ release-package proof remain release work
 **Automated proof recorded before commit**:
 - Canonical entitlement conformance passed against the pinned
   `connect-contracts` revision, including active, expired, not-yet-valid,
-  missing-feature, unknown-key, bad-signature, and malformed-base64 fixtures.
+  missing-feature, unknown-key, bad-signature, signed duplicate-claim-member,
+  and malformed-base64 fixtures.
 - Focused Rust tests passed for exact time boundaries, signature tampering,
   feature denial, private-file requirements, symlink rejection, key-ring and
-  path boundaries, both wire-version route gates, denied submission/status,
+  path boundaries including empty-XDG fallback, both wire-version route gates,
+  denied submission/status, expiry during upload with no persisted job/import,
   live-registration ownership, and in-process entitlement restoration.
 - A release-mode provider compiled with only the canonical test public key ran
   against Email Watcher's real Connect/persistence code and a deterministic
@@ -1609,6 +1611,10 @@ release-package proof remain release work
   fixture returned the capability without restarting either process. This was
   a test-authority process proof, not an installed production-package or live
   Gmail/UI proof.
+- The exact final provider and consumer heads repeated the two-process proof
+  through the real Ollama endpoint with `qwen3-30b-a3b:latest`. The job
+  completed, the active/expired/restored and removal/restart checks passed, and
+  the proof reported `proof_passed: true`.
 
 **Known limits and deferred work**:
 - The provider proof uses an injected test authority. An official package must

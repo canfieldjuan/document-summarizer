@@ -41,7 +41,7 @@ access require a currently valid signed entitlement containing
 On Linux, the entitlement is read on every Connect request from
 `$XDG_CONFIG_HOME/local-connect/entitlement-v1.json`, or from
 `$HOME/.config/local-connect/entitlement-v1.json` when `XDG_CONFIG_HOME` is
-unset. The directory must be owned by the current user with mode `700`; the
+unset or empty. The directory must be owned by the current user with mode `700`; the
 regular, non-symlink entitlement file must be owned by that user with mode
 `600`. Expiry is exact and has no hidden grace period. Replacing the file with a
 new valid entitlement restores capability availability without restarting the

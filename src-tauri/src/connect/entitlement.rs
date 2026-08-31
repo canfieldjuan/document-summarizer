@@ -145,19 +145,31 @@ impl EntitlementGate {
         keys: BTreeMap<String, Vec<u8>>,
         now: DateTime<Utc>,
     ) -> Self {
+        Self::for_test_with_clock(path, keys, move || now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_clock<F>(
+        path: PathBuf,
+        keys: BTreeMap<String, Vec<u8>>,
+        clock: F,
+    ) -> Self
+    where
+        F: Fn() -> DateTime<Utc> + Send + Sync + 'static,
+    {
         Self {
             path: Some(path),
             keys: Arc::new(keys),
-            clock: Arc::new(move || now),
+            clock: Arc::new(clock),
             forced: None,
         }
     }
 }
 
 fn entitlement_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    let root = match xdg_config_home {
+    let root = match xdg_config_home.filter(|value| !value.is_empty()) {
         Some(value) => PathBuf::from(value),
-        None => PathBuf::from(home?).join(".config"),
+        None => PathBuf::from(home.filter(|value| !value.is_empty())?).join(".config"),
     };
     root.is_absolute()
         .then(|| root.join("local-connect").join(ENTITLEMENT_FILE_NAME))
@@ -602,6 +614,15 @@ mod tests {
         assert_eq!(
             entitlement_path(Some(OsString::from("/config")), None),
             Some(PathBuf::from("/config/local-connect/entitlement-v1.json"))
+        );
+        assert_eq!(
+            entitlement_path(
+                Some(OsString::new()),
+                Some(OsString::from("/home/test-user")),
+            ),
+            Some(PathBuf::from(
+                "/home/test-user/.config/local-connect/entitlement-v1.json"
+            ))
         );
     }
 
