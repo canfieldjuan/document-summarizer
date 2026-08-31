@@ -1,3 +1,4 @@
+use crate::connect::contracts::valid_uuid_v4;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use ring::signature::{UnparsedPublicKey, ED25519};
@@ -10,6 +11,8 @@ use std::io::{Read, Take};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+
+#[cfg(test)]
 use uuid::Uuid;
 
 #[cfg(unix)]
@@ -236,12 +239,8 @@ fn evaluate_entitlement(
     let Ok(claims) = serde_json::from_slice::<EntitlementClaims>(&payload) else {
         return EntitlementDecision::Invalid;
     };
-    let valid_entitlement_id = Uuid::parse_str(&claims.entitlement_id)
-        .ok()
-        .filter(|value| value.get_version_num() == 4 && value.to_string() == claims.entitlement_id)
-        .is_some();
     if claims.format_version != FORMAT_VERSION
-        || !valid_entitlement_id
+        || !valid_uuid_v4(&claims.entitlement_id)
         || claims.subject.is_empty()
         || claims.subject.chars().count() > MAX_SUBJECT_CHARS
         || claims.features.is_empty()
@@ -512,6 +511,22 @@ mod tests {
         write_private(
             &root.0.join(ENTITLEMENT_FILE_NAME),
             &signed_entitlement(&key, "test-key", &uppercase_id),
+        );
+        assert_eq!(
+            gate(&root, &key, "2026-08-31T00:00:00Z").decision(),
+            EntitlementDecision::Invalid
+        );
+
+        let mut invalid_variant = claims(
+            "2026-01-01T00:00:00Z",
+            "2027-01-01T00:00:00Z",
+            vec![FEATURE_ID],
+        );
+        invalid_variant["entitlement_id"] =
+            Value::String("00000000-0000-4000-0000-000000000000".to_string());
+        write_private(
+            &root.0.join(ENTITLEMENT_FILE_NAME),
+            &signed_entitlement(&key, "test-key", &invalid_variant),
         );
         assert_eq!(
             gate(&root, &key, "2026-08-31T00:00:00Z").decision(),

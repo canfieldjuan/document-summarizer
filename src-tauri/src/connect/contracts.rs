@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use uuid::{Uuid, Version};
+use uuid::{Uuid, Variant, Version};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const APP_ID: &str = "document-summarizer";
@@ -400,7 +400,9 @@ fn invalid_wire_warning(warning: &ConnectWarning) -> bool {
 pub fn valid_uuid_v4(value: &str) -> bool {
     Uuid::parse_str(value)
         .ok()
-        .filter(|uuid| uuid.get_version() == Some(Version::Random))
+        .filter(|uuid| {
+            uuid.get_variant() == Variant::RFC4122 && uuid.get_version() == Some(Version::Random)
+        })
         .is_some_and(|uuid| uuid.to_string() == value)
 }
 
@@ -466,6 +468,10 @@ mod tests {
     #[test]
     fn job_request_boundary_rejects_paths_versions_and_size_overflow() {
         assert!(valid_request().validate(DEFAULT_MAX_INPUT_BYTES).is_ok());
+
+        let mut non_rfc_variant = valid_request();
+        non_rfc_variant.job_id = "00000000-0000-4000-0000-000000000000".to_string();
+        assert!(non_rfc_variant.validate(DEFAULT_MAX_INPUT_BYTES).is_err());
 
         let mut path = valid_request();
         path.inputs[0].display_name = "../report.pdf".to_string();
