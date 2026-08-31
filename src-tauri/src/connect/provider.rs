@@ -20,15 +20,16 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
@@ -38,6 +39,11 @@ use uuid::Uuid;
 type RuntimeFactory =
     Arc<dyn Fn() -> Result<Box<dyn ModelRuntime>, ModelRuntimeFailure> + Send + Sync + 'static>;
 const V2_INSTANCE_ID_FILE: &str = "connect-v2-instance-id";
+const MAX_REGISTRATION_BYTES: u64 = 64 * 1024;
+const MAX_PROBED_MANIFEST_BYTES: u64 = 64 * 1024;
+const REGISTRATION_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+const REGISTRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const REGISTRATION_LOCK_RETRY: Duration = Duration::from_millis(10);
 
 #[derive(Clone)]
 struct ProviderState {
@@ -52,6 +58,49 @@ struct ProviderState {
     runtime_factory: RuntimeFactory,
 }
 
+#[derive(Deserialize)]
+struct ManifestIdentity {
+    protocol_version: u32,
+    instance_id: String,
+    app: ManifestAppIdentity,
+}
+
+#[derive(Deserialize)]
+struct ManifestAppIdentity {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct RegistrationIdentity {
+    protocol_version: u32,
+    instance_id: String,
+    app_id: String,
+    transport: RegistrationTransportIdentity,
+    auth: RegistrationAuthIdentity,
+}
+
+#[derive(Deserialize)]
+struct RegistrationTransportIdentity {
+    kind: String,
+    base_url: String,
+}
+
+#[derive(Deserialize)]
+struct RegistrationAuthIdentity {
+    scheme: String,
+    token: String,
+}
+
+struct RegistrationLifecycleLock {
+    file: File,
+}
+
+impl Drop for RegistrationLifecycleLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ProviderStartError {
     #[error("Connect requires XDG_RUNTIME_DIR")]
@@ -60,6 +109,8 @@ pub enum ProviderStartError {
     InvalidMaxInputBytes,
     #[error("Connect v2 instance identity is invalid")]
     InvalidInstanceIdentity,
+    #[error("A live Document Summarizer Connect provider is already registered")]
+    ProviderAlreadyRunning,
     #[error("Connect provider I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error("Connect provider database setup failed: {0}")]
@@ -73,11 +124,13 @@ pub enum ProviderStartError {
 }
 
 pub struct ConnectProvider {
+    registration_lock_path: PathBuf,
     registration_path_v1: PathBuf,
     registration_path_v2: PathBuf,
     base_url: String,
     instance_id_v1: String,
     instance_id_v2: String,
+    token: String,
     shutdown: Option<oneshot::Sender<()>>,
     server_thread: Option<JoinHandle<()>>,
 }
@@ -122,6 +175,18 @@ impl ConnectProvider {
         let providers_dir_v2 = runtime_root.join("local-connect/v2/providers");
         ensure_private_directory(&providers_dir_v1)?;
         ensure_private_directory(&providers_dir_v2)?;
+        let registration_lock_path = providers_dir_v1.join(format!(".{APP_ID}.lifecycle.lock"));
+        let registration_lock = acquire_registration_lock(&registration_lock_path)?;
+        let removed_registrations = scavenge_stale_registrations(
+            &registration_lock,
+            [
+                (&providers_dir_v1, WireVersion::V1),
+                (&providers_dir_v2, WireVersion::V2),
+            ],
+        )?;
+        if removed_registrations > 0 {
+            eprintln!("Removed {removed_registrations} stale Connect registration(s)");
+        }
 
         let conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
         let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
@@ -247,17 +312,21 @@ impl ConnectProvider {
             },
             auth: AuthRegistration {
                 scheme: "bearer".to_string(),
-                token,
+                token: token.clone(),
             },
         };
         let registration_path_v1 = providers_dir_v1.join(format!("{APP_ID}-{instance_id_v1}.json"));
         let registration_path_v2 = providers_dir_v2.join(format!("{APP_ID}-{instance_id_v2}.json"));
-        if let Err(error) = write_registration(&registration_path_v1, &registration_v1) {
+        if let Err(error) =
+            write_registration(&registration_lock, &registration_path_v1, &registration_v1)
+        {
             let _ = shutdown_tx.send(());
             let _ = server_thread.join();
             return Err(error);
         }
-        if let Err(error) = write_registration(&registration_path_v2, &registration_v2) {
+        if let Err(error) =
+            write_registration(&registration_lock, &registration_path_v2, &registration_v2)
+        {
             let _ = fs::remove_file(&registration_path_v1);
             let _ = shutdown_tx.send(());
             let _ = server_thread.join();
@@ -265,11 +334,13 @@ impl ConnectProvider {
         }
 
         Ok(Self {
+            registration_lock_path,
             registration_path_v1,
             registration_path_v2,
             base_url,
             instance_id_v1,
             instance_id_v2,
+            token,
             shutdown: Some(shutdown_tx),
             server_thread: Some(server_thread),
         })
@@ -294,17 +365,44 @@ impl ConnectProvider {
     pub fn registration_path_v2(&self) -> &Path {
         &self.registration_path_v2
     }
+
+    pub(crate) fn unregister(&self) {
+        let registration_lock = match acquire_registration_lock(&self.registration_lock_path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                eprintln!("Connect registration cleanup lock failed: {error}");
+                return;
+            }
+        };
+        for (path, version, instance_id) in [
+            (
+                &self.registration_path_v1,
+                WireVersion::V1,
+                self.instance_id_v1.as_str(),
+            ),
+            (
+                &self.registration_path_v2,
+                WireVersion::V2,
+                self.instance_id_v2.as_str(),
+            ),
+        ] {
+            if let Err(error) = remove_registration_if_owned(
+                &registration_lock,
+                path,
+                version,
+                instance_id,
+                &self.base_url,
+                &self.token,
+            ) {
+                eprintln!("Connect registration cleanup failed: {error}");
+            }
+        }
+    }
 }
 
 impl Drop for ConnectProvider {
     fn drop(&mut self) {
-        for path in [&self.registration_path_v1, &self.registration_path_v2] {
-            if let Err(error) = fs::remove_file(path) {
-                if error.kind() != io::ErrorKind::NotFound {
-                    eprintln!("Connect registration cleanup failed: {error}");
-                }
-            }
-        }
+        self.unregister();
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -323,6 +421,20 @@ impl WireVersion {
         match self {
             Self::V1 => PROTOCOL_VERSION,
             Self::V2 => v2::PROTOCOL_VERSION,
+        }
+    }
+
+    fn transport_kind(self) -> &'static str {
+        match self {
+            Self::V1 => "http-loopback-v1",
+            Self::V2 => v2::TRANSPORT_KIND,
+        }
+    }
+
+    fn manifest_path(self) -> &'static str {
+        match self {
+            Self::V1 => "/v1/manifest",
+            Self::V2 => "/v2/manifest",
         }
     }
 }
@@ -1025,7 +1137,41 @@ impl IntoResponse for ProviderHttpError {
     }
 }
 
+fn acquire_registration_lock(path: &Path) -> Result<RegistrationLifecycleLock, io::Error> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+
+    let deadline = Instant::now() + REGISTRATION_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(RegistrationLifecycleLock { file }),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(REGISTRATION_LOCK_RETRY);
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for the Connect registration lifecycle lock",
+                ));
+            }
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
+}
+
 fn write_registration<T: Serialize>(
+    _registration_lock: &RegistrationLifecycleLock,
     registration_path: &Path,
     registration: &T,
 ) -> Result<(), ProviderStartError> {
@@ -1048,6 +1194,203 @@ fn write_registration<T: Serialize>(
     }
     write_result?;
     Ok(())
+}
+
+fn scavenge_stale_registrations(
+    _registration_lock: &RegistrationLifecycleLock,
+    provider_directories: [(&Path, WireVersion); 2],
+) -> Result<usize, ProviderStartError> {
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(REGISTRATION_PROBE_TIMEOUT)
+        .timeout(REGISTRATION_PROBE_TIMEOUT)
+        .build()
+        .map_err(|error| ProviderStartError::Server(error.to_string()))?;
+    let mut candidates = Vec::new();
+    for (directory, version) in provider_directories {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if let Some(instance_id) = owned_registration_instance_id(&path) {
+                candidates.push((path, version, instance_id));
+            }
+        }
+    }
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+    for (path, version, instance_id) in &candidates {
+        if registration_proves_live(&client, path, *version, instance_id) {
+            return Err(ProviderStartError::ProviderAlreadyRunning);
+        }
+    }
+    for (path, _, _) in &candidates {
+        fs::remove_file(path)?;
+    }
+    if !candidates.is_empty() {
+        for (directory, _) in provider_directories {
+            File::open(directory)?.sync_all()?;
+        }
+    }
+    Ok(candidates.len())
+}
+
+fn owned_registration_instance_id(path: &Path) -> Option<String> {
+    let filename = path.file_name()?.to_str()?;
+    let instance_id = filename
+        .strip_prefix(APP_ID)?
+        .strip_prefix('-')?
+        .strip_suffix(".json")?;
+    valid_uuid_v4(instance_id).then(|| instance_id.to_string())
+}
+
+fn registration_proves_live(
+    client: &reqwest::blocking::Client,
+    path: &Path,
+    version: WireVersion,
+    expected_instance_id: &str,
+) -> bool {
+    let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES) else {
+        return false;
+    };
+    let Ok(registration) = serde_json::from_slice::<RegistrationIdentity>(&bytes) else {
+        return false;
+    };
+    if !registration_matches_candidate(&registration, version, expected_instance_id) {
+        return false;
+    }
+    let Some(manifest) = probe_manifest(
+        client,
+        &registration.transport.base_url,
+        &registration.auth.token,
+        version,
+    ) else {
+        return false;
+    };
+    manifest.protocol_version == version.protocol_version()
+        && manifest.instance_id == expected_instance_id
+        && manifest.app.id == APP_ID
+}
+
+fn registration_matches_candidate(
+    registration: &RegistrationIdentity,
+    version: WireVersion,
+    expected_instance_id: &str,
+) -> bool {
+    registration.protocol_version == version.protocol_version()
+        && registration.instance_id == expected_instance_id
+        && registration.app_id == APP_ID
+        && registration.transport.kind == version.transport_kind()
+        && registration.auth.scheme == "bearer"
+        && !registration.auth.token.is_empty()
+        && validated_manifest_url(&registration.transport.base_url, version).is_some()
+}
+
+fn validated_manifest_url(base_url: &str, version: WireVersion) -> Option<reqwest::Url> {
+    let mut url = reqwest::Url::parse(base_url).ok()?;
+    if url.scheme() != "http"
+        || url.host_str() != Some("127.0.0.1")
+        || url.port().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    url.set_path(version.manifest_path());
+    Some(url)
+}
+
+fn probe_manifest(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    token: &str,
+    version: WireVersion,
+) -> Option<ManifestIdentity> {
+    let url = validated_manifest_url(base_url, version)?;
+    let response = client
+        .get(url)
+        .header(header::ACCEPT, "application/json")
+        .bearer_auth(token)
+        .send()
+        .ok()?;
+    if response.status() != StatusCode::OK
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_PROBED_MANIFEST_BYTES)
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_PROBED_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_PROBED_MANIFEST_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(max_bytes + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= max_bytes).then_some(bytes)
+}
+
+fn remove_registration_if_owned(
+    _registration_lock: &RegistrationLifecycleLock,
+    path: &Path,
+    version: WireVersion,
+    expected_instance_id: &str,
+    expected_base_url: &str,
+    expected_token: &str,
+) -> Result<bool, io::Error> {
+    if !registration_belongs_to_provider(
+        path,
+        version,
+        expected_instance_id,
+        expected_base_url,
+        expected_token,
+    ) {
+        return Ok(false);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => {
+            let parent = path.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "registration has no parent")
+            })?;
+            File::open(parent)?.sync_all()?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn registration_belongs_to_provider(
+    path: &Path,
+    version: WireVersion,
+    expected_instance_id: &str,
+    expected_base_url: &str,
+    expected_token: &str,
+) -> bool {
+    let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES) else {
+        return false;
+    };
+    serde_json::from_slice::<RegistrationIdentity>(&bytes)
+        .ok()
+        .is_some_and(|registration| {
+            registration_matches_candidate(&registration, version, expected_instance_id)
+                && registration.transport.base_url == expected_base_url
+                && registration.auth.token == expected_token
+        })
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), io::Error> {
@@ -1465,6 +1808,207 @@ mod tests {
     }
 
     #[test]
+    fn provider_start_scavenges_stale_owned_registrations_and_preserves_foreign_files() {
+        let root = TestDirectory::new("doc-sum-connect-registration-scavenge");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        let providers_v1 = runtime_root.join("local-connect/v1/providers");
+        let providers_v2 = runtime_root.join("local-connect/v2/providers");
+        ensure_private_directory(&providers_v1).unwrap();
+        ensure_private_directory(&providers_v2).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let registration_lock =
+            acquire_registration_lock(&providers_v1.join(format!(".{APP_ID}.lifecycle.lock")))
+                .unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let dead_base_url = format!(
+            "http://127.0.0.1:{}/",
+            listener.local_addr().unwrap().port()
+        );
+        drop(listener);
+        let stale_v1_id = Uuid::new_v4().to_string();
+        let stale_v2_id = Uuid::new_v4().to_string();
+        let stale_v1_path = providers_v1.join(format!("{APP_ID}-{stale_v1_id}.json"));
+        let stale_v2_path = providers_v2.join(format!("{APP_ID}-{stale_v2_id}.json"));
+        let malformed_owned_path = providers_v1.join(format!("{APP_ID}-{}.json", Uuid::new_v4()));
+        let empty_owned_path = providers_v1.join(format!("{APP_ID}-{}.json", Uuid::new_v4()));
+        let max_sized_owned_path = providers_v1.join(format!("{APP_ID}-{}.json", Uuid::new_v4()));
+        let oversized_owned_path = providers_v1.join(format!("{APP_ID}-{}.json", Uuid::new_v4()));
+        let foreign_path = providers_v1.join(format!("translator-{}.json", Uuid::new_v4()));
+        let similar_name_path = providers_v1.join(format!("{APP_ID}-not-a-uuid.json"));
+        let auth = AuthRegistration {
+            scheme: "bearer".to_string(),
+            token: "stale-registration-token".to_string(),
+        };
+        write_registration(
+            &registration_lock,
+            &stale_v1_path,
+            &RuntimeRegistration {
+                protocol_version: PROTOCOL_VERSION,
+                instance_id: stale_v1_id,
+                app_id: APP_ID.to_string(),
+                pid: u32::MAX,
+                started_at: Utc::now(),
+                transport: TransportRegistration {
+                    kind: "http-loopback-v1".to_string(),
+                    base_url: dead_base_url.clone(),
+                },
+                auth: auth.clone(),
+            },
+        )
+        .unwrap();
+        write_registration(
+            &registration_lock,
+            &stale_v2_path,
+            &v2::RuntimeRegistration {
+                protocol_version: v2::PROTOCOL_VERSION,
+                instance_id: stale_v2_id,
+                app_id: APP_ID.to_string(),
+                pid: u32::MAX,
+                started_at: Utc::now(),
+                transport: TransportRegistration {
+                    kind: v2::TRANSPORT_KIND.to_string(),
+                    base_url: dead_base_url,
+                },
+                auth,
+            },
+        )
+        .unwrap();
+        fs::write(&malformed_owned_path, b"not-json").unwrap();
+        fs::write(&empty_owned_path, b"").unwrap();
+        let mut max_sized_registration = fs::read(&stale_v1_path).unwrap();
+        max_sized_registration.resize(MAX_REGISTRATION_BYTES as usize, b' ');
+        fs::write(&max_sized_owned_path, max_sized_registration).unwrap();
+        fs::write(
+            &oversized_owned_path,
+            vec![b' '; MAX_REGISTRATION_BYTES as usize + 1],
+        )
+        .unwrap();
+        fs::write(&foreign_path, b"foreign-provider").unwrap();
+        fs::write(&similar_name_path, b"similar-name").unwrap();
+        drop(registration_lock);
+
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .expect("provider should replace stale registrations");
+
+        assert!(!stale_v1_path.exists());
+        assert!(!stale_v2_path.exists());
+        assert!(!malformed_owned_path.exists());
+        assert!(!empty_owned_path.exists());
+        assert!(!max_sized_owned_path.exists());
+        assert!(!oversized_owned_path.exists());
+        assert!(foreign_path.exists());
+        assert!(similar_name_path.exists());
+        assert!(provider.registration_path().exists());
+        assert!(provider.registration_path_v2().exists());
+    }
+
+    #[test]
+    fn provider_start_preserves_live_and_serializes_replacement_cleanup() {
+        let root = TestDirectory::new("doc-sum-connect-live-registration");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let runtime_factory: RuntimeFactory =
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>));
+        let first = Arc::new(
+            ConnectProvider::start_at(
+                db_path.clone(),
+                app_data.clone(),
+                runtime_root.clone(),
+                DEFAULT_MAX_INPUT_BYTES,
+                runtime_factory.clone(),
+            )
+            .expect("first provider should start"),
+        );
+        let registration_path_v1 = first.registration_path().to_path_buf();
+        let registration_path_v2 = first.registration_path_v2().to_path_buf();
+        let registration_bytes_v1 = fs::read(&registration_path_v1).unwrap();
+        let registration_bytes_v2 = fs::read(&registration_path_v2).unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&registration_bytes_v1).unwrap();
+
+        let second = ConnectProvider::start_at(
+            db_path,
+            app_data,
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory,
+        );
+
+        assert!(matches!(
+            second,
+            Err(ProviderStartError::ProviderAlreadyRunning)
+        ));
+        assert_eq!(
+            fs::read(&registration_path_v1).unwrap(),
+            registration_bytes_v1
+        );
+        assert_eq!(
+            fs::read(&registration_path_v2).unwrap(),
+            registration_bytes_v2
+        );
+        assert_eq!(
+            client()
+                .get(format!("{}v1/manifest", first.base_url()))
+                .bearer_auth(&registration.auth.token)
+                .send()
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let replacement_base_url = "http://127.0.0.1:49152/";
+        let replacement_token = "replacement-provider-token";
+        let mut replacement: v2::RuntimeRegistration =
+            serde_json::from_slice(&registration_bytes_v2).unwrap();
+        replacement.transport.base_url = replacement_base_url.to_string();
+        replacement.auth.token = replacement_token.to_string();
+        let publication_lock = acquire_registration_lock(&first.registration_lock_path).unwrap();
+        let cleanup_provider = Arc::clone(&first);
+        let (cleanup_started_tx, cleanup_started_rx) = mpsc::sync_channel(1);
+        let (cleanup_finished_tx, cleanup_finished_rx) = mpsc::sync_channel(1);
+        let cleanup_thread = thread::spawn(move || {
+            cleanup_started_tx.send(()).unwrap();
+            cleanup_provider.unregister();
+            cleanup_finished_tx.send(()).unwrap();
+        });
+        cleanup_started_rx.recv().unwrap();
+        assert!(matches!(
+            cleanup_finished_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        write_registration(&publication_lock, &registration_path_v2, &replacement).unwrap();
+        drop(publication_lock);
+        cleanup_finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        cleanup_thread.join().unwrap();
+
+        assert!(!registration_path_v1.exists());
+        assert!(registration_path_v2.exists());
+        let removal_lock = acquire_registration_lock(&first.registration_lock_path).unwrap();
+        assert!(remove_registration_if_owned(
+            &removal_lock,
+            &registration_path_v2,
+            WireVersion::V2,
+            first.instance_id_v2(),
+            replacement_base_url,
+            replacement_token,
+        )
+        .unwrap());
+        assert!(!registration_path_v2.exists());
+    }
+
+    #[test]
     fn restarted_v2_provider_reuses_identity_and_exposes_interrupted_failure() {
         let root = TestDirectory::new("doc-sum-connect-v2-restart");
         let runtime_root = root.0.join("runtime");
@@ -1869,9 +2413,11 @@ mod tests {
 
         let registration_path = provider.registration_path().to_path_buf();
         let registration_path_v2 = provider.registration_path_v2().to_path_buf();
-        drop(provider);
+        provider.unregister();
         assert!(!registration_path.exists());
         assert!(!registration_path_v2.exists());
+        provider.unregister();
+        drop(provider);
     }
 
     #[test]

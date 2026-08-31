@@ -276,7 +276,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
     }));
 
-    builder
+    let app = builder
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
@@ -321,7 +321,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             get_run_status,
             get_persisted_summary
         ])
-        .run(tauri::generate_context!())?;
+        .build(tauri::generate_context!())?;
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(provider) = app_handle.try_state::<ConnectProvider>() {
+                provider.unregister();
+            }
+        }
+    });
     Ok(())
 }
 

@@ -614,7 +614,7 @@ a panic, non-stale error, or unexpected nonterminal return is failed durably
 when possible. A process exit while `CANCELLING` is finalized by startup
 recovery as described above.
 
-## Connect v1 provider
+## Connect provider lifecycle and v1 contract
 
 Document Summarizer advertises `document.summarize` version `1.0`, accepting
 `application/pdf` and producing
@@ -624,11 +624,36 @@ repository. Protocol, application, capability, and summary versions are
 separate fields.
 
 When `XDG_RUNTIME_DIR` is available, the Tauri process binds an ephemeral exact
-IPv4-loopback HTTP endpoint and atomically writes an owner-only registration at
-`$XDG_RUNTIME_DIR/local-connect/v1/providers/`. Each process uses a fresh UUID
-and bearer token. Manifest, submission, and status routes require that token;
-browser `Origin` requests are rejected. Missing runtime-directory or provider
-startup failures are logged and do not prevent standalone startup.
+IPv4-loopback HTTP endpoint and atomically writes owner-only registrations under
+`$XDG_RUNTIME_DIR/local-connect/v1/providers/` and
+`$XDG_RUNTIME_DIR/local-connect/v2/providers/`. Protocol v1 uses a fresh
+instance UUID for each process. Protocol v2 reuses the provider identity stored
+in private application data so accepted jobs remain associated with the same
+provider across restart. Both registrations use a fresh bearer token and the
+same ephemeral endpoint for each process. Manifest, submission, and status
+routes require that token; browser `Origin` requests are rejected. Missing
+runtime-directory or provider startup failures are logged and do not prevent
+standalone startup.
+
+Provider startup scans only registration filenames that exactly claim the
+Document Summarizer app ID and a UUIDv4 instance. It reads bounded regular files
+and probes the declared exact-loopback manifest with the registered bearer
+token. Any matching live manifest aborts replacement; otherwise those owned
+entries are stale or malformed and are removed before new registrations are
+published. Foreign and merely similar filenames are not touched. This keeps
+cleanup local to Document Summarizer without treating a PID or file's presence
+as proof that a capability is available.
+
+On Tauri's final `RunEvent::Exit`, the provider unregisters both protocol files.
+Publication, startup scavenging, and removal share an owner-only lifecycle-file
+lock. While holding that lock, removal requires the on-disk protocol, instance
+ID, endpoint, and bearer token to match the exiting process. This makes cleanup
+idempotent and prevents an older process from unlinking a replacement between
+its ownership check and deletion. Lock acquisition is bounded; a timeout logs
+the cleanup failure and leaves the registration for normal next-start recovery.
+Abrupt termination or power loss cannot run exit cleanup; any files left by that
+boundary are reclaimed on the next provider startup and remain
+non-authoritative to authenticated-manifest discovery in the meantime.
 
 "Optional" in this provider lifecycle means that Connect failure or absence
 cannot disable the standalone application. It is not a user-facing toggle and
