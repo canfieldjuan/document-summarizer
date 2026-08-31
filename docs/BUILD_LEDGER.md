@@ -1629,3 +1629,74 @@ release-package proof remain release work
 - Device binding, online revocation, billing/account UI, clock-rollback defense,
   shared Gmail authorization, workflows, OCR, and model/runtime changes remain
   deferred.
+
+## Slice 17 — Connect Entitlement Activation: Provider (2026-08-31)
+
+**Status**: Document Summarizer activation boundary, desktop presentation,
+deterministic rollback probes, and final Debian-bundle launch proof complete;
+cross-app package-manager installation and production issuer custody remain
+deferred
+
+**Activation contract**:
+- The implementation is pinned to the accepted Connect activation decision and
+  entitlement fixtures at canonical `connect-contracts` revision
+  `c5405935bd1354cf6a4c8539425a53dfd7f52949`.
+- The core exposes a claim-free status containing only the stable license state
+  and active boolean. The Tauri commands and file picker remain adapters; no
+  signature, filesystem, or commercial decision moved into TypeScript.
+- Install reads at most the bounded entitlement size from a regular source file
+  without following a final symlink, applies the live signature/claim/feature/
+  time verifier before mutation, and derives the shared destination internally.
+  Only a currently active entitlement is admitted; the selected source is not
+  modified.
+- All Unix participants coordinate on the persistent owner-private
+  `.entitlement-v1.lock`. Under a non-blocking exclusive lock, the provider
+  rechecks the candidate time boundary, writes and syncs a unique mode-`600`
+  same-directory file, atomically replaces the entitlement, syncs the
+  directory, and re-evaluates the installed file before reporting active.
+- Stable structured failures distinguish unavailable authority, invalid source,
+  inactive source, unsafe storage, held activation lock, and install failure.
+  Expected failures before replacement leave an existing entitlement
+  byte-for-byte unchanged and remove temporary output.
+
+**Desktop behavior**:
+- The header now presents Ollama and Connect as separate availability cards.
+  Connect shows active, missing, invalid, future, expired, feature-missing, and
+  no-authority states without exposing claims. A user can activate or replace a
+  license through the existing least-privilege open-file permission.
+- A real 1180-by-780 virtual-display capture found and corrected an intrinsic
+  grid-width defect that initially pushed the activation button outside its
+  card. The final capture showed both cards, contained ellipsis, and the visible
+  activation action without changing the document workbench or history rail.
+
+**Verification exercised**:
+- Focused installer tests passed for valid exact-byte installation, source
+  preservation, mode-`600` output and lock, claim-free serialization, stable
+  errors, independent gate reopen, invalid/expired/not-yet-valid/missing-feature
+  rejection, source-symlink rejection, insecure-destination rejection,
+  cross-process lock contention, exact modes under a restrictive process
+  `umask`, injected pre-replacement failure, rollback, and temporary-file
+  cleanup.
+- The full Rust suite passed in both default-feature and featureless modes.
+  Strict Clippy, Rust formatting, the TypeScript compiler, and the production
+  Vite build passed. The opt-in canonical entitlement fixture test passed
+  against the pinned revision after fetching that exact contract commit.
+- The final Connect-enabled no-bundle release and Debian bundle both built with
+  only the canonical test public key ring. A scan of the final packaged binary
+  found the expected test key ID and public key and no private-key PEM marker.
+- The final Debian package was extracted to an isolated root and its packaged
+  executable was launched with isolated XDG data, config, and runtime paths.
+  It registered a live provider and an authenticated manifest request returned
+  `CONNECT_ENTITLEMENT_REQUIRED` with no license. The process was stopped with
+  `Ctrl-C`; this is an extracted-package interrupted-process proof, not a
+  package-manager install/uninstall or graceful GUI-close proof.
+
+**Known limits and deferred work**:
+- The package contains a canonical test authority, not a production public key.
+  Production issuer private-key custody, customer license acquisition, and
+  payment/account UI remain separate release work.
+- The matching Email Watcher activation boundary and a two-installed-app proof
+  are required before this commercial activation slice is complete.
+- Windows ACL/path semantics, advance-dated renewal staging, online revocation,
+  machine binding, clock-rollback defense, and cross-machine Connect remain
+  deferred.

@@ -23,16 +23,31 @@
           </div>
         </div>
 
-        <section class="runtime-card" aria-labelledby="runtime-title" aria-live="polite">
-          <span id="runtime-dot" class="runtime-dot is-checking" aria-hidden="true"></span>
-          <div class="runtime-copy">
-            <p id="runtime-title" class="runtime-title">Checking Ollama</p>
-            <p id="runtime-detail" class="runtime-detail">Looking for the local model…</p>
-          </div>
-          <button id="runtime-retry" class="quiet-button" type="button" hidden>
-            Check again
-          </button>
-        </section>
+        <div class="status-cards">
+          <section class="runtime-card" aria-labelledby="runtime-title" aria-live="polite">
+            <span id="runtime-dot" class="runtime-dot is-checking" aria-hidden="true"></span>
+            <div class="runtime-copy">
+              <p id="runtime-title" class="runtime-title">Checking Ollama</p>
+              <p id="runtime-detail" class="runtime-detail">Looking for the local model…</p>
+            </div>
+            <button id="runtime-retry" class="quiet-button" type="button" hidden>
+              Check again
+            </button>
+          </section>
+
+          <section class="connect-card" aria-labelledby="connect-title" aria-live="polite">
+            <span id="connect-mark" class="connect-mark is-checking" aria-hidden="true">
+              <span></span>
+            </span>
+            <div class="runtime-copy">
+              <p id="connect-title" class="runtime-title">Checking Connect</p>
+              <p id="connect-detail" class="runtime-detail">Looking for your license…</p>
+            </div>
+            <button id="connect-activate" class="quiet-button" type="button" hidden>
+              Activate
+            </button>
+          </section>
+        </div>
       </header>
 
       <main class="workspace">

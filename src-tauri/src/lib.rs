@@ -2,6 +2,9 @@ pub mod connect;
 mod desktop;
 pub mod pipeline;
 
+use connect::entitlement::{
+    EntitlementDecision, EntitlementGate, EntitlementInstallError, EntitlementStatus,
+};
 use connect::provider::ConnectProvider;
 use desktop::{BackgroundRunAccepted, DesktopJobError, DesktopJobManager};
 use pipeline::chunk::{
@@ -33,10 +36,12 @@ use pipeline::workspace::{
 use rusqlite::Connection;
 use serde::Serialize;
 use std::error::Error;
+use std::path::Path;
 use tauri::{Manager, State};
 
 struct AppState {
     jobs: DesktopJobManager,
+    entitlement: Option<EntitlementGate>,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +123,12 @@ impl From<DesktopJobError> for CommandError {
     fn from(error: DesktopJobError) -> Self {
         let code = error.code().to_string();
         Self::new(code, error.to_string())
+    }
+}
+
+impl From<EntitlementInstallError> for CommandError {
+    fn from(error: EntitlementInstallError) -> Self {
+        Self::new(error.code(), error.to_string())
     }
 }
 
@@ -228,6 +239,27 @@ fn get_runtime_status() -> RuntimeStatus {
 }
 
 #[tauri::command]
+fn get_connect_entitlement_status(state: State<'_, AppState>) -> EntitlementStatus {
+    state.entitlement.as_ref().map_or_else(
+        || EntitlementDecision::AuthorityUnavailable.into(),
+        EntitlementGate::status,
+    )
+}
+
+#[tauri::command]
+fn install_connect_entitlement(
+    state: State<'_, AppState>,
+    source_path: String,
+) -> Result<EntitlementStatus, CommandError> {
+    let gate = state
+        .entitlement
+        .as_ref()
+        .ok_or_else(|| CommandError::from(EntitlementInstallError::AuthorityUnavailable))?;
+    gate.install(Path::new(&source_path))
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 fn list_recent_runs(state: State<'_, AppState>) -> Result<Vec<RunHistoryItem>, CommandError> {
     let conn = open_database(&state)?;
     let mut runs = load_recent_runs(&conn).map_err(CommandError::from)?;
@@ -291,8 +323,16 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
             drop(conn);
 
+            let entitlement = match EntitlementGate::from_installation() {
+                Ok(gate) => Some(gate),
+                Err(error) => {
+                    eprintln!("Connect entitlement authority unavailable: {error}");
+                    None
+                }
+            };
             app.manage(AppState {
                 jobs: DesktopJobManager::new(db_path.clone()),
+                entitlement,
             });
             match ConnectProvider::start(db_path, app_data_dir) {
                 Ok(provider) => {
@@ -317,6 +357,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             continue_document,
             cancel_document,
             get_runtime_status,
+            get_connect_entitlement_status,
+            install_connect_entitlement,
             list_recent_runs,
             get_run_status,
             get_persisted_summary

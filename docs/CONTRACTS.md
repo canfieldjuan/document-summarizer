@@ -681,12 +681,28 @@ non-symlink file beneath an owner-only directory. The interval is
 unknown keys, malformed claims, missing features, insecure files, and absent
 authority all deny Connect without exposing private claims to callers.
 
+The desktop entitlement-status boundary returns only one of `active`,
+`authority_unavailable`, `missing`, `invalid`, `not_yet_valid`, `expired`, or
+`feature_missing` plus an active boolean. License installation is a UI-neutral
+Rust core operation; the Tauri file picker and commands are adapters. The core
+accepts only a bounded, non-symlink regular source file that evaluates `active`
+under the compiled authority, derives the destination internally, and never
+modifies the source. Participating Unix applications coordinate on the
+owner-private persistent `.entitlement-v1.lock` file. Under that non-blocking
+exclusive lock, the provider revalidates time, writes and syncs a unique
+same-directory mode-`600` file, atomically replaces the entitlement, syncs the
+directory, and re-evaluates the installed file. Validation, lock, write, and
+other expected pre-replacement failures preserve any existing entitlement
+byte-for-byte. Successful replacement affects the next provider request without
+an application restart or private-database mutation.
+
 This offline bearer entitlement is not machine-bound and cannot be revoked
-before expiry without local replacement. Production issuer-key custody and
-license delivery are release operations outside the application repository;
-private signing keys are never packaged. Google OAuth remains owned by Email
-Watcher: Connect receives only explicitly handed-off PDF bytes and bounded
-artifact metadata, never mailbox credentials or tokens.
+before expiry without local replacement. License acquisition and production
+issuer-key custody are release operations outside the application repository;
+local installation is the app operation described above, and private signing
+keys are never packaged. Google OAuth remains owned by Email Watcher: Connect
+receives only explicitly handed-off PDF bytes and bounded artifact metadata,
+never mailbox credentials or tokens.
 
 `POST /v1/jobs` requires the bounded job-request JSON as the first multipart
 field and one `application/pdf` byte stream as the second. No caller path is

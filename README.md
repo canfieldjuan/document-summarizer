@@ -47,12 +47,23 @@ regular, non-symlink entitlement file must be owned by that user with mode
 new valid entitlement restores capability availability without restarting the
 application.
 
+The desktop header reports only the license state and whether Connect is active;
+it does not expose license claims. **Activate** lets the user choose an acquired
+license file. The Rust core reads bounded regular-file bytes without following a
+final symlink, requires the same signature/feature/time checks as live Connect,
+and writes only to the fixed shared path. Document Summarizer and other Connect
+apps serialize installation through `.entitlement-v1.lock`; a synced mode-`600`
+temporary file is atomically promoted and the installed file is re-evaluated
+before success is reported. Invalid or inactive sources and expected failures
+before promotion leave an existing license and the selected source unchanged.
+
 Issuer public keys are embedded at build time, never loaded from a runtime
 environment variable. Set `LOCAL_CONNECT_ENTITLEMENT_KEYRING_FILE` to the
 release key-ring JSON when producing an official Connect-enabled build. If no
 key ring is supplied, the standalone build remains healthy but Connect fails
-closed and advertises no capability. Private signing keys must never be placed
-in this repository or application package.
+closed, advertises no capability, and does not admit license installation.
+Private signing keys must never be placed in this repository or application
+package.
 
 ## Development
 
@@ -122,4 +133,5 @@ CONNECT_CONTRACTS_DIR=/absolute/path/to/connect-contracts \
 ```
 
 That check reads entitlement fixtures from canonical Git revision
-`3851b4c55901ef18470c63b92a99a8348e2f1459`.
+`c5405935bd1354cf6a4c8539425a53dfd7f52949`, which also contains the accepted
+activation contract.
