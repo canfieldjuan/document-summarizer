@@ -661,8 +661,10 @@ Connect manifest discovery, new-job admission, and Connect job-status access
 require an active signed entitlement containing
 `connect.capability_exchange`. The provider authenticates the caller first and
 then evaluates the entitlement on every request, so expiry or replacement takes
-effect without application restart. New-job admission rechecks immediately
-before persistence, after the artifact has been received and validated. A
+effect without application restart. Submission authentication and entitlement
+checks run before multipart extraction. New-job admission rechecks inside the
+acquired SQLite write transaction and again before commit, after the artifact
+has been received and validated. A
 denied provider retains ownership of its live registration; authenticated discovery treats the stable public
 `CONNECT_ENTITLEMENT_REQUIRED` response as unavailable rather than as a stale
 file, while another provider process cannot replace it.

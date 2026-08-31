@@ -8,7 +8,7 @@ const EMPTY_KEYRING: &str = r#"{"keys":[]}"#;
 
 fn main() {
     println!("cargo:rerun-if-env-changed={KEYRING_ENV}");
-    let keyring = match env::var_os(KEYRING_ENV) {
+    let keyring = match env::var_os(KEYRING_ENV).filter(|value| !value.is_empty()) {
         Some(source) => {
             let source = PathBuf::from(source);
             println!("cargo:rerun-if-changed={}", source.display());

@@ -15,7 +15,7 @@ use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
 use crate::pipeline::service::{process_ingested_to_summary, SummaryComponents};
 use crate::pipeline::structure::DeterministicStructureInterpreter;
-use axum::extract::{DefaultBodyLimit, Multipart, Path as AxumPath, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -598,30 +598,38 @@ async fn get_job_status_v2(
 
 async fn create_job(
     State(state): State<ProviderState>,
-    headers: HeaderMap,
-    multipart: Multipart,
+    request: Request,
 ) -> Result<Response, ProviderHttpError> {
-    create_job_for(WireVersion::V1, state, headers, multipart).await
+    create_job_for_request(WireVersion::V1, state, request).await
 }
 
 async fn create_job_v2(
     State(state): State<ProviderState>,
-    headers: HeaderMap,
-    multipart: Multipart,
+    request: Request,
 ) -> Result<Response, ProviderHttpError> {
-    create_job_for(WireVersion::V2, state, headers, multipart)
+    create_job_for_request(WireVersion::V2, state, request)
         .await
         .map_err(|error| error.with_protocol_version(v2::PROTOCOL_VERSION))
+}
+
+async fn create_job_for_request(
+    version: WireVersion,
+    state: ProviderState,
+    request: Request,
+) -> Result<Response, ProviderHttpError> {
+    authorize(&state, request.headers())?;
+    require_entitlement(&state)?;
+    let multipart = Multipart::from_request(request, &state)
+        .await
+        .map_err(ProviderHttpError::multipart)?;
+    create_job_for(version, state, multipart).await
 }
 
 async fn create_job_for(
     version: WireVersion,
     state: ProviderState,
-    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Response, ProviderHttpError> {
-    authorize(&state, &headers)?;
-    require_entitlement(&state)?;
     let request_field = multipart
         .next_field()
         .await
@@ -712,15 +720,11 @@ async fn create_job_for(
             false,
         ));
     }
-    if let Err(error) = require_entitlement(&state) {
-        remove_file_quietly(&import_path).await;
-        return Err(error);
-    }
     let provider_instance_id = match version {
         WireVersion::V1 => &state.instance_id_v1,
         WireVersion::V2 => &state.instance_id_v2,
     };
-    let accepted = store::accept_job_with_ingestion(
+    let accepted = store::accept_job_with_ingestion_guarded(
         &mut conn,
         &request,
         &request_hash,
@@ -728,9 +732,14 @@ async fn create_job_for(
         provider_instance_id,
         &document,
         &run,
+        || state.entitlement.decision().is_active(),
     );
     let accepted = match accepted {
-        Ok((_, accepted)) => accepted,
+        Ok(Some((_, accepted))) => accepted,
+        Ok(None) => {
+            remove_file_quietly(&import_path).await;
+            return Err(entitlement_required_error());
+        }
         Err(error) => {
             if let Some(existing) =
                 store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
@@ -1072,12 +1081,16 @@ fn require_entitlement(state: &ProviderState) -> Result<(), ProviderHttpError> {
     if state.entitlement.decision().is_active() {
         return Ok(());
     }
-    Err(ProviderHttpError::new(
+    Err(entitlement_required_error())
+}
+
+fn entitlement_required_error() -> ProviderHttpError {
+    ProviderHttpError::new(
         StatusCode::FORBIDDEN,
         "CONNECT_ENTITLEMENT_REQUIRED",
         "An active Connect entitlement is required.",
         false,
-    ))
+    )
 }
 
 struct ProviderHttpError {
@@ -1152,7 +1165,7 @@ impl ProviderHttpError {
         self
     }
 
-    fn multipart(error: axum::extract::multipart::MultipartError) -> Self {
+    fn multipart(error: impl std::fmt::Display) -> Self {
         eprintln!("Connect provider multipart error: {error}");
         Self::bad_request("MULTIPART_INVALID", "The multipart request is invalid.")
     }
@@ -1926,6 +1939,16 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
 
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .body("not multipart")
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: ErrorEnvelope = response.json().unwrap();
+        assert_eq!(error.error.code, "MULTIPART_INVALID");
+
         write_private_entitlement(&entitlement_path, &expired);
         for version in [WireVersion::V1, WireVersion::V2] {
             let response = http
@@ -1942,6 +1965,24 @@ mod tests {
             assert_eq!(error.protocol_version, version.protocol_version());
             assert_eq!(error.error.code, "CONNECT_ENTITLEMENT_REQUIRED");
         }
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .body("not multipart")
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let error: ErrorEnvelope = response.json().unwrap();
+        assert_eq!(error.error.code, "CONNECT_ENTITLEMENT_REQUIRED");
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth("not-the-registered-token")
+            .body("not multipart")
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let error: ErrorEnvelope = response.json().unwrap();
+        assert_eq!(error.error.code, "AUTHENTICATION_REQUIRED");
         assert!(probe_manifest(
             &http,
             provider.base_url(),
@@ -2018,7 +2059,7 @@ mod tests {
         let entitlement = EntitlementGate::for_test_with_clock(entitlement_path, keys, {
             let clock_calls = Arc::clone(&clock_calls);
             move || {
-                let timestamp = if clock_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let timestamp = if clock_calls.fetch_add(1, Ordering::SeqCst) < 2 {
                     "2026-08-31T00:00:00Z"
                 } else {
                     "2027-01-01T00:00:00Z"
@@ -2053,7 +2094,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let error: ErrorEnvelope = response.json().unwrap();
         assert_eq!(error.error.code, "CONNECT_ENTITLEMENT_REQUIRED");
-        assert_eq!(clock_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 3);
         let conn = db::init_db(app_data.join("summarizer.db")).unwrap();
         assert!(store::get_job(&conn, &request.job_id).unwrap().is_none());
         assert_eq!(

@@ -1582,7 +1582,8 @@ release-package proof remain release work
 - Bearer authentication precedes entitlement evaluation. Both protocol-v1 and
   protocol-v2 manifest, submission, and status routes return the same bounded
   `CONNECT_ENTITLEMENT_REQUIRED` error while denied, before parsing an artifact
-  or opening the job database.
+  or opening the job database. Malformed multipart metadata cannot bypass that
+  ordering.
 - The provider process and its registration remain live while denied. Startup
   liveness probing recognizes only the authenticated entitlement-required
   envelope as proof of ownership, preventing a second instance from scavenging
@@ -1599,9 +1600,10 @@ release-package proof remain release work
   and malformed-base64 fixtures.
 - Focused Rust tests passed for exact time boundaries, signature tampering,
   feature denial, private-file requirements, symlink rejection, key-ring and
-  path boundaries including empty-XDG fallback, both wire-version route gates,
-  denied submission/status, expiry during upload with no persisted job/import,
-  live-registration ownership, and in-process entitlement restoration.
+  path boundaries including empty-XDG fallback and an empty build-keyring
+  variable, both wire-version route gates, malformed-multipart ordering, denied
+  submission/status, expiry inside the write transaction with no committed
+  job/import, live-registration ownership, and in-process entitlement restoration.
 - A release-mode provider compiled with only the canonical test public key ran
   against Email Watcher's real Connect/persistence code and a deterministic
   local model fixture. A PDF job completed; replacing the entitlement with the
