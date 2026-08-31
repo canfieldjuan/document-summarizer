@@ -1560,9 +1560,9 @@ passed; full multi-page live completion remains blocked by concurrent GPU load
 
 ## Slice 16 — Paid Connect Entitlement: Provider Boundary (2026-08-31)
 
-**Status**: Provider implementation and deterministic proof complete; official
-production issuer-key provisioning and the two-app release proof remain release
-work
+**Status**: Provider implementation, deterministic tests, and test-authority
+two-process proof complete; official production issuer-key provisioning and
+release-package proof remain release work
 
 **Commercial and trust contract**:
 - Standalone document ingestion, processing, saved results, and recovery remain
@@ -1600,6 +1600,15 @@ work
   feature denial, private-file requirements, symlink rejection, key-ring and
   path boundaries, both wire-version route gates, denied submission/status,
   live-registration ownership, and in-process entitlement restoration.
+- A release-mode provider compiled with only the canonical test public key ran
+  against Email Watcher's real Connect/persistence code and a deterministic
+  local model fixture. A PDF job completed; replacing the entitlement with the
+  canonical expired fixture removed consumer discovery and made the live
+  provider return `CONNECT_ENTITLEMENT_REQUIRED`; the completed caller-owned
+  result remained readable without Gmail access; restoring the active signed
+  fixture returned the capability without restarting either process. This was
+  a test-authority process proof, not an installed production-package or live
+  Gmail/UI proof.
 
 **Known limits and deferred work**:
 - The provider proof uses an injected test authority. An official package must
