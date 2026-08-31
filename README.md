@@ -71,3 +71,17 @@ cargo test
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+Run the opt-in provider conformance check against the pinned canonical Connect
+v2 corpus from the repository root:
+
+```bash
+CONNECT_CONTRACTS_DIR=/absolute/path/to/connect-contracts \
+  cargo test --manifest-path src-tauri/Cargo.toml \
+  connect::v2::tests::canonical_v2_provider_contract_fixtures -- --ignored --exact
+```
+
+The check reads fixtures from canonical Git revision
+`4d46af25ef5112f76daf841c7622987f05d25142`; it does not trust or copy the
+contracts checkout's working tree. Updating that pin requires an explicit
+compatibility change.

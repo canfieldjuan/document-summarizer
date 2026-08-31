@@ -271,6 +271,37 @@ impl JobResult {
 mod tests {
     use super::*;
     use crate::pipeline::contracts::{PipelineWarning, SummaryArtifact};
+    use serde_json::Value;
+    use std::env;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    const CONTRACTS_REVISION: &str = "4d46af25ef5112f76daf841c7622987f05d25142";
+
+    fn canonical_fixture(relative_path: &str) -> Value {
+        let repository = PathBuf::from(
+            env::var_os("CONNECT_CONTRACTS_DIR")
+                .expect("CONNECT_CONTRACTS_DIR must name a connect-contracts Git checkout"),
+        );
+        assert!(
+            repository.is_dir(),
+            "CONNECT_CONTRACTS_DIR is not a directory"
+        );
+        let revision_path = format!("{CONTRACTS_REVISION}:fixtures/v2/{relative_path}");
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .arg("show")
+            .arg(&revision_path)
+            .output()
+            .expect("git must be available for canonical Connect conformance");
+        assert!(
+            output.status.success(),
+            "canonical Connect fixture unavailable at {revision_path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        serde_json::from_slice(&output.stdout).expect("canonical Connect fixture must be JSON")
+    }
 
     fn request() -> JobRequest {
         JobRequest {
@@ -463,5 +494,95 @@ mod tests {
             JobStatus::from_v1(status),
             Err(ContractBuildError::OutputIntegrity)
         ));
+    }
+
+    #[test]
+    #[ignore = "requires CONNECT_CONTRACTS_DIR"]
+    fn canonical_v2_provider_contract_fixtures() {
+        let cases = canonical_fixture("index.json");
+        let cases = cases
+            .as_array()
+            .expect("canonical Connect fixture index must be an array");
+        let mut output_schemas = BTreeSet::new();
+        let mut admitted_provider_request = false;
+        let mut rejected_request = false;
+
+        for case in cases {
+            let schema = case["schema"]
+                .as_str()
+                .expect("canonical fixture schema must be a string");
+            let fixture_path = case["fixture"]
+                .as_str()
+                .expect("canonical fixture path must be a string");
+            let valid = case["valid"]
+                .as_bool()
+                .expect("canonical fixture validity must be boolean");
+            let fixture = canonical_fixture(fixture_path);
+
+            match schema {
+                "job-request.schema.json" => {
+                    let targets_document_summarizer = case["provider_manifest"]
+                        .as_str()
+                        .is_some_and(|path| path == "valid/manifest.json");
+                    let admitted = serde_json::from_value::<JobRequest>(fixture)
+                        .ok()
+                        .is_some_and(|request| {
+                            request.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_ok()
+                        });
+                    assert_eq!(
+                        admitted,
+                        valid && targets_document_summarizer,
+                        "provider request admission diverged for {fixture_path}"
+                    );
+                    admitted_provider_request |= admitted;
+                    rejected_request |= !admitted;
+                }
+                "manifest.schema.json" if valid => {
+                    let parsed: AppManifest = serde_json::from_value(fixture.clone())
+                        .expect("valid canonical manifest must deserialize");
+                    assert_eq!(serde_json::to_value(parsed).unwrap(), fixture);
+                    output_schemas.insert(schema);
+                }
+                "registration.schema.json" if valid => {
+                    let parsed: RuntimeRegistration = serde_json::from_value(fixture.clone())
+                        .expect("valid canonical registration must deserialize");
+                    assert_eq!(serde_json::to_value(parsed).unwrap(), fixture);
+                    output_schemas.insert(schema);
+                }
+                "job-status.schema.json" if valid => {
+                    let parsed: JobStatus = serde_json::from_value(fixture.clone())
+                        .expect("valid canonical job status must deserialize");
+                    assert_eq!(serde_json::to_value(parsed).unwrap(), fixture);
+                    output_schemas.insert(schema);
+                }
+                "error.schema.json" if valid => {
+                    let parsed: ErrorEnvelope = serde_json::from_value(fixture.clone())
+                        .expect("valid canonical error must deserialize");
+                    assert_eq!(serde_json::to_value(parsed).unwrap(), fixture);
+                    output_schemas.insert(schema);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(admitted_provider_request);
+        assert!(rejected_request);
+        assert_eq!(
+            output_schemas,
+            BTreeSet::from([
+                "error.schema.json",
+                "job-status.schema.json",
+                "manifest.schema.json",
+                "registration.schema.json",
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(AppManifest::new(
+                "11111111-1111-4111-8111-111111111111",
+                v1::DEFAULT_MAX_INPUT_BYTES,
+            ))
+            .unwrap(),
+            canonical_fixture("valid/manifest.json")
+        );
     }
 }
