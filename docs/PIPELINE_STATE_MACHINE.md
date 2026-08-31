@@ -208,6 +208,13 @@ processing job left by process interruption becomes `failed` with retryable
 `PROVIDER_RESTARTED`. The underlying pipeline run remains authoritative; the
 automatic pipeline resume/rollback policy is still deferred.
 
+Commercial entitlement is an admission boundary around this API lifecycle, not
+a pipeline state. The provider authenticates first, then requires an active
+`connect.capability_exchange` entitlement for manifest, submission, and status
+routes. Denial returns `CONNECT_ENTITLEMENT_REQUIRED` before request parsing or
+database work and therefore cannot create or advance a pipeline run. Expiry
+does not rewrite already earned standalone artifacts or pipeline history.
+
 ### Ingestion transaction behavior
 
 Extension/signature validation and source reading occur before durable run

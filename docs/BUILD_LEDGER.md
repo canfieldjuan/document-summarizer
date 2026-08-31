@@ -1557,3 +1557,75 @@ passed; full multi-page live completion remains blocked by concurrent GPU load
   Such residue remains non-authoritative to discovery and is deterministically
   reclaimed on the next provider startup. No signal daemon, broker, or generic
   third-party registration garbage collector was added.
+
+## Slice 16 — Paid Connect Entitlement: Provider Boundary (2026-08-31)
+
+**Status**: Provider implementation, deterministic tests, and test-authority
+two-process proof complete; official production issuer-key provisioning and
+release-package proof remain release work
+
+**Commercial and trust contract**:
+- Standalone document ingestion, processing, saved results, and recovery remain
+  available without Connect. Connect is not a free toggle: manifest discovery,
+  job submission, and job status require a signed entitlement containing
+  `connect.capability_exchange`.
+- The provider verifies an Ed25519 signature over the exact payload bytes using
+  an issuer key ring embedded only at build time. A missing key ring fails
+  Connect closed without preventing standalone startup. Runtime configuration
+  cannot substitute a new trust root, and no private issuer key is committed.
+- The verified Linux file boundary is the current user's private
+  `local-connect/entitlement-v1.json`. Owner, mode, regular-file, no-symlink,
+  size, schema, canonical base64url, UUID, feature, signature, and exact UTC
+  interval checks all fail closed. There is no grace period.
+
+**Provider behavior**:
+- Bearer authentication precedes entitlement evaluation. Both protocol-v1 and
+  protocol-v2 manifest, submission, and status routes return the same bounded
+  `CONNECT_ENTITLEMENT_REQUIRED` error while denied, before parsing an artifact
+  or opening the job database. Malformed multipart metadata cannot bypass that
+  ordering.
+- The provider process and its registration remain live while denied. Startup
+  liveness probing recognizes only the authenticated entitlement-required
+  envelope as proof of ownership, preventing a second instance from scavenging
+  a live denied provider. Discovery still omits the capability because no
+  manifest is returned.
+- Replacing an expired entitlement with a valid signed file restores the
+  capability without provider restart. Expiry does not delete or mutate
+  pipeline artifacts; standalone access to earned results is unchanged.
+
+**Automated proof recorded before commit**:
+- Canonical entitlement conformance passed against the pinned
+  `connect-contracts` revision, including active, expired, not-yet-valid,
+  missing-feature, unknown-key, bad-signature, signed duplicate-claim-member,
+  and malformed-base64 fixtures.
+- Focused Rust tests passed for exact time boundaries, signature tampering,
+  feature denial, private-file requirements, symlink rejection, key-ring and
+  path boundaries including empty-XDG fallback and an empty build-keyring
+  variable, both wire-version route gates, malformed-multipart ordering, denied
+  submission/status, expiry inside the write transaction with no committed
+  job/import, live-registration ownership, and in-process entitlement restoration.
+- A release-mode provider compiled with only the canonical test public key ran
+  against Email Watcher's real Connect/persistence code and a deterministic
+  local model fixture. A PDF job completed; replacing the entitlement with the
+  canonical expired fixture removed consumer discovery and made the live
+  provider return `CONNECT_ENTITLEMENT_REQUIRED`; the completed caller-owned
+  result remained readable without Gmail access; restoring the active signed
+  fixture returned the capability without restarting either process. This was
+  a test-authority process proof, not an installed production-package or live
+  Gmail/UI proof.
+- The exact final provider and consumer heads repeated the two-process proof
+  through the real Ollama endpoint with `qwen3-30b-a3b:latest`. The job
+  completed, the active/expired/restored and removal/restart checks passed, and
+  the proof reported `proof_passed: true`.
+
+**Known limits and deferred work**:
+- The provider proof uses an injected test authority. An official package must
+  embed the production public key and receive a separately issued entitlement
+  before Connect can be sold; issuer private-key custody and license delivery
+  remain outside this repository.
+- The current secure entitlement-file reader is implemented for the verified
+  Linux/Unix boundary. Windows ACL/path hardening and target-host packaging
+  proof remain required before a Windows release.
+- Device binding, online revocation, billing/account UI, clock-rollback defense,
+  shared Gmail authorization, workflows, OCR, and model/runtime changes remain
+  deferred.

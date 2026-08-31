@@ -3,6 +3,7 @@ use crate::connect::contracts::{
     JobError, JobRequest, JobResult, JobStatus, RuntimeRegistration, TransportRegistration, APP_ID,
     DEFAULT_MAX_INPUT_BYTES, MAX_REQUEST_JSON_BYTES, PROTOCOL_VERSION,
 };
+use crate::connect::entitlement::{EntitlementConfigurationError, EntitlementGate};
 use crate::connect::store::{self, ConnectStoreError, StoredConnectJob};
 use crate::connect::v2;
 use crate::pipeline::chunk::DeterministicDocumentChunker;
@@ -14,7 +15,7 @@ use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
 use crate::pipeline::service::{process_ingested_to_summary, SummaryComponents};
 use crate::pipeline::structure::DeterministicStructureInterpreter;
-use axum::extract::{DefaultBodyLimit, Multipart, Path as AxumPath, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -56,6 +57,7 @@ struct ProviderState {
     manifest_v2: v2::AppManifest,
     max_input_bytes: u64,
     runtime_factory: RuntimeFactory,
+    entitlement: EntitlementGate,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +70,11 @@ struct ManifestIdentity {
 #[derive(Deserialize)]
 struct ManifestAppIdentity {
     id: String,
+}
+
+enum ManifestProbe {
+    Manifest(ManifestIdentity),
+    EntitlementRequired,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +122,8 @@ pub enum ProviderStartError {
     Io(#[from] io::Error),
     #[error("Connect provider database setup failed: {0}")]
     Store(#[from] ConnectStoreError),
+    #[error(transparent)]
+    Entitlement(#[from] EntitlementConfigurationError),
     #[error("Connect registration serialization failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -152,21 +161,42 @@ impl ConnectProvider {
             OllamaRuntime::from_environment()
                 .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
         });
-        Self::start_at(
+        let entitlement = EntitlementGate::from_installation()?;
+        Self::start_at_with_entitlement(
             db_path,
             app_data_dir,
             runtime_root,
             max_input_bytes,
             runtime_factory,
+            entitlement,
         )
     }
 
+    #[cfg(test)]
     fn start_at(
         db_path: PathBuf,
         app_data_dir: PathBuf,
         runtime_root: PathBuf,
         max_input_bytes: u64,
         runtime_factory: RuntimeFactory,
+    ) -> Result<Self, ProviderStartError> {
+        Self::start_at_with_entitlement(
+            db_path,
+            app_data_dir,
+            runtime_root,
+            max_input_bytes,
+            runtime_factory,
+            EntitlementGate::always_active_for_test(),
+        )
+    }
+
+    fn start_at_with_entitlement(
+        db_path: PathBuf,
+        app_data_dir: PathBuf,
+        runtime_root: PathBuf,
+        max_input_bytes: u64,
+        runtime_factory: RuntimeFactory,
+        entitlement: EntitlementGate,
     ) -> Result<Self, ProviderStartError> {
         ensure_private_directory(&app_data_dir)?;
         let imports_dir = app_data_dir.join("connect-imports");
@@ -220,6 +250,7 @@ impl ConnectProvider {
             manifest_v2,
             max_input_bytes,
             runtime_factory,
+            entitlement,
         };
         let body_limit = usize::try_from(max_input_bytes)
             .unwrap_or(usize::MAX)
@@ -491,6 +522,7 @@ async fn get_manifest(
     headers: HeaderMap,
 ) -> Result<Json<AppManifest>, ProviderHttpError> {
     authorize(&state, &headers)?;
+    require_entitlement(&state)?;
     Ok(Json(state.manifest_v1))
 }
 
@@ -499,6 +531,8 @@ async fn get_manifest_v2(
     headers: HeaderMap,
 ) -> Result<Json<v2::AppManifest>, ProviderHttpError> {
     authorize(&state, &headers)
+        .map_err(|error| error.with_protocol_version(v2::PROTOCOL_VERSION))?;
+    require_entitlement(&state)
         .map_err(|error| error.with_protocol_version(v2::PROTOCOL_VERSION))?;
     Ok(Json(state.manifest_v2))
 }
@@ -509,6 +543,7 @@ async fn get_job_status(
     AxumPath(job_id): AxumPath<String>,
 ) -> Result<Json<JobStatus>, ProviderHttpError> {
     authorize(&state, &headers)?;
+    require_entitlement(&state)?;
     if !valid_uuid_v4(&job_id) {
         return Err(ProviderHttpError::bad_request(
             "JOB_ID_INVALID",
@@ -537,6 +572,7 @@ async fn get_job_status_v2(
 ) -> Result<Response, ProviderHttpError> {
     let result = (|| {
         authorize(&state, &headers)?;
+        require_entitlement(&state)?;
         if !valid_uuid_v4(&job_id) {
             return Err(ProviderHttpError::bad_request(
                 "JOB_ID_INVALID",
@@ -562,29 +598,38 @@ async fn get_job_status_v2(
 
 async fn create_job(
     State(state): State<ProviderState>,
-    headers: HeaderMap,
-    multipart: Multipart,
+    request: Request,
 ) -> Result<Response, ProviderHttpError> {
-    create_job_for(WireVersion::V1, state, headers, multipart).await
+    create_job_for_request(WireVersion::V1, state, request).await
 }
 
 async fn create_job_v2(
     State(state): State<ProviderState>,
-    headers: HeaderMap,
-    multipart: Multipart,
+    request: Request,
 ) -> Result<Response, ProviderHttpError> {
-    create_job_for(WireVersion::V2, state, headers, multipart)
+    create_job_for_request(WireVersion::V2, state, request)
         .await
         .map_err(|error| error.with_protocol_version(v2::PROTOCOL_VERSION))
+}
+
+async fn create_job_for_request(
+    version: WireVersion,
+    state: ProviderState,
+    request: Request,
+) -> Result<Response, ProviderHttpError> {
+    authorize(&state, request.headers())?;
+    require_entitlement(&state)?;
+    let multipart = Multipart::from_request(request, &state)
+        .await
+        .map_err(ProviderHttpError::multipart)?;
+    create_job_for(version, state, multipart).await
 }
 
 async fn create_job_for(
     version: WireVersion,
     state: ProviderState,
-    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Response, ProviderHttpError> {
-    authorize(&state, &headers)?;
     let request_field = multipart
         .next_field()
         .await
@@ -679,7 +724,7 @@ async fn create_job_for(
         WireVersion::V1 => &state.instance_id_v1,
         WireVersion::V2 => &state.instance_id_v2,
     };
-    let accepted = store::accept_job_with_ingestion(
+    let accepted = store::accept_job_with_ingestion_guarded(
         &mut conn,
         &request,
         &request_hash,
@@ -687,9 +732,14 @@ async fn create_job_for(
         provider_instance_id,
         &document,
         &run,
+        || state.entitlement.decision().is_active(),
     );
     let accepted = match accepted {
-        Ok((_, accepted)) => accepted,
+        Ok(Some((_, accepted))) => accepted,
+        Ok(None) => {
+            remove_file_quietly(&import_path).await;
+            return Err(entitlement_required_error());
+        }
         Err(error) => {
             if let Some(existing) =
                 store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
@@ -1027,6 +1077,22 @@ fn authorize(state: &ProviderState, headers: &HeaderMap) -> Result<(), ProviderH
     Ok(())
 }
 
+fn require_entitlement(state: &ProviderState) -> Result<(), ProviderHttpError> {
+    if state.entitlement.decision().is_active() {
+        return Ok(());
+    }
+    Err(entitlement_required_error())
+}
+
+fn entitlement_required_error() -> ProviderHttpError {
+    ProviderHttpError::new(
+        StatusCode::FORBIDDEN,
+        "CONNECT_ENTITLEMENT_REQUIRED",
+        "An active Connect entitlement is required.",
+        false,
+    )
+}
+
 struct ProviderHttpError {
     status: StatusCode,
     error: JobError,
@@ -1099,7 +1165,7 @@ impl ProviderHttpError {
         self
     }
 
-    fn multipart(error: axum::extract::multipart::MultipartError) -> Self {
+    fn multipart(error: impl std::fmt::Display) -> Self {
         eprintln!("Connect provider multipart error: {error}");
         Self::bad_request("MULTIPART_INVALID", "The multipart request is invalid.")
     }
@@ -1258,7 +1324,7 @@ fn registration_proves_live(
     if !registration_matches_candidate(&registration, version, expected_instance_id) {
         return false;
     }
-    let Some(manifest) = probe_manifest(
+    let Some(probe) = probe_manifest(
         client,
         &registration.transport.base_url,
         &registration.auth.token,
@@ -1266,9 +1332,14 @@ fn registration_proves_live(
     ) else {
         return false;
     };
-    manifest.protocol_version == version.protocol_version()
-        && manifest.instance_id == expected_instance_id
-        && manifest.app.id == APP_ID
+    match probe {
+        ManifestProbe::Manifest(manifest) => {
+            manifest.protocol_version == version.protocol_version()
+                && manifest.instance_id == expected_instance_id
+                && manifest.app.id == APP_ID
+        }
+        ManifestProbe::EntitlementRequired => true,
+    }
 }
 
 fn registration_matches_candidate(
@@ -1307,15 +1378,16 @@ fn probe_manifest(
     base_url: &str,
     token: &str,
     version: WireVersion,
-) -> Option<ManifestIdentity> {
+) -> Option<ManifestProbe> {
     let url = validated_manifest_url(base_url, version)?;
     let response = client
-        .get(url)
+        .get(url.clone())
         .header(header::ACCEPT, "application/json")
         .bearer_auth(token)
         .send()
         .ok()?;
-    if response.status() != StatusCode::OK
+    let status = response.status();
+    if !matches!(status, StatusCode::OK | StatusCode::FORBIDDEN)
         || response
             .content_length()
             .is_some_and(|length| length > MAX_PROBED_MANIFEST_BYTES)
@@ -1330,7 +1402,56 @@ fn probe_manifest(
     if bytes.len() as u64 > MAX_PROBED_MANIFEST_BYTES {
         return None;
     }
-    serde_json::from_slice(&bytes).ok()
+    if status == StatusCode::OK {
+        return serde_json::from_slice(&bytes)
+            .ok()
+            .map(ManifestProbe::Manifest);
+    }
+    let envelope: ErrorEnvelope = serde_json::from_slice(&bytes).ok()?;
+    if envelope.protocol_version != version.protocol_version()
+        || envelope.error.code != "CONNECT_ENTITLEMENT_REQUIRED"
+        || !probe_rejects_invalid_token(client, url, token, version)
+    {
+        return None;
+    }
+    Some(ManifestProbe::EntitlementRequired)
+}
+
+fn probe_rejects_invalid_token(
+    client: &reqwest::blocking::Client,
+    url: reqwest::Url,
+    token: &str,
+    version: WireVersion,
+) -> bool {
+    let response = match client
+        .get(url)
+        .header(header::ACCEPT, "application/json")
+        .bearer_auth(format!("{token}-invalid"))
+        .send()
+    {
+        Ok(response) => response,
+        Err(_) => return false,
+    };
+    if response.status() != StatusCode::UNAUTHORIZED
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_PROBED_MANIFEST_BYTES)
+    {
+        return false;
+    }
+    let mut bytes = Vec::new();
+    if response
+        .take(MAX_PROBED_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 > MAX_PROBED_MANIFEST_BYTES
+    {
+        return false;
+    }
+    serde_json::from_slice::<ErrorEnvelope>(&bytes).is_ok_and(|envelope| {
+        envelope.protocol_version == version.protocol_version()
+            && envelope.error.code == "AUTHENTICATION_REQUIRED"
+    })
 }
 
 fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
@@ -1522,11 +1643,22 @@ mod tests {
     use crate::connect::contracts::{
         CapabilityRef, InputArtifact, JobState, CAPABILITY_ID, CAPABILITY_VERSION, INPUT_MEDIA_TYPE,
     };
+    use crate::connect::entitlement::{EntitlementGate, ENTITLEMENT_FILE_NAME, FEATURE_ID};
     use crate::pipeline::contracts::{ModelRequest, ModelResponse};
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use base64::{
+        engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+        Engine as _,
+    };
+    use chrono::DateTime;
     use reqwest::blocking::{multipart, Client};
+    use ring::rand::SystemRandom;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn accepted_job_ownership_preserves_only_its_shared_import() {
@@ -1720,6 +1852,257 @@ mod tests {
             }],
             parameters: BTreeMap::new(),
         }
+    }
+
+    fn signed_test_entitlement(
+        key: &Ed25519KeyPair,
+        not_before: &str,
+        expires_at: &str,
+    ) -> Vec<u8> {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "format_version": 1,
+            "entitlement_id": Uuid::new_v4().to_string(),
+            "subject": "provider-test-customer",
+            "features": [FEATURE_ID],
+            "issued_at": not_before,
+            "not_before": not_before,
+            "expires_at": expires_at,
+        }))
+        .unwrap();
+        serde_json::to_vec(&serde_json::json!({
+            "format_version": 1,
+            "key_id": "provider-test-key",
+            "payload_base64url": URL_SAFE_NO_PAD.encode(&payload),
+            "signature_base64url": URL_SAFE_NO_PAD.encode(key.sign(&payload).as_ref()),
+        }))
+        .unwrap()
+    }
+
+    fn write_private_entitlement(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn entitlement_gates_manifest_jobs_and_status_while_registration_stays_owned() {
+        let root = TestDirectory::new("doc-sum-connect-entitlement-gate");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        let entitlement_dir = root.0.join("entitlement");
+        fs::create_dir_all(&entitlement_dir).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&entitlement_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let entitlement_path = entitlement_dir.join(ENTITLEMENT_FILE_NAME);
+        let key_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(key_document.as_ref()).unwrap();
+        let active = signed_test_entitlement(&key, "2026-01-01T00:00:00Z", "2027-01-01T00:00:00Z");
+        let expired = signed_test_entitlement(&key, "2025-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
+        write_private_entitlement(&entitlement_path, &active);
+        let mut keys = BTreeMap::new();
+        keys.insert(
+            "provider-test-key".to_string(),
+            key.public_key().as_ref().to_vec(),
+        );
+        let entitlement = EntitlementGate::for_test(
+            entitlement_path.clone(),
+            keys,
+            DateTime::parse_from_rfc3339("2026-08-31T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        let runtime_factory: RuntimeFactory =
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>));
+        let provider = ConnectProvider::start_at_with_entitlement(
+            app_data.join("summarizer.db"),
+            app_data.clone(),
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory.clone(),
+            entitlement.clone(),
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let http = client();
+
+        for version in [WireVersion::V1, WireVersion::V2] {
+            let response = http
+                .get(format!(
+                    "{}{}",
+                    provider.base_url(),
+                    &version.manifest_path()[1..]
+                ))
+                .bearer_auth(&registration.auth.token)
+                .send()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .body("not multipart")
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: ErrorEnvelope = response.json().unwrap();
+        assert_eq!(error.error.code, "MULTIPART_INVALID");
+
+        write_private_entitlement(&entitlement_path, &expired);
+        for version in [WireVersion::V1, WireVersion::V2] {
+            let response = http
+                .get(format!(
+                    "{}{}",
+                    provider.base_url(),
+                    &version.manifest_path()[1..]
+                ))
+                .bearer_auth(&registration.auth.token)
+                .send()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let error: ErrorEnvelope = response.json().unwrap();
+            assert_eq!(error.protocol_version, version.protocol_version());
+            assert_eq!(error.error.code, "CONNECT_ENTITLEMENT_REQUIRED");
+        }
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .body("not multipart")
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let error: ErrorEnvelope = response.json().unwrap();
+        assert_eq!(error.error.code, "CONNECT_ENTITLEMENT_REQUIRED");
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth("not-the-registered-token")
+            .body("not multipart")
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let error: ErrorEnvelope = response.json().unwrap();
+        assert_eq!(error.error.code, "AUTHENTICATION_REQUIRED");
+        assert!(probe_manifest(
+            &http,
+            provider.base_url(),
+            "not-the-registered-token",
+            WireVersion::V1,
+        )
+        .is_none());
+
+        let bytes = b"%PDF-1.4\nentitlement denial\n%%EOF".to_vec();
+        let request = fixture_request_v2(&bytes);
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form_v2(&request, bytes))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let error: ErrorEnvelope = response.json().unwrap();
+        assert_eq!(error.protocol_version, v2::PROTOCOL_VERSION);
+        assert_eq!(error.error.code, "CONNECT_ENTITLEMENT_REQUIRED");
+
+        let response = http
+            .get(format!("{}v2/jobs/{}", provider.base_url(), request.job_id))
+            .bearer_auth(&registration.auth.token)
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        assert!(matches!(
+            ConnectProvider::start_at_with_entitlement(
+                app_data.join("summarizer.db"),
+                app_data,
+                runtime_root,
+                DEFAULT_MAX_INPUT_BYTES,
+                runtime_factory,
+                entitlement,
+            ),
+            Err(ProviderStartError::ProviderAlreadyRunning)
+        ));
+
+        write_private_entitlement(&entitlement_path, &active);
+        let response = http
+            .get(format!("{}v2/manifest", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(provider.registration_path().exists());
+        assert!(provider.registration_path_v2().exists());
+    }
+
+    #[test]
+    fn entitlement_is_rechecked_before_job_persistence() {
+        let root = TestDirectory::new("doc-sum-connect-entitlement-expiry-race");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        let entitlement_dir = root.0.join("entitlement");
+        fs::create_dir_all(&entitlement_dir).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&entitlement_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let entitlement_path = entitlement_dir.join(ENTITLEMENT_FILE_NAME);
+        let key_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(key_document.as_ref()).unwrap();
+        write_private_entitlement(
+            &entitlement_path,
+            &signed_test_entitlement(&key, "2026-01-01T00:00:00Z", "2027-01-01T00:00:00Z"),
+        );
+        let mut keys = BTreeMap::new();
+        keys.insert(
+            "provider-test-key".to_string(),
+            key.public_key().as_ref().to_vec(),
+        );
+        let clock_calls = Arc::new(AtomicUsize::new(0));
+        let entitlement = EntitlementGate::for_test_with_clock(entitlement_path, keys, {
+            let clock_calls = Arc::clone(&clock_calls);
+            move || {
+                let timestamp = if clock_calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                    "2026-08-31T00:00:00Z"
+                } else {
+                    "2027-01-01T00:00:00Z"
+                };
+                DateTime::parse_from_rfc3339(timestamp)
+                    .unwrap()
+                    .with_timezone(&Utc)
+            }
+        });
+        let runtime_factory: RuntimeFactory =
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>));
+        let provider = ConnectProvider::start_at_with_entitlement(
+            app_data.join("summarizer.db"),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory,
+            entitlement,
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let bytes = b"%PDF-1.4\nentitlement expiry race\n%%EOF".to_vec();
+        let request = fixture_request_v2(&bytes);
+        let response = client()
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form_v2(&request, bytes))
+            .send()
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let error: ErrorEnvelope = response.json().unwrap();
+        assert_eq!(error.error.code, "CONNECT_ENTITLEMENT_REQUIRED");
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 3);
+        let conn = db::init_db(app_data.join("summarizer.db")).unwrap();
+        assert!(store::get_job(&conn, &request.job_id).unwrap().is_none());
+        assert_eq!(
+            fs::read_dir(app_data.join("connect-imports"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     fn form(request: &JobRequest, bytes: Vec<u8>) -> multipart::Form {

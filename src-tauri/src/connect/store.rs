@@ -76,10 +76,44 @@ pub fn accept_job_with_ingestion(
     document: &IngestedDocument,
     run: &PipelineRun,
 ) -> Result<(PipelineRun, StoredConnectJob), ConnectStoreError> {
+    accept_job_with_ingestion_guarded(
+        conn,
+        request,
+        request_hash,
+        import_path,
+        provider_instance_id,
+        document,
+        run,
+        || true,
+    )?
+    .ok_or_else(|| {
+        ConnectStoreError::InvalidJob(
+            "unconditional Connect job admission was rejected".to_string(),
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn accept_job_with_ingestion_guarded<F>(
+    conn: &mut Connection,
+    request: &JobRequest,
+    request_hash: &str,
+    import_path: &str,
+    provider_instance_id: &str,
+    document: &IngestedDocument,
+    run: &PipelineRun,
+    mut admission_check: F,
+) -> Result<Option<(PipelineRun, StoredConnectJob)>, ConnectStoreError>
+where
+    F: FnMut() -> bool,
+{
     let input = &request.inputs[0];
     let byte_size = i64::try_from(input.byte_size)?;
-    let now = Utc::now();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !admission_check() {
+        return Ok(None);
+    }
+    let now = Utc::now();
     let ingested_run = db::persist_ingestion_in_transaction(&tx, document, run)?;
     tx.execute(
         "INSERT INTO connect_jobs (
@@ -109,11 +143,14 @@ pub fn accept_job_with_ingestion(
             now.to_rfc3339(),
         ],
     )?;
+    if !admission_check() {
+        return Ok(None);
+    }
     tx.commit()?;
     let stored = get_job(conn, &request.job_id)?.ok_or_else(|| {
         ConnectStoreError::InvalidJob("accepted job was not readable after commit".to_string())
     })?;
-    Ok((ingested_run, stored))
+    Ok(Some((ingested_run, stored)))
 }
 
 pub fn get_job(

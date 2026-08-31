@@ -4,7 +4,8 @@ A local-first Tauri desktop application that ingests native-text PDFs, preserves
 page provenance through a durable processing pipeline, and produces summaries
 with page-linked exact source excerpts using an Ollama-hosted model. The
 application also provides the optional local Connect `document.summarize`
-capability while remaining usable on its own.
+capability to installations with an active Connect entitlement while remaining
+usable on its own.
 
 ## Local runtime
 
@@ -28,6 +29,30 @@ Existing deployment overrides remain available through
 `DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional
 `DOC_SUM_MODEL_API_TOKEN_FILE`. The endpoint admission rule remains exact
 loopback HTTP only.
+
+## Connect entitlement
+
+Connect is a paid, failure-isolated capability. Document ingestion, processing,
+saved results, and the rest of the standalone application do not require a
+Connect entitlement. Connect manifest discovery, new jobs, and job-status API
+access require a currently valid signed entitlement containing
+`connect.capability_exchange`.
+
+On Linux, the entitlement is read on every Connect request from
+`$XDG_CONFIG_HOME/local-connect/entitlement-v1.json`, or from
+`$HOME/.config/local-connect/entitlement-v1.json` when `XDG_CONFIG_HOME` is
+unset or empty. The directory must be owned by the current user with mode `700`; the
+regular, non-symlink entitlement file must be owned by that user with mode
+`600`. Expiry is exact and has no hidden grace period. Replacing the file with a
+new valid entitlement restores capability availability without restarting the
+application.
+
+Issuer public keys are embedded at build time, never loaded from a runtime
+environment variable. Set `LOCAL_CONNECT_ENTITLEMENT_KEYRING_FILE` to the
+release key-ring JSON when producing an official Connect-enabled build. If no
+key ring is supplied, the standalone build remains healthy but Connect fails
+closed and advertises no capability. Private signing keys must never be placed
+in this repository or application package.
 
 ## Development
 
@@ -85,3 +110,16 @@ The check reads fixtures from canonical Git revision
 `4d46af25ef5112f76daf841c7622987f05d25142`; it does not trust or copy the
 contracts checkout's working tree. Updating that pin requires an explicit
 compatibility change.
+
+Run the independent signed-entitlement conformance check against its separately
+pinned canonical revision:
+
+```bash
+CONNECT_CONTRACTS_DIR=/absolute/path/to/connect-contracts \
+  cargo test --manifest-path src-tauri/Cargo.toml \
+  connect::entitlement::tests::canonical_entitlement_v1_fixtures \
+  -- --ignored --exact
+```
+
+That check reads entitlement fixtures from canonical Git revision
+`3851b4c55901ef18470c63b92a99a8348e2f1459`.

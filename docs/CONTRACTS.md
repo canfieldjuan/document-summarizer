@@ -656,13 +656,37 @@ boundary are reclaimed on the next provider startup and remain
 non-authoritative to authenticated-manifest discovery in the meantime.
 
 "Optional" in this provider lifecycle means that Connect failure or absence
-cannot disable the standalone application. It is not a user-facing toggle and
-does not describe commercial entitlement. The current v1 provider advertises
-whenever startup succeeds; paid-entitlement gating is not implemented yet. The
-sellable product contract requires entitlement to gate capability visibility
-and job admission while leaving standalone document use healthy. Google OAuth
-remains owned by Email Watcher: Connect receives only explicitly handed-off PDF
-bytes and bounded artifact metadata, never mailbox credentials or tokens.
+cannot disable the standalone application. It is not a user-facing toggle.
+Connect manifest discovery, new-job admission, and Connect job-status access
+require an active signed entitlement containing
+`connect.capability_exchange`. The provider authenticates the caller first and
+then evaluates the entitlement on every request, so expiry or replacement takes
+effect without application restart. Submission authentication and entitlement
+checks run before multipart extraction. New-job admission rechecks inside the
+acquired SQLite write transaction and again before commit, after the artifact
+has been received and validated. A
+denied provider retains ownership of its live registration; authenticated discovery treats the stable public
+`CONNECT_ENTITLEMENT_REQUIRED` response as unavailable rather than as a stale
+file, while another provider process cannot replace it.
+
+The v1 entitlement envelope contains exact signed payload bytes and an Ed25519
+signature. Issuer public keys are embedded from the build-time-only
+`LOCAL_CONNECT_ENTITLEMENT_KEYRING_FILE`; a build with no keys remains a working
+standalone application but fails Connect closed. Runtime environment variables
+cannot replace issuer trust. On the verified Linux boundary, the entitlement is
+read from `$XDG_CONFIG_HOME/local-connect/entitlement-v1.json` or the equivalent
+`$HOME/.config` fallback when the XDG value is unset or empty, and must be an owner-only, owner-owned, regular,
+non-symlink file beneath an owner-only directory. The interval is
+`issued_at <= not_before <= now < expires_at`, with no grace period. Invalid signatures,
+unknown keys, malformed claims, missing features, insecure files, and absent
+authority all deny Connect without exposing private claims to callers.
+
+This offline bearer entitlement is not machine-bound and cannot be revoked
+before expiry without local replacement. Production issuer-key custody and
+license delivery are release operations outside the application repository;
+private signing keys are never packaged. Google OAuth remains owned by Email
+Watcher: Connect receives only explicitly handed-off PDF bytes and bounded
+artifact metadata, never mailbox credentials or tokens.
 
 `POST /v1/jobs` requires the bounded job-request JSON as the first multipart
 field and one `application/pdf` byte stream as the second. No caller path is
