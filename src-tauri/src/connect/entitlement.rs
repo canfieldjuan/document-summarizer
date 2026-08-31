@@ -364,7 +364,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
 
-    const CONTRACTS_REVISION: &str = "3aef9c78186dca29949c10e4fc129d12ab932cf6";
+    const CONTRACTS_REVISION: &str = "3851b4c55901ef18470c63b92a99a8348e2f1459";
 
     struct TestDirectory(PathBuf);
 
@@ -403,11 +403,15 @@ mod tests {
 
     fn signed_entitlement(key: &Ed25519KeyPair, key_id: &str, claims: &Value) -> Vec<u8> {
         let payload = serde_json::to_vec(claims).unwrap();
+        signed_payload(key, key_id, &payload)
+    }
+
+    fn signed_payload(key: &Ed25519KeyPair, key_id: &str, payload: &[u8]) -> Vec<u8> {
         serde_json::to_vec(&json!({
             "format_version": 1,
             "key_id": key_id,
-            "payload_base64url": URL_SAFE_NO_PAD.encode(&payload),
-            "signature_base64url": URL_SAFE_NO_PAD.encode(key.sign(&payload).as_ref()),
+            "payload_base64url": URL_SAFE_NO_PAD.encode(payload),
+            "signature_base64url": URL_SAFE_NO_PAD.encode(key.sign(payload).as_ref()),
         }))
         .unwrap()
     }
@@ -539,6 +543,26 @@ mod tests {
                 EntitlementDecision::Missing
             );
         }
+    }
+
+    #[test]
+    fn duplicate_claim_members_are_rejected_before_authorization() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let payload = format!(
+            r#"{{"format_version":1,"entitlement_id":"{}","subject":"test-customer","features":["document.local_processing"],"features":["{}"],"issued_at":"2026-01-01T00:00:00Z","not_before":"2026-01-01T00:00:00Z","expires_at":"2027-01-01T00:00:00Z"}}"#,
+            Uuid::new_v4(),
+            FEATURE_ID
+        );
+        write_private(
+            &root.0.join(ENTITLEMENT_FILE_NAME),
+            &signed_payload(&key, "test-key", payload.as_bytes()),
+        );
+
+        assert_eq!(
+            gate(&root, &key, "2026-08-31T00:00:00Z").decision(),
+            EntitlementDecision::Invalid
+        );
     }
 
     #[test]
