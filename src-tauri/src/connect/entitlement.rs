@@ -224,11 +224,12 @@ fn evaluate_entitlement(
     let Ok(claims) = serde_json::from_slice::<EntitlementClaims>(&payload) else {
         return EntitlementDecision::Invalid;
     };
+    let valid_entitlement_id = Uuid::parse_str(&claims.entitlement_id)
+        .ok()
+        .filter(|value| value.get_version_num() == 4 && value.to_string() == claims.entitlement_id)
+        .is_some();
     if claims.format_version != FORMAT_VERSION
-        || Uuid::parse_str(&claims.entitlement_id)
-            .ok()
-            .filter(|value| value.get_version_num() == 4)
-            .is_none()
+        || !valid_entitlement_id
         || claims.subject.is_empty()
         || claims.subject.chars().count() > MAX_SUBJECT_CHARS
         || claims.features.is_empty()
@@ -469,6 +470,26 @@ mod tests {
         assert_eq!(
             gate(&root, &key, "2026-08-31T00:00:00Z").decision(),
             EntitlementDecision::FeatureMissing
+        );
+
+        let mut uppercase_id = claims(
+            "2026-01-01T00:00:00Z",
+            "2027-01-01T00:00:00Z",
+            vec![FEATURE_ID],
+        );
+        uppercase_id["entitlement_id"] = Value::String(
+            uppercase_id["entitlement_id"]
+                .as_str()
+                .unwrap()
+                .to_ascii_uppercase(),
+        );
+        write_private(
+            &root.0.join(ENTITLEMENT_FILE_NAME),
+            &signed_entitlement(&key, "test-key", &uppercase_id),
+        );
+        assert_eq!(
+            gate(&root, &key, "2026-08-31T00:00:00Z").decision(),
+            EntitlementDecision::Invalid
         );
 
         let mut tampered: Value = serde_json::from_slice(&license).unwrap();
