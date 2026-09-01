@@ -471,17 +471,28 @@ accepted; shared on-prem inference remains future work
   contract required for gateway routing. That contract, multi-model routing,
   and model promotion policy require a separate evidence-driven slice.
 - The shared appliance selects vLLM as its primary worker and Ollama as a
-  separately validated fallback. Applications continue to request task
-  requirements through the authenticated inference gateway; they do not select
-  either runtime, a model artifact, or fallback order.
+  planned fallback that must be qualified independently for each eligible task.
+  Applications continue to request task requirements through the authenticated
+  inference gateway; they do not select either runtime, a model artifact, or
+  fallback order.
+- Primary promotion requires pinned vLLM package or container provenance, model
+  artifact, dependencies, and serving configuration plus task-specific
+  deterministic metrics and validation. Semantic outputs also require blinded
+  human review; structural validity alone is insufficient.
 - LM Studio and llama.cpp are no longer supported production-worker targets.
   Existing deployment files and compatibility evidence remain until accepted
   cutover work replaces their operational use; new application clients must not
   bind to either runtime.
 - Fallback is gateway-owned and fail-closed. Ollama is eligible only when it is
-  healthy and approved for the same task requirements and vLLM is known
-  unavailable before admission. Ambiguous or in-flight failures retain the same
-  gateway request identity rather than creating unrelated duplicate work.
+  healthy, independently qualified for the same task requirements, uses an
+  already-local approved model, runs with cloud access disabled
+  (`OLLAMA_NO_CLOUD=1`), and vLLM is known unavailable before admission.
+  Ambiguous or in-flight primary failures remain unresolved until the gateway
+  recovers the primary result, proves non-acceptance, or confirms cancellation;
+  retaining the request identity alone does not permit cross-worker replay.
+  Before dispatch, the gateway must durably reserve the authenticated request,
+  canonical digest, and worker attempt so exact repeats join active work or
+  return the retained terminal result across gateway restarts.
   Authentication, authorization, malformed-input, unsupported-task, and
   application-validation failures do not trigger fallback.
 - The implemented standalone and Connect provider paths still use
