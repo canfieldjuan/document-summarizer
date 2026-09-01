@@ -501,7 +501,9 @@ accepted; shared on-prem inference remains future work
   logs/diagnostics/backups, and deleted after the application durably persists
   and acknowledges the result or its immutable request expires. A metadata-only
   tombstone remains for a bounded replay-protection period beyond expiry, and
-  expired identities never dispatch.
+  expired identities never dispatch. Expiry terminalizes any in-flight attempt;
+  cancellation is best-effort, and late output is discarded without recreating
+  the protected result buffer or changing the terminal tombstone.
   Authentication, authorization, malformed-input, unsupported-task, and
   application-validation failures do not trigger fallback.
 - An application that rejects a structurally valid gateway result must durably
