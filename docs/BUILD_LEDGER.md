@@ -1858,3 +1858,87 @@ were exercised end to end on Ubuntu
   ownership boundary, frontend product role, or reverse-discovery behavior was
   changed in this slice. `docs/PIPELINE_STATE_MACHINE.md` therefore remains
   unchanged.
+
+## Slice 20 — Real Office Corpus Live Acceptance Closure (2026-09-01)
+
+**Status**: The previously unproven public W-9 and contractor packets, plus the
+partial-text NARA fixture, completed the full local Ollama summary/citation path
+with durable reopen proof
+
+**Contract violations found**:
+- A contractor repair response altered a source sentence. Repeated W-9 repairs
+  also dropped a qualification or attached familiar text from another page to
+  the current block. The exact-quote validator rejected every case before an
+  analyzed artifact or success state could be committed.
+- Repeating the source-copy prompt was not a reliable repair boundary. An
+  initial deterministic quote catalog serialized to 51,063 user-prompt
+  characters and exceeded the practical budget of the configured 8,192-token
+  context, causing a contract-invalid model response.
+- When Ollama's schema grammar was unavailable, one intermediate synthesis
+  response returned eight claims although the application schema and parser
+  allowed four. The per-request bound existed in the schema but was absent from
+  the JSON prompt seen by fallback mode. Rust rejected the oversized response.
+
+**Fixes applied**:
+- Primary evidence extraction and its strict source validator are unchanged.
+  The one permitted repair now selects from an application-built catalog of
+  exact normalized-source quotations. Each candidate has a deterministic quote
+  ID and fixed block provenance; the model returns only quote IDs and claim
+  text. Rust rejects foreign or duplicate IDs and materializes quotation bytes,
+  block/page provenance, and evidence identity itself.
+- The repair catalog is bounded to 48 candidates and 12,000 quotation
+  characters. On the W-9, final repair requests measured 13,752 and 13,903
+  serialized user-prompt characters and passed. A successful replacement keeps
+  the existing durable `MODEL_EVIDENCE_RESPONSE_REPAIRED` warning.
+- Both evidence and candidate synthesis envelopes now include the exact dynamic
+  `maximum_claims` represented by their JSON Schema. The Rust bounds were not
+  raised, and malformed, oversized, foreign-ID, or duplicate-ID output still
+  fails closed.
+- The office harness now records request schema/size metadata without exposing
+  prompts, and reports visual-page and cited-page sets. It asserts that a
+  visual-only page is never cited as native text.
+
+**Tests and live evidence**:
+- The summary module ran 44 tests: 43 passed and the explicit live hierarchical
+  Ollama test was ignored. New probes cover deterministic/bounded source quote
+  catalogs, exact source containment, foreign and duplicate selections, the
+  one-repair persistence path, and prompt/schema synthesis-limit agreement.
+- Default-feature and featureless all-target Rust suites each passed with 198
+  library tests and four intentional external/live ignores; the office target
+  passed its privacy test with three opt-in ignores, and all three release-
+  contract tests passed. Strict Clippy passed in both modes, Rust formatting
+  passed, and the TypeScript/Vite production build passed.
+- Both ignored canonical Connect tests passed explicitly against the mounted
+  external entitlement-v1/provider-v2 contract checkout.
+- The final five-document deterministic corpus run passed. It preserved 6, 1,
+  8, 12, and 111 pages; every run reached `CHUNKED`, state version 11, with 11
+  events and equal artifacts after an independent SQLite connection reopen.
+  NARA page 9 remained visual-only with `NO_NATIVE_TEXT`.
+- The six-page W-9 completed the full live pipeline in 60.85 seconds with 6
+  supported claims, 6 cited evidence items, state version 18, 18 events, and
+  `MODEL_EVIDENCE_RESPONSE_REPAIRED`. The eight-page contractor packet completed
+  in 34.71 seconds with the same claim/evidence/state/event counts and repair
+  warning.
+- The twelve-page NARA fixture completed in 32.42 seconds with 6 supported
+  claims and 6 cited evidence items. Page 9 remained visual-only; accepted
+  citations referenced pages 1 and 5. `NO_NATIVE_TEXT` and the repair warning
+  survived reopen.
+
+**Persistence and unchanged boundaries**:
+- Every live acceptance run reloaded equal summary, citation, and immutable
+  event artifacts through a new SQLite connection and re-read source bytes
+  unchanged. Failed model contracts never reached `ANALYZED`, `SYNTHESIZED`, or
+  a terminal success state. This is database-connection reopen proof, not a
+  desktop-process or machine-reboot claim.
+- No artifact schema/version, database migration, pipeline state transition,
+  Connect contract, frontend behavior, parser, model choice, OCR/vision path, or
+  Email Watcher code changed. `docs/PIPELINE_STATE_MACHINE.md` remains accurate
+  and unchanged.
+
+**Deferred**:
+- The live timings are warm-model correctness observations, not performance
+  benchmarks. OCR/vision and citations for visual-only content remain deferred;
+  visual-only pages are retained and explicitly excluded from native-text
+  citations.
+- Production issuer custody/customer license delivery, Windows/macOS package
+  acceptance, and machine-reboot recovery remain outside this corpus closure.

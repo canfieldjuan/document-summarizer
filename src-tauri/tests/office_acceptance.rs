@@ -1,7 +1,7 @@
 use document_summarizer_lib::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
 use document_summarizer_lib::pipeline::contracts::{
-    ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure, NormalizedDocument,
-    PipelineState, StructureNode,
+    ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
+    NormalizedDocument, PipelineState, StructureNode,
 };
 use document_summarizer_lib::pipeline::db::{
     get_chunked_document, get_citation_artifact, get_normalized_document, get_parsed_document,
@@ -42,6 +42,7 @@ impl Drop for TestDatabase {
 
 struct RecordingRuntime<'a> {
     inner: &'a dyn ModelRuntime,
+    requests: Mutex<Vec<ModelRequest>>,
     responses: Mutex<Vec<ModelResponse>>,
 }
 
@@ -49,8 +50,16 @@ impl<'a> RecordingRuntime<'a> {
     fn new(inner: &'a dyn ModelRuntime) -> Self {
         Self {
             inner,
+            requests: Mutex::new(Vec::new()),
             responses: Mutex::new(Vec::new()),
         }
+    }
+
+    fn requests(&self) -> Vec<ModelRequest> {
+        self.requests
+            .lock()
+            .expect("recording runtime lock should not be poisoned")
+            .clone()
     }
 
     fn responses(&self) -> Vec<ModelResponse> {
@@ -63,6 +72,10 @@ impl<'a> RecordingRuntime<'a> {
 
 impl ModelRuntime for RecordingRuntime<'_> {
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+        self.requests
+            .lock()
+            .expect("recording runtime lock should not be poisoned")
+            .push(request.clone());
         let response = self.inner.generate(request)?;
         self.responses
             .lock()
@@ -96,6 +109,18 @@ fn add_optional_summary(report: &mut serde_json::Value, summary: &str, reveal_te
 
 fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
     let reveal_text = reveal_model_text();
+    eprintln!("OFFICE_LIVE_MODEL_REQUESTS");
+    for (index, request) in runtime.requests().iter().enumerate() {
+        let schema = match &request.output_format {
+            ModelOutputFormat::JsonSchema { name, .. } => name.as_str(),
+            ModelOutputFormat::Text => "text",
+        };
+        eprintln!(
+            "request[{index}]: schema={schema}, system_chars={}, user_chars={}",
+            request.system_prompt.chars().count(),
+            request.user_prompt.chars().count()
+        );
+    }
     eprintln!("OFFICE_LIVE_MODEL_RESPONSES");
     for (index, response) in runtime.responses().iter().enumerate() {
         if reveal_text {
@@ -510,12 +535,32 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .flat_map(|page| page.content.iter())
         .map(|block| (block.block_id.as_str(), block))
         .collect::<HashMap<_, _>>();
+    let visual_pages = normalized
+        .pages
+        .iter()
+        .filter(|page| page.requires_visual_processing)
+        .map(|page| page.page_number)
+        .collect::<Vec<_>>();
+    let mut cited_pages = result
+        .citations
+        .evidence
+        .iter()
+        .flat_map(|evidence| evidence.source_span.page_start..=evidence.source_span.page_end)
+        .collect::<Vec<_>>();
+    cited_pages.sort_unstable();
+    cited_pages.dedup();
     for evidence in &result.citations.evidence {
         let block = blocks
             .get(evidence.block_id.as_str())
             .expect("citation must reference a normalized block");
         assert!(block.text.contains(&evidence.exact_quote));
         assert_eq!(block.source, evidence.source_span);
+    }
+    for visual_page in &visual_pages {
+        assert!(
+            !cited_pages.contains(visual_page),
+            "a visual-only page must not be cited as native text"
+        );
     }
 
     let run = get_pipeline_run(&conn, &result.run_id)
@@ -565,6 +610,8 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         "event_count": events.len(),
         "claim_count": expected_citations.claims.len(),
         "evidence_count": expected_citations.evidence.len(),
+        "visual_pages": visual_pages,
+        "cited_pages": cited_pages,
         "warning_codes": expected_summary
             .warnings
             .iter()

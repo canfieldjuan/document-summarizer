@@ -400,11 +400,18 @@ and deterministic evidence ID; the model cannot supply or override those
 fields.
 
 If a generated chunk response fails the evidence JSON/source contract, analysis
-may make exactly one replacement request with a stricter one-block,
-one-contiguous-passage prompt. Nothing from the rejected response is persisted.
-The replacement must validate in full or the run fails normally; a successful
-replacement adds `MODEL_EVIDENCE_RESPONSE_REPAIRED` to the durable warning set.
-Runtime and response-identity failures are not retried by this contract.
+may make exactly one replacement request. Rust first derives a deterministic
+catalog of at most 48 bounded, contiguous quotations from that chunk's
+authoritative normalized blocks, with at most 12,000 quotation characters in
+the catalog. Every candidate has an application-issued quote ID and fixed block
+provenance. The repair model may return one to three supplied quote IDs plus
+claim text; it cannot supply or alter quotation text or block identity. Rust
+rejects unknown or duplicate IDs and materializes the exact quote, block,
+`SourceSpan`, and evidence ID from the catalog. Nothing from the rejected
+response is persisted. The replacement must validate in full or the run fails
+normally; a successful replacement adds `MODEL_EVIDENCE_RESPONSE_REPAIRED` to
+the durable warning set. Runtime and response-identity failures are not retried
+by this contract.
 
 Synthesis version `3.0.0` receives only the validated evidence catalog and
 returns structured claims. A catalog that fits one bounded request keeps the
@@ -412,7 +419,10 @@ direct path. Larger catalogs are partitioned deterministically in source order,
 with at most eight items and 16,000 Unicode characters per request. Each first
 pass produces at most four intermediate claims. Candidate reductions use the
 same request bounds and must reduce every non-final batch by at least half.
-The complete plan is conservatively capped at 256 model requests.
+The exact per-request `maximum_claims` is present in both the JSON Schema and
+the serialized user prompt, so Ollama's validated JSON-object fallback receives
+the same bound even when server-side grammar loading is unavailable. The
+complete plan is conservatively capped at 256 model requests.
 
 Intermediate candidates are ephemeral and have deterministic IDs derived from
 the document, synthesis version, reduction round, batch/order, text, and
