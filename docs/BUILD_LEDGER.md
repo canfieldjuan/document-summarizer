@@ -418,8 +418,10 @@ deterministically; password handling is deferred.
 
 ## Cross-App Product Direction: Connect and Shared Inference Are Separate Boundaries
 
-**Status**: Architectural distinction accepted; shared on-prem inference remains
-future work
+**Status**: Architectural distinction and vLLM-primary/Ollama-fallback direction
+accepted; shared on-prem inference remains future work
+
+**Implementation tracking**: Email Watcher issue #72
 
 **Two independent planes**:
 - Connect is the typed interoperability plane between independently installed
@@ -468,12 +470,29 @@ future work
 - The current prompt-level `ModelRequest` does not yet define the task-profile
   contract required for gateway routing. That contract, multi-model routing,
   and model promotion policy require a separate evidence-driven slice.
-- An Ollama runtime serving Qwen3 30B-A3B is the selected operational direction.
-  LM Studio and llama.cpp are not current deployment targets; compatibility with
-  an OpenAI-compatible protocol does not imply product support for every server
-  implementing that protocol. The operator's separate Email Watcher evaluation
-  informed this selection, but Document Summarizer acceptance remains a distinct
-  deployment proof rather than behavior proved by this entry.
+- The shared appliance selects vLLM as its primary worker and Ollama as a
+  separately validated fallback. Applications continue to request task
+  requirements through the authenticated inference gateway; they do not select
+  either runtime, a model artifact, or fallback order.
+- LM Studio and llama.cpp are no longer supported production-worker targets.
+  Existing deployment files and compatibility evidence remain until accepted
+  cutover work replaces their operational use; new application clients must not
+  bind to either runtime.
+- Fallback is gateway-owned and fail-closed. Ollama is eligible only when it is
+  healthy and approved for the same task requirements and vLLM is known
+  unavailable before admission. Ambiguous or in-flight failures retain the same
+  gateway request identity rather than creating unrelated duplicate work.
+  Authentication, authorization, malformed-input, unsupported-task, and
+  application-validation failures do not trigger fallback.
+- The implemented standalone and Connect provider paths still use
+  `OllamaRuntime`; this direction does not claim a vLLM or gateway cutover.
+  Existing Ollama/Qwen acceptance remains valid evidence for that deployment
+  path. A later adapter changes the runtime factory behind `ModelRuntime` while
+  preserving pipeline state, deterministic validation, and Connect behavior.
+- The current Ollama model artifact is GGUF. Current vLLM documentation calls
+  GGUF support experimental and under-optimized, so the primary-worker proof
+  must select and pin an appropriate supported artifact instead of assuming the
+  Ollama blob is the production vLLM artifact.
 
 **Safety and ownership**:
 - Shared inference is infrastructure, not application discovery or workflow
@@ -487,9 +506,9 @@ future work
 
 **Current-slice constraint**:
 - This direction does not expand the current Document Summarizer or Connect v1
-  proof. The inference gateway, administrator UI, appliance packaging,
-  multi-model routing, capacity policy, and cross-machine discovery remain
-  separately scoped follow-up work.
+  proof. The vLLM workload/capacity proof, gateway runtime, Ollama fallback,
+  administrator UI, appliance packaging, multi-model routing, capacity policy,
+  and cross-machine discovery remain separately scoped follow-up work.
 
 ## Connect v1 Two-App Acceptance Checkpoint (2026-08-29)
 
