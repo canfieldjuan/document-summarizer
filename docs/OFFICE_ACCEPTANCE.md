@@ -114,16 +114,20 @@ hardware.
 
 Connect is optional only for standalone resilience. The commercial requirement
 is that cross-application capability discovery and job submission require a
-paid Connect entitlement. Current v1 registration is not entitlement-gated and
-therefore is not yet the sellable boundary.
+paid Connect entitlement. The provider's process-registration file deliberately
+remains present while the provider is live, including while entitlement is
+denied, because it represents process ownership rather than a sellable
+capability. Authenticated manifest discovery, job submission, and job status are
+the entitlement-gated product boundary. A denied or expired provider therefore
+retains its live registration but advertises no capability to Email Watcher.
 
 Google OAuth stays private to Email Watcher. Email Watcher uses its credential
 store to retrieve an attachment, then explicitly streams the selected PDF bytes
 and bounded metadata through Connect. Document Summarizer must never receive a
 Gmail token, mailbox permission, or private Email Watcher database path.
 
-The next Connect slice must prove all four states without changing either
-standalone workflow:
+The provider and consumer activation slices have now proved all four states
+without changing either standalone workflow:
 
 1. entitled plus provider available: capability appears and a job succeeds;
 2. not entitled: capability is absent and job admission fails closed;
@@ -132,6 +136,9 @@ standalone workflow:
 4. entitlement/provider restored: capability returns without an Email Watcher
    code change.
 
-Billing, account management, workflow automation, and a marketplace remain
-outside that proof. The entitlement authority and offline/grace policy require
-an explicit product/security design before implementation.
+The proof used the accepted test authority and local packages/processes; it was
+not a production-key issuance, live Gmail OAuth, or human-click acceptance run.
+The product/security decision is now an offline Ed25519-signed entitlement with
+build-time issuer trust, request-time evaluation, and no grace period. Production
+issuer-key custody, license delivery, billing/account management, workflow
+automation, and a marketplace remain outside that proof.

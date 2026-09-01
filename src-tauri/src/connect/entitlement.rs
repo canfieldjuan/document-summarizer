@@ -17,9 +17,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 #[cfg(unix)]
+use std::fs::Metadata;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 
 pub const FEATURE_ID: &str = "connect.capability_exchange";
 pub const ENTITLEMENT_FILE_NAME: &str = "entitlement-v1.json";
@@ -38,6 +42,8 @@ const COMPILED_KEYRING: &str = include_str!(concat!(
     "/connect-entitlement-keyring.json"
 ));
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+const NONBLOCKING_NOFOLLOW_FLAGS: i32 = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync + 'static>;
 
@@ -97,6 +103,12 @@ pub enum EntitlementInstallError {
     InstallFailed,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct CandidateInstallError {
+    promoted: bool,
+}
+
 impl EntitlementInstallError {
     pub fn code(&self) -> &'static str {
         match self {
@@ -119,6 +131,8 @@ pub struct EntitlementGate {
     forced: Option<EntitlementDecision>,
     #[cfg(test)]
     fail_before_replace: bool,
+    #[cfg(test)]
+    fail_after_replace_once: Arc<AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +181,8 @@ impl EntitlementGate {
             forced: None,
             #[cfg(test)]
             fail_before_replace: false,
+            #[cfg(test)]
+            fail_after_replace_once: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -208,11 +224,17 @@ impl EntitlementGate {
                 .ok_or(EntitlementInstallError::StorageUnavailable)?;
             ensure_private_directory(parent)?;
             let _lock = acquire_activation_lock(parent)?;
-            validate_existing_destination(destination)?;
+            let previous = read_existing_destination(destination)?;
             require_active_candidate(&candidate, &self.keys, (self.clock)())?;
-            install_candidate(self, destination, &candidate)?;
+            if let Err(error) = install_candidate(self, destination, &candidate) {
+                if error.promoted {
+                    restore_previous_entitlement(self, destination, previous.as_deref())?;
+                }
+                return Err(EntitlementInstallError::InstallFailed);
+            }
             let status = self.status();
             if !status.active {
+                restore_previous_entitlement(self, destination, previous.as_deref())?;
                 return Err(EntitlementInstallError::InstallFailed);
             }
             Ok(status)
@@ -233,6 +255,7 @@ impl EntitlementGate {
             clock: Arc::new(Utc::now),
             forced: Some(EntitlementDecision::Active),
             fail_before_replace: false,
+            fail_after_replace_once: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -260,6 +283,7 @@ impl EntitlementGate {
             clock: Arc::new(clock),
             forced: None,
             fail_before_replace: false,
+            fail_after_replace_once: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -449,50 +473,62 @@ fn read_candidate_entitlement(path: &Path) -> Result<Vec<u8>, EntitlementInstall
     {
         return Err(EntitlementInstallError::SourceInvalid);
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|_| EntitlementInstallError::SourceInvalid)?;
-    let opened = file
-        .metadata()
-        .map_err(|_| EntitlementInstallError::SourceInvalid)?;
-    if !opened.is_file()
-        || opened.len() == 0
-        || opened.len() > MAX_ENTITLEMENT_BYTES
-        || opened.dev() != metadata.dev()
-        || opened.ino() != metadata.ino()
-    {
-        return Err(EntitlementInstallError::SourceInvalid);
-    }
-    read_bounded(file.take(MAX_ENTITLEMENT_BYTES + 1))
-        .filter(|bytes| !bytes.is_empty())
+    read_verified_regular_file(path, &metadata, false, false)
         .ok_or(EntitlementInstallError::SourceInvalid)
 }
 
 #[cfg(unix)]
 fn ensure_private_directory(path: &Path) -> Result<(), EntitlementInstallError> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            builder.recursive(true).mode(0o700);
-            builder
-                .create(path)
-                .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+    let mut missing = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&cursor) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(cursor.clone());
+                cursor = cursor
+                    .parent()
+                    .ok_or(EntitlementInstallError::StorageUnavailable)?
+                    .to_path_buf();
+            }
+            Err(_) => return Err(EntitlementInstallError::StorageUnavailable),
         }
-        Err(_) => return Err(EntitlementInstallError::StorageUnavailable),
     }
 
+    for directory in missing.iter().rev() {
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        let created = match builder.create(directory) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(_) => return Err(EntitlementInstallError::StorageUnavailable),
+        };
+        if created {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+                .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+        }
+        validate_private_directory(directory)?;
+        if created {
+            sync_directory(directory)?;
+            let parent = directory
+                .parent()
+                .ok_or(EntitlementInstallError::StorageUnavailable)?;
+            sync_directory(parent)?;
+        }
+    }
+
+    validate_private_directory(path)
+}
+
+#[cfg(unix)]
+fn validate_private_directory(path: &Path) -> Result<(), EntitlementInstallError> {
     let metadata =
         fs::symlink_metadata(path).map_err(|_| EntitlementInstallError::StorageUnavailable)?;
     let current_uid = unsafe { libc::geteuid() };
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.uid() != current_uid
-        || metadata.mode() & 0o077 != 0
+        || metadata.mode() & 0o777 != 0o700
     {
         return Err(EntitlementInstallError::StorageUnavailable);
     }
@@ -500,10 +536,10 @@ fn ensure_private_directory(path: &Path) -> Result<(), EntitlementInstallError> 
 }
 
 #[cfg(unix)]
-fn validate_existing_destination(path: &Path) -> Result<(), EntitlementInstallError> {
+fn read_existing_destination(path: &Path) -> Result<Option<Vec<u8>>, EntitlementInstallError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(EntitlementInstallError::StorageUnavailable),
     };
     let current_uid = unsafe { libc::geteuid() };
@@ -511,10 +547,13 @@ fn validate_existing_destination(path: &Path) -> Result<(), EntitlementInstallEr
         || metadata.file_type().is_symlink()
         || metadata.uid() != current_uid
         || metadata.mode() & 0o077 != 0
+        || metadata.len() > MAX_ENTITLEMENT_BYTES
     {
         return Err(EntitlementInstallError::StorageUnavailable);
     }
-    Ok(())
+    read_verified_regular_file(path, &metadata, true, true)
+        .map(Some)
+        .ok_or(EntitlementInstallError::StorageUnavailable)
 }
 
 #[cfg(unix)]
@@ -525,14 +564,14 @@ struct ActivationLock {
 #[cfg(unix)]
 fn acquire_activation_lock(parent: &Path) -> Result<ActivationLock, EntitlementInstallError> {
     let path = parent.join(ENTITLEMENT_LOCK_FILE_NAME);
-    validate_lock_path(&path)?;
+    let expected = validate_lock_path(&path)?;
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .custom_flags(NONBLOCKING_NOFOLLOW_FLAGS)
         .open(&path)
         .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
     file.set_permissions(fs::Permissions::from_mode(0o600))
@@ -541,7 +580,13 @@ fn acquire_activation_lock(parent: &Path) -> Result<ActivationLock, EntitlementI
         .metadata()
         .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
     let current_uid = unsafe { libc::geteuid() };
-    if !metadata.is_file() || metadata.uid() != current_uid || metadata.mode() & 0o077 != 0 {
+    if !metadata.is_file()
+        || metadata.uid() != current_uid
+        || metadata.mode() & 0o077 != 0
+        || expected
+            .as_ref()
+            .is_some_and(|value| value.dev() != metadata.dev() || value.ino() != metadata.ino())
+    {
         return Err(EntitlementInstallError::StorageUnavailable);
     }
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -558,10 +603,10 @@ fn acquire_activation_lock(parent: &Path) -> Result<ActivationLock, EntitlementI
 }
 
 #[cfg(unix)]
-fn validate_lock_path(path: &Path) -> Result<(), EntitlementInstallError> {
+fn validate_lock_path(path: &Path) -> Result<Option<Metadata>, EntitlementInstallError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(EntitlementInstallError::StorageUnavailable),
     };
     let current_uid = unsafe { libc::geteuid() };
@@ -572,7 +617,7 @@ fn validate_lock_path(path: &Path) -> Result<(), EntitlementInstallError> {
     {
         return Err(EntitlementInstallError::StorageUnavailable);
     }
-    Ok(())
+    Ok(Some(metadata))
 }
 
 #[cfg(unix)]
@@ -580,27 +625,32 @@ fn install_candidate(
     _gate: &EntitlementGate,
     destination: &Path,
     candidate: &[u8],
-) -> Result<(), EntitlementInstallError> {
+) -> Result<(), CandidateInstallError> {
     let parent = destination
         .parent()
-        .ok_or(EntitlementInstallError::StorageUnavailable)?;
-    let (mut temporary, temporary_path) = create_temporary_entitlement(parent)?;
+        .ok_or(CandidateInstallError { promoted: false })?;
+    let (mut temporary, temporary_path) = create_temporary_entitlement(parent)
+        .map_err(|_| CandidateInstallError { promoted: false })?;
     let mut replaced = false;
     let result = (|| {
         temporary
             .write_all(candidate)
-            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+            .map_err(|_| CandidateInstallError { promoted: false })?;
         temporary
             .sync_all()
-            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+            .map_err(|_| CandidateInstallError { promoted: false })?;
         #[cfg(test)]
         if _gate.fail_before_replace {
-            return Err(EntitlementInstallError::InstallFailed);
+            return Err(CandidateInstallError { promoted: false });
         }
         fs::rename(&temporary_path, destination)
-            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+            .map_err(|_| CandidateInstallError { promoted: false })?;
         replaced = true;
-        sync_directory(parent)?;
+        #[cfg(test)]
+        if _gate.fail_after_replace_once.swap(false, Ordering::SeqCst) {
+            return Err(CandidateInstallError { promoted: true });
+        }
+        sync_directory(parent).map_err(|_| CandidateInstallError { promoted: true })?;
         Ok(())
     })();
     drop(temporary);
@@ -608,6 +658,38 @@ fn install_candidate(
         let _ = fs::remove_file(&temporary_path);
     }
     result
+}
+
+#[cfg(unix)]
+fn restore_previous_entitlement(
+    gate: &EntitlementGate,
+    destination: &Path,
+    previous: Option<&[u8]>,
+) -> Result<(), EntitlementInstallError> {
+    if let Some(previous) = previous {
+        install_candidate(gate, destination, previous)
+            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+        let restored = read_existing_destination(destination)
+            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+        if restored.as_deref() != Some(previous) {
+            return Err(EntitlementInstallError::InstallFailed);
+        }
+        return Ok(());
+    }
+
+    match fs::remove_file(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(EntitlementInstallError::InstallFailed),
+    }
+    let parent = destination
+        .parent()
+        .ok_or(EntitlementInstallError::InstallFailed)?;
+    sync_directory(parent).map_err(|_| EntitlementInstallError::InstallFailed)?;
+    match fs::symlink_metadata(destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(EntitlementInstallError::InstallFailed),
+    }
 }
 
 #[cfg(unix)]
@@ -689,26 +771,51 @@ fn read_private_entitlement(path: &Path) -> Option<Vec<u8>> {
     {
         return None;
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-        .ok()?;
-    let opened = file.metadata().ok()?;
-    if !opened.is_file()
-        || opened.uid() != current_uid
-        || opened.mode() & 0o077 != 0
-        || opened.len() == 0
-        || opened.len() > MAX_ENTITLEMENT_BYTES
-    {
-        return None;
-    }
-    read_bounded(file.take(MAX_ENTITLEMENT_BYTES + 1))
+    read_verified_regular_file(path, &metadata, true, false)
 }
 
 #[cfg(not(unix))]
 fn read_private_entitlement(_path: &Path) -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(unix)]
+fn read_verified_regular_file(
+    path: &Path,
+    expected: &Metadata,
+    require_private_owner: bool,
+    allow_empty: bool,
+) -> Option<Vec<u8>> {
+    let file = open_verified_regular_file(path, expected, require_private_owner, allow_empty)?;
+    let bytes = read_bounded(file.take(MAX_ENTITLEMENT_BYTES + 1))?;
+    (allow_empty || !bytes.is_empty()).then_some(bytes)
+}
+
+#[cfg(unix)]
+fn open_verified_regular_file(
+    path: &Path,
+    expected: &Metadata,
+    require_private_owner: bool,
+    allow_empty: bool,
+) -> Option<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(NONBLOCKING_NOFOLLOW_FLAGS)
+        .open(path)
+        .ok()?;
+    let opened = file.metadata().ok()?;
+    let wrong_private_owner = require_private_owner
+        && (opened.uid() != unsafe { libc::geteuid() } || opened.mode() & 0o077 != 0);
+    if !opened.is_file()
+        || wrong_private_owner
+        || opened.len() > MAX_ENTITLEMENT_BYTES
+        || (!allow_empty && opened.len() == 0)
+        || opened.dev() != expected.dev()
+        || opened.ino() != expected.ino()
+    {
+        return None;
+    }
+    Some(file)
 }
 
 fn read_bounded(mut reader: Take<File>) -> Option<Vec<u8>> {
@@ -1160,6 +1267,163 @@ mod tests {
             Err(EntitlementInstallError::StorageUnavailable)
         );
         assert_eq!(fs::read(&destination).unwrap(), b"existing-entitlement");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_private_directory_requires_exact_0700() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let source = root.0.join("candidate.json");
+        write_private(&source, &active_license(&key));
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o300)).unwrap();
+        let gate = gate(&root, &key, "2026-08-31T00:00:00Z");
+
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::StorageUnavailable)
+        );
+        assert!(!root.0.join(ENTITLEMENT_FILE_NAME).exists());
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_validation_failure_restores_existing_entitlement() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let destination = root.0.join(ENTITLEMENT_FILE_NAME);
+        let existing = active_license(&key);
+        write_private(&destination, &existing);
+        let source = root.0.join("replacement.json");
+        write_private(&source, &active_license(&key));
+        let mut gate = gate(&root, &key, "2026-08-31T00:00:00Z");
+        gate.forced = Some(EntitlementDecision::Expired);
+
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::InstallFailed)
+        );
+        assert_eq!(fs::read(&destination).unwrap(), existing);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_validation_failure_removes_candidate_without_existing_entitlement() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let destination = root.0.join(ENTITLEMENT_FILE_NAME);
+        let source = root.0.join("candidate.json");
+        write_private(&source, &active_license(&key));
+        let mut gate = gate(&root, &key, "2026-08-31T00:00:00Z");
+        gate.forced = Some(EntitlementDecision::Expired);
+
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::InstallFailed)
+        );
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_promotion_failure_restores_existing_entitlement() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let destination = root.0.join(ENTITLEMENT_FILE_NAME);
+        let existing = active_license(&key);
+        write_private(&destination, &existing);
+        let source = root.0.join("replacement.json");
+        write_private(&source, &active_license(&key));
+        let gate = gate(&root, &key, "2026-08-31T00:00:00Z");
+        gate.fail_after_replace_once.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::InstallFailed)
+        );
+        assert_eq!(fs::read(&destination).unwrap(), existing);
+        assert!(fs::read_dir(&root.0).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!(".{ENTITLEMENT_FILE_NAME}.tmp."))
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_promotion_failure_removes_candidate_without_existing_entitlement() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let destination = root.0.join(ENTITLEMENT_FILE_NAME);
+        let source = root.0.join("candidate.json");
+        write_private(&source, &active_license(&key));
+        let gate = gate(&root, &key, "2026-08-31T00:00:00Z");
+        gate.fail_after_replace_once.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::InstallFailed)
+        );
+        assert!(!destination.exists());
+        assert!(fs::read_dir(&root.0).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!(".{ENTITLEMENT_FILE_NAME}.tmp."))
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_read_and_lock_descriptors_are_nonblocking() {
+        let root = TestDirectory::new();
+        let source = root.0.join("candidate.json");
+        write_private(&source, b"candidate");
+        let expected = fs::symlink_metadata(&source).unwrap();
+        let opened = open_verified_regular_file(&source, &expected, false, false).unwrap();
+        let read_flags = unsafe { libc::fcntl(opened.as_raw_fd(), libc::F_GETFL) };
+        assert!(read_flags >= 0);
+        assert_ne!(read_flags & libc::O_NONBLOCK, 0);
+
+        let lock = acquire_activation_lock(&root.0).unwrap();
+        let lock_flags = unsafe { libc::fcntl(lock._file.as_raw_fd(), libc::F_GETFL) };
+        assert!(lock_flags >= 0);
+        assert_ne!(lock_flags & libc::O_NONBLOCK, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_private_directory_creation_uses_exact_modes() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let source = root.0.join("candidate.json");
+        write_private(&source, &active_license(&key));
+        let destination = root
+            .0
+            .join("config")
+            .join("local-connect")
+            .join(ENTITLEMENT_FILE_NAME);
+        let mut keys = BTreeMap::new();
+        keys.insert("test-key".to_string(), key.public_key().as_ref().to_vec());
+        let gate = EntitlementGate::for_test(
+            destination,
+            keys,
+            DateTime::parse_from_rfc3339("2026-08-31T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+
+        assert!(gate.install(&source).unwrap().active);
+        for directory in [root.0.join("config"), root.0.join("config/local-connect")] {
+            assert_eq!(
+                fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
     }
 
     #[cfg(unix)]
