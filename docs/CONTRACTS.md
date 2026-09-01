@@ -449,7 +449,7 @@ artifact commits at `VERIFIED`, then the run transitions to `FAILED` with
 
 The supported runtime adapter is Ollama through its loopback OpenAI-compatible
 API. It defaults to `http://127.0.0.1:11434/v1/` and
-`qwen3-30b-a3b:latest`. Each generation request has a 300-second default
+`qwen3-30b-a3b:latest`. Each generation request has a 900-second default
 deadline, while connection and health checks retain separate shorter limits;
 `DOC_SUM_MODEL_BASE_URL`, `DOC_SUM_MODEL_NAME`,
 `DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional

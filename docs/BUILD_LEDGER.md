@@ -1772,3 +1772,89 @@ and signed-package process smoke complete at the local release gate
   package-manager install/uninstall, live Gmail/human-click acceptance, Windows
   ACL/path and package proof, online revocation, machine binding, clock-rollback
   defense, and cross-machine Connect remain deferred.
+
+## Slice 19 — Installed Two-App Connect Acceptance (2026-08-31)
+
+**Status**: Real Gmail attachment, installed-package discovery, live Ollama
+summarization, durable caller result, provider removal, and provider restoration
+were exercised end to end on Ubuntu
+
+**Installed two-app proof**:
+- Email Watcher and Document Summarizer were installed as independent Debian
+  packages and launched with an isolated owner-private XDG profile. Email
+  Watcher reused its configured Gmail authorization only inside its own process;
+  neither the credential store nor mailbox access was exposed through Connect.
+- A real message containing the existing structured-report PDF fixture was sent
+  through the configured Gmail profile and then collected through Email
+  Watcher's normal check path. The inbox displayed the PDF attachment and added
+  `Summarize` only after generic discovery found an entitled provider for
+  `document.summarize` accepting `application/pdf`.
+- Invoking that contextual action transferred the explicitly selected PDF
+  artifact through Connect v2. Document Summarizer imported it into provider-
+  owned storage and ran the existing parse-to-citation pipeline against the
+  loopback Ollama runtime with `qwen3-30b-a3b:latest`.
+- The final installed-package run reached `CompleteWithWarnings` at state
+  version 18 with analyzed, synthesized, verified, summary, and citation
+  artifacts present. Its provider job and Email Watcher caller job both reached
+  `completed`, and the Email Watcher UI displayed the returned `summary.json`
+  output. The native-text warning was preserved rather than hidden.
+
+**Defect found and repaired**:
+- The former 300-second per-generation default was too short for the accepted
+  model and realistic multi-stage document work. A live synthesis request
+  exhausted that deadline and returned the existing structured retryable
+  `MODEL_RUNTIME_UNAVAILABLE` failure; neither app crashed and neither caller
+  nor provider falsely recorded success.
+- Re-running with an explicit 900-second deployment override completed the same
+  workflow. The supported built-in generation deadline is now 900 seconds, and
+  the README and runtime contract state that value. Connection and health
+  checks remain independently fail-fast.
+- A rebuilt installed package was then launched without
+  `DOC_SUM_MODEL_TIMEOUT_SECONDS` and completed a fresh end-to-end job. That
+  final run did not itself exceed 300 seconds in either synthesis or
+  verification, so it proves no-override installed behavior but is not claimed
+  as a live boundary-duration test. The focused configuration test proves the
+  default selected by the environment loader is 900 seconds.
+
+**Removal, restoration, and standalone behavior**:
+- Stopping the provider caused capability discovery to return no compatible
+  provider while Email Watcher's inbox and previously completed result remained
+  usable. Removing only the `document-summarizer` Debian package left the
+  installed Email Watcher process healthy and the contextual action absent.
+- Reinstalling the rebuilt Document Summarizer package and relaunching it caused
+  the same unchanged Email Watcher build to rediscover exactly one compatible
+  `document.summarize` capability and restore the action. No caller database or
+  code change was used to manufacture either state.
+
+**Durability and verification**:
+- Both database-owning desktop processes were closed and independently
+  relaunched after the fixed run. Document ID, source size and hash, pipeline
+  run ID, state/version, all five durable artifact hashes, provider result hash,
+  caller result hash, and both completed statuses were identical after reopen.
+  This is an installed-process reopen proof, not a machine reboot proof.
+- The complete Rust suite passed in default-feature and featureless modes;
+  strict Clippy passed in both modes, Rust formatting passed, and the frontend
+  production build passed. Both ignored canonical Connect entitlement/provider
+  fixture tests passed explicitly against the external contract checkout.
+- A Connect-enabled Debian package rebuilt successfully with only the canonical
+  test authority. The final bundle was 8,597,766 bytes with SHA-256
+  `f37738be749548df2d018da71c70944a318f11c1809bd220c1e71360f25d5783`.
+  The installed executable was byte-identical to the exact executable extracted
+  from that package; Debian's packaging transformation means it was not
+  asserted to match the pre-bundle target byte for byte.
+- The final UI proof ran on the host X display after the temporary Xvfb harness
+  exited. Actions were driven through the native desktop UI with automation;
+  this is not described as a human-manual click test.
+
+**Known limits and deferred work**:
+- The package still embeds the canonical test authority, not a production
+  issuer public key. Production issuer custody and customer license delivery
+  remain release work.
+- Windows/macOS package, ACL, and cross-app acceptance; machine reboot recovery;
+  larger and scanned-document corpus runs; and Connect polling/log-volume
+  hardening remain deferred. The polling noise did not change the completed
+  result or either application's standalone behavior.
+- No Connect protocol shape, pipeline transition, summary schema, Gmail
+  ownership boundary, frontend product role, or reverse-discovery behavior was
+  changed in this slice. `docs/PIPELINE_STATE_MACHINE.md` therefore remains
+  unchanged.
