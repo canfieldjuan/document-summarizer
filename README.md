@@ -19,7 +19,7 @@ Context: managed by Ollama; the accepted local deployment uses 8192
 
 Ollama and the model are managed outside the application. The desktop app checks
 readiness and explains when either is unavailable; it does not start Ollama or
-download model weights. Model-generation requests default to a 300-second
+download model weights. Model-generation requests default to a 900-second
 deadline so the selected model can complete bounded multi-stage document work
 without requiring a hidden deployment override. Connection and health checks
 retain their shorter fail-fast deadlines.

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1/";
 const DEFAULT_MODEL: &str = "qwen3-30b-a3b:latest";
-const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
+const DEFAULT_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const HEALTH_TIMEOUT_SECONDS: u64 = 5;
 const DETERMINISTIC_GENERATION_SEED: u64 = 42;
@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(DEFAULT_MODEL, "qwen3-30b-a3b:latest");
         assert_eq!(
             model_timeout_seconds(None).expect("default timeout should configure"),
-            300
+            900
         );
     }
 
