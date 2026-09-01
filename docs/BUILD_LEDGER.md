@@ -504,6 +504,9 @@ accepted; shared on-prem inference remains future work
   expired identities never dispatch. Expiry terminalizes any in-flight attempt;
   cancellation is best-effort, and late output is discarded without recreating
   the protected result buffer or changing the terminal tombstone.
+  Applications acknowledge through the versioned, same-credential
+  `POST /v1/inference/{request_id}/ack` operation defined by the gateway ADR;
+  exact repeats are idempotent and conflicting dispositions fail closed.
   Authentication, authorization, malformed-input, unsupported-task, and
   application-validation failures do not trigger fallback.
 - An application that rejects a structurally valid gateway result must durably
