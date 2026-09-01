@@ -506,7 +506,9 @@ accepted; shared on-prem inference remains future work
   the protected result buffer or changing the terminal tombstone.
   Applications acknowledge through the versioned, same-credential
   `POST /v1/inference/{request_id}/ack` operation defined by the gateway ADR;
-  exact repeats are idempotent and conflicting dispositions fail closed.
+  request IDs use canonical URL-segment-safe UUIDv4 text. Exact repeats of an
+  already-acknowledged tombstone remain idempotent after expiry, conflicting
+  dispositions fail closed, and another credential cannot delete the result.
   Authentication, authorization, malformed-input, unsupported-task, and
   application-validation failures do not trigger fallback.
 - An application that rejects a structurally valid gateway result must durably
