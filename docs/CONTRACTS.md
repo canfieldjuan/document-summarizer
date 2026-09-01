@@ -687,14 +687,20 @@ The desktop entitlement-status boundary returns only one of `active`,
 Rust core operation; the Tauri file picker and commands are adapters. The core
 accepts only a bounded, non-symlink regular source file that evaluates `active`
 under the compiled authority, derives the destination internally, and never
-modifies the source. Participating Unix applications coordinate on the
-owner-private persistent `.entitlement-v1.lock` file. Under that non-blocking
-exclusive lock, the provider revalidates time, writes and syncs a unique
-same-directory mode-`600` file, atomically replaces the entitlement, syncs the
-directory, and re-evaluates the installed file. Validation, lock, write, and
-other expected pre-replacement failures preserve any existing entitlement
-byte-for-byte. Successful replacement affects the next provider request without
-an application restart or private-database mutation.
+modifies the source. Candidate, installed-entitlement, and lock opens use
+non-following, non-blocking descriptors and verify the opened file identity and
+type after open. Participating Unix applications coordinate on the
+owner-private persistent `.entitlement-v1.lock` file beneath an exact mode-`700`
+directory. Newly created private-directory entries are synced before use. Under
+the non-blocking exclusive lock, the provider snapshots any prior entitlement,
+revalidates time, writes and syncs a unique same-directory mode-`600` file,
+atomically replaces the entitlement, syncs the directory, and re-evaluates the
+installed file. Validation, lock, write, and other pre-promotion failures
+preserve any existing entitlement byte-for-byte. A post-promotion sync or final
+validation failure durably restores the prior bytes, or removes the promoted
+candidate when no prior entitlement existed; rollback failure is reported as an
+install failure rather than success. Successful replacement affects the next
+provider request without an application restart or private-database mutation.
 
 This offline bearer entitlement is not machine-bound and cannot be revoked
 before expiry without local replacement. License acquisition and production
