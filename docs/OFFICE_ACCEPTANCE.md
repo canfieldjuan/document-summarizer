@@ -35,7 +35,8 @@ new corpus revision and must not silently inherit these observations.
   equality after an independent reopen.
 
 Raw model responses and summary text are hidden by default; reports contain
-only lengths and hashes. Setting
+only lengths, hashes, request schema/size metadata, and source-page sets.
+Setting
 `DOC_SUM_OFFICE_TRACE_MODEL_RESPONSES=1` opts into displaying them for a known
 non-private fixture. `DOC_SUM_OFFICE_TRACE_SOURCE_CONTAINS` displays only nearby
 source lines containing the requested phrase.
@@ -104,11 +105,56 @@ first response was invalid and the bounded repair request returned
 `MODEL_RUNTIME_UNAVAILABLE` after 406.48 seconds. No full W-9 or contractor
 completion is claimed.
 
-These are correctness observations under contention, not performance
+These were correctness observations under contention, not performance
 acceptance. During the latest failure Ollama reported 78% CPU / 22% GPU while a
-separate LM Studio evaluation retained most GPU memory. The complete live W-9
-and agreement runs remain unproven until that separate evaluation releases the
-hardware.
+separate LM Studio evaluation retained most GPU memory. At this checkpoint the
+complete live W-9 and agreement runs remained unproven.
+
+## Live corpus closure on 2026-09-01
+
+The five-document deterministic harness was rerun after the installed two-app
+acceptance slice and again preserved 6, 1, 8, 12, and 111 pages, including NARA
+page 9 as visual-only. All five runs reached `CHUNKED` at state version 11 with
+11 ordered events, unchanged source identity, and equal durable artifacts after
+an independent SQLite connection reopen.
+
+Uncontended live W-9 and contractor runs exposed two additional fail-closed
+boundaries rather than false success. Qwen could still rewrite or associate a
+familiar sentence with the wrong W-9 block during the single repair request.
+The repair contract now gives the model a bounded catalog of application-
+derived exact quotations and accepts only supplied quote IDs plus claim text;
+Rust remains the sole owner of quotation bytes and block/page provenance. The
+catalog is capped at 48 candidates and 12,000 quotation characters. A larger
+51,063-character repair payload reproduced an invalid model response under the
+8,192-token deployment context; bounded W-9 repairs measured 13,752 and 13,903
+user-prompt characters and passed.
+
+Ollama's selected model also returned eight claims for an intermediate request
+whose schema allowed four when server-side grammar was unavailable. Both
+evidence and candidate synthesis prompt envelopes now carry the exact dynamic
+`maximum_claims` used by the unchanged Rust validator and JSON Schema. The
+application limit was not raised.
+
+With `qwen3-30b-a3b:latest` on `127.0.0.1:11434`:
+
+- The six-page W-9 completed in 60.85 seconds with 6 supported claims and 6
+  cited evidence items. The reopened run was `CompleteWithWarnings`, state
+  version 18, with 18 ordered events and
+  `MODEL_EVIDENCE_RESPONSE_REPAIRED` recorded.
+- The eight-page contractor packet completed in 34.71 seconds with 6 supported
+  claims and 6 cited evidence items, the same terminal state/version/event
+  counts, and the explicit repair warning.
+- The twelve-page NARA schedule completed in 32.42 seconds with 6 supported
+  claims and 6 cited evidence items. Page 9 remained visual-only, while the
+  accepted evidence cited pages 1 and 5 only. `NO_NATIVE_TEXT` and the repair
+  warning survived the independent reopen.
+
+Each live test reloaded identical summary, citation, and immutable event
+artifacts from a new SQLite connection and re-read the original source bytes.
+The reported timings are single correctness observations with a warm local
+model, not release benchmarks or process-restart claims. OCR/vision remains
+deferred; a visual-only page is retained and warned, never invented or cited as
+native text.
 
 ## Product boundary: paid Connect
 
