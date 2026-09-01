@@ -1700,3 +1700,75 @@ deferred
 - Windows ACL/path semantics, advance-dated renewal staging, online revocation,
   machine binding, clock-rollback defense, and cross-machine Connect remain
   deferred.
+
+## Slice 18 — Connect Entitlement Activation Consistency Hardening (2026-08-31)
+
+**Status**: Provider activation durability, race resistance, boundary probes,
+and signed-package process smoke complete at the local release gate
+
+**Violations found and repaired**:
+- Candidate, installed-entitlement, and activation-lock opens did not include
+  `O_NONBLOCK`. A metadata/open race could therefore replace a checked regular
+  file with a FIFO and block the activation path. Those opens now combine
+  non-following, close-on-exec, and non-blocking flags, then verify descriptor
+  type, identity, owner/mode where required, and bounded size after open.
+- A candidate was already visible after atomic rename when directory sync or
+  final entitlement validation failed, but the installer returned failure
+  without restoring the prior durable state. Activation now snapshots the
+  existing bytes while holding the shared lock and tracks whether promotion
+  occurred. Every detected post-promotion failure atomically reinstalls and
+  verifies the prior bytes, or removes the new candidate and syncs the directory
+  when no prior entitlement existed. A rollback failure remains a stable
+  `CONNECT_ENTITLEMENT_INSTALL_FAILED`, never success.
+- Installation accepted owner-private directories that lacked owner read or
+  search permission, including mode `0300`, and recursively created directory
+  entries were not explicitly made durable. The destination directory now
+  requires exact permission bits `0700`; each missing entry is created and
+  validated at that mode, then both it and its parent are synced before use.
+
+**Failing-before and boundary proof**:
+- Before the repair,
+  `existing_private_directory_requires_exact_0700` failed because activation
+  created a destination under mode `0300` instead of rejecting it.
+  `final_validation_failure_restores_existing_entitlement` also failed because
+  the replacement bytes remained after activation returned `InstallFailed`.
+- After the repair, the focused entitlement module passed 18 tests with the
+  canonical external-fixture test intentionally ignored at that gate. Probes
+  cover valid exact-`0700` creation and invalid `0300`, pre-promotion failure,
+  final-validation failure, and post-promotion failure, with both prior-license
+  and no-prior-license cases. A descriptor-level `fcntl(F_GETFL)` probe confirms
+  guarded reads and the lock retain `O_NONBLOCK`.
+- The canonical entitlement-v1 fixture test passed separately against revision
+  `c5405935bd1354cf6a4c8539425a53dfd7f52949` and its test key ring.
+
+**Regression and release proof**:
+- Both default-feature and featureless Rust suites passed. Each library run had
+  194 passing and four ignored tests; the office target had one passing and
+  three ignored tests; all three release-contract tests passed. Strict Clippy
+  passed in both modes, Rust formatting passed, and the TypeScript/Vite
+  production build passed.
+- Connect-enabled no-bundle and Debian release builds passed using only the
+  canonical test key ring. The resulting
+  `Document Summarizer_0.1.0_amd64.deb` was 8,597,772 bytes with SHA-256
+  `ffa336e8761ecc3bac892e094f151014a5ba999e556aedbab640f14306a1fe5a`.
+- The package was extracted under isolated XDG data, config, cache, and runtime
+  roots with the canonical active entitlement. Its packaged executable
+  registered protocol v1 and returned app ID `document-summarizer` with
+  capability `document.summarize` through an authenticated manifest request.
+  The process was then interrupted with `Ctrl-C`; this proves packaged startup
+  and the signed provider boundary, not package-manager installation or graceful
+  GUI close.
+- Email Watcher's matching activation hardening was reviewed and merged in PR
+  #67 at merge commit `816b6c2d93566cac73d790bd2eeeac6d37c4b044` after its
+  exact-head local gates and installed-package boundary proof passed with no
+  unresolved review threads.
+
+**Unchanged boundaries and deferred work**:
+- No Connect wire shape, job behavior, pipeline/database state, frontend
+  behavior, standalone entitlement independence, summary semantics, or Ollama
+  runtime behavior changed.
+- The package still contains the canonical test authority rather than a
+  production issuer public key. Production issuer custody and license delivery,
+  package-manager install/uninstall, live Gmail/human-click acceptance, Windows
+  ACL/path and package proof, online revocation, machine binding, clock-rollback
+  defense, and cross-machine Connect remain deferred.

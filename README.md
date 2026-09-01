@@ -54,8 +54,11 @@ final symlink, requires the same signature/feature/time checks as live Connect,
 and writes only to the fixed shared path. Document Summarizer and other Connect
 apps serialize installation through `.entitlement-v1.lock`; a synced mode-`600`
 temporary file is atomically promoted and the installed file is re-evaluated
-before success is reported. Invalid or inactive sources and expected failures
-before promotion leave an existing license and the selected source unchanged.
+before success is reported. Invalid or inactive sources and failures before
+promotion leave an existing license and the selected source unchanged. If a
+post-promotion durability or final-validation step fails, activation restores
+the prior license bytes, or removes the promoted candidate when no prior license
+existed, before returning a structured install failure.
 
 Issuer public keys are embedded at build time, never loaded from a runtime
 environment variable. Set `LOCAL_CONNECT_ENTITLEMENT_KEYRING_FILE` to the
