@@ -479,6 +479,10 @@ accepted; shared on-prem inference remains future work
   artifact, dependencies, and serving configuration plus task-specific
   deterministic metrics and validation. Semantic outputs also require blinded
   human review; structural validity alone is insufficient.
+- Ollama qualification is symmetric: pin its exact package or container,
+  dependencies, model artifact content digest rather than a mutable tag, and
+  complete serving configuration. Both workers must be gateway-private and
+  unreachable directly from client-network computers.
 - LM Studio and llama.cpp are no longer supported production-worker targets.
   Existing deployment files and compatibility evidence remain until accepted
   cutover work replaces their operational use; new application clients must not
@@ -491,10 +495,19 @@ accepted; shared on-prem inference remains future work
   recovers the primary result, proves non-acceptance, or confirms cancellation;
   retaining the request identity alone does not permit cross-worker replay.
   Before dispatch, the gateway must durably reserve the authenticated request,
-  canonical digest, and worker attempt so exact repeats join active work or
-  return the retained terminal result across gateway restarts.
+  immutable expiry, canonical digest, and worker attempt so exact repeats join
+  active work or return a protected unacknowledged result across gateway
+  restarts. The result buffer is encrypted, credential-scoped, excluded from
+  logs/diagnostics/backups, and deleted after the application durably persists
+  and acknowledges the result or its immutable request expires. A metadata-only
+  tombstone remains for a bounded replay-protection period beyond expiry, and
+  expired identities never dispatch.
   Authentication, authorization, malformed-input, unsupported-task, and
   application-validation failures do not trigger fallback.
+- An application that rejects a structurally valid gateway result must durably
+  mark that request terminal and acknowledge it; it must not retry the same
+  retained output indefinitely. Expiry or terminal output rejection stops
+  automatic retries, and only explicit requeue creates a new identity.
 - The implemented standalone and Connect provider paths still use
   `OllamaRuntime`; this direction does not claim a vLLM or gateway cutover.
   Existing Ollama/Qwen acceptance remains valid evidence for that deployment
