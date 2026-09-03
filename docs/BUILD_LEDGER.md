@@ -1992,3 +1992,61 @@ with durable reopen proof
   citations.
 - Production issuer custody/customer license delivery, Windows/macOS package
   acceptance, and machine-reboot recovery remain outside this corpus closure.
+
+## Slice 21 — vLLM Structured-Output Compatibility Hardening (2026-09-02)
+
+**Status**: Decoder compatibility, application validation, and two-model live
+pipeline persistence proof complete
+
+**Defect and boundary repair**:
+- vLLM 0.28.0 rejected the former synthesis response schema before generation
+  with HTTP 400 and `Unimplemented keys: ["uniqueItems"]`. The unsupported
+  keyword appeared on both evidence-ID and hierarchical candidate-ID arrays.
+- Model-facing synthesis schemas now retain non-empty array, maximum-item, and
+  non-empty string bounds without `uniqueItems`. This is a decoder vocabulary
+  accommodation, not a relaxation of the application artifact contract.
+- Rust remains authoritative after generation. Direct and hierarchical parsers
+  still reject duplicate, foreign, empty, cross-batch, and over-limit
+  references before a synthesized artifact or success transition can persist.
+  A regression test locks the supported schema shape while existing negative
+  boundary tests lock those application rejections.
+
+**Live vLLM effect proof**:
+- A direct request using the former `uniqueItems` schema reproduced HTTP 400.
+  The equivalent bounded schema without that keyword returned HTTP 200 and
+  valid structured JSON from `qwen3.8-27b-awq`; the same patched shape returned
+  HTTP 200 and valid structured JSON from `ministral-3-14b-awq`.
+- The ignored real-pipeline test ran the repository PDF through ingestion,
+  parsing, normalization, structure, chunking, analysis, synthesis,
+  verification, summary/citation persistence, and independent SQLite reopen.
+  It passed against Qwen in 1059.52 seconds and against Ministral in 37.26
+  seconds. These are correctness observations from one warm local machine, not
+  comparative performance claims.
+- The local vLLM runtime initially failed during FlashInfer sampler JIT because
+  its CUDA/CUB headers did not provide the expected `FlagHeads` member. The
+  vLLM-supported `VLLM_USE_FLASHINFER_SAMPLER=0` setting selected the native
+  sampler; both models then started and completed the proofs. No package or
+  application dependency was changed to hide that deployment constraint.
+
+**Regression and architecture proof**:
+- The focused schema regression plus direct and hierarchical rejection probes
+  passed. Default-feature and featureless all-target suites each reported 199
+  passing and four intentionally ignored library tests; the office target
+  reported one passing and three opt-in ignores, and all three release-contract
+  tests passed. Rust formatting, strict Clippy in both feature modes, and the
+  TypeScript/Vite production build passed.
+- No prompt, persisted artifact schema/version, database migration, pipeline
+  transition, Connect contract, parser, frontend behavior, default Ollama
+  deployment, or model selection changed. `docs/PIPELINE_STATE_MACHINE.md`
+  remains accurate and unchanged.
+
+**Deferred**:
+- The application still instantiates `OllamaRuntime` and records its existing
+  runtime identity even when the exact-loopback OpenAI-compatible override is
+  pointed at vLLM for this proof. A production vLLM adapter/runtime factory,
+  truthful runtime provenance, pinned appliance launch configuration, and
+  gateway cutover remain separate work.
+- vLLM/FlashInfer/CUDA package compatibility must be pinned in the future
+  appliance deployment. This slice proves the native sampler configuration on
+  this machine; it does not establish a packaged inference appliance or a
+  cross-machine runtime path.

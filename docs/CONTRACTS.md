@@ -472,7 +472,12 @@ both prompts. Generation requests use temperature zero, fixed seed `42`, and no
 reasoning effort. The adapter maps the schema request to Ollama's
 OpenAI-compatible structured-output
 field; Rust parses and validates the returned JSON before it can become a
-pipeline artifact. Model output cannot invoke pipeline actions.
+pipeline artifact. Model-facing synthesis schemas include deterministic shape,
+size, and string bounds but omit JSON Schema `uniqueItems`, which constrained
+decoders do not implement consistently. Rust remains authoritative for
+reference uniqueness and rejects duplicate, foreign, empty, or over-limit
+evidence and candidate IDs before persistence. Model output cannot invoke
+pipeline actions.
 The selected imported Qwen model may make Ollama report the exact server error
 `failed to load model vocabulary required for format`. Only for that exact
 HTTP-500 response, the adapter caches the incompatibility and retries with
