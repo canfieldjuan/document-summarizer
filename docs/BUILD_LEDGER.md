@@ -2077,12 +2077,11 @@ live pipeline persistence proof complete
   remains accurate and unchanged.
 
 **Deferred**:
-- The application still instantiates `OllamaRuntime` and records its existing
-  runtime identity even when the exact-loopback OpenAI-compatible override is
-  pointed at vLLM for this proof. A production vLLM adapter/runtime factory,
-  truthful runtime provenance, pinned appliance launch configuration, and
-  gateway cutover remain separate work.
-- vLLM/FlashInfer/CUDA package compatibility must be pinned in the future
-  appliance deployment. This slice proves the native sampler configuration on
-  this machine; it does not establish a packaged inference appliance or a
-  cross-machine runtime path.
+- The exact-loopback vLLM experiment reused `OllamaRuntime` identity, so it is
+  historical compatibility evidence only and not truthful production runtime
+  provenance. Current product direction remains a gateway-owned Ollama worker
+  with the shared Qwen profile. Provider-neutral runtime provenance, if another
+  runtime is supported later, remains separate work.
+- The vLLM/FlashInfer/CUDA setting proves only that the historical local
+  experiment could run on this machine. This slice does not select vLLM, add a
+  vLLM packaging requirement, or establish a cross-machine runtime path.
