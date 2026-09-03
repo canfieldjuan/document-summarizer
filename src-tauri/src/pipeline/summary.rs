@@ -1453,18 +1453,6 @@ fn analysis_repair_output_schema(maximum_evidence: usize) -> Value {
     })
 }
 
-fn model_reference_array_schema(maximum_items: usize) -> Value {
-    // Constrained decoders such as vLLM do not implement JSON Schema's
-    // `uniqueItems`. The stage parsers remain the authoritative boundary and
-    // reject duplicate, foreign, empty, and over-limit reference sets.
-    json!({
-        "type": "array",
-        "minItems": 1,
-        "maxItems": maximum_items,
-        "items": {"type": "string", "minLength": 1}
-    })
-}
-
 fn synthesis_output_schema(maximum_claims: usize) -> Value {
     json!({
         "type": "object",
@@ -1481,7 +1469,13 @@ fn synthesis_output_schema(maximum_claims: usize) -> Value {
                             "minLength": 1,
                             "maxLength": MAX_CLAIM_CHARACTERS
                         },
-                        "evidence_ids": model_reference_array_schema(MAX_EVIDENCE_PER_CLAIM)
+                        "evidence_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": MAX_EVIDENCE_PER_CLAIM,
+                            "items": {"type": "string", "minLength": 1},
+                            "uniqueItems": true
+                        }
                     },
                     "required": ["text", "evidence_ids"],
                     "additionalProperties": false
@@ -1512,7 +1506,13 @@ fn candidate_synthesis_output_schema(
                             "minLength": 1,
                             "maxLength": MAX_CLAIM_CHARACTERS
                         },
-                        "candidate_ids": model_reference_array_schema(maximum_candidate_references)
+                        "candidate_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": maximum_candidate_references,
+                            "items": {"type": "string", "minLength": 1},
+                            "uniqueItems": true
+                        }
                     },
                     "required": ["text", "candidate_ids"],
                     "additionalProperties": false
@@ -4826,33 +4826,6 @@ mod tests {
             analysis_output_schema()["properties"]["evidence"]["maxItems"],
             MAX_GENERATED_EVIDENCE_PER_CHUNK
         );
-    }
-
-    #[test]
-    fn synthesis_generation_schemas_keep_bounds_without_unsupported_uniqueness_keywords() {
-        for (schema, reference_field, expected_maximum) in [
-            (
-                synthesis_output_schema(MAX_SUMMARY_CLAIMS),
-                "evidence_ids",
-                MAX_EVIDENCE_PER_CLAIM,
-            ),
-            (
-                candidate_synthesis_output_schema(
-                    MAX_SUMMARY_CLAIMS,
-                    MAX_SYNTHESIS_ITEMS_PER_REQUEST,
-                ),
-                "candidate_ids",
-                MAX_SYNTHESIS_ITEMS_PER_REQUEST,
-            ),
-        ] {
-            let references =
-                &schema["properties"]["claims"]["items"]["properties"][reference_field];
-            assert_eq!(references["type"], "array");
-            assert_eq!(references["minItems"], 1);
-            assert_eq!(references["maxItems"], expected_maximum);
-            assert_eq!(references["items"]["type"], "string");
-            assert!(references.get("uniqueItems").is_none());
-        }
     }
 
     #[test]

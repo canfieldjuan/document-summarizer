@@ -1993,23 +1993,32 @@ with durable reopen proof
 - Production issuer custody/customer license delivery, Windows/macOS package
   acceptance, and machine-reboot recovery remain outside this corpus closure.
 
-## Slice 21 — vLLM Structured-Output Compatibility Hardening (2026-09-02)
+## Slice 21 — Constrained-Decoder Structured-Output Compatibility Hardening (2026-09-02–03)
 
-**Status**: Decoder compatibility, application validation, and two-model live
-pipeline persistence proof complete
+**Status**: vLLM and Ollama decoder compatibility, application validation, and
+live pipeline persistence proof complete
 
 **Defect and boundary repair**:
 - vLLM 0.28.0 rejected the former synthesis response schema before generation
   with HTTP 400 and `Unimplemented keys: ["uniqueItems"]`. The unsupported
   keyword appeared on both evidence-ID and hierarchical candidate-ID arrays.
-- Model-facing synthesis schemas now retain non-empty array, maximum-item, and
-  non-empty string bounds without `uniqueItems`. This is a decoder vocabulary
-  accommodation, not a relaxation of the application artifact contract.
+- Ollama 0.24.0 rejected the analysis schema because 2,000- and 4,000-character
+  `maxLength` values expanded into grammar repetitions beyond its sane limit.
+  Its exact HTTP-500 compatibility response moved the runtime to generic JSON
+  mode. A real four-page office PDF then failed once when synthesis returned an
+  empty claim set and once when analysis returned a non-source quotation even
+  after its bounded repair request.
+- The runtime adapter now derives a decoding copy of every canonical schema and
+  recursively removes only schema-keyword occurrences of `uniqueItems` and
+  `maxLength`. Property names and ordinary metadata with those spellings remain
+  intact. Required fields, object closure, enums, non-empty strings, and array
+  count bounds still reach the decoder. The caller's canonical schema is not
+  mutated.
 - Rust remains authoritative after generation. Direct and hierarchical parsers
-  still reject duplicate, foreign, empty, cross-batch, and over-limit
-  references before a synthesized artifact or success transition can persist.
-  A regression test locks the supported schema shape while existing negative
-  boundary tests lock those application rejections.
+  still reject oversized strings, non-source quotations, duplicate, foreign,
+  empty, cross-batch, and over-limit references before an artifact or success
+  transition can persist. This is a decoder vocabulary accommodation, not a
+  relaxation of the durable application contract.
 
 **Live vLLM effect proof**:
 - A direct request using the former `uniqueItems` schema reproduced HTTP 400.
@@ -2028,13 +2037,40 @@ pipeline persistence proof complete
   sampler; both models then started and completed the proofs. No package or
   application dependency was changed to hide that deployment constraint.
 
+**Live Ollama failure and recovery proof**:
+- The installed application preserved both failed `output_test.pdf` attempts as
+  immutable failures. Both retained parse, normalization, structure, and chunk
+  artifacts; the first retained its valid analysis artifact but no synthesis,
+  while the retry retained no invalid analysis or later artifacts.
+- A direct request using the projected analysis schema returned HTTP 200 rather
+  than Ollama's grammar error. The patched ignored office acceptance test then
+  processed the same source through the full pipeline against
+  `qwen3-30b-a3b:latest`, committed five supported summary claims with five
+  exact evidence quotations, reached `CompleteWithWarnings` at state version
+  18, and retrieved identical summary, citation, event history, and unchanged
+  source bytes after an independent SQLite reopen. All patched-run schema
+  requests returned HTTP 200 without activating generic JSON fallback.
+- The patched Debian package was installed and its desktop binary retried the
+  same `output_test.pdf` source through the user-facing application path. That
+  run reached `CompleteWithWarnings` at state version 18 with 18 immutable
+  events, seven claims, seven evidence records, and both summary and citation
+  artifacts. After terminating and independently relaunching the installed
+  process, the same run, version, event count, artifact hashes, and claim and
+  evidence counts remained retrievable. The source file SHA-256 still matched
+  the durable document hash.
+
 **Regression and architecture proof**:
-- The focused schema regression plus direct and hierarchical rejection probes
-  passed. Default-feature and featureless all-target suites each reported 199
-  passing and four intentionally ignored library tests; the office target
-  reported one passing and three opt-in ignores, and all three release-contract
-  tests passed. Rust formatting, strict Clippy in both feature modes, and the
-  TypeScript/Vite production build passed.
+- The adapter projection regression covers nested object, array, and composition
+  schemas, preserves domain property names and metadata that resemble removed
+  keywords, proves the canonical input is unchanged, and retains required
+  structural bounds. Existing negative boundary tests continue to lock strict
+  application rejection behavior.
+- The focused runtime-adapter suite reported 10 passing tests. Default-feature
+  and featureless all-target suites each reported 199 passing and four
+  intentionally ignored library tests; the office target reported one passing
+  and three opt-in ignores, and all three release-contract tests passed. Rust
+  formatting, strict Clippy in both feature modes, the TypeScript/Vite
+  production build, and `git diff --check` passed.
 - No prompt, persisted artifact schema/version, database migration, pipeline
   transition, Connect contract, parser, frontend behavior, default Ollama
   deployment, or model selection changed. `docs/PIPELINE_STATE_MACHINE.md`
