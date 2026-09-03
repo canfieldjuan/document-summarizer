@@ -1992,3 +1992,96 @@ with durable reopen proof
   citations.
 - Production issuer custody/customer license delivery, Windows/macOS package
   acceptance, and machine-reboot recovery remain outside this corpus closure.
+
+## Slice 21 — Constrained-Decoder Structured-Output Compatibility Hardening (2026-09-02–03)
+
+**Status**: vLLM and Ollama decoder compatibility, application validation, and
+live pipeline persistence proof complete
+
+**Defect and boundary repair**:
+- vLLM 0.28.0 rejected the former synthesis response schema before generation
+  with HTTP 400 and `Unimplemented keys: ["uniqueItems"]`. The unsupported
+  keyword appeared on both evidence-ID and hierarchical candidate-ID arrays.
+- Ollama 0.24.0 rejected the analysis schema because 2,000- and 4,000-character
+  `maxLength` values expanded into grammar repetitions beyond its sane limit.
+  Its exact HTTP-500 compatibility response moved the runtime to generic JSON
+  mode. A real four-page office PDF then failed once when synthesis returned an
+  empty claim set and once when analysis returned a non-source quotation even
+  after its bounded repair request.
+- The runtime adapter now derives a decoding copy of every canonical schema and
+  recursively removes only schema-keyword occurrences of `uniqueItems` and
+  `maxLength`. Property names and ordinary metadata with those spellings remain
+  intact. Required fields, object closure, enums, non-empty strings, and array
+  count bounds still reach the decoder. The caller's canonical schema is not
+  mutated.
+- Rust remains authoritative after generation. Direct and hierarchical parsers
+  still reject oversized strings, non-source quotations, duplicate, foreign,
+  empty, cross-batch, and over-limit references before an artifact or success
+  transition can persist. This is a decoder vocabulary accommodation, not a
+  relaxation of the durable application contract.
+
+**Live vLLM effect proof**:
+- A direct request using the former `uniqueItems` schema reproduced HTTP 400.
+  The equivalent bounded schema without that keyword returned HTTP 200 and
+  valid structured JSON from `qwen3.8-27b-awq`; the same patched shape returned
+  HTTP 200 and valid structured JSON from `ministral-3-14b-awq`.
+- The ignored real-pipeline test ran the repository PDF through ingestion,
+  parsing, normalization, structure, chunking, analysis, synthesis,
+  verification, summary/citation persistence, and independent SQLite reopen.
+  It passed against Qwen in 1059.52 seconds and against Ministral in 37.26
+  seconds. These are correctness observations from one warm local machine, not
+  comparative performance claims.
+- The local vLLM runtime initially failed during FlashInfer sampler JIT because
+  its CUDA/CUB headers did not provide the expected `FlagHeads` member. The
+  vLLM-supported `VLLM_USE_FLASHINFER_SAMPLER=0` setting selected the native
+  sampler; both models then started and completed the proofs. No package or
+  application dependency was changed to hide that deployment constraint.
+
+**Live Ollama failure and recovery proof**:
+- The installed application preserved both failed `output_test.pdf` attempts as
+  immutable failures. Both retained parse, normalization, structure, and chunk
+  artifacts; the first retained its valid analysis artifact but no synthesis,
+  while the retry retained no invalid analysis or later artifacts.
+- A direct request using the projected analysis schema returned HTTP 200 rather
+  than Ollama's grammar error. The patched ignored office acceptance test then
+  processed the same source through the full pipeline against
+  `qwen3-30b-a3b:latest`, committed five supported summary claims with five
+  exact evidence quotations, reached `CompleteWithWarnings` at state version
+  18, and retrieved identical summary, citation, event history, and unchanged
+  source bytes after an independent SQLite reopen. All patched-run schema
+  requests returned HTTP 200 without activating generic JSON fallback.
+- The patched Debian package was installed and its desktop binary retried the
+  same `output_test.pdf` source through the user-facing application path. That
+  run reached `CompleteWithWarnings` at state version 18 with 18 immutable
+  events, seven claims, seven evidence records, and both summary and citation
+  artifacts. After terminating and independently relaunching the installed
+  process, the same run, version, event count, artifact hashes, and claim and
+  evidence counts remained retrievable. The source file SHA-256 still matched
+  the durable document hash.
+
+**Regression and architecture proof**:
+- The adapter projection regression covers nested object, array, and composition
+  schemas, preserves domain property names and metadata that resemble removed
+  keywords, proves the canonical input is unchanged, and retains required
+  structural bounds. Existing negative boundary tests continue to lock strict
+  application rejection behavior.
+- The focused runtime-adapter suite reported 10 passing tests. Default-feature
+  and featureless all-target suites each reported 199 passing and four
+  intentionally ignored library tests; the office target reported one passing
+  and three opt-in ignores, and all three release-contract tests passed. Rust
+  formatting, strict Clippy in both feature modes, the TypeScript/Vite
+  production build, and `git diff --check` passed.
+- No prompt, persisted artifact schema/version, database migration, pipeline
+  transition, Connect contract, parser, frontend behavior, default Ollama
+  deployment, or model selection changed. `docs/PIPELINE_STATE_MACHINE.md`
+  remains accurate and unchanged.
+
+**Deferred**:
+- The exact-loopback vLLM experiment reused `OllamaRuntime` identity, so it is
+  historical compatibility evidence only and not truthful production runtime
+  provenance. Current product direction remains a gateway-owned Ollama worker
+  with the shared Qwen profile. Provider-neutral runtime provenance, if another
+  runtime is supported later, remains separate work.
+- The vLLM/FlashInfer/CUDA setting proves only that the historical local
+  experiment could run on this machine. This slice does not select vLLM, add a
+  vLLM packaging requirement, or establish a cross-machine runtime path.

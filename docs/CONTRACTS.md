@@ -472,14 +472,22 @@ both prompts. Generation requests use temperature zero, fixed seed `42`, and no
 reasoning effort. The adapter maps the schema request to Ollama's
 OpenAI-compatible structured-output
 field; Rust parses and validates the returned JSON before it can become a
-pipeline artifact. Model output cannot invoke pipeline actions.
-The selected imported Qwen model may make Ollama report the exact server error
-`failed to load model vocabulary required for format`. Only for that exact
-HTTP-500 response, the adapter caches the incompatibility and retries with
-Ollama's JSON-object mode rather than unconstrained text. The prompt still
-carries the explicit JSON shape and the same Rust schema, identity, quotation,
-and provenance checks remain mandatory. Other HTTP failures do not activate the
-fallback.
+pipeline artifact. Before transport, the adapter derives a non-mutating decoder
+projection of the canonical schema. It omits `uniqueItems`, which vLLM does not
+implement, and `maxLength`, whose large bounded values Ollama expands into
+grammar repetitions that it refuses to compile. The projection retains object
+closure, required fields, enums, non-empty strings, and array count bounds.
+Rust remains authoritative for string size and reference uniqueness and rejects
+oversized text, duplicate or foreign references, non-source quotations, and
+other contract-invalid output before persistence. Model output cannot invoke
+pipeline actions.
+The adapter retains a defensive compatibility path for the exact Ollama server
+error `failed to load model vocabulary required for format`: it caches that
+failure and retries with Ollama's JSON-object mode rather than unconstrained
+text. Current pipeline schemas are expected to use the compatible projected
+schema instead. The prompt still carries the explicit JSON shape and the same
+Rust schema, identity, quotation, provenance, and size checks remain mandatory.
+Other HTTP failures do not activate the fallback.
 
 Analysis remains version `2.0.0`; synthesis, verification, and summary are
 version `3.0.0`, and citation is version `2.0.0`. No schema migration is

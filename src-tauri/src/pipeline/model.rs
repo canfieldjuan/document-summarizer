@@ -412,14 +412,66 @@ fn response_format(
             false,
         ));
     }
+    let decoder_schema = decoder_compatible_schema(schema);
     Ok(Some(serde_json::json!({
         "type": "json_schema",
         "json_schema": {
             "name": name,
             "strict": true,
-            "schema": schema,
+            "schema": decoder_schema,
         }
     })))
+}
+
+fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(fields) = schema else {
+        return schema.clone();
+    };
+
+    let mut projected = fields.clone();
+    // vLLM does not implement `uniqueItems`, while Ollama expands large
+    // `maxLength` values into grammar repetitions that it refuses to compile.
+    // Stage parsers remain authoritative for uniqueness and string bounds.
+    projected.remove("uniqueItems");
+    projected.remove("maxLength");
+
+    for keyword in ["properties", "patternProperties", "$defs", "definitions"] {
+        if let Some(serde_json::Value::Object(named_schemas)) = fields.get(keyword) {
+            projected.insert(
+                keyword.to_string(),
+                serde_json::Value::Object(
+                    named_schemas
+                        .iter()
+                        .map(|(name, child)| (name.clone(), decoder_compatible_schema(child)))
+                        .collect(),
+                ),
+            );
+        }
+    }
+    for keyword in [
+        "items",
+        "contains",
+        "additionalProperties",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+    ] {
+        if let Some(child) = fields.get(keyword) {
+            projected.insert(keyword.to_string(), decoder_compatible_schema(child));
+        }
+    }
+    for keyword in ["prefixItems", "allOf", "anyOf", "oneOf"] {
+        if let Some(serde_json::Value::Array(children)) = fields.get(keyword) {
+            projected.insert(
+                keyword.to_string(),
+                serde_json::Value::Array(children.iter().map(decoder_compatible_schema).collect()),
+            );
+        }
+    }
+
+    serde_json::Value::Object(projected)
 }
 
 fn json_object_response_format() -> serde_json::Value {
@@ -705,6 +757,76 @@ mod tests {
         })
         .expect_err("an oversized schema must fail before an HTTP request");
         assert_eq!(error.code, "MODEL_CONFIG_INVALID");
+    }
+
+    #[test]
+    fn structured_response_format_projects_only_unsupported_decoder_keywords() {
+        let contract_schema = serde_json::json!({
+            "type": "object",
+            "description": "maxLength and uniqueItems remain ordinary description text",
+            "properties": {
+                "maxLength": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4_000
+                },
+                "ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "uniqueItems": true,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2_000
+                    }
+                },
+                "choice": {
+                    "anyOf": [
+                        {"type": "string", "maxLength": 8},
+                        {"type": "null"}
+                    ]
+                }
+            },
+            "required": ["maxLength", "ids"],
+            "additionalProperties": false
+        });
+
+        let actual = response_format(&ModelOutputFormat::JsonSchema {
+            name: "decoder_projection_v1".to_string(),
+            schema: contract_schema.clone(),
+        })
+        .expect("canonical schema should be accepted")
+        .expect("structured format should be present");
+        let projected = &actual["json_schema"]["schema"];
+
+        assert_eq!(
+            projected["description"],
+            "maxLength and uniqueItems remain ordinary description text"
+        );
+        assert!(projected["properties"].get("maxLength").is_some());
+        assert_eq!(projected["properties"]["maxLength"]["minLength"], 1);
+        assert!(projected["properties"]["maxLength"]
+            .get("maxLength")
+            .is_none());
+        assert_eq!(projected["properties"]["ids"]["minItems"], 1);
+        assert_eq!(projected["properties"]["ids"]["maxItems"], 5);
+        assert!(projected["properties"]["ids"].get("uniqueItems").is_none());
+        assert_eq!(projected["properties"]["ids"]["items"]["minLength"], 1);
+        assert!(projected["properties"]["ids"]["items"]
+            .get("maxLength")
+            .is_none());
+        assert!(projected["properties"]["choice"]["anyOf"][0]
+            .get("maxLength")
+            .is_none());
+        assert_eq!(projected["required"], contract_schema["required"]);
+        assert_eq!(projected["additionalProperties"], false);
+
+        assert_eq!(contract_schema["properties"]["ids"]["uniqueItems"], true);
+        assert_eq!(
+            contract_schema["properties"]["ids"]["items"]["maxLength"],
+            2_000
+        );
     }
 
     #[test]
