@@ -651,6 +651,17 @@ both the same document-level claim bound and complete evidence-ID coverage. It
 must not funnel the whole document through a final request whose item count
 silently becomes the claim ceiling.
 
+Synthesis must also preserve downstream verifiability. Before inference, Rust
+must prove that the evidence catalog can be assigned to no more than `B`
+single-claim verification inputs under `V_request`, reserving the maximum
+allowed claim-text size. Hierarchical candidate pairs are compatible only when
+their combined evidence can still fit that same conservative single-claim
+verification bound. After synthesis, Rust must run the actual claims through
+the complete count, per-request character, and aggregate verification planner
+before persisting the synthesis artifact. A claim set that is legal by evidence
+count but cannot be verified within the configured context is invalid synthesis,
+not a later verification-stage surprise.
+
 Let `V` be the supported-claim count after semantic verification, and let
 `E_V` be the validated evidence IDs cited by those supported claims. `V = 0`
 remains a structured hard failure. If `0 < V < K` or `E_V` does not cover all
@@ -808,6 +819,11 @@ are not.
 - Verification probes cover 15, 16, and 17 claims; one character below, at, and
   above the three-character-derived per-request and aggregate limits; and a
   mixed catalog requiring both count and character partitioning.
+- Synthesis-to-verification probes use maximum-length quotations to prove a
+  count-legal but context-oversized candidate pair is rejected before model
+  generation, while the adjacent size-safe pair is admitted and the final
+  actual claim catalog passes the complete verification planner before
+  persistence.
 - Request diagnostics prove elapsed time is present for success and failure,
   provider token counts are captured when supplied, missing usage remains
   explicit, and no prompt, source, output, token, or path content is logged.
