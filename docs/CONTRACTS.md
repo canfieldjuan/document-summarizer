@@ -417,6 +417,152 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ## Local summary artifacts
 
+### Proposed: substantive evidence, quote-only paraphrase, and synthesis repair
+
+Status: contract only, not implemented. This proposal requires review before
+code. Commit implementation separately; fold these rules into current behavior
+and delete this subsection when the complete implementation lands.
+
+Root cause and evidence:
+
+- A required one-item page response has no way to record that its entire
+  candidate catalog contains only scan artifacts, furniture, or a bare heading.
+  In the NARA probe, pages 6 and 12 each have only one such candidate. Those
+  claims were nevertheless marked supported: materiality is distinct from
+  entailment, and verification cannot serve as the omission classifier.
+- Analysis currently writes claim text while seeing all page candidates, then
+  binds it to just one selected quotation. The NARA approval claim selected q1
+  while the approval language was in q2. A single-claim probe changing only
+  quotation choice changed ambiguous to supported. This demonstrates a binding
+  defect, not a general guarantee that correct quotations yield support.
+- DOL's failing synthesis batch requires exactly four claims from eight evidence
+  items. It returned four claims referencing seven items, omitting the bare title
+  "Labor Standards in Agriculture". Missing references fail synthesis immediately;
+  the later verification-shortfall retry cannot repair this failure.
+
+Required change surface: versioned analysis/omission contracts, selection and
+paraphrase requests, analysis planning and reload validation, synthesis ranges,
+coverage-error classification and bounded request repair, durable local audit
+records, and focused/live acceptance. Do not import the abandoned rewrite's
+architecture. Reuse only the narrow non-substantive-omission concept.
+
+Analysis has two separate model operations for a retained page:
+
+1. Selection sees the page's full application-built candidate catalog and returns
+   exactly one schema-enumerated decision: a supplied quote ID or the explicit
+   non-substantive omission decision. It cannot return claim text, invented IDs,
+   quotation bytes, or block identity.
+2. Paraphrase sees only the selected exact quotation and fixed task instructions;
+   it cannot see other candidates, prior selection messages, other page text, or
+   previous claims. It returns only claim_text, still bounded to 192 characters.
+   Rust restores the selected quotation and provenance. This eliminates access
+   to competing candidates during paraphrase; it does not make hallucination
+   impossible. Semantic verification and all existing negative checks remain.
+
+An omitted page makes only the selection call. An accepted omission records the
+typed reason NonSubstantivePageFurniture, page/chunk identity, and binding to the
+examined candidate catalog. No arbitrary free-form omission reason is accepted.
+The entire catalog must contain no substantive usable native-text fact: allowed
+cases are scan artifacts, isolated footers/date stamps, and bare headings without
+an assertion. Shortness, difficult content, redundancy, uncertainty, or failed
+verification alone are not omission reasons. A short obligation, exception,
+deadline, table value, or substantive heading must not be omitted as furniture.
+Never treat illegibility as proof that the original document contains no facts.
+Rust permits a page-wide omission only when the examined catalog covers all of
+that page's native-text content. A truncated or input-rejected catalog cannot
+justify an omission; missing candidate text must not become missing evidence.
+
+Omissions are not EvidenceItems and never become summary claims or citations.
+Only these recorded omissions are outside the all-evidence-cited requirement;
+synthesis cannot silently discard or reclassify retained evidence. There is at
+most one outcome (evidence or omission) per inspected native-text page. Rust
+rejects mixed, duplicate, foreign-page, or incomplete outcomes. The versioned
+analysis artifact persists omissions and a durable warning; reopening recomputes
+identity and catalog bindings. If a run later fails, accepted omission decisions
+must remain auditable, rather than exist only in an in-memory response log.
+
+Coverage accounting is not relaxed. N remains all native-text pages under the
+current definition. B = min(64, max(8, ceil(3*N/5))) is unchanged, and E counts
+retained evidence only. Keep K = min(B, E, max(3, ceil(B/2))) for positive E.
+Start with the existing evenly spaced page plan, then inspect previously
+unvisited pages in deterministic source order when omissions leave the target
+unmet. Stop when E reaches min(N, max(B, ceil(3*N/5))) or all native-text pages
+have outcomes. Thus at most N selections and N paraphrases run; omitted pages
+are neither cited nor counted as evidence. Reload must validate the exact
+initial/backfill plan and stopping condition, not accept an arbitrary subset.
+If usable pages are exhausted first, persist the omissions and a coverage
+shortfall warning; do not claim the target was met. If E is zero, retain the
+omission audit and fail with a structured no-substantive-evidence result, never
+invent a summary. Live acceptance still checks raw native-text page coverage of
+at least 60 percent and separately prints omission and inspected-page counts.
+
+Synthesis evidence batches receive a range, not a forced exact allocation:
+retain the distributed document-floor allocation as each batch minimum, but
+allow up to min(batch evidence count, B) claims. The direct path retains K..B.
+The final artifact must still satisfy K..B and cite every retained evidence ID.
+Candidate reductions remain progress-making and preserve all original lineage.
+Preflight plans against the sum of batch maxima, not their minima, including
+worst-case reductions and repair calls under the existing 256-request ceiling.
+All input, output, per-claim evidence, and verification-admission limits remain.
+
+Each synthesis request (direct, evidence batch, or candidate reduction) may make
+one additional generation only if an otherwise valid response omits required
+references. The retry regenerates that request's complete response from the same
+catalog and bounds, with explicit missing evidence/candidate identifiers and a
+distinct attempt seed. It does not restart completed batches. Missing-reference
+diagnostics are typed separately from malformed JSON, foreign/duplicate IDs,
+unsupported claims, transport errors, and other failures; those do not enter this
+repair path. A second omission fails closed. Never append missing IDs to an
+unrelated claim, silently deduplicate, drop evidence, or lower K to pass.
+Each repair counts against the same request budget. Preflight reserves at most
+two generations per logical synthesis request and includes bounded feedback in
+its system-plus-user input calculation before any inference.
+
+This request repair is distinct from the existing one-time re-synthesis after a
+verification coverage shortfall. Keep the latter's existing attempt ceiling;
+it is not an extra fallback for synthesis errors. This revision does not claim
+that changing a seed repairs semantic defects in the retained evidence.
+
+Persist bounded local repair-attempt metadata for both success and failure:
+run/synthesis/request/repair ordinals, catalog and response fingerprints, missing
+IDs, validation outcome, and existing duration/token diagnostics. Never store an
+invalid partial response as a validated SynthesizedDocument or overwrite an
+earlier attempt. Selection/omission audit and repair-attempt storage must preserve
+expected-state/version checks and atomic append behavior. DB/schema integration,
+if needed, lands last as its own PR; the feature is not complete without durable
+audit. Historical artifacts retain their old validators and identity/hash rules;
+new omission semantics require explicitly versioned artifacts, not retroactive
+acceptance of missing evidence in old records.
+
+Explicit non-scope: no additional output tokens, larger context, longer timeout,
+model/endpoint change, parser/OCR/vision changes, unbounded retries, relaxed
+exactness/provenance/verdict rules, Connect, packaging, dependencies, or output
+rendering changes. Existing allowances remain 2,048 analysis, 4,096 synthesis,
+4,096 verification, context assumption 8,192, and timeout 900 seconds.
+
+Verification required before claiming completion:
+
+- Selection/paraphrase separation: a decoy candidate contains a fact absent from
+  the selected quote, and captured paraphrase input demonstrably excludes it.
+  Invalid selection, mixed outcome, extra field, and 192/193-character tests.
+- Recorded omission fixtures: noise, bare title and footer/stamp; negative
+  controls for short substantive obligations, exceptions, dates and table values.
+  Focused live selection probes must exercise those positive and negative cases;
+  scripted model responses alone cannot establish correct omission decisions.
+  Reopen/tamper, all-omitted, mixed retained/omitted, backfill, tail and stopping
+  boundary tests, plus an incomplete catalog with omitted substantive tail text.
+  No silent denominator reduction or omitted-page citation.
+- Synthesis slack and direct/hierarchical document-bound equivalence; one missing
+  reference repaired, a second omission rejected, foreign/mixed input rejected
+  without repair, complete coverage requiring no repair. Exact/max-plus-one input
+  and total-call budgets include feedback and worst-case candidate reductions.
+- Immutable audit on success, failed repair, cancellation and restart, with
+  historical artifact/migration regression checks; existing negative tests pass.
+- Local tests, strict clippy and formatting. Then live Qwen NARA and DOL runs
+  report claims, retained evidence, inspected/omitted pages, raw cited-page
+  fraction, request/repair counts, duration and completion tokens, with failures
+  first. Neither mocked omission choices nor green unit tests prove live quality.
+
 `ModelRuntime` is the only inference boundary. A request may select plain text
 or a named, bounded JSON Schema output contract. Current analysis version
 `4.0.0` uses application-built quote candidates rather than model-authored
