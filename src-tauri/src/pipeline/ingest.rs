@@ -150,10 +150,53 @@ mod tests {
     use std::fs::{self, File};
     use std::io::Write;
 
+    struct TestDirectory(std::path::PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("doc-sum-ingest-{}", Uuid::new_v4()));
+            fs::create_dir(&path).expect("test directory should be unique and writable");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_directory_cleanup_is_isolated_on_return_and_unwind() {
+        let neighbor = TestDirectory::new();
+        let neighbor_file = neighbor.0.join("keep.pdf");
+        fs::write(&neighbor_file, b"neighbor").unwrap();
+        let normal = TestDirectory::new();
+        let normal_path = normal.0.clone();
+        assert_ne!(normal_path, neighbor.0);
+        fs::write(normal_path.join("source.pdf"), b"fixture").unwrap();
+        fs::write(normal_path.join("test.db-journal"), b"sidecar").unwrap();
+        drop(normal);
+        assert!(!normal_path.exists());
+
+        let unwinding = TestDirectory::new();
+        let unwind_path = unwinding.0.clone();
+        let result = std::panic::catch_unwind(move || {
+            let _directory = unwinding;
+            fs::write(_directory.0.join("test.db"), b"database").unwrap();
+            panic!("injected test failure");
+        });
+        assert!(result.is_err());
+        assert!(!unwind_path.exists());
+        assert_eq!(fs::read(neighbor_file).unwrap(), b"neighbor");
+    }
+
     #[test]
     fn test_ingest_valid_pdf() {
+        let directory = TestDirectory::new();
+        let source_path = directory.0.join("test_doc.pdf");
+        let test_path = source_path.to_str().unwrap();
         let mut conn = init_db(":memory:").unwrap();
-        let test_path = "test_doc.pdf";
         let source_bytes = b"%PDF-1.4 mock content";
         let mut file = File::create(test_path).unwrap();
         file.write_all(source_bytes).unwrap();
@@ -180,14 +223,14 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].previous_state, None);
         assert_eq!(events[0].next_state, PipelineState::Received);
-
-        fs::remove_file(test_path).unwrap();
     }
 
     #[test]
     fn test_duplicate_bytes_create_independent_document_and_run_identities() {
+        let directory = TestDirectory::new();
+        let source_path = directory.0.join("test_duplicate.pdf");
+        let test_path = source_path.to_str().unwrap();
         let mut conn = init_db(":memory:").unwrap();
-        let test_path = "test_duplicate.pdf";
         let source_bytes = b"%PDF-1.4 duplicate content";
         fs::write(test_path, source_bytes).unwrap();
 
@@ -217,12 +260,13 @@ mod tests {
             3
         );
         assert_eq!(fs::read(test_path).unwrap(), source_bytes);
-
-        fs::remove_file(test_path).unwrap();
     }
 
     #[test]
     fn test_ingestion_rolls_back_document_run_and_events_together() {
+        let directory = TestDirectory::new();
+        let source_path = directory.0.join("test_ingestion_rollback.pdf");
+        let test_path = source_path.to_str().unwrap();
         let mut conn = init_db(":memory:").unwrap();
         conn.execute_batch(
             "CREATE TRIGGER test_fail_final_ingestion_event
@@ -233,7 +277,6 @@ mod tests {
              END;",
         )
         .unwrap();
-        let test_path = "test_ingestion_rollback.pdf";
         fs::write(test_path, b"%PDF-1.4 rollback content").unwrap();
 
         let result = ingest_pdf(&mut conn, test_path);
@@ -246,21 +289,23 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0, "{table} must roll back");
         }
-
-        fs::remove_file(test_path).unwrap();
     }
 
     #[test]
     fn test_ingest_missing_file() {
+        let directory = TestDirectory::new();
+        let source_path = directory.0.join("missing.pdf");
         let mut conn = init_db(":memory:").unwrap();
-        let result = ingest_pdf(&mut conn, "missing.pdf");
+        let result = ingest_pdf(&mut conn, source_path.to_str().unwrap());
         assert!(matches!(result.unwrap_err(), IngestError::IoError(_)));
     }
 
     #[test]
     fn test_ingest_unsupported_file() {
+        let directory = TestDirectory::new();
+        let source_path = directory.0.join("test_doc.txt");
+        let test_path = source_path.to_str().unwrap();
         let mut conn = init_db(":memory:").unwrap();
-        let test_path = "test_doc.txt";
         let mut file = File::create(test_path).unwrap();
         file.write_all(b"%PDF-1.4 mock content").unwrap(); // Has signature but wrong extension
 
@@ -269,14 +314,14 @@ mod tests {
             result.unwrap_err(),
             IngestError::UnsupportedExtension
         ));
-
-        fs::remove_file(test_path).unwrap();
     }
 
     #[test]
     fn test_ingest_bad_signature() {
+        let directory = TestDirectory::new();
+        let source_path = directory.0.join("test_bad_sig.pdf");
+        let test_path = source_path.to_str().unwrap();
         let mut conn = init_db(":memory:").unwrap();
-        let test_path = "test_bad_sig.pdf";
         let mut file = File::create(test_path).unwrap();
         file.write_all(b"NOT A PDF content").unwrap(); // Right extension but bad signature
 
@@ -293,14 +338,15 @@ mod tests {
             count, 0,
             "No run should be created or stranded on validation failure"
         );
-
-        fs::remove_file(test_path).unwrap();
     }
 
     #[test]
     fn test_ingest_persistence_across_database_connection_reopen() {
-        let db_path = "test_persistence.db";
-        let test_path = "test_persist_doc.pdf";
+        let directory = TestDirectory::new();
+        let database_path = directory.0.join("test_persistence.db");
+        let db_path = database_path.to_str().unwrap();
+        let source_path = directory.0.join("test_persist_doc.pdf");
+        let test_path = source_path.to_str().unwrap();
         let source_bytes = b"%PDF-1.4 mock content persistence";
 
         let mut file = File::create(test_path).unwrap();
@@ -354,8 +400,5 @@ mod tests {
                 assert_eq!(persisted.timestamp, expected.timestamp);
             }
         }
-
-        fs::remove_file(test_path).unwrap();
-        fs::remove_file(db_path).unwrap();
     }
 }
