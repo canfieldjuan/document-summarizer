@@ -433,6 +433,17 @@ evidence items. Rust derives final claim IDs, restores canonical evidence order,
 renders authoritative page labels, and persists every source chunk ID exactly
 once in source order.
 
+Synthesis also preserves downstream verifiability. Before inference, Rust
+proves that the evidence catalog can be assigned to no more than `B`
+single-claim verification inputs under `V_request` while reserving the maximum
+claim-text size. Candidate pairs are compatible only when their combined
+evidence fits that conservative single-claim bound. After synthesis, Rust runs
+the actual claim catalog through the complete count, per-request character, and
+aggregate verification planner before persistence. Current-version synthesis
+artifacts must pass the same planner when loaded, so a count-legal but
+context-oversized claim set fails in synthesis rather than surprising the later
+verification stage.
+
 Verification version `3.0.0` classifies every synthesized claim against only
 its validated exact quotations. Requests stay in canonical claim order and
 contain at most 16 claims. With context `C = 8,192`, output allowance
@@ -562,7 +573,8 @@ least `K` and no greater than `B`, complete validated-evidence coverage, and
 citations to at least 60 percent of native-text pages. Visual-only pages are
 excluded from that ratio. Deterministic boundary tests cover direct and
 hierarchical parity, tail eligibility, sparse page scopes, quote-ID admission,
-claim/evidence floors, request-size edges, zero/positive verification
+claim/evidence floors, synthesis-to-verification safe and oversized candidate
+pairs, final-catalog admission, request-size edges, zero/positive verification
 shortfalls, attempt immutability, exact quotation bytes, provenance, and
 fail-closed persistence.
 
