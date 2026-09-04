@@ -747,7 +747,7 @@ fn synthesize(
         minimum: claim_floor,
         maximum: claim_budget,
     };
-    ensure_evidence_coverage_is_representable(evidence.len(), claim_budget)?;
+    ensure_evidence_coverage_is_representable(&evidence, claim_budget)?;
     let mut request_budget = SynthesisRequestBudget::default();
     let use_direct_request = if evidence.len() <= MAX_SYNTHESIS_ITEMS_PER_REQUEST {
         synthesis_request_within_bounds(
@@ -782,6 +782,7 @@ fn synthesize(
         )?
     };
     validate_synthesis_coverage(&claims, &evidence, claim_floor, claim_budget)?;
+    ensure_claim_catalog_is_verifiable(&claims, &evidence, claim_budget)?;
     let summary_text = render_cited_summary(&claims, analyzed)?;
     let synthesized = SynthesizedDocument {
         document_id: analyzed.document_id.clone(),
@@ -852,7 +853,7 @@ fn synthesis_claim_floor(
 }
 
 fn ensure_evidence_coverage_is_representable(
-    evidence_count: usize,
+    evidence: &[PromptEvidenceItem],
     claim_budget: usize,
 ) -> Result<(), PipelineFailure> {
     let coverage_capacity = claim_budget
@@ -865,15 +866,72 @@ fn ensure_evidence_coverage_is_representable(
                 false,
             )
         })?;
-    if evidence_count <= coverage_capacity {
-        return Ok(());
+    if evidence.len() > coverage_capacity {
+        return Err(stage_failure(
+            PipelineStage::Synthesize,
+            "SYNTHESIS_EVIDENCE_COVERAGE_UNSATISFIABLE",
+            "The validated evidence catalog cannot fit the bounded document claim budget",
+            false,
+        ));
     }
-    Err(stage_failure(
-        PipelineStage::Synthesize,
-        "SYNTHESIS_EVIDENCE_COVERAGE_UNSATISFIABLE",
-        "The validated evidence catalog cannot fit the bounded document claim budget",
-        false,
-    ))
+    let request_limit = synthesis_verification_request_character_limit()?;
+    let mut required_claims = 0usize;
+    let mut current = Vec::new();
+    for item in evidence {
+        let mut proposed = current.clone();
+        proposed.push(item);
+        if proposed.len() <= MAX_EVIDENCE_PER_CLAIM
+            && conservative_verification_claim_fits(&proposed, request_limit)?
+        {
+            current = proposed;
+            continue;
+        }
+        if current.is_empty() {
+            return Err(stage_failure(
+                PipelineStage::Synthesize,
+                "SYNTHESIS_EVIDENCE_COVERAGE_UNSATISFIABLE",
+                "One evidence item cannot fit a bounded verification claim",
+                false,
+            ));
+        }
+        required_claims = required_claims.checked_add(1).ok_or_else(|| {
+            stage_failure(
+                PipelineStage::Synthesize,
+                "INVALID_SYNTHESIS_BUDGET",
+                "The verification-safe evidence partition exceeds the supported range",
+                false,
+            )
+        })?;
+        current = vec![item];
+        if !conservative_verification_claim_fits(&current, request_limit)? {
+            return Err(stage_failure(
+                PipelineStage::Synthesize,
+                "SYNTHESIS_EVIDENCE_COVERAGE_UNSATISFIABLE",
+                "One evidence item cannot fit a bounded verification claim",
+                false,
+            ));
+        }
+    }
+    if !current.is_empty() {
+        required_claims = required_claims.checked_add(1).ok_or_else(|| {
+            stage_failure(
+                PipelineStage::Synthesize,
+                "INVALID_SYNTHESIS_BUDGET",
+                "The verification-safe evidence partition exceeds the supported range",
+                false,
+            )
+        })?;
+    }
+    if required_claims <= claim_budget {
+        Ok(())
+    } else {
+        Err(stage_failure(
+            PipelineStage::Synthesize,
+            "SYNTHESIS_EVIDENCE_COVERAGE_UNSATISFIABLE",
+            "The validated evidence catalog cannot fit verification-safe claims within the document budget",
+            false,
+        ))
+    }
 }
 
 fn validate_synthesis_coverage(
@@ -903,6 +961,120 @@ fn validate_synthesis_coverage(
         ));
     }
     Ok(())
+}
+
+fn synthesis_verification_request_character_limit() -> Result<usize, PipelineFailure> {
+    verification_request_character_limit(MODEL_CONTEXT_TOKENS, VERIFICATION_OUTPUT_TOKENS).map_err(
+        |_| {
+            stage_failure(
+                PipelineStage::Synthesize,
+                "INVALID_SYNTHESIS_BUDGET",
+                "The configured model context cannot hold downstream claim verification",
+                false,
+            )
+        },
+    )
+}
+
+fn conservative_verification_claim_fits(
+    evidence: &[&PromptEvidenceItem],
+    request_character_limit: usize,
+) -> Result<bool, PipelineFailure> {
+    let user_prompt = serde_json::to_string(&VerificationPrompt {
+        claims: vec![PromptVerificationClaim {
+            claim_id: format!("claim-{}", "0".repeat(64)),
+            text: "x".repeat(MAX_CLAIM_CHARACTERS),
+            evidence: evidence
+                .iter()
+                .map(|item| PromptVerificationEvidence {
+                    evidence_id: item.evidence_id.clone(),
+                    exact_quote: item.exact_quote.clone(),
+                })
+                .collect(),
+        }],
+    })
+    .map_err(|_| {
+        stage_failure(
+            PipelineStage::Synthesize,
+            "INVALID_SYNTHESIS_BUDGET",
+            "The verification-safe evidence partition could not be serialized",
+            false,
+        )
+    })?;
+    let model_facing_characters = VERIFICATION_SYSTEM_PROMPT
+        .chars()
+        .count()
+        .checked_add(user_prompt.chars().count())
+        .ok_or_else(|| {
+            stage_failure(
+                PipelineStage::Synthesize,
+                "INVALID_SYNTHESIS_BUDGET",
+                "The verification-safe evidence partition exceeds the supported range",
+                false,
+            )
+        })?;
+    Ok(verification_request_within_bounds(
+        1,
+        model_facing_characters,
+        request_character_limit,
+    ))
+}
+
+fn ensure_claim_catalog_is_verifiable(
+    claims: &[CitedClaim],
+    evidence: &[PromptEvidenceItem],
+    claim_budget: usize,
+) -> Result<(), PipelineFailure> {
+    let evidence_by_id = evidence
+        .iter()
+        .map(|item| (item.evidence_id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    let prompt = VerificationPrompt {
+        claims: claims
+            .iter()
+            .map(|claim| {
+                let claim_evidence = claim
+                    .evidence_ids
+                    .iter()
+                    .map(|evidence_id| {
+                        evidence_by_id
+                            .get(evidence_id.as_str())
+                            .map(|item| PromptVerificationEvidence {
+                                evidence_id: item.evidence_id.clone(),
+                                exact_quote: item.exact_quote.clone(),
+                            })
+                            .ok_or_else(|| {
+                                stage_failure(
+                                    PipelineStage::Synthesize,
+                                    "MODEL_CLAIMS_RESPONSE_INVALID",
+                                    "A synthesis claim references unknown verification evidence",
+                                    true,
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(PromptVerificationClaim {
+                    claim_id: claim.claim_id.clone(),
+                    text: claim.text.clone(),
+                    evidence: claim_evidence,
+                })
+            })
+            .collect::<Result<Vec<_>, PipelineFailure>>()?,
+    };
+    let request_limit = synthesis_verification_request_character_limit()?;
+    plan_verification_batches(&prompt, claims, claim_budget, request_limit)
+        .map(|_| ())
+        .map_err(|failure| {
+            stage_failure(
+                PipelineStage::Synthesize,
+                "MODEL_CLAIMS_RESPONSE_INVALID",
+                format!(
+                    "The synthesis claim catalog cannot fit the bounded verification plan: {}",
+                    failure.message
+                ),
+                true,
+            )
+        })
 }
 
 fn synthesize_hierarchically(
@@ -957,7 +1129,12 @@ fn synthesize_hierarchically(
     let mut round = 1usize;
     while candidates.len() > claim_bounds.maximum {
         let reduction_needed = candidates.len() - claim_bounds.maximum;
-        let pairs = compatible_candidate_pairs(&candidates, reduction_needed);
+        let pairs = compatible_candidate_pairs(
+            &candidates,
+            reduction_needed,
+            evidence,
+            synthesis_verification_request_character_limit()?,
+        )?;
         if pairs.is_empty() {
             return Err(stage_failure(
                 PipelineStage::Synthesize,
@@ -1045,7 +1222,9 @@ fn synthesize_hierarchically(
 fn compatible_candidate_pairs(
     candidates: &[SynthesisCandidate],
     maximum_pairs: usize,
-) -> Vec<(usize, usize)> {
+    evidence: &[PromptEvidenceItem],
+    request_character_limit: usize,
+) -> Result<Vec<(usize, usize)>, PipelineFailure> {
     let mut pairs = Vec::new();
     let mut used = HashSet::new();
     for left_index in 0..candidates.len() {
@@ -1057,26 +1236,44 @@ fn compatible_candidate_pairs(
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        let compatible_right = ((left_index + 1)..candidates.len()).find(|right_index| {
-            !used.contains(right_index)
-                && left_evidence
-                    .union(
-                        &candidates[*right_index]
-                            .evidence_ids
-                            .iter()
-                            .map(String::as_str)
-                            .collect::<HashSet<_>>(),
-                    )
-                    .count()
-                    <= MAX_EVIDENCE_PER_CLAIM
-        });
+        let mut compatible_right = None;
+        for (right_index, right_candidate) in candidates.iter().enumerate().skip(left_index + 1) {
+            if used.contains(&right_index) {
+                continue;
+            }
+            let right_evidence = right_candidate
+                .evidence_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            let combined_ids = left_evidence
+                .union(&right_evidence)
+                .copied()
+                .collect::<HashSet<_>>();
+            if combined_ids.len() > MAX_EVIDENCE_PER_CLAIM {
+                continue;
+            }
+            let combined_evidence = evidence
+                .iter()
+                .filter(|item| combined_ids.contains(item.evidence_id.as_str()))
+                .collect::<Vec<_>>();
+            if combined_evidence.len() == combined_ids.len()
+                && conservative_verification_claim_fits(
+                    &combined_evidence,
+                    request_character_limit,
+                )?
+            {
+                compatible_right = Some(right_index);
+                break;
+            }
+        }
         if let Some(right_index) = compatible_right {
             used.insert(left_index);
             used.insert(right_index);
             pairs.push((left_index, right_index));
         }
     }
-    pairs
+    Ok(pairs)
 }
 
 fn request_evidence_claims(
@@ -1735,7 +1932,9 @@ fn plan_verification_batches(
         return Err(stage_failure(
             PipelineStage::Verify,
             "VERIFICATION_INPUT_TOO_LARGE",
-            "The aggregate verification input exceeds the document claim-budget allowance",
+            format!(
+                "The aggregate verification input ({aggregate_characters} characters) exceeds the document claim-budget allowance ({aggregate_limit} characters)"
+            ),
             false,
         ));
     }
@@ -3263,6 +3462,25 @@ fn validate_synthesized_document_without_runtime(
                 false,
             ));
         }
+        let evidence = analyzed
+            .chunks
+            .iter()
+            .flat_map(|analysis| analysis.evidence.iter())
+            .map(|evidence| PromptEvidenceItem {
+                evidence_id: evidence.evidence_id.clone(),
+                claim_text: evidence.claim_text.clone(),
+                exact_quote: evidence.exact_quote.clone(),
+            })
+            .collect::<Vec<_>>();
+        if ensure_claim_catalog_is_verifiable(&synthesized.claims, &evidence, claim_budget).is_err()
+        {
+            return Err(stage_failure(
+                PipelineStage::Synthesize,
+                "INVALID_SYNTHESIZED_DOCUMENT",
+                "Current synthesis claims must fit the bounded verification plan",
+                false,
+            ));
+        }
     }
     if render_cited_summary(&synthesized.claims, analyzed)? != synthesized.summary_text {
         return Err(stage_failure(
@@ -4051,6 +4269,7 @@ mod tests {
     use uuid::Uuid;
 
     const TEST_GENERATION_SEED: u64 = 9_876_543;
+    const OVERSIZED_SYNTHESIS_EVIDENCE_COUNT: usize = 48;
 
     struct TestDatabase(PathBuf);
 
@@ -4169,7 +4388,11 @@ mod tests {
                     let claims = fixture_claim_groups(prompt.evidence.len(), prompt.minimum_claims)
                         .into_iter()
                         .map(|indices| RawClaim {
-                            text: prompt.evidence[indices[0]].claim_text.clone(),
+                            text: prompt.evidence[indices[0]]
+                                .claim_text
+                                .chars()
+                                .take(MAX_ANALYSIS_CLAIM_CHARACTERS)
+                                .collect(),
                             evidence_ids: indices
                                 .into_iter()
                                 .map(|index| prompt.evidence[index].evidence_id.clone())
@@ -4494,7 +4717,14 @@ mod tests {
             .first()
             .expect("fixture chunk should contain evidence")
             .clone();
-        first_chunk.evidence = (0..LEGACY_MAX_EVIDENCE_PER_CHUNK)
+        let exact_quote = source
+            .exact_quote
+            .chars()
+            .find(|character| !character.is_whitespace())
+            .expect("source quote should contain a non-whitespace character")
+            .to_string();
+        assert!(!exact_quote.is_empty());
+        first_chunk.evidence = (0..OVERSIZED_SYNTHESIS_EVIDENCE_COUNT)
             .map(|index| {
                 let prefix = format!("Evidence {index:02}: ");
                 let claim_text = format!(
@@ -4508,14 +4738,14 @@ mod tests {
                     index,
                     &source.block_id,
                     &claim_text,
-                    &source.exact_quote,
+                    &exact_quote,
                 );
                 EvidenceItem {
                     evidence_id,
                     chunk_id: first_chunk.chunk_id.clone(),
                     block_id: source.block_id.clone(),
                     claim_text,
-                    exact_quote: source.exact_quote.clone(),
+                    exact_quote: exact_quote.clone(),
                     source_span: source.source_span.clone(),
                 }
             })
@@ -4873,9 +5103,18 @@ mod tests {
             6
         );
 
-        ensure_evidence_coverage_is_representable(128, 8)
+        let evidence_fixture = |count: usize| {
+            (0..count)
+                .map(|index| PromptEvidenceItem {
+                    evidence_id: format!("evidence-{index:064x}"),
+                    claim_text: format!("Evidence {index}"),
+                    exact_quote: "q".to_string(),
+                })
+                .collect::<Vec<_>>()
+        };
+        ensure_evidence_coverage_is_representable(&evidence_fixture(128), 8)
             .expect("the exact bounded evidence capacity should pass");
-        let error = ensure_evidence_coverage_is_representable(129, 8)
+        let error = ensure_evidence_coverage_is_representable(&evidence_fixture(129), 8)
             .expect_err("one evidence item beyond bounded claim capacity must fail");
         assert_eq!(error.code, "SYNTHESIS_EVIDENCE_COVERAGE_UNSATISFIABLE");
     }
@@ -4963,7 +5202,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_catalog_uses_deterministic_bounded_hierarchy_with_original_provenance() {
+    fn oversized_catalog_uses_deterministic_bounded_partitioning_with_original_provenance() {
         let database = TestDatabase::new();
         let (_conn, _run_id, analyzed, chunked, normalized) = large_analyzed_checkpoint(&database);
         let evidence = analyzed
@@ -5020,10 +5259,9 @@ mod tests {
             (0..u32::try_from(requests.len()).expect("request count should fit u32"))
                 .collect::<Vec<_>>()
         );
-        assert!(requests.iter().any(|request| matches!(
+        assert!(requests.iter().all(|request| matches!(
             &request.output_format,
-            ModelOutputFormat::JsonSchema { name, .. }
-                if name == HIERARCHICAL_SYNTHESIS_SCHEMA_NAME
+            ModelOutputFormat::JsonSchema { name, .. } if name == SYNTHESIS_SCHEMA_NAME
         )));
         for request in &requests {
             assert!(request.user_prompt.chars().count() <= MAX_SYNTHESIS_REQUEST_CHARACTERS);
@@ -5261,6 +5499,95 @@ mod tests {
     }
 
     #[test]
+    fn synthesis_candidate_compatibility_preserves_downstream_verification_size() {
+        let request_limit = synthesis_verification_request_character_limit()
+            .expect("verification-safe synthesis limit should derive");
+        let evidence = (0..MAX_EVIDENCE_PER_CLAIM)
+            .map(|index| PromptEvidenceItem {
+                evidence_id: format!("evidence-{index:064x}"),
+                claim_text: format!("Evidence {index}"),
+                exact_quote: "q".repeat(MAX_ANALYSIS_QUOTE_CHARACTERS),
+            })
+            .collect::<Vec<_>>();
+        let maximum_safe_evidence = (1..=MAX_EVIDENCE_PER_CLAIM)
+            .take_while(|count| {
+                conservative_verification_claim_fits(
+                    &evidence.iter().take(*count).collect::<Vec<_>>(),
+                    request_limit,
+                )
+                .expect("verification-safe claim size should calculate")
+            })
+            .last()
+            .expect("one maximum-length quote should remain verifiable");
+        assert!(maximum_safe_evidence < MAX_EVIDENCE_PER_CLAIM);
+        assert!(conservative_verification_claim_fits(
+            &evidence
+                .iter()
+                .take(maximum_safe_evidence)
+                .collect::<Vec<_>>(),
+            request_limit,
+        )
+        .expect("safe boundary should calculate"));
+        assert!(!conservative_verification_claim_fits(
+            &evidence
+                .iter()
+                .take(maximum_safe_evidence + 1)
+                .collect::<Vec<_>>(),
+            request_limit,
+        )
+        .expect("oversized boundary should calculate"));
+
+        let candidate = |candidate_id: &str, range: std::ops::Range<usize>| SynthesisCandidate {
+            candidate_id: candidate_id.to_string(),
+            text: candidate_id.to_string(),
+            evidence_ids: evidence[range]
+                .iter()
+                .map(|item| item.evidence_id.clone())
+                .collect(),
+        };
+        let safe_candidates = vec![
+            candidate("candidate-safe-left", 0..maximum_safe_evidence - 1),
+            candidate(
+                "candidate-safe-right",
+                maximum_safe_evidence - 1..maximum_safe_evidence,
+            ),
+        ];
+        assert_eq!(
+            compatible_candidate_pairs(&safe_candidates, 1, &evidence, request_limit)
+                .expect("safe candidates should plan"),
+            vec![(0, 1)]
+        );
+        let oversized_candidates = vec![
+            candidate("candidate-large-left", 0..maximum_safe_evidence),
+            candidate(
+                "candidate-large-right",
+                maximum_safe_evidence..maximum_safe_evidence + 1,
+            ),
+        ];
+        assert!(
+            compatible_candidate_pairs(&oversized_candidates, 1, &evidence, request_limit)
+                .expect("oversized candidates should still plan deterministically")
+                .is_empty()
+        );
+
+        let claim = |count: usize| CitedClaim {
+            claim_id: format!("claim-{}", "0".repeat(64)),
+            text: "x".repeat(MAX_CLAIM_CHARACTERS),
+            evidence_ids: evidence
+                .iter()
+                .take(count)
+                .map(|item| item.evidence_id.clone())
+                .collect(),
+        };
+        ensure_claim_catalog_is_verifiable(&[claim(maximum_safe_evidence)], &evidence, 1)
+            .expect("the adjacent safe claim should pass the complete verification planner");
+        let error =
+            ensure_claim_catalog_is_verifiable(&[claim(maximum_safe_evidence + 1)], &evidence, 1)
+                .expect_err("the count-legal oversized claim must fail during synthesis");
+        assert_eq!(error.code, "MODEL_CLAIMS_RESPONSE_INVALID");
+    }
+
+    #[test]
     fn hierarchical_cancellation_stops_at_the_first_completed_request_boundary() {
         let database = TestDatabase::new();
         let (_conn, _run_id, analyzed, chunked, normalized) = large_analyzed_checkpoint(&database);
@@ -5282,27 +5609,42 @@ mod tests {
     }
 
     #[test]
-    fn malformed_hierarchical_response_fails_without_a_synthesized_artifact() {
+    fn malformed_candidate_response_fails_hierarchical_composition() {
         let database = TestDatabase::new();
-        let (mut conn, run_id, _analyzed, _chunked, _normalized) =
+        let (_conn, _run_id, analyzed, _chunked, _normalized) =
             large_analyzed_checkpoint(&database);
+        let evidence = analyzed
+            .chunks
+            .iter()
+            .flat_map(|analysis| analysis.evidence.iter())
+            .map(|item| PromptEvidenceItem {
+                evidence_id: item.evidence_id.clone(),
+                claim_text: item.claim_text.clone(),
+                exact_quote: item.exact_quote.clone(),
+            })
+            .collect::<Vec<_>>();
         let runtime = RecordingHierarchicalRuntime::with_invalid_candidate_reference();
 
-        let error = synthesize_analyzed_document(&mut conn, &runtime, &run_id)
-            .expect_err("foreign candidate output must fail the active stage");
+        let error = synthesize_hierarchically(
+            &runtime,
+            &analyzed,
+            &evidence,
+            ClaimBounds {
+                minimum: 4,
+                maximum: 4,
+            },
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+            &mut SynthesisRequestBudget::default(),
+        )
+        .expect_err("foreign candidate output must fail hierarchical composition");
 
-        assert_eq!(error.code(), "MODEL_CLAIMS_RESPONSE_INVALID");
-        assert!(get_synthesized_document(&conn, &run_id)
-            .expect("synthesis lookup should succeed")
-            .is_none());
-        let run = get_pipeline_run(&conn, &run_id)
-            .expect("run should load")
-            .expect("run should exist");
-        assert_eq!(run.state, PipelineState::Failed);
-        assert!(!list_pipeline_events(&conn, &run_id)
-            .expect("events should load")
-            .iter()
-            .any(|event| event.next_state == PipelineState::Synthesized));
+        assert_eq!(error.code, "MODEL_CLAIMS_RESPONSE_INVALID");
+        assert!(runtime.captured_requests().iter().any(|request| matches!(
+            &request.output_format,
+            ModelOutputFormat::JsonSchema { name, .. }
+                if name == HIERARCHICAL_SYNTHESIS_SCHEMA_NAME
+        )));
     }
 
     #[test]
