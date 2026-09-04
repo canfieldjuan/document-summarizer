@@ -412,7 +412,7 @@ many distinct pages and rejects an under-floor response. Scope-local IDs are at
 most eight ASCII characters, analysis claim text is at most 192 characters,
 and each request remains bounded before inference.
 
-For synthesis version `3.0.0`, `N` is the native-text page count and `E`
+For synthesis version `4.0.0`, `N` is the native-text page count and `E`
 is the validated evidence count. The document claim budget and floor are:
 
 `B = min(64, max(8, ceil(3 * N / 5)))`
@@ -444,7 +444,7 @@ artifacts must pass the same planner when loaded, so a count-legal but
 context-oversized claim set fails in synthesis rather than surprising the later
 verification stage.
 
-Verification version `3.0.0` classifies every synthesized claim against only
+Verification version `4.0.0` classifies every synthesized claim against only
 its validated exact quotations. Requests stay in canonical claim order and
 contain at most 16 claims. With context `C = 8,192`, output allowance
 `O = 4,096`, framing reserve `R_V = 512`, and the identifier-aware
@@ -480,6 +480,14 @@ attempt. Update and delete triggers make attempt history immutable; migration
 backfills existing primary summary artifacts as ordinal zero. Artifact JSON,
 version, document identity, creation time, and SHA-256 row hash remain checked
 on retrieval.
+
+Current artifacts use analysis version `3.0.0`, synthesis, verification, and
+summary version `4.0.0`, and citation version `3.0.0`. Previously persisted
+semantic synthesis, verification, and summary version `3.0.0` artifacts and
+citation version `2.0.0` retain their original validation rules; mechanical
+version `2.0.0` summary artifacts and citation version `1.0.0` remain readable
+separately. Continuation from a pre-upgrade `SYNTHESIZED`, `VERIFIED`, or
+completed checkpoint does not apply current-version invariants retroactively.
 
 The supported runtime adapter is Ollama through its loopback OpenAI-compatible
 API, defaulting to `http://127.0.0.1:11434/v1/` and

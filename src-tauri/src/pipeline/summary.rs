@@ -16,15 +16,19 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 pub const ANALYSIS_VERSION: &str = "3.0.0";
-pub const SYNTHESIS_VERSION: &str = "3.0.0";
-pub const VERIFICATION_VERSION: &str = "3.0.0";
-pub const SUMMARY_VERSION: &str = "3.0.0";
-pub const CITATION_VERSION: &str = "2.0.0";
+pub const SYNTHESIS_VERSION: &str = "4.0.0";
+pub const VERIFICATION_VERSION: &str = "4.0.0";
+pub const SUMMARY_VERSION: &str = "4.0.0";
+pub const CITATION_VERSION: &str = "3.0.0";
 
 const LEGACY_ANALYSIS_VERSION: &str = "2.0.0";
+const PREVIOUS_SYNTHESIS_VERSION: &str = "3.0.0";
 const LEGACY_SYNTHESIS_VERSION: &str = "2.0.0";
+const PREVIOUS_VERIFICATION_VERSION: &str = "3.0.0";
 const LEGACY_VERIFICATION_VERSION: &str = "2.0.0";
+const PREVIOUS_SUMMARY_VERSION: &str = "3.0.0";
 const LEGACY_SUMMARY_VERSION: &str = "2.0.0";
+const PREVIOUS_CITATION_VERSION: &str = "2.0.0";
 const LEGACY_CITATION_VERSION: &str = "1.0.0";
 
 const ANALYSIS_SCHEMA_NAME: &str = "document_chunk_evidence_selection_v2";
@@ -658,10 +662,10 @@ pub fn complete_verified_document(
             ),
         ));
     }
-    let summary_version = if verified.verification_version == LEGACY_VERIFICATION_VERSION {
-        LEGACY_SUMMARY_VERSION
-    } else {
-        SUMMARY_VERSION
+    let summary_version = match verified.verification_version.as_str() {
+        LEGACY_VERIFICATION_VERSION => LEGACY_SUMMARY_VERSION,
+        PREVIOUS_VERIFICATION_VERSION => PREVIOUS_SUMMARY_VERSION,
+        _ => SUMMARY_VERSION,
     };
     let mut summary = SummaryArtifact {
         document_id: verified.document_id.clone(),
@@ -3606,7 +3610,7 @@ fn validate_synthesized_document_without_runtime(
     validate_analyzed_content(analyzed, chunked, normalized)?;
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
-        SYNTHESIS_VERSION | LEGACY_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION | PREVIOUS_SYNTHESIS_VERSION | LEGACY_SYNTHESIS_VERSION
     );
     if synthesized.document_id != analyzed.document_id
         || !synthesis_version_supported
@@ -3720,6 +3724,9 @@ fn validate_verified_document(
     if verified.verification_version == LEGACY_VERIFICATION_VERSION {
         return validate_legacy_verified_document(verified, synthesized);
     }
+    if verified.verification_version == PREVIOUS_VERIFICATION_VERSION {
+        return validate_previous_verified_document(verified, synthesized, analyzed);
+    }
 
     let verification_metadata_valid = verified.document_id == synthesized.document_id
         && verified.verification_version == VERIFICATION_VERSION
@@ -3763,6 +3770,54 @@ fn validate_verified_document(
             PipelineStage::Verify,
             "INVALID_VERIFIED_DOCUMENT",
             "Semantic verification identity, verdict coverage, filtered claims, or warnings are invalid",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_previous_verified_document(
+    verified: &VerifiedDocument,
+    synthesized: &SynthesizedDocument,
+    analyzed: &AnalyzedDocument,
+) -> Result<(), PipelineFailure> {
+    let verification_metadata_valid = verified.document_id == synthesized.document_id
+        && verified.synthesis_attempt_ordinal == 0
+        && !verified.runtime_id.trim().is_empty()
+        && !verified.model_id.trim().is_empty()
+        && verified.source_chunk_ids == synthesized.source_chunk_ids
+        && verified.claim_verifications.len() == synthesized.claims.len();
+    let verification_coverage_valid = verification_metadata_valid
+        && verified
+            .claim_verifications
+            .iter()
+            .zip(&synthesized.claims)
+            .all(|(verification, claim)| {
+                verification.claim_id == claim.claim_id
+                    && verification.evidence_ids == claim.evidence_ids
+            });
+    let supported_claims = synthesized
+        .claims
+        .iter()
+        .zip(&verified.claim_verifications)
+        .filter(|(_, verification)| verification.verdict == ClaimVerdict::Supported)
+        .map(|(claim, _)| claim.clone())
+        .collect::<Vec<_>>();
+    let expected_summary = render_cited_summary(&supported_claims, analyzed)?;
+    if !verification_coverage_valid
+        || verified.claims != supported_claims
+        || verified.summary_text != expected_summary
+        || verified.warnings
+            != verification_warnings(synthesized, &verified.claim_verifications, false)
+        || verified
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "SEMANTIC_VERIFICATION_DEFERRED")
+    {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "INVALID_VERIFIED_DOCUMENT",
+            "Previous semantic verification identity, verdict coverage, filtered claims, or warnings are invalid",
             false,
         ));
     }
@@ -3998,6 +4053,7 @@ fn build_citation_artifact(
 pub(crate) fn expected_citation_version(summary_version: &str) -> Option<&'static str> {
     match summary_version {
         SUMMARY_VERSION => Some(CITATION_VERSION),
+        PREVIOUS_SUMMARY_VERSION => Some(PREVIOUS_CITATION_VERSION),
         LEGACY_SUMMARY_VERSION => Some(LEGACY_CITATION_VERSION),
         _ => None,
     }
@@ -6152,6 +6208,136 @@ mod tests {
                 .expect("legacy synthesis should pass row integrity validation")
                 .expect("legacy synthesis should exist"),
             legacy
+        );
+    }
+
+    #[test]
+    fn previous_version_three_summary_chain_keeps_old_validation_boundaries() {
+        let database = TestDatabase::new();
+        let (conn, run_id) = chunked_run(&database);
+        let chunked = get_chunked_document(&conn, &run_id)
+            .expect("chunked artifact should load")
+            .expect("chunked artifact should exist");
+        let normalized = get_normalized_document(&conn, &run_id)
+            .expect("normalized artifact should load")
+            .expect("normalized artifact should exist");
+        let runtime = FakeRuntime::healthy();
+        let mut analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("current analysis should validate");
+        analyzed.analysis_version = LEGACY_ANALYSIS_VERSION.to_string();
+        for chunk in &mut analyzed.chunks {
+            for (index, evidence) in chunk.evidence.iter_mut().enumerate() {
+                evidence.evidence_id = deterministic_evidence_id(
+                    &analyzed.document_id,
+                    LEGACY_ANALYSIS_VERSION,
+                    &chunk.chunk_id,
+                    index,
+                    &evidence.block_id,
+                    &evidence.claim_text,
+                    &evidence.exact_quote,
+                );
+            }
+        }
+        validate_analyzed_document(&analyzed, &chunked, &normalized, &runtime)
+            .expect("pre-upgrade analysis should remain valid");
+
+        let mut previous = synthesize(
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture synthesis should validate");
+        previous.claims.truncate(1);
+        previous.synthesis_version = PREVIOUS_SYNTHESIS_VERSION.to_string();
+        for (index, claim) in previous.claims.iter_mut().enumerate() {
+            claim.claim_id = deterministic_claim_id(
+                &previous.document_id,
+                PREVIOUS_SYNTHESIS_VERSION,
+                index,
+                &claim.text,
+                &claim.evidence_ids,
+            );
+        }
+        previous.summary_text = render_cited_summary(&previous.claims, &analyzed)
+            .expect("previous summary should render");
+        validate_synthesized_document(&previous, &analyzed, &chunked, &normalized, &runtime)
+            .expect("thin version-three synthesis must retain its original validation rules");
+
+        let mut current_labeled = previous.clone();
+        current_labeled.synthesis_version = SYNTHESIS_VERSION.to_string();
+        for (index, claim) in current_labeled.claims.iter_mut().enumerate() {
+            claim.claim_id = deterministic_claim_id(
+                &current_labeled.document_id,
+                SYNTHESIS_VERSION,
+                index,
+                &claim.text,
+                &claim.evidence_ids,
+            );
+        }
+        current_labeled.summary_text = render_cited_summary(&current_labeled.claims, &analyzed)
+            .expect("current-labeled summary should render");
+        let error = validate_synthesized_document(
+            &current_labeled,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &runtime,
+        )
+        .expect_err("the same thin catalog must fail current coverage invariants");
+        assert_eq!(error.code, "INVALID_SYNTHESIZED_DOCUMENT");
+
+        let verifications = previous
+            .claims
+            .iter()
+            .map(|claim| ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            })
+            .collect::<Vec<_>>();
+        let previous_verified = VerifiedDocument {
+            document_id: previous.document_id.clone(),
+            verification_version: PREVIOUS_VERIFICATION_VERSION.to_string(),
+            synthesis_attempt_ordinal: 0,
+            runtime_id: runtime.runtime_id().to_string(),
+            model_id: runtime.model_id().to_string(),
+            summary_text: previous.summary_text.clone(),
+            source_chunk_ids: previous.source_chunk_ids.clone(),
+            claims: previous.claims.clone(),
+            claim_verifications: verifications.clone(),
+            warnings: verification_warnings(&previous, &verifications, false),
+        };
+        validate_verified_document(
+            &previous_verified,
+            &previous,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .expect("version-three semantic verification must remain readable");
+        let mut previous_with_retry_ordinal = previous_verified.clone();
+        previous_with_retry_ordinal.synthesis_attempt_ordinal = 1;
+        let error = validate_verified_document(
+            &previous_with_retry_ordinal,
+            &previous,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .expect_err("version-three verification cannot claim a retry-only ordinal");
+        assert_eq!(error.code, "INVALID_VERIFIED_DOCUMENT");
+        assert_eq!(
+            expected_citation_version(PREVIOUS_SUMMARY_VERSION),
+            Some(PREVIOUS_CITATION_VERSION)
         );
     }
 
