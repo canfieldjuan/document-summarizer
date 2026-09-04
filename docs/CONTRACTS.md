@@ -417,67 +417,9 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ## Local summary artifacts
 
-### Per-page selection revision (contract before implementation)
-
-Root cause: multi-item analysis asks the model to enforce quote-ID uniqueness
-and distinct-page coverage. The live corpus failed both obligations. An enum
-only restricts membership, and `uniqueItems` compares whole objects, not their
-quote-ID field. The production Ollama/llama.cpp decoder also does not support
-`uniqueItems`; this is not solely a vLLM compatibility limitation.
-
-Required change surface: `summary.rs` analysis planning, request shape, artifact
-validation and regression fixtures; `model.rs` decoder rationale; this contract
-and `LOCAL_MODEL_EVALUATION.md`. Analysis version advances to `4.0.0` and its
-selection schema advances; stored versions `3.0.0` and `2.0.0` remain readable
-under their original validators, without rewriting their evidence identities.
-
-Each selected native-text page receives exactly one model request, containing
-only that page's candidate quotations. The evidence array has `minItems: 1`
-and `maxItems: 1`, with the quote-ID enum restricted to those supplied candidates.
-Rust still rejects empty, multiple, foreign, overlong, or malformed output;
-it never deduplicates or repairs an invalid response. Claim text remains bounded
-at 192 characters. The model chooses material evidence and paraphrases it;
-the application restores exact quotation and provenance as before.
-
-For `N` native-text pages and unchanged claim budget `B`, select
-`P = min(N, max(B, ceil(3*N/5)))` distinct pages. This is the attainable stopping
-target: both budget and 60-percent evidence-page coverage are met, or all pages
-are exhausted when `N < B`. Select `P` evenly spaced source-order page indices,
-including the first and last when `P > 1`; do not satisfy the target with a
-head-only prefix. Pages without native text are excluded. Once all selected
-pages yield their single validated item, stop; no extra analysis requests run.
-Thus the NARA fixture requires eight requests and the DOL deck 67, rather than
-eleven and 111. This bounds analysis requests by page count, not by chunk size.
-Final accepted-claim page coverage is still measured separately after verification.
-
-The current multi-page scope floor and output-derived evidence-quota math are
-replaced by this application-owned loop invariant. The 1,024-token output
-allowance and existing input guard remain unchanged. Ordered chunk metadata is
-retained, including empty evidence for chunks with no selected page; reloading
-must prove exactly one evidence item for each planned page and none for other
-pages. Prior analysis artifacts retain their historical nonempty-chunk and
-scope-floor checks. No database migration is needed.
-
-Explicit non-scope: synthesis/verification budgets, retries, durable lineage,
-validators for exactness and provenance, timeout, endpoint, model, parser,
-OCR/vision, Connect, packaging, dependencies, and output rendering. Deterministic
-positional quote selection is a contingent fallback, not an automatic response
-to a synthesis or verification failure.
-
-Verification plan: single-item schema and page-only enum tests; zero/two-item,
-foreign-ID, mixed-response, and 192/193-character boundary probes; sparse/dense
-page plans, tail inclusion, small-document exhaustion, visual-only exclusion,
-chunk-independent stopping and reload rejection of missing/extra page evidence;
-historical artifact compatibility and existing negative tests. Run all local
-tests, strict clippy and formatting, then both live corpus runs. Report delivered
-claims, validated evidence, cited/native-page fraction, request count and total
-completion tokens, with any failure first. Do not infer latency improvement.
-Fold this revision into current behavior and remove this pending subsection in
-the implementation commit.
-
 `ModelRuntime` is the only inference boundary. A request may select plain text
 or a named, bounded JSON Schema output contract. Current analysis version
-`3.0.0` uses application-built quote candidates rather than model-authored
+`4.0.0` uses application-built quote candidates rather than model-authored
 quotation bytes. Each candidate is a bounded contiguous exact substring of one
 authoritative normalized block and carries a scope-local ordinal such as `q1`,
 plus fixed block/page provenance and a durable content-derived identity that the
@@ -489,19 +431,38 @@ evidence ID. Exact quotation and provenance therefore hold by construction, and
 historical repair warnings remain readable without a current quote-copy repair
 request.
 
-Analysis partitions each chunk into source-ordered page scopes. Candidate
-construction gives every native-text page/block an eligible quotation before an
-earlier block receives additional capacity, so a bounded catalog cannot silently
-drop the tail. Let `A` be the 1,024-token analysis output allowance,
-`R_A = 192` the response-envelope reserve, and `I_A = 92` the bounded
-quote-ID/claim-item allowance. The response quota is
-`Q_A = floor((A - R_A) / I_A) = 9`, and one scope contains at most
-`S_max = floor(5 * Q_A / 3) = 15` native-text pages; character bounds may
-split it further. For a scope containing `S` native-text pages, Rust requires
-`F_scope = max(1, ceil(3 * S / 5))` distinct evidence items from at least that
-many distinct pages and rejects an under-floor response. Scope-local IDs are at
-most eight ASCII characters, analysis claim text is at most 192 characters,
-and each request remains bounded before inference.
+Analysis selects exactly one evidence item per selected native-text page. Each
+request contains only that page's candidate quotations, with an enum restricted
+to their scope-local IDs and an evidence array bounded by `minItems: 1` and
+`maxItems: 1`. Rust rejects empty, multiple, foreign, mixed-validity, malformed,
+or overlong responses without deduplication or repair. The model chooses a
+material passage and writes claim text; Rust restores exact bytes and provenance.
+Candidate construction covers the page's blocks and tail before inference.
+Scope-local IDs are at most eight ASCII characters, claim text is at most 192
+characters, and the output allowance remains 1,024 tokens. The input guard
+remains unchanged. Multi-page output quotas and model-enforced page floors no
+longer govern current analysis.
+
+For `N` native-text pages and the claim budget `B` below, Rust selects
+`P = min(N, max(B, ceil(3*N/5)))` distinct pages. The plan evenly spaces
+source-order indices, including first and last when `P > 1`, rather than
+dropping the tail with a head-only prefix. Pages without native text are
+excluded. Each planned page yields one validated item, then analysis stops;
+small documents exhaust all pages when `N < B`. This meets the attainable
+budget and 60-percent evidence-page target with eight requests for NARA and
+67 for the DOL deck. Final accepted-claim page coverage is measured separately.
+Ordered chunk metadata remains intact; chunks with no planned page have empty
+evidence. Reload validation requires exactly one item per planned page and none
+elsewhere. No database migration is required. Historical analysis `3.0.0`
+retains its multi-page scope quotas and `2.0.0` its original validators; neither
+version's evidence identities are rewritten.
+
+Regression tests cover page-only enums, single-item cardinality, empty/two-item
+and mixed/foreign responses, 192/193-character bounds, sparse/dense plans, tail
+inclusion, small-page exhaustion, visual-only exclusion, chunk-independent
+stopping, missing/extra evidence on reload, and historical artifact compatibility.
+Deterministic positional quote selection remains a contingent fallback, not an
+automatic response to synthesis or verification failure.
 
 For synthesis version `4.0.0`, `N` is the native-text page count and `E`
 is the validated evidence count. The document claim budget and floor are:
@@ -572,7 +533,7 @@ backfills existing primary summary artifacts as ordinal zero. Artifact JSON,
 version, document identity, creation time, and SHA-256 row hash remain checked
 on retrieval.
 
-Current artifacts use analysis version `3.0.0`, synthesis, verification, and
+Current artifacts use analysis version `4.0.0`, synthesis, verification, and
 summary version `4.0.0`, and citation version `3.0.0`. Previously persisted
 semantic synthesis, verification, and summary version `3.0.0` artifacts and
 citation version `2.0.0` retain their original validation rules; mechanical
@@ -609,7 +570,10 @@ remain omitted. Object closure, required fields, enums, non-empty strings, and
 array bounds survive. The analysis system prompt explicitly states that each
 `claim_text` is at most 192 characters and that each `quote_id` may appear at
 most once in the entire response. An enum constrains membership, not reuse;
-`uniqueItems` would compare whole objects rather than quote IDs.
+`uniqueItems` would compare whole objects rather than quote IDs and is unsupported
+by production Ollama's llama.cpp grammar converter as well as vLLM. Current
+single-item page-local analysis enforces uniqueness and page membership
+structurally instead. See the [llama.cpp decoder limitations](https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md#json-schemas--gbnf).
 
 Projection tests cover zero, 191, 192, 193, 2,000, and 4,000, preserve the
 canonical input schema, and exercise small and large bounds in nested schemas.

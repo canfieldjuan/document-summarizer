@@ -621,7 +621,10 @@ fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_json::Value {
     };
 
     let mut projected = fields.clone();
-    // vLLM does not implement `uniqueItems`. Retain the proven small string
+    // Neither the production Ollama/llama.cpp grammar converter nor vLLM
+    // enforces `uniqueItems`; it also compares objects, not quote-ID fields.
+    // Single-item page analysis enforces uniqueness structurally in both paths.
+    // Retain the proven small string
     // bounds; larger Ollama grammar repetitions can fail compilation.
     // Stage parsers remain authoritative even when the decoder has a bound.
     projected.remove("uniqueItems");

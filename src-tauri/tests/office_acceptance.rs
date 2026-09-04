@@ -632,6 +632,22 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .max(3)
         .min(claim_budget)
         .min(evidence_ids.len());
+    // Print delivered metrics before quality assertions: a thin result must not
+    // disappear from the report merely because the acceptance gate rejects it.
+    eprintln!(
+        "OFFICE_LIVE_DELIVERED_METRICS {}",
+        json!({
+            "claim_count": result.citations.claims.len(),
+            "claim_budget": claim_budget,
+            "claim_floor": claim_floor,
+            "validated_evidence_count": evidence_ids.len(),
+            "cited_evidence_count": cited_evidence_ids.len(),
+            "cited_native_text_page_count": cited_native_text_pages.len(),
+            "native_text_page_count": native_text_pages.len(),
+            "request_count": runtime.requests().len(),
+            "warning_codes": result.summary.warnings.iter().map(|warning| warning.code.as_str()).collect::<Vec<_>>(),
+        })
+    );
     assert!(result.citations.claims.len() >= claim_floor);
     assert!(result.citations.claims.len() <= claim_budget);
     assert_eq!(cited_evidence_ids, evidence_ids);
