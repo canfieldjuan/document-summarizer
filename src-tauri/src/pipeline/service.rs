@@ -554,6 +554,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
     use uuid::Uuid;
 
     struct TestDatabase(PathBuf);
@@ -596,6 +597,43 @@ mod tests {
 
     impl ModelRuntime for FixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            Ok(ModelResponse {
+                text: crate::pipeline::summary::fixture_model_output(request),
+                runtime_id: self.runtime_id().to_string(),
+                model_id: self.model_id().to_string(),
+            })
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "fixture-model"
+        }
+    }
+
+    #[derive(Default)]
+    struct SeedRecordingFixtureRuntime {
+        seeds: Mutex<Vec<u64>>,
+    }
+
+    impl SeedRecordingFixtureRuntime {
+        fn seeds(&self) -> Vec<u64> {
+            self.seeds.lock().expect("seed lock should succeed").clone()
+        }
+    }
+
+    impl ModelRuntime for SeedRecordingFixtureRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            self.seeds
+                .lock()
+                .expect("seed lock should succeed")
+                .push(request.seed);
             Ok(ModelResponse {
                 text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
@@ -1404,15 +1442,22 @@ mod tests {
             assert!(serialized.get("retryOfRunId").is_some());
             assert!(serialized.get("retryRunId").is_some());
 
+            let retry_runtime = SeedRecordingFixtureRuntime::default();
             let completed = retry_failed_run_to_summary(
                 &mut conn,
                 &parent.run_id,
                 parent.state_version,
-                pipeline.components(&FixtureRuntime),
+                pipeline.components(&retry_runtime),
             )
             .expect("retry should complete from the ingested checkpoint");
             assert_ne!(completed.run_id, parent.run_id);
             assert_eq!(completed.document.document_id, parent.document_id);
+            let parent_seed = crate::pipeline::summary::generation_seed_for_run(&parent.run_id);
+            let retry_seed = crate::pipeline::summary::generation_seed_for_run(&completed.run_id);
+            assert_ne!(retry_seed, parent_seed);
+            let request_seeds = retry_runtime.seeds();
+            assert!(!request_seeds.is_empty());
+            assert!(request_seeds.iter().all(|seed| *seed == retry_seed));
             assert_eq!(
                 get_pipeline_run(&conn, &parent.run_id)
                     .expect("parent should reload")

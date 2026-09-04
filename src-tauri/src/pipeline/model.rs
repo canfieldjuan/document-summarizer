@@ -16,7 +16,6 @@ const DEFAULT_MODEL: &str = "qwen3-30b-a3b:latest";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const HEALTH_TIMEOUT_SECONDS: u64 = 5;
-const DETERMINISTIC_GENERATION_SEED: u64 = 42;
 const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
@@ -140,7 +139,7 @@ impl OllamaRuntime {
                 },
             ],
             temperature: 0.0,
-            seed: DETERMINISTIC_GENERATION_SEED,
+            seed: request.seed,
             max_tokens: request.max_output_tokens,
             stream: false,
             reasoning_effort: "none",
@@ -848,7 +847,7 @@ mod tests {
                 },
             ],
             temperature: 0.0,
-            seed: DETERMINISTIC_GENERATION_SEED,
+            seed: 7_654_321,
             max_tokens: 8,
             stream: false,
             reasoning_effort: "none",
@@ -857,7 +856,7 @@ mod tests {
         let serialized = serde_json::to_value(payload).expect("chat payload should serialize");
         assert_eq!(serialized["reasoning_effort"], "none");
         assert_eq!(serialized["response_format"]["type"], "json_object");
-        assert_eq!(serialized["seed"], DETERMINISTIC_GENERATION_SEED);
+        assert_eq!(serialized["seed"], 7_654_321);
         assert_eq!(serialized["max_tokens"], 8);
     }
 
@@ -869,6 +868,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: "system".to_string(),
             user_prompt: "user".to_string(),
+            seed: 8_675_309,
             max_output_tokens: 8,
             output_format: ModelOutputFormat::JsonSchema {
                 name: "fixture_v1".to_string(),
@@ -895,9 +895,7 @@ mod tests {
         assert!(requests
             .iter()
             .all(|request| request["reasoning_effort"] == "none"));
-        assert!(requests
-            .iter()
-            .all(|request| request["seed"] == DETERMINISTIC_GENERATION_SEED));
+        assert!(requests.iter().all(|request| request["seed"] == 8_675_309));
     }
 
     #[test]

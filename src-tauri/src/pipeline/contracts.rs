@@ -351,6 +351,7 @@ pub struct ChunkedDocument {
 pub struct ModelRequest {
     pub system_prompt: String,
     pub user_prompt: String,
+    pub seed: u64,
     pub max_output_tokens: u32,
     pub output_format: ModelOutputFormat,
 }
