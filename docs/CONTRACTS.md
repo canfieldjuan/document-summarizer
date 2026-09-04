@@ -417,6 +417,41 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ## Local summary artifacts
 
+### Output allowance revision (contract before implementation)
+
+Root cause: the analysis allowance was reduced from 2,048 to 1,024 tokens in
+PR #12 alongside concise multi-item evidence production. It did not reserve
+generation space for a reasoning model. A direct Muse GGUF run exhausted 1,024
+generation tokens without final text while remaining below the context limit.
+
+Raise current analysis output to 2,048 tokens and both direct/hierarchical
+synthesis output to 4,096. Verification stays at 4,096. These are maximum
+generation allowances, not required answer lengths or an instruction to think
+longer. The endpoint, model default, reasoning control, temperature, context
+assumption of 8,192 tokens, and 900-second timeout remain unchanged.
+
+Required change surface: `summary.rs` constants, input admission/partitioning,
+historical-analysis quota isolation and regression tests; this contract and
+the model evaluation. Before inference, analysis and synthesis count system
+plus serialized user text against `min(16_000, 3*(C-O-512))` characters, using
+the existing conservative character proxy, not claiming exact tokenization.
+Synthesis partitioning reserves the larger of its two system prompts. This
+keeps planning and execution consistent as increased output reduces input room.
+Historical v3 analysis continues to derive its nine-item quota from its original
+1,024-token allowance. Do not retroactively change artifact validators.
+
+Explicit non-scope: no relaxed evidence/claim/string/provenance validators,
+budget floors, repair/deduplication, parser, DB migration, model runtime fix,
+Connect, packaging or rendering changes. The standalone Muse schema-enforcement
+failure remains a separate blocker; extra output is not a schema fix.
+
+Verification: request payload tests for all generation stages; exact input
+boundary and boundary-plus-one tests including system text; prior v3 quota and
+artifact tests; full local tests, strict clippy and formatting. Rerun the public
+NARA and DOL fixtures against the same standalone Muse GGUF with only output
+allowances and resulting input admission changed, and lead with remaining
+failures. Fold this subsection into current behavior in the code commit.
+
 `ModelRuntime` is the only inference boundary. A request may select plain text
 or a named, bounded JSON Schema output contract. Current analysis version
 `4.0.0` uses application-built quote candidates rather than model-authored
