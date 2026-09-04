@@ -755,12 +755,18 @@ text, prompts, quotations, model output, credentials, or private source paths.
 The current 900-second request deadline is not raised by this work.
 
 Behavior-version constants must advance for changed analysis, synthesis,
-verification, summary, and citation semantics while historical artifacts remain
-readable. The bounded re-synthesis must not overwrite the already-persisted
-first synthesis, and the final verification must identify the synthesis attempt
-it validates. A narrowly scoped persisted-artifact or schema change needed to
-represent that immutable attempt lineage is in scope; unrelated storage changes
-are not.
+verification, summary, and citation semantics. Current artifacts use analysis
+version `3.0.0`, synthesis, verification, and summary version `4.0.0`, and
+citation version `3.0.0`. Previously persisted semantic synthesis, verification,
+and summary version `3.0.0` artifacts and citation version `2.0.0` retain their
+original validation rules; mechanical version `2.0.0` summary artifacts and
+citation version `1.0.0` remain readable separately. Continuation from a
+pre-upgrade `SYNTHESIZED`, `VERIFIED`, or completed checkpoint must not apply
+new-version invariants retroactively. The bounded re-synthesis must not overwrite the
+already-persisted first synthesis, and the final verification must identify the
+synthesis attempt it validates. A narrowly scoped persisted-artifact or schema
+change needed to represent that immutable attempt lineage is in scope;
+unrelated storage changes are not.
 
 ### Required change surface
 
