@@ -503,7 +503,7 @@ pub(crate) fn verify_synthesized_document_controlled(
         ));
     }
 
-    let coverage_met =
+    let coverage_met = if persisted_synthesis.synthesis_version == SYNTHESIS_VERSION {
         match verification_meets_coverage(&verified, &persisted_analysis, &normalized) {
             Ok(coverage_met) => coverage_met,
             Err(failure) => {
@@ -515,7 +515,10 @@ pub(crate) fn verify_synthesized_document_controlled(
                     failure,
                 ));
             }
-        };
+        }
+    } else {
+        true
+    };
     if coverage_met {
         complete_verification(conn, run_id, verifying_run.state_version, 0, &verified)?;
         return Ok(verified);
@@ -6214,7 +6217,7 @@ mod tests {
     #[test]
     fn previous_version_three_summary_chain_keeps_old_validation_boundaries() {
         let database = TestDatabase::new();
-        let (conn, run_id) = chunked_run(&database);
+        let (mut conn, run_id) = chunked_run(&database);
         let chunked = get_chunked_document(&conn, &run_id)
             .expect("chunked artifact should load")
             .expect("chunked artifact should exist");
@@ -6339,6 +6342,45 @@ mod tests {
             expected_citation_version(PREVIOUS_SUMMARY_VERSION),
             Some(PREVIOUS_CITATION_VERSION)
         );
+
+        let chunked_run = get_pipeline_run(&conn, &run_id)
+            .expect("run should load")
+            .expect("run should exist");
+        let (analyzing, _) = db::start_analysis(&mut conn, &run_id, chunked_run.state_version)
+            .expect("analysis should start");
+        db::complete_analysis(
+            &mut conn,
+            &run_id,
+            analyzing.state_version,
+            &analyzed,
+            analyzed.warnings.clone(),
+        )
+        .expect("previous analysis should persist");
+        let analyzed_run = get_pipeline_run(&conn, &run_id)
+            .expect("run should load")
+            .expect("run should exist");
+        let (synthesizing, _) = db::start_synthesis(&mut conn, &run_id, analyzed_run.state_version)
+            .expect("synthesis should start");
+        db::complete_synthesis(
+            &mut conn,
+            &run_id,
+            synthesizing.state_version,
+            &previous,
+            previous.warnings.clone(),
+        )
+        .expect("previous synthesis should persist");
+
+        let continued = verify_synthesized_document(&mut conn, &runtime, &run_id)
+            .expect("a positive previous synthesis must verify without v4 re-synthesis");
+        assert_eq!(continued.synthesis_attempt_ordinal, 0);
+        assert_eq!(continued.claims, previous.claims);
+        assert!(get_synthesis_attempt(&conn, &run_id, 1)
+            .expect("retry synthesis lookup should succeed")
+            .is_none());
+        assert!(!continued
+            .warnings
+            .iter()
+            .any(|warning| warning.code == COVERAGE_SHORTFALL_WARNING_CODE));
     }
 
     #[test]
