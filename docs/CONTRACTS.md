@@ -557,7 +557,7 @@ citations for visual-only pages remain deferred.
 
 ## Pending summary coverage and model-request contract
 
-**Status:** behavioral contract approved for review, not yet implemented. The
+**Status:** behavioral contract proposed for review, not yet implemented. The
 preceding section remains the description of current behavior until a separate
 implementation commit satisfies every requirement below.
 
