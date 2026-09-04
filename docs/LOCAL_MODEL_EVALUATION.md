@@ -1,5 +1,82 @@
 # Corpus and native Ollama evaluation — 2026-09-04
 
+## Latest result: larger output allowances help progress, but both Muse runs fail
+
+**No product closure: neither document delivered a summary.** Contract
+`9996ed4` precedes implementation `253a6e4`. Analysis now allows 2,048 output
+tokens, direct/hierarchical synthesis 4,096, and verification remains 4,096.
+Input admission reserves output and framing within the unchanged 8,192-token
+context assumption. All validators, page/evidence/claim floors, temperature,
+reasoning request, and the 900-second request timeout remain unchanged.
+
+The requested `Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf` ran directly in standalone
+`llama-server` (installed build `c1d0e7a`), using its embedded ATEM template with
+Jinja, one slot, context 8,192, and loopback port 11435. **No LM Studio runtime
+was used.** This is the same GGUF/runtime configuration as the preceding Muse
+probe, not a weights-only comparison with the earlier Qwen/Ollama runs. Each
+acceptance run creates a new run-derived seed; these are individual observations,
+not a same-seed reproducibility or causal-quality benchmark.
+
+| Run after increase | Delivered claims | Validated evidence | Final cited-page fraction | Requests | Completion tokens | Prompt tokens | Model time | Test time |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| NARA | Not produced | 8, persisted | Unavailable: no summary | 12 | 16,996 | 16,571 | 454,859 ms | 455.60 s |
+| DOL | Not produced | 1 transient; no complete artifact | Unavailable: no summary | 2 | 569 | 1,100 | 15,386 ms | 17.26 s |
+
+Both test commands exited 101. All requests used Primary transport, which does
+not establish schema enforcement. NARA completed all eight page analyses and
+both synthesis attempts. One accepted analysis response used 1,139 output tokens,
+above the old 1,024 allowance; re-synthesis used 2,116, above its old 2,048 limit.
+The first verification supported six of eight claims and marked two ambiguous,
+triggering the existing bounded retry. Final verification consumed all 4,096
+allowed generation tokens and returned truncated JSON, producing
+`MODEL_VERIFICATION_RESPONSE_INVALID`. Its reported prompt plus completion was
+6,529 tokens; server logs show `truncated = 0` (no context truncation). The
+observed exhaustion is output, not the full context. No final supported summary
+or citation artifact was delivered. Increasing analysis/synthesis allowances did
+not establish that verification's unchanged allowance is sufficient for Muse.
+
+NARA completion usage by stage was 5,076 analysis, 3,814 synthesis and 8,106
+verification. DOL's second response instead failed
+`MODEL_EVIDENCE_RESPONSE_INVALID`: its claim was 196 characters against the
+unchanged 192 limit, using only 261 completion tokens. The two quote IDs were
+valid in their separate page-local requests; this was length, not duplicate-ID
+failure. More generation space cannot enforce the missing runtime length bound.
+
+For comparison, the preceding Muse run with 1,024/2,048/4,096 allowances failed
+NARA during analysis: three requests, two transient validated items, 2,034
+completion tokens and 55,007 ms model time. Its failing response used all 1,024
+generation tokens without final text. DOL previously failed after two requests,
+one transient validated item, 538 completion tokens and 14,451 ms model time;
+a separate diagnostic found a 218-character claim. Neither baseline delivered
+a summary. The additional spend after this increase is not a measured coverage
+win, and no claim of successful Muse model-quality comparison is made.
+
+The earlier runtime probe also matters: the installed Muse-specific handler in
+`common/chat.cpp` enables grammar for tools but does not apply the JSON response
+schema on this path. A strict enum negative probe returned the forbidden value.
+The template defaults to high reasoning despite the adapter sending
+`reasoning_effort: "none"`. Output allowances are therefore only one limitation;
+runtime schema enforcement and model-specific reasoning control remain open.
+No runtime patch, reasoning change or further context/output increase was made
+to hide this result. The standalone server was stopped cleanly after both tests.
+
+Local gates on the implementation passed: `cargo test --all-targets
+--all-features --quiet` (220 library tests, four ignored; one deterministic
+acceptance and three release tests), `cargo clippy --all-targets --all-features
+-- -D warnings`, `cargo fmt --all --check`, and `git diff --check`. New coverage
+checks request allowances, exact input boundaries including system text,
+hierarchical partitioning and preserved historical v3 quotas. These gates do
+not override the failed live acceptance.
+
+Reproduction: set `DOC_SUM_MODEL_BASE_URL=http://127.0.0.1:11435/v1/`,
+`DOC_SUM_MODEL_NAME=doc-sum-muse-glimmer`, `DOC_SUM_OFFICE_PDF` to each public
+corpus path below and `DOC_SUM_OFFICE_TRACE_MODEL_RESPONSES=1`, then run
+`cargo test --test office_acceptance
+office_pdf_live_ollama_summary_has_exact_durable_evidence -- --ignored --exact
+--nocapture` from `src-tauri`. Public diagnostic logs are retained locally in
+`/tmp/doc-sum-output-budget.1lTgFh/`; the preceding Muse probe is in
+`/tmp/doc-sum-muse-eval.MizXyU/`. Raw source/model text is not committed here.
+
 ## Latest result: both corpus acceptance gates still fail after per-page selection
 
 **The product blocker remains open.** Contract `2c0bb13` precedes implementation
