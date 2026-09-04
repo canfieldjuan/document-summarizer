@@ -579,7 +579,11 @@ large page-derived claim budget but only one small evidence set. Requiring every
 available evidence item to survive semantic verification would make a thin but
 supported result fail only after the full model spend. Evidence production and
 verification-shortfall behavior must therefore change together with the claim
-budget.
+budget. Page scopes must also be bounded by the analysis output-token allowance:
+a page-derived floor that cannot fit as complete JSON would turn coverage into a
+new deterministic failure. Finally, evidence coverage and claim count are
+different obligations. Requiring one claim per evidence item would prohibit the
+consolidation that synthesis exists to perform.
 
 Exact quotation bytes are also still model-authored on the primary analysis
 path. Deterministic whitespace reconciliation and a second, catalog-backed
@@ -598,34 +602,65 @@ document claim budget is:
 
 `B = min(64, max(8, ceil(3 * N / 5)))`.
 
-Analysis is partitioned into page-scoped requests. For each scope containing
-`S` native-text pages, the validated analysis result must contain at least
-`F_scope = max(1, ceil(3 * S / 5))` distinct evidence items drawn from at least
-`F_scope` distinct pages. Candidate construction must make at least one eligible
-exact quote available for every native-text page in the scope. A response below
-either floor is invalid and fails in analysis; it must not silently reduce `E`.
-Consequently, across all scopes, `E` grows with native-text page count instead
-of being limited only by character-derived chunk count.
+Analysis is partitioned into page-scoped requests whose page count is derived
+from the configured analysis output allowance. Let `A` be
+`ANALYSIS_OUTPUT_TOKENS`, reserve `R_A = 192` tokens for the response envelope,
+and allocate `I_A = 128` tokens for each bounded quote-ID/claim item. The maximum
+evidence quota for one response is
+`Q_A = floor((A - R_A) / I_A)`; `A < R_A + I_A` is invalid configuration.
+Without tokenizer admission, the item allowance reserves 35 tokens for the
+70-character quote ID at two characters per token, 64 tokens for at most 192
+claim-text characters at three characters per token, and 24 tokens for JSON
+field syntax and escaping; the resulting 123-token item remains below `I_A`.
+The quote-ID response schema and parser must enforce those identifier and text
+bounds rather than applying the general 2,000-character claim limit. A page
+scope may contain no more than
+`S_max = floor(5 * Q_A / 3)` native-text pages, and character limits may split
+it further.
+
+For each resulting scope containing `S` native-text pages, the validated
+analysis result must contain at least
+`F_scope = max(1, ceil(3 * S / 5))` and no more than `Q_A` distinct evidence
+items drawn from at least `F_scope` distinct pages. Candidate construction must
+make at least one eligible exact quote available for every native-text page in
+the scope. A response below either floor is invalid and fails in analysis; it
+must not silently reduce `E`. Because `F_scope <= Q_A` by construction and the
+sum of the per-scope floors is at least `ceil(3 * N / 5)`, `E` continues to grow
+with native-text page count without asking one response to exceed its output
+budget.
 
 The budget is monotonic in native-text page count. The direct and hierarchical
 paths must both use `B`; crossing an item or character partition boundary must
-not lower the document's final claim capacity. Synthesis must request and
-validate at least `min(B, E)` distinct, non-duplicative claims and no more than
-`B`. Hierarchical batching may reduce duplication inside a batch, but its
-intermediate quotas and final composition must preserve enough candidate
-capacity to meet the same document-level lower bound. It must not funnel the
-whole document through a final request whose item count silently becomes the
-claim ceiling.
+not lower the document's final claim capacity. Claim count has its own lower
+bound, independent of the evidence-production floor:
 
-Let `T = min(B, E)` and `V` be the supported-claim count after semantic
-verification. `V = 0` remains a structured hard failure. If `0 < V < T`, the
-run records a durable coverage-shortfall warning and performs exactly one
-bounded re-synthesis from the original validated evidence; unsupported claim
-text is not evidence. The retry uses the same document budget and request-size
-limits and receives one new semantic-verification pass. If that pass supports
-zero claims, the run fails. If it supports at least one but still fewer than
-`T`, the run completes with the durable warning and only those supported claims.
-There is no third synthesis or verification attempt.
+`K = min(B, E, max(3, ceil(B / 2)))`.
+
+The `E` term makes the bound valid for small catalogs: `E = 1` requires one
+claim and `E = 2` requires two, while larger catalogs retain room to consolidate
+related evidence. Synthesis must request and validate at least `K` distinct,
+non-duplicative claims and no more than `B`. Every supplied evidence ID must
+appear at least once across the deterministically accepted synthesis claims,
+and every claim must cite supplied evidence. IDs must be copied exactly;
+related evidence should be consolidated into coherent claims rather than
+repeated as separate ideas. Hierarchical batching may consolidate inside a
+batch, but its intermediate quotas, lineage, and final composition must preserve
+both the same document-level claim bound and complete evidence-ID coverage. It
+must not funnel the whole document through a final request whose item count
+silently becomes the claim ceiling.
+
+Let `V` be the supported-claim count after semantic verification, and let
+`E_V` be the validated evidence IDs cited by those supported claims. `V = 0`
+remains a structured hard failure. If `0 < V < K` or `E_V` does not cover all
+`E` validated evidence items, the run records a durable coverage-shortfall
+warning and performs exactly one bounded re-synthesis from the original
+validated evidence; unsupported claim text is not evidence. The retry uses the
+same document budget, claim floor, complete evidence-coverage target, and
+request-size limits and receives one new semantic-verification pass. If that
+pass supports zero claims, the run fails. If it remains below `K` or leaves
+evidence uncovered but supports at least one claim, the run completes with the
+durable warning and only those supported claims. There is no third synthesis or
+verification attempt.
 
 The first synthesis, its verification verdicts, the retry synthesis, and the
 accepted verdicts must remain auditable and linked to the same run without
@@ -662,14 +697,19 @@ both claim count and context-derived input size. Let `C` be the configured model
 context in tokens and `O` the configured maximum output tokens. The complete
 model-facing verification input, including system instructions and the user
 payload, must fit within
-`V_request = min(16_000, 4 * (C - O))` serialized Unicode characters; `C <= O`
-is invalid configuration. With the current 8,192-token context and 4,096-token
-output allowance, the ceiling is 16,000 characters, not 100,000. Each request
-also contains at most 16 claims.
+`V_request = min(16_000, 3 * (C - O))` serialized Unicode characters; `C <= O`
+is invalid configuration. The three-character proxy is required because the
+current adapter has no exact tokenizer preflight and identifier-heavy JSON
+tokenizes more densely than ordinary prose. With the current 8,192-token
+context and 4,096-token output allowance, the ceiling is 12,288 characters,
+not 100,000. An adapter with measured tokenizer admission may replace the proxy
+in a later, separately contracted change. Each request also contains at most 16
+claims.
 
 The aggregate verification input for one semantic-verification pass must not
 exceed `V_aggregate = V_request * ceil(B / 16)`, which is at most 64,000
-characters under the document budget. Both ceilings are enforced before the
+characters by formula and 49,152 characters under the current model settings.
+Both ceilings are enforced before the
 first inference request, and one claim that cannot fit alone fails before
 inference. A bounded re-synthesis receives a fresh aggregate allowance for its
 single new verification pass. The verifier must treat matching words as
@@ -712,7 +752,9 @@ are not.
   diagnostics, including immutable synthesis-attempt identity.
 - `pipeline/db.rs` and a narrowly scoped migration if required: preserve both
   bounded synthesis attempts and associate each verification with its input
-  attempt without overwriting historical artifacts.
+  attempt without overwriting historical artifacts. This immutable-attempt
+  storage work is sequenced last and must land as its own PR after the other
+  accepted summary-quality work.
 - `pipeline/service.rs`: supply the current run identity to every model stage
   without changing document identity or retry lineage.
 - `tests/office_acceptance.rs`: quality floors and request metrics in the live
@@ -725,7 +767,8 @@ are not.
 ### Acceptance evidence
 
 - A live native-text run asserts that final supported claim count is at least
-  `min(B, E)` and no greater than `B`.
+  `K` and no greater than `B`, and that the union of evidence IDs cited by those
+  supported claims covers every validated evidence item.
 - A live native-text run asserts that cited native-text pages divided by all
   native-text pages is at least 60 percent. Visual-only pages remain excluded
   from both numerator and denominator and remain uncited by the native-text
@@ -733,18 +776,25 @@ are not.
 - A tail-heavy fixture proves that a material conclusion or checklist on the
   last page remains eligible and cited; a head-only catalog cannot pass.
 - Direct and hierarchical fixtures with the same `N` and `E` prove the same
-  claim bounds on both sides of the partition threshold.
+  `K` claim bound and complete evidence-ID coverage on both sides of the
+  partition threshold.
 - Sparse, multi-page fixtures prove every page-scoped analysis result meets its
-  evidence-item and distinct-page floors; `E` cannot collapse to the old
-  per-chunk maximum when `N` grows without proportional characters.
-- A first-pass verification shortfall proves exactly one bounded re-synthesis
-  occurs and the warning is durable. A second positive shortfall completes with
-  only supported claims and the warning; zero supported claims still fails.
+  output-derived evidence quota plus its evidence-item and distinct-page floors;
+  a 25-page scope is partitioned before its required output can exceed
+  `ANALYSIS_OUTPUT_TOKENS`, and `E` cannot collapse to the old per-chunk maximum
+  when `N` grows without proportional characters.
+- Claim-bound fixtures cover `E = 1`, `E = 2`, `E < ceil(B / 2)`, and
+  `E >= ceil(B / 2)`, and prove that multiple evidence IDs may consolidate into
+  one accepted claim without losing evidence-ID coverage.
+- A first-pass claim-count or evidence-coverage shortfall proves exactly one
+  bounded re-synthesis occurs and the warning is durable. A second positive
+  shortfall completes with only supported claims and the warning; zero supported
+  claims still fails.
 - Retrying one failed document proves equal document identity and different
   run-derived seeds; reconstructing requests for one run proves seed stability.
 - Verification probes cover 15, 16, and 17 claims; one character below, at, and
-  above the derived per-request and aggregate limits; and a mixed catalog
-  requiring both count and character partitioning.
+  above the three-character-derived per-request and aggregate limits; and a
+  mixed catalog requiring both count and character partitioning.
 - Request diagnostics prove elapsed time is present for success and failure,
   provider token counts are captured when supplied, missing usage remains
   explicit, and no prompt, source, output, token, or path content is logged.
