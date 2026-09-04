@@ -4383,8 +4383,14 @@ mod tests {
             .expect("normalized artifact should load")
             .expect("normalized artifact should exist");
         let runtime = FakeRuntime::healthy();
-        let mut analyzed = analyze(&runtime, &chunked, &normalized, &UNCONTROLLED_EXECUTION)
-            .expect("current analysis should validate");
+        let mut analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("current analysis should validate");
         analyzed.analysis_version = LEGACY_ANALYSIS_VERSION.to_string();
         for chunk in &mut analyzed.chunks {
             for (index, evidence) in chunk.evidence.iter_mut().enumerate() {
