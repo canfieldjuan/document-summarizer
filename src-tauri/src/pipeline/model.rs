@@ -1007,7 +1007,7 @@ mod tests {
                 },
                 "choice": {
                     "anyOf": [
-                        {"type": "string", "maxLength": 8},
+                        {"type": "string", "maxLength": 8, "enum": ["q1", "q2"]},
                         {"type": "null"}
                     ]
                 }
@@ -1043,6 +1043,10 @@ mod tests {
         assert!(projected["properties"]["choice"]["anyOf"][0]
             .get("maxLength")
             .is_none());
+        assert_eq!(
+            projected["properties"]["choice"]["anyOf"][0]["enum"],
+            serde_json::json!(["q1", "q2"])
+        );
         assert_eq!(projected["required"], contract_schema["required"]);
         assert_eq!(projected["additionalProperties"], false);
 
