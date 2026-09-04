@@ -203,11 +203,12 @@ impl ModelRuntime for OllamaRuntime {
         if request.system_prompt.trim().is_empty()
             || request.user_prompt.trim().is_empty()
             || request.max_output_tokens == 0
+            || request.seed > i64::MAX as u64
         {
             return Err(with_request_attempts(
                 runtime_failure(
                     "MODEL_REQUEST_INVALID",
-                    "Model request prompts and output limit must be present",
+                    "Model request prompts, output limit, and signed-range seed must be valid",
                     false,
                 ),
                 vec![request_attempt_diagnostic(
@@ -1085,6 +1086,32 @@ mod tests {
     }
 
     #[test]
+    fn runtime_rejects_a_seed_above_the_ollama_signed_integer_boundary() {
+        let runtime = OllamaRuntime::new(
+            "http://127.0.0.1:11434/v1/",
+            "fixture-model",
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("loopback runtime should configure");
+        let failure = runtime
+            .generate(&ModelRequest {
+                stage: crate::pipeline::contracts::PipelineStage::Analyze,
+                ordinal: 0,
+                system_prompt: "system".to_string(),
+                user_prompt: "user".to_string(),
+                seed: (i64::MAX as u64) + 1,
+                max_output_tokens: 1,
+                output_format: ModelOutputFormat::Text,
+            })
+            .expect_err("a seed above Ollama's signed integer range must fail before transport");
+
+        assert_eq!(failure.code, "MODEL_REQUEST_INVALID");
+        assert_eq!(failure.request_attempts.len(), 1);
+        assert!(!failure.request_attempts[0].succeeded);
+    }
+
+    #[test]
     fn exact_vocabulary_failure_retries_and_caches_json_mode() {
         let (base_url, server) = schema_fallback_server();
         let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
@@ -1184,7 +1211,7 @@ mod tests {
             ordinal: 4,
             system_prompt: "PRIVATE_SYSTEM_SENTINEL".to_string(),
             user_prompt: "PRIVATE_SOURCE_SENTINEL".to_string(),
-            seed: 4_242,
+            seed: i64::MAX as u64,
             max_output_tokens: 321,
             output_format: ModelOutputFormat::Text,
         };
@@ -1238,6 +1265,7 @@ mod tests {
 
         let sent_request = server.join().expect("loopback server should finish");
         assert_eq!(sent_request["max_tokens"], 321);
+        assert_eq!(sent_request["seed"], i64::MAX);
     }
 
     #[test]

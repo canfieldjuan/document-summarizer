@@ -59,7 +59,7 @@ pub(crate) fn generation_seed_for_run(run_id: &str) -> u64 {
     let digest = hasher.finalize();
     let mut seed_bytes = [0_u8; 8];
     seed_bytes.copy_from_slice(&digest[..8]);
-    u64::from_be_bytes(seed_bytes)
+    u64::from_be_bytes(seed_bytes) & (i64::MAX as u64)
 }
 
 const ANALYSIS_SYSTEM_PROMPT: &str = r#"You extract comprehensive, non-redundant evidence from one source chunk for later document-summary synthesis.
@@ -3714,7 +3714,8 @@ mod tests {
         let run_id = "run-00000000-0000-0000-0000-000000000001";
         let seed = generation_seed_for_run(run_id);
 
-        assert_eq!(seed, 0xd6ff_f1dc_1d62_74bc);
+        assert_eq!(seed, 0x56ff_f1dc_1d62_74bc);
+        assert!(seed <= i64::MAX as u64);
         assert_eq!(seed, generation_seed_for_run(run_id));
         assert_ne!(
             seed,
