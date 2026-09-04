@@ -400,6 +400,21 @@ Publishing installers, changing model behavior, and configuring repository
 branch protection are outside this workflow's scope. The first pull request
 must exercise the hosted job; local success alone is not hosted-CI evidence.
 
+## Ingestion test isolation
+
+Tests in `pipeline/ingest.rs` own unique directories under the operating
+system temporary directory. Every source fixture, missing-file probe, database,
+and SQLite sidecar for one test stays inside that directory. Parallel test
+processes must not share fixture or database paths, and tests must not change
+the process working directory. Scope cleanup removes the owned directory on
+normal return or panic unwinding; a process abort may leave only temporary
+files, never artifacts in the source checkout.
+
+This changes test storage only. Production ingestion, source-byte checks,
+transaction rollback, and database-reopen assertions retain their behavior.
+Verification includes concurrent ingestion test processes and a probe proving
+normal/unwind cleanup preserves a neighboring test directory.
+
 ## Local summary artifacts
 
 `ModelRuntime` is the only inference boundary. A request may select plain text
