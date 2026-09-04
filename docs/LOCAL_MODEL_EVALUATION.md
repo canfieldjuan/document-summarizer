@@ -1,5 +1,63 @@
 # Corpus and native Ollama evaluation — 2026-09-04
 
+## Latest result: both corpus acceptance gates still fail after per-page selection
+
+**The product blocker remains open.** Contract `2c0bb13` precedes implementation
+`75df3bd`. The new single-item page-local analysis succeeds on both public
+documents, but NARA still delivers insufficient verified coverage and DOL fails
+in synthesis before producing a summary. No validator, floor, timeout, endpoint,
+or model was relaxed. PR #30 is ready for review, not draft, and is not merged.
+
+| Run | Delivered claims | Validated evidence | Cited native-text pages | Requests | Completion tokens | Model request time | Test time |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| NARA first | Below floor 4; exact count not printed | 8 | Not printed before assertion | 12 | 3,112 | 36,751 ms | 37.56 s |
+| NARA diagnostic rerun | 4 (budget 8, floor 4) | 8 | 4/11 (36.36%) | 12 | 3,054 | 31,701 ms | 32.51 s |
+| DOL first | Not produced | 67 | Unavailable: no summary | 68 | 3,586 | 43,751 ms | 45.84 s |
+
+All three test commands exited 101; all requests used Primary transport with no
+schema fallback. All planned analysis responses passed the unchanged exactness,
+192-character, identifier-membership and provenance checks, plus the new
+single-item/page-local checks. No invalid or repeated quote ID reached an
+accepted analysis. DOL's 67 evidence items follow from its 67 validated one-item
+responses and completed analysis checkpoint before synthesis started; there is
+no delivered citation artifact for that run.
+
+NARA first passed analysis in eight requests using 360 completion tokens. It
+completed synthesis and verification twice, then the live gate rejected the
+delivered claim count. The test now prints delivered metrics before quality
+assertions rather than hiding them when an assertion fails. A separate public
+diagnostic rerun on the same production code delivered four supported claims,
+citing four of eight validated evidence items and four of eleven native-text
+pages. It failed the evidence-coverage assertion and also falls below the
+60-percent page target. The durable warnings included `SEMANTIC_CLAIMS_WITHHELD`
+and `SUMMARY_COVERAGE_SHORTFALL`. Both synthesis responses were identical to
+each other within each run, as were both verdict responses; a different attempt
+seed does not guarantee different output at temperature zero.
+
+DOL completed all 67 analysis requests in 37,394 ms using 2,870 completion
+tokens. Its first synthesis batch then failed `MODEL_CLAIMS_RESPONSE_INVALID`:
+"Every supplied evidence ID must be cited by at least one synthesis claim."
+No verification or re-synthesis ran. The analysis-stage uniqueness and page
+coverage blockers are removed; synthesis coverage is a separate live blocker.
+Deterministic positional quote selection was not activated: the page loop met
+its evidence target on both documents, and positional selection does not itself
+enforce synthesis references or semantic support.
+
+The diagnostic also shows that structural validity is not semantic quality:
+one bounded NARA claim ended mid-thought, and another described illegible source
+content rather than a substantive document finding. Exact quotation/provenance
+does not make every paraphrase useful or correct. No quality improvement is
+claimed from analysis counts alone.
+
+The selected model remained `qwen3-30b-a3b:latest`, with context 8,192 and the
+unchanged 900-second timeout. Both input hashes match the corpus hashes below.
+Local gates on this implementation passed: 219 library tests with four ignored,
+one deterministic acceptance test, three release tests, strict clippy, and
+formatting. Boundary tests cover one/zero/two response items, foreign/mixed IDs,
+192/193 characters, page-only enums, tail-inclusive stopping, sparse/dense and
+chunk-independent plans, empty unselected chunks, and historical v3 artifacts.
+These local gates do not override the failed live acceptance.
+
 ## Latest result: the product blocker remains after the bounded-generation fix
 
 Both corpus runs still fail before delivering a summary at implementation
@@ -38,8 +96,8 @@ and distinct quote IDs can still cite the same page. Explicit prompt wording
 did not reliably satisfy either requirement on this corpus. Closing the
 product blocker needs a further contract for reliable distinct-page/quote
 selection; this change does not silently deduplicate, lower a floor, or relax
-the validator. The narrow fix is held as a draft, not a successful corpus
-closure, and issue #29 remains open.
+the validator. The narrow fix was opened for review, not claimed as a successful
+corpus closure, and issue #29 remains open.
 
 Local gates passed: 216 library tests, one deterministic acceptance test,
 three release tests, strict clippy, and formatting. The new projection test
