@@ -417,6 +417,64 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ## Local summary artifacts
 
+### Per-page selection revision (contract before implementation)
+
+Root cause: multi-item analysis asks the model to enforce quote-ID uniqueness
+and distinct-page coverage. The live corpus failed both obligations. An enum
+only restricts membership, and `uniqueItems` compares whole objects, not their
+quote-ID field. The production Ollama/llama.cpp decoder also does not support
+`uniqueItems`; this is not solely a vLLM compatibility limitation.
+
+Required change surface: `summary.rs` analysis planning, request shape, artifact
+validation and regression fixtures; `model.rs` decoder rationale; this contract
+and `LOCAL_MODEL_EVALUATION.md`. Analysis version advances to `4.0.0` and its
+selection schema advances; stored versions `3.0.0` and `2.0.0` remain readable
+under their original validators, without rewriting their evidence identities.
+
+Each selected native-text page receives exactly one model request, containing
+only that page's candidate quotations. The evidence array has `minItems: 1`
+and `maxItems: 1`, with the quote-ID enum restricted to those supplied candidates.
+Rust still rejects empty, multiple, foreign, overlong, or malformed output;
+it never deduplicates or repairs an invalid response. Claim text remains bounded
+at 192 characters. The model chooses material evidence and paraphrases it;
+the application restores exact quotation and provenance as before.
+
+For `N` native-text pages and unchanged claim budget `B`, select
+`P = min(N, max(B, ceil(3*N/5)))` distinct pages. This is the attainable stopping
+target: both budget and 60-percent evidence-page coverage are met, or all pages
+are exhausted when `N < B`. Select `P` evenly spaced source-order page indices,
+including the first and last when `P > 1`; do not satisfy the target with a
+head-only prefix. Pages without native text are excluded. Once all selected
+pages yield their single validated item, stop; no extra analysis requests run.
+Thus the NARA fixture requires eight requests and the DOL deck 67, rather than
+eleven and 111. This bounds analysis requests by page count, not by chunk size.
+Final accepted-claim page coverage is still measured separately after verification.
+
+The current multi-page scope floor and output-derived evidence-quota math are
+replaced by this application-owned loop invariant. The 1,024-token output
+allowance and existing input guard remain unchanged. Ordered chunk metadata is
+retained, including empty evidence for chunks with no selected page; reloading
+must prove exactly one evidence item for each planned page and none for other
+pages. Prior analysis artifacts retain their historical nonempty-chunk and
+scope-floor checks. No database migration is needed.
+
+Explicit non-scope: synthesis/verification budgets, retries, durable lineage,
+validators for exactness and provenance, timeout, endpoint, model, parser,
+OCR/vision, Connect, packaging, dependencies, and output rendering. Deterministic
+positional quote selection is a contingent fallback, not an automatic response
+to a synthesis or verification failure.
+
+Verification plan: single-item schema and page-only enum tests; zero/two-item,
+foreign-ID, mixed-response, and 192/193-character boundary probes; sparse/dense
+page plans, tail inclusion, small-document exhaustion, visual-only exclusion,
+chunk-independent stopping and reload rejection of missing/extra page evidence;
+historical artifact compatibility and existing negative tests. Run all local
+tests, strict clippy and formatting, then both live corpus runs. Report delivered
+claims, validated evidence, cited/native-page fraction, request count and total
+completion tokens, with any failure first. Do not infer latency improvement.
+Fold this revision into current behavior and remove this pending subsection in
+the implementation commit.
+
 `ModelRuntime` is the only inference boundary. A request may select plain text
 or a named, bounded JSON Schema output contract. Current analysis version
 `3.0.0` uses application-built quote candidates rather than model-authored
