@@ -518,14 +518,14 @@ limits. The exact Ollama vocabulary-loading failure may retry once through
 JSON-object mode; other HTTP failures do not activate that fallback, and each
 transport attempt is diagnosed separately.
 
-Analysis, synthesis, verification, and summary are version `3.0.0`; citation
-is version `2.0.0`. Historical versioned artifacts remain readable:
-synthesis `2.0.0` retains its original identity rules, and mechanical
-verification `2.0.0` may produce paired summary `2.0.0` and citation
-`1.0.0` with `SEMANTIC_VERIFICATION_DEFERRED`. Final summary and citation
-artifacts carry content-integrity hashes, citations bind the exact summary hash
-and rendered text, and retrieval revalidates the accepted verdict against its
-named synthesis attempt.
+Historical synthesis `3.0.0` and `2.0.0` artifacts retain their original
+identity and coverage rules. Semantic verification `3.0.0` retains its original
+single-attempt behavior, while mechanical verification `2.0.0` may produce
+paired summary `2.0.0` and citation `1.0.0` with
+`SEMANTIC_VERIFICATION_DEFERRED`. Final summary and citation artifacts carry
+content-integrity hashes, citations bind the exact summary hash and rendered
+text, and retrieval revalidates the accepted verdict against its named
+synthesis attempt.
 
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
