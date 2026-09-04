@@ -382,6 +382,24 @@ association, creation time, and SHA-256 integrity hash. Artifact insertion,
 one transaction. Retrieval verifies integrity and stored metadata before the
 artifact is returned.
 
+## Continuous integration
+
+Pull requests and pushes to `main` run the `Rust checks` GitHub Actions job
+on Ubuntu. A clean checkout installs Tauri's Linux build prerequisites and
+builds the frontend assets before compiling the desktop targets. From
+`src-tauri`, the gate runs `cargo test --locked --all-targets --all-features`,
+`cargo clippy --locked --all-targets --all-features -- -D warnings`, and
+`cargo fmt --all -- --check`. A failed command fails the job; no path filter
+or allowed-failure setting may skip or conceal a required gate.
+
+The workflow uses read-only repository permissions, no application secrets,
+and a bounded job timeout. Third-party actions are pinned to commit IDs.
+Live Ollama and external-PDF tests remain explicitly ignored: CI proves the
+deterministic contracts and migrations, not real-document summary quality.
+Publishing installers, changing model behavior, and configuring repository
+branch protection are outside this workflow's scope. The first pull request
+must exercise the hosted job; local success alone is not hosted-CI evidence.
+
 ## Local summary artifacts
 
 `ModelRuntime` is the only inference boundary. A request may select plain text
