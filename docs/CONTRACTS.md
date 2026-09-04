@@ -605,13 +605,15 @@ document claim budget is:
 Analysis is partitioned into page-scoped requests whose page count is derived
 from the configured analysis output allowance. Let `A` be
 `ANALYSIS_OUTPUT_TOKENS`, reserve `R_A = 192` tokens for the response envelope,
-and allocate `I_A = 128` tokens for each bounded quote-ID/claim item. The maximum
+and allocate `I_A = 92` tokens for each bounded quote-ID/claim item. The maximum
 evidence quota for one response is
 `Q_A = floor((A - R_A) / I_A)`; `A < R_A + I_A` is invalid configuration.
-Without tokenizer admission, the item allowance reserves 35 tokens for the
-70-character quote ID at two characters per token, 64 tokens for at most 192
-claim-text characters at three characters per token, and 24 tokens for JSON
-field syntax and escaping; the resulting 123-token item remains below `I_A`.
+Without tokenizer admission, the item allowance reserves four tokens for a
+scope-local quote ID of at most eight ASCII characters at two characters per
+token, 64 tokens for at most 192 claim-text characters at three characters per
+token, and 24 tokens for JSON field syntax and escaping. The resulting 92-token
+item equals `I_A`. With the current 1,024-token allowance, `Q_A` is nine and
+`S_max` below is 15.
 The quote-ID response schema and parser must enforce those identifier and text
 bounds rather than applying the general 2,000-character claim limit. A page
 scope may contain no more than
@@ -671,12 +673,18 @@ first attempt.
 
 Primary analysis must use application-built quote candidates. Every candidate
 is a bounded, contiguous exact substring of one authoritative normalized block
-and carries an application-issued quote ID plus fixed block and page
-provenance. The model returns quote IDs and claim text; it never returns quote
-bytes or chooses block/page identity. Rust rejects empty, duplicate, foreign,
+and carries a short scope-local selection ID plus fixed block and page
+provenance. Selection IDs are canonical ordinals such as `q1` and `q2`, are at
+most eight ASCII characters, and are mapped by Rust to full content-derived
+candidate identities that are never model-authored. The response schema's
+`quote_id` field must enumerate exactly the selection IDs supplied in that
+request; decoder-compatible schema projection must preserve the enum. The model
+returns one of those quote IDs and claim text; it never returns quote bytes or
+chooses block/page identity. Rust still rejects empty, duplicate, foreign,
 mixed-validity, or over-limit selections and materializes quotation bytes,
-`SourceSpan`, and evidence identity from the selected candidate. Exactness is
-therefore true by construction. The existing quote-copy repair model call and
+`SourceSpan`, and durable evidence identity from the selected candidate.
+Exactness is therefore true by construction, and durable artifact identity does
+not depend on the scope-local ID. The existing quote-copy repair model call and
 its repair-only response schema are removed; historical repair warnings remain
 readable.
 
@@ -694,21 +702,22 @@ unconditional requirements.
 
 Verification requests remain in canonical claim order and are partitioned by
 both claim count and context-derived input size. Let `C` be the configured model
-context in tokens and `O` the configured maximum output tokens. The complete
+context in tokens, `O` the configured maximum output tokens, and `R_V = 512`
+tokens reserved for the chat template and adapter framing. The complete
 model-facing verification input, including system instructions and the user
 payload, must fit within
-`V_request = min(16_000, 3 * (C - O))` serialized Unicode characters; `C <= O`
-is invalid configuration. The three-character proxy is required because the
-current adapter has no exact tokenizer preflight and identifier-heavy JSON
-tokenizes more densely than ordinary prose. With the current 8,192-token
-context and 4,096-token output allowance, the ceiling is 12,288 characters,
-not 100,000. An adapter with measured tokenizer admission may replace the proxy
-in a later, separately contracted change. Each request also contains at most 16
-claims.
+`V_request = min(16_000, 3 * (C - O - R_V))` serialized Unicode characters;
+`C <= O + R_V` is invalid configuration. The three-character proxy is required
+because the current adapter has no exact tokenizer preflight and
+identifier-heavy JSON tokenizes more densely than ordinary prose. With the
+current 8,192-token context and 4,096-token output allowance, the ceiling is
+10,752 characters, not 100,000. An adapter with measured tokenizer admission
+may replace the proxy in a later, separately contracted change. Each request
+also contains at most 16 claims.
 
 The aggregate verification input for one semantic-verification pass must not
 exceed `V_aggregate = V_request * ceil(B / 16)`, which is at most 64,000
-characters by formula and 49,152 characters under the current model settings.
+characters by formula and 43,008 characters under the current model settings.
 Both ceilings are enforced before the
 first inference request, and one claim that cannot fit alone fails before
 inference. A bounded re-synthesis receives a fresh aggregate allowance for its
@@ -783,6 +792,10 @@ are not.
   a 25-page scope is partitioned before its required output can exceed
   `ANALYSIS_OUTPUT_TOKENS`, and `E` cannot collapse to the old per-chunk maximum
   when `N` grows without proportional characters.
+- Quote-ID fixtures prove the response schema enumerates exactly the supplied
+  scope-local IDs, decoder projection preserves that enum, maximum-length IDs
+  pass, over-length and foreign IDs fail application validation, and selected
+  ordinals map back to the correct full candidate identity and exact source.
 - Claim-bound fixtures cover `E = 1`, `E = 2`, `E < ceil(B / 2)`, and
   `E >= ceil(B / 2)`, and prove that multiple evidence IDs may consolidate into
   one accepted claim without losing evidence-ID coverage.
@@ -798,6 +811,9 @@ are not.
 - Request diagnostics prove elapsed time is present for success and failure,
   provider token counts are captured when supplied, missing usage remains
   explicit, and no prompt, source, output, token, or path content is logged.
+- A live Ollama analysis run over the repository fixture records request
+  metrics and evidence counts and completes without any invalid quote-ID
+  response before budget or page-scope implementation begins.
 - Existing negative tests for exact quotation bytes, provenance, foreign and
   duplicate IDs, mixed-validity selections, invalid verdict coverage, and
   fail-closed artifact persistence continue to pass unchanged in intent.
