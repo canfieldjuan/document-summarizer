@@ -349,8 +349,11 @@ pub struct ChunkedDocument {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRequest {
+    pub stage: PipelineStage,
+    pub ordinal: u32,
     pub system_prompt: String,
     pub user_prompt: String,
+    pub seed: u64,
     pub max_output_tokens: u32,
     pub output_format: ModelOutputFormat,
 }
@@ -365,11 +368,39 @@ pub enum ModelOutputFormat {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTransportAttempt {
+    Primary,
+    SchemaFallbackRetry,
+    CachedSchemaFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ModelTokenUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRequestAttemptDiagnostic {
+    pub stage: PipelineStage,
+    pub request_ordinal: u32,
+    pub attempt_ordinal: u32,
+    pub transport_attempt: ModelTransportAttempt,
+    pub elapsed_milliseconds: u64,
+    pub configured_output_tokens: u32,
+    pub provider_usage: ModelTokenUsage,
+    pub succeeded: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelResponse {
     pub text: String,
     pub runtime_id: String,
     pub model_id: String,
+    pub request_attempts: Vec<ModelRequestAttemptDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,6 +408,7 @@ pub struct ModelRuntimeFailure {
     pub code: String,
     pub message: String,
     pub recoverable: bool,
+    pub request_attempts: Vec<ModelRequestAttemptDiagnostic>,
 }
 
 impl fmt::Display for ModelRuntimeFailure {

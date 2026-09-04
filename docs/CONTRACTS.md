@@ -555,6 +555,317 @@ claim, response schemas, and model response bytes are also bounded. Independent
 source-fact verification, OCR/vision routing, PDF-viewer navigation, and
 citations for visual-only pages remain deferred.
 
+## Pending summary coverage and model-request contract
+
+**Status:** behavioral contract proposed for review, not yet implemented. The
+preceding section remains the description of current behavior until a separate
+implementation commit satisfies every requirement below. When that
+implementation is accepted, its documentation change must fold these rules into
+the preceding current-behavior section and delete this entire pending section;
+the two descriptions must not remain as parallel sources of truth.
+
+### Root cause
+
+The current stage limits do not compose into a document-level coverage
+guarantee. Analysis admits only a small fixed evidence set per chunk, while the
+hierarchical synthesis path repeatedly reduces candidates and can offer fewer
+final claim slots than the direct path. Verification can then withhold any
+number of claims while still allowing a non-empty result to complete. A larger
+document can therefore receive a thinner accepted summary than a smaller one.
+
+A page-derived claim budget alone does not repair that mismatch. Evidence is
+currently produced per character-bounded chunk, so sparse documents can have a
+large page-derived claim budget but only one small evidence set. Requiring every
+available evidence item to survive semantic verification would make a thin but
+supported result fail only after the full model spend. Evidence production and
+verification-shortfall behavior must therefore change together with the claim
+budget. Page scopes must also be bounded by the analysis output-token allowance:
+a page-derived floor that cannot fit as complete JSON would turn coverage into a
+new deterministic failure. Finally, evidence coverage and claim count are
+different obligations. Requiring one claim per evidence item would prohibit the
+consolidation that synthesis exists to perform.
+
+Exact quotation bytes are also still model-authored on the primary analysis
+path. Deterministic whitespace reconciliation and a second, catalog-backed
+repair request mitigate invalid copies but do not remove that source of
+failure. The repair catalog is bounded while traversing source blocks in order,
+so later blocks can be absent. Finally, every run uses one fixed generation
+seed, verification partitions only by claim count after applying an aggregate
+character ceiling, and model requests expose neither measured duration nor
+token usage.
+
+### Required behavior
+
+For this contract, `N` is the number of normalized pages containing native text
+and `E` is the number of validated evidence items available to synthesis. The
+document claim budget is:
+
+`B = min(64, max(8, ceil(3 * N / 5)))`.
+
+Analysis is partitioned into page-scoped requests whose page count is derived
+from the configured analysis output allowance. Let `A` be
+`ANALYSIS_OUTPUT_TOKENS`, reserve `R_A = 192` tokens for the response envelope,
+and allocate `I_A = 92` tokens for each bounded quote-ID/claim item. The maximum
+evidence quota for one response is
+`Q_A = floor((A - R_A) / I_A)`; `A < R_A + I_A` is invalid configuration.
+Without tokenizer admission, the item allowance reserves four tokens for a
+scope-local quote ID of at most eight ASCII characters at two characters per
+token, 64 tokens for at most 192 claim-text characters at three characters per
+token, and 24 tokens for JSON field syntax and escaping. The resulting 92-token
+item equals `I_A`. With the current 1,024-token allowance, `Q_A` is nine and
+`S_max` below is 15.
+The quote-ID response schema and parser must enforce those identifier and text
+bounds rather than applying the general 2,000-character claim limit. A page
+scope may contain no more than
+`S_max = floor(5 * Q_A / 3)` native-text pages, and character limits may split
+it further.
+
+For each resulting scope containing `S` native-text pages, the validated
+analysis result must contain at least
+`F_scope = max(1, ceil(3 * S / 5))` and no more than `Q_A` distinct evidence
+items drawn from at least `F_scope` distinct pages. Candidate construction must
+make at least one eligible exact quote available for every native-text page in
+the scope. A response below either floor is invalid and fails in analysis; it
+must not silently reduce `E`. Because `F_scope <= Q_A` by construction and the
+sum of the per-scope floors is at least `ceil(3 * N / 5)`, `E` continues to grow
+with native-text page count without asking one response to exceed its output
+budget.
+
+The budget is monotonic in native-text page count. The direct and hierarchical
+paths must both use `B`; crossing an item or character partition boundary must
+not lower the document's final claim capacity. Claim count has its own lower
+bound, independent of the evidence-production floor:
+
+`K = min(B, E, max(3, ceil(B / 2)))`.
+
+The `E` term makes the bound valid for small catalogs: `E = 1` requires one
+claim and `E = 2` requires two, while larger catalogs retain room to consolidate
+related evidence. Synthesis must request and validate at least `K` distinct,
+non-duplicative claims and no more than `B`. Every supplied evidence ID must
+appear at least once across the deterministically accepted synthesis claims,
+and every claim must cite supplied evidence. IDs must be copied exactly;
+related evidence should be consolidated into coherent claims rather than
+repeated as separate ideas. Hierarchical batching may consolidate inside a
+batch, but its intermediate quotas, lineage, and final composition must preserve
+both the same document-level claim bound and complete evidence-ID coverage. It
+must not funnel the whole document through a final request whose item count
+silently becomes the claim ceiling.
+
+Synthesis must also preserve downstream verifiability. Before inference, Rust
+must prove that the evidence catalog can be assigned to no more than `B`
+single-claim verification inputs under `V_request`, reserving the maximum
+allowed claim-text size. Hierarchical candidate pairs are compatible only when
+their combined evidence can still fit that same conservative single-claim
+verification bound. After synthesis, Rust must run the actual claims through
+the complete count, per-request character, and aggregate verification planner
+before persisting the synthesis artifact. A claim set that is legal by evidence
+count but cannot be verified within the configured context is invalid synthesis,
+not a later verification-stage surprise.
+
+Let `V` be the supported-claim count after semantic verification, and let
+`E_V` be the validated evidence IDs cited by those supported claims. `V = 0`
+remains a structured hard failure. If `0 < V < K` or `E_V` does not cover all
+`E` validated evidence items, the run records a durable coverage-shortfall
+warning and performs exactly one bounded re-synthesis from the original
+validated evidence; unsupported claim text is not evidence. The retry uses the
+same document budget, claim floor, complete evidence-coverage target, and
+request-size limits and receives one new semantic-verification pass. If that
+pass supports zero claims, the run fails. If it remains below `K` or leaves
+evidence uncovered but supports at least one claim, the run completes with the
+durable warning and only those supported claims. There is no third synthesis or
+verification attempt.
+
+The first synthesis, its verification verdicts, the retry synthesis, and the
+accepted verdicts must remain auditable and linked to the same run without
+overwriting an earlier artifact. The final verified artifact must validate
+against the synthesis attempt it actually filters. The current one-synthesis
+persisted shape cannot be treated as permission to erase or misidentify the
+first attempt.
+
+Primary analysis must use application-built quote candidates. Every candidate
+is a bounded, contiguous exact substring of one authoritative normalized block
+and carries a short scope-local selection ID plus fixed block and page
+provenance. Selection IDs are canonical ordinals such as `q1` and `q2`, are at
+most eight ASCII characters, and are mapped by Rust to full content-derived
+candidate identities that are never model-authored. The response schema's
+`quote_id` field must enumerate exactly the selection IDs supplied in that
+request; decoder-compatible schema projection must preserve the enum. The model
+returns one of those quote IDs and claim text; it never returns quote bytes or
+chooses block/page identity. Rust still rejects empty, duplicate, foreign,
+mixed-validity, or over-limit selections and materializes quotation bytes,
+`SourceSpan`, and durable evidence identity from the selected candidate.
+Exactness is therefore true by construction, and durable artifact identity does
+not depend on the scope-local ID. The existing quote-copy repair model call and
+its repair-only response schema are removed; historical repair warnings remain
+readable.
+
+Candidate construction and request partitioning must cover the full chunk in
+source order. Each native-text page/block receives candidate opportunity before
+any earlier page/block receives additional capacity. When the whole catalog
+does not fit one bounded request, analysis partitions it into page-scoped
+requests rather than truncating the tail. The prompt must ask for comprehensive,
+non-redundant evidence from the beginning, middle, and final third of each
+scope, including material conclusions, checklists, tables, exceptions, risks,
+amounts, deadlines, and recommendations. Claims must preserve attribution,
+negation, qualifications, and modal language such as `may`, `should`,
+`generally`, `typically`, and `recommended` instead of strengthening them into
+unconditional requirements.
+
+Verification requests remain in canonical claim order and are partitioned by
+both claim count and context-derived input size. Let `C` be the configured model
+context in tokens, `O` the configured maximum output tokens, and `R_V = 512`
+tokens reserved for the chat template and adapter framing. The complete
+model-facing verification input, including system instructions and the user
+payload, must fit within
+`V_request = min(16_000, 3 * (C - O - R_V))` serialized Unicode characters;
+`C <= O + R_V` is invalid configuration. The three-character proxy is required
+because the current adapter has no exact tokenizer preflight and
+identifier-heavy JSON tokenizes more densely than ordinary prose. With the
+current 8,192-token context and 4,096-token output allowance, the ceiling is
+10,752 characters, not 100,000. An adapter with measured tokenizer admission
+may replace the proxy in a later, separately contracted change. Each request
+also contains at most 16 claims.
+
+The aggregate verification input for one semantic-verification pass must not
+exceed `V_aggregate = V_request * ceil(B / 16)`, which is at most 64,000
+characters by formula and 43,008 characters under the current model settings.
+Both ceilings are enforced before the
+first inference request, and one claim that cannot fit alone fails before
+inference. A bounded re-synthesis receives a fresh aggregate allowance for its
+single new verification pass. The verifier must treat matching words as
+insufficient when a claim swaps table or matrix columns, assigns an action or
+consequence to the wrong actor, reverses or drops negation, or strengthens
+source modality. Every request and response retains the existing exact claim-ID
+coverage, verdict-enum, source-exactness, provenance, and fail-closed
+validation.
+
+Each processing run derives its generation seed deterministically from its
+`run_id` with a domain-separated SHA-256-to-`u64` mapping. Every `ModelRequest`
+carries that seed explicitly. Replaying the same run is reproducible, while a
+retry run for the same document receives a different seed and is a genuine
+second generation attempt. Stage and request ordinals remain explicit request
+metadata so diagnostics can distinguish otherwise similar calls.
+
+Every logical model request records its stage, ordinal, locally measured elapsed
+time, configured output-token limit, and provider-reported prompt, completion,
+and total token counts. A schema-fallback transport retry is recorded as a
+separate attempt. Missing provider usage is represented as unreported, never as
+zero or an application estimate. Structured diagnostics must not contain source
+text, prompts, quotations, model output, credentials, or private source paths.
+The current 900-second request deadline is not raised by this work.
+
+Behavior-version constants must advance for changed analysis, synthesis,
+verification, summary, and citation semantics. Current artifacts use analysis
+version `3.0.0`, synthesis, verification, and summary version `4.0.0`, and
+citation version `3.0.0`. Previously persisted semantic synthesis, verification,
+and summary version `3.0.0` artifacts and citation version `2.0.0` retain their
+original validation rules; mechanical version `2.0.0` summary artifacts and
+citation version `1.0.0` remain readable separately. Continuation from a
+pre-upgrade `SYNTHESIZED`, `VERIFIED`, or completed checkpoint must not apply
+new-version invariants retroactively. The bounded re-synthesis must not overwrite the
+already-persisted first synthesis, and the final verification must identify the
+synthesis attempt it validates. A narrowly scoped persisted-artifact or schema
+change needed to represent that immutable attempt lineage is in scope;
+unrelated storage changes are not.
+
+### Required change surface
+
+- `pipeline/summary.rs`: document budget, page-complete quote-candidate
+  partitioning, quote-ID analysis, budget-preserving synthesis, character-aware
+  verification, verifier wording, and boundary validation.
+- `pipeline/contracts.rs` and `pipeline/model.rs`: per-request seed/context,
+  measured duration, provider token usage, and privacy-safe request-attempt
+  diagnostics, including immutable synthesis-attempt identity.
+- `pipeline/db.rs` and a narrowly scoped migration if required: preserve both
+  bounded synthesis attempts and associate each verification with its input
+  attempt without overwriting historical artifacts. This immutable-attempt
+  storage work is sequenced last and must land as its own PR after the other
+  accepted summary-quality work.
+- `pipeline/service.rs`: supply the current run identity to every model stage
+  without changing document identity or retry lineage.
+- `tests/office_acceptance.rs`: quality floors and request metrics in the live
+  acceptance report.
+- `docs/CONTRACTS.md`: promote the accepted behavior into the current contract
+  and remove this pending section in the implementation commit.
+- Focused deterministic tests for both sides of every new budget, candidate,
+  seed, verification-size, and metrics boundary.
+
+### Acceptance evidence
+
+- A live native-text run asserts that final supported claim count is at least
+  `K` and no greater than `B`, and that the union of evidence IDs cited by those
+  supported claims covers every validated evidence item.
+- A live native-text run asserts that cited native-text pages divided by all
+  native-text pages is at least 60 percent. Visual-only pages remain excluded
+  from both numerator and denominator and remain uncited by the native-text
+  path.
+- A tail-heavy fixture proves that a material conclusion or checklist on the
+  last page remains eligible and cited; a head-only catalog cannot pass.
+- Direct and hierarchical fixtures with the same `N` and `E` prove the same
+  `K` claim bound and complete evidence-ID coverage on both sides of the
+  partition threshold.
+- Sparse, multi-page fixtures prove every page-scoped analysis result meets its
+  output-derived evidence quota plus its evidence-item and distinct-page floors;
+  a 25-page scope is partitioned before its required output can exceed
+  `ANALYSIS_OUTPUT_TOKENS`, and `E` cannot collapse to the old per-chunk maximum
+  when `N` grows without proportional characters.
+- Quote-ID fixtures prove the response schema enumerates exactly the supplied
+  scope-local IDs, decoder projection preserves that enum, maximum-length IDs
+  pass, over-length and foreign IDs fail application validation, and selected
+  ordinals map back to the correct full candidate identity and exact source.
+- Claim-bound fixtures cover `E = 1`, `E = 2`, `E < ceil(B / 2)`, and
+  `E >= ceil(B / 2)`, and prove that multiple evidence IDs may consolidate into
+  one accepted claim without losing evidence-ID coverage.
+- A first-pass claim-count or evidence-coverage shortfall proves exactly one
+  bounded re-synthesis occurs and the warning is durable. A second positive
+  shortfall completes with only supported claims and the warning; zero supported
+  claims still fails.
+- Retrying one failed document proves equal document identity and different
+  run-derived seeds; reconstructing requests for one run proves seed stability.
+- Verification probes cover 15, 16, and 17 claims; one character below, at, and
+  above the three-character-derived per-request and aggregate limits; and a
+  mixed catalog requiring both count and character partitioning.
+- Synthesis-to-verification probes use maximum-length quotations to prove a
+  count-legal but context-oversized candidate pair is rejected before model
+  generation, while the adjacent size-safe pair is admitted and the final
+  actual claim catalog passes the complete verification planner before
+  persistence.
+- Request diagnostics prove elapsed time is present for success and failure,
+  provider token counts are captured when supplied, missing usage remains
+  explicit, and no prompt, source, output, token, or path content is logged.
+- A live Ollama analysis run over the repository fixture records request
+  metrics and evidence counts and completes without any invalid quote-ID
+  response before budget or page-scope implementation begins.
+- Existing negative tests for exact quotation bytes, provenance, foreign and
+  duplicate IDs, mixed-validity selections, invalid verdict coverage, and
+  fail-closed artifact persistence continue to pass unchanged in intent.
+
+### Explicit non-scope
+
+Connect, entitlement, packaging, OCR/vision, parsing, model selection, and
+customer-visible summary presentation remain unchanged. The delivered UI may
+continue to render cited claim cards; changing it to prose is a separate product
+decision. No timeout increase, dependency upgrade, broad refactor, generated
+file churn, or opportunistic storage migration belongs in this implementation.
+
+### Follow-on Ollama-native evaluation
+
+Only after the preceding contract is implemented and accepted may a separate
+adapter evaluation compare the OpenAI-compatible endpoint with Ollama's native
+`POST /api/chat`. The native endpoint supports a JSON schema in `format`,
+generation `options`, and response-side duration and prompt/output token counts;
+Ollama's OpenAI compatibility does not expose a request field for context size.
+The evaluation must test an explicit `options.num_ctx`, preserve the same Rust
+validation and loopback/privacy boundary, and measure end-to-end output quality,
+latency, request metrics, and failure behavior before recommending a cutover.
+
+That evaluation must also record current GPU inventory, actual model residency
+and CPU/GPU split, configured parallelism, context size, and observed memory at
+idle and peak. The decision must account for KV-cache growth and the fact that
+parallel requests multiply context-memory demand. A theoretical estimate alone
+is not machine acceptance, and this contract does not select or implement the
+native adapter.
+
 ## Stable checkpoint continuation
 
 A nonterminal run at `INGESTED`, `PARSED`, `NORMALIZED`, `STRUCTURED`,

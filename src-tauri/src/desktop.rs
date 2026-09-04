@@ -450,6 +450,7 @@ mod tests {
                 text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
             })
         }
 
@@ -500,6 +501,7 @@ mod tests {
                 code: "FIXTURE_GATE_FAILED".to_string(),
                 message: "fixture gate was poisoned".to_string(),
                 recoverable: true,
+                request_attempts: Vec::new(),
             })?;
             while !*released {
                 released =
@@ -510,12 +512,14 @@ mod tests {
                             code: "FIXTURE_GATE_FAILED".to_string(),
                             message: "fixture gate was poisoned".to_string(),
                             recoverable: true,
+                            request_attempts: Vec::new(),
                         })?;
             }
             Ok(ModelResponse {
                 text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
             })
         }
 
