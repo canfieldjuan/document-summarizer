@@ -561,6 +561,7 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
             panic!("live office PDF pipeline should complete: {error:?}");
         }
     };
+    print_recorded_responses(&runtime);
     assert_eq!(result.document.content_hash, source_hash);
     assert_eq!(result.document.byte_size, source_size);
     assert_eq!(result.summary.text, result.citations.rendered_text);
