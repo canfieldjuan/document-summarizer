@@ -417,41 +417,6 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ## Local summary artifacts
 
-### Output allowance revision (contract before implementation)
-
-Root cause: the analysis allowance was reduced from 2,048 to 1,024 tokens in
-PR #12 alongside concise multi-item evidence production. It did not reserve
-generation space for a reasoning model. A direct Muse GGUF run exhausted 1,024
-generation tokens without final text while remaining below the context limit.
-
-Raise current analysis output to 2,048 tokens and both direct/hierarchical
-synthesis output to 4,096. Verification stays at 4,096. These are maximum
-generation allowances, not required answer lengths or an instruction to think
-longer. The endpoint, model default, reasoning control, temperature, context
-assumption of 8,192 tokens, and 900-second timeout remain unchanged.
-
-Required change surface: `summary.rs` constants, input admission/partitioning,
-historical-analysis quota isolation and regression tests; this contract and
-the model evaluation. Before inference, analysis and synthesis count system
-plus serialized user text against `min(16_000, 3*(C-O-512))` characters, using
-the existing conservative character proxy, not claiming exact tokenization.
-Synthesis partitioning reserves the larger of its two system prompts. This
-keeps planning and execution consistent as increased output reduces input room.
-Historical v3 analysis continues to derive its nine-item quota from its original
-1,024-token allowance. Do not retroactively change artifact validators.
-
-Explicit non-scope: no relaxed evidence/claim/string/provenance validators,
-budget floors, repair/deduplication, parser, DB migration, model runtime fix,
-Connect, packaging or rendering changes. The standalone Muse schema-enforcement
-failure remains a separate blocker; extra output is not a schema fix.
-
-Verification: request payload tests for all generation stages; exact input
-boundary and boundary-plus-one tests including system text; prior v3 quota and
-artifact tests; full local tests, strict clippy and formatting. Rerun the public
-NARA and DOL fixtures against the same standalone Muse GGUF with only output
-allowances and resulting input admission changed, and lead with remaining
-failures. Fold this subsection into current behavior in the code commit.
-
 `ModelRuntime` is the only inference boundary. A request may select plain text
 or a named, bounded JSON Schema output contract. Current analysis version
 `4.0.0` uses application-built quote candidates rather than model-authored
@@ -474,9 +439,10 @@ or overlong responses without deduplication or repair. The model chooses a
 material passage and writes claim text; Rust restores exact bytes and provenance.
 Candidate construction covers the page's blocks and tail before inference.
 Scope-local IDs are at most eight ASCII characters, claim text is at most 192
-characters, and the output allowance remains 1,024 tokens. The input guard
-remains unchanged. Multi-page output quotas and model-enforced page floors no
-longer govern current analysis.
+characters, and the output allowance is 2,048 tokens. Analysis counts system
+plus serialized user text against the context-derived input limit below.
+Multi-page output quotas and model-enforced page floors no longer govern
+current analysis.
 
 For `N` native-text pages and the claim budget `B` below, Rust selects
 `P = min(N, max(B, ceil(3*N/5)))` distinct pages. The plan evenly spaces
@@ -489,8 +455,9 @@ budget and 60-percent evidence-page target with eight requests for NARA and
 Ordered chunk metadata remains intact; chunks with no planned page have empty
 evidence. Reload validation requires exactly one item per planned page and none
 elsewhere. No database migration is required. Historical analysis `3.0.0`
-retains its multi-page scope quotas and `2.0.0` its original validators; neither
-version's evidence identities are rewritten.
+retains its multi-page scope quotas, including the nine-item quota derived from
+the historical 1,024-token allowance, and `2.0.0` its original validators;
+neither version's evidence identities are rewritten.
 
 Regression tests cover page-only enums, single-item cardinality, empty/two-item
 and mixed/foreign responses, 192/193-character bounds, sparse/dense plans, tail
@@ -511,7 +478,8 @@ Every accepted synthesis contains at least `K` and at most `B` distinct
 claims, every claim cites supplied evidence, and the union of cited evidence IDs
 covers all `E`. Related evidence may consolidate into one coherent claim.
 Requests are partitioned deterministically in source order with at most eight
-items and 16,000 Unicode characters each. Hierarchical candidate reductions
+items and the context-derived input limit below. Both direct and hierarchical
+requests allow at most 4,096 output tokens. Hierarchical candidate reductions
 preserve original evidence lineage and document-level capacity through bounded
 pairwise composition; the whole document is never funneled through a final
 request whose batch size becomes the claim ceiling. The complete synthesis plan
@@ -519,6 +487,19 @@ is capped at 256 model requests, and no claim may expand beyond 16 original
 evidence items. Rust derives final claim IDs, restores canonical evidence order,
 renders authoritative page labels, and persists every source chunk ID exactly
 once in source order.
+
+Generation allowances are ceilings, not required answer lengths. With context
+`C = 8,192`, stage output allowance `O`, and framing reserve `512`, analysis and
+synthesis admit at most `min(16_000, 3 * (C - O - 512))` Unicode characters of
+system plus serialized user text: 16,000 for analysis and 10,752 for synthesis.
+The three-character proxy is not exact tokenization. Synthesis partitioning and
+execution both reserve the larger of the direct and hierarchical system prompts,
+so the same bound controls planning and inference. Boundary tests cover exact
+limits, one character beyond, arithmetic exhaustion, request output allowances,
+and preservation of historical artifact quotas. Increased output room does not
+relax any validator, evidence or claim floor, or timeout. Runtime enforcement of
+response schemas remains separately necessary; Primary transport alone is not
+proof of constrained decoding.
 
 Synthesis also preserves downstream verifiability. Before inference, Rust
 proves that the evidence catalog can be assigned to no more than `B`
@@ -585,7 +566,9 @@ overrides remain `DOC_SUM_MODEL_BASE_URL`, `DOC_SUM_MODEL_NAME`,
 `DOC_SUM_MODEL_API_TOKEN_FILE`. The adapter accepts only plain HTTP on exact
 IPv4 or IPv6 loopback, disables proxies and redirects, and reads only this
 application's bounded token file. Prompts mark document and evidence text as
-untrusted data, temperature is zero, and reasoning is disabled.
+untrusted data and temperature is zero. The adapter requests
+`reasoning_effort: "none"`; whether reasoning is actually disabled depends on
+the runtime and model template, not that request field alone.
 
 Each run derives a signed-range generation seed from a domain-separated SHA-256
 mapping of its `run_id`; a distinct domain-separated attempt seed makes the
@@ -674,11 +657,12 @@ remain separate target-platform work. A supported Linux package must contain the
 desktop executable, desktop entry, and icons without legacy probe executables.
 
 Current limits are conservative. Source chunks remain bounded at 100,000
-Unicode characters. Analysis is bounded by its output-derived evidence quota,
-page-scope size, quote/claim lengths, and request input. Synthesis has no
-unbounded aggregate prompt: every direct, evidence-batch, and candidate request
-is capped at eight items and 16,000 Unicode characters, and a hierarchy is
-capped at 256 requests. Verification is bounded by claim count, the
+Unicode characters. Current analysis is bounded by its selected-page plan,
+one-item response, quote/claim lengths, and context-derived request input.
+Synthesis has no unbounded aggregate prompt: every direct, evidence-batch, and
+candidate request is capped at eight items and the context-derived
+system-plus-user input limit, and a hierarchy is capped at 256 requests.
+Verification is bounded by claim count, the
 context-derived per-request input limit, and its formula-derived aggregate
 limit before inference. A native-text-free document, an individually oversized
 item, an unrepresentable evidence catalog, or a plan beyond those limits fails

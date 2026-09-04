@@ -36,9 +36,10 @@ const ANALYSIS_SCHEMA_NAME: &str = "document_page_evidence_selection_v3";
 const SYNTHESIS_SCHEMA_NAME: &str = "document_summary_claims_v1";
 const HIERARCHICAL_SYNTHESIS_SCHEMA_NAME: &str = "document_candidate_claims_v1";
 const VERIFICATION_SCHEMA_NAME: &str = "document_claim_verdicts_v1";
-const ANALYSIS_OUTPUT_TOKENS: u32 = 1_024;
-const SYNTHESIS_OUTPUT_TOKENS: u32 = 2_048;
+const ANALYSIS_OUTPUT_TOKENS: u32 = 2_048;
+const SYNTHESIS_OUTPUT_TOKENS: u32 = 4_096;
 const VERIFICATION_OUTPUT_TOKENS: u32 = 4_096;
+const PREVIOUS_ANALYSIS_OUTPUT_TOKENS: u32 = 1_024;
 const ANALYSIS_RESPONSE_ENVELOPE_TOKENS: u32 = 192;
 const ANALYSIS_EVIDENCE_ITEM_TOKENS: u32 = 92;
 const MODEL_CONTEXT_TOKENS: u32 = 8_192;
@@ -799,7 +800,7 @@ fn analyze(
                     false,
                 )
             })?;
-            if user_prompt.chars().count() > MAX_CHUNK_INPUT_CHARACTERS {
+            if !analysis_request_within_bounds(user_prompt.chars().count()) {
                 return Err(stage_failure(
                     PipelineStage::Analyze,
                     "ANALYSIS_REQUEST_TOO_LARGE",
@@ -1574,8 +1575,7 @@ fn partition_synthesis_items<T: Clone>(
     for item in items {
         let mut proposed = current.clone();
         proposed.push(item.clone());
-        let fits = proposed.len() <= MAX_SYNTHESIS_ITEMS_PER_REQUEST
-            && prompt_characters(&proposed)? <= MAX_SYNTHESIS_REQUEST_CHARACTERS;
+        let fits = synthesis_request_within_bounds(proposed.len(), prompt_characters(&proposed)?);
         if fits {
             current = proposed;
             continue;
@@ -1615,7 +1615,32 @@ fn partition_synthesis_items<T: Clone>(
 
 fn synthesis_request_within_bounds(item_count: usize, prompt_characters: usize) -> bool {
     (1..=MAX_SYNTHESIS_ITEMS_PER_REQUEST).contains(&item_count)
-        && prompt_characters <= MAX_SYNTHESIS_REQUEST_CHARACTERS
+        && synthesis_request_user_character_limit().is_some_and(|limit| prompt_characters <= limit)
+}
+
+fn generation_input_character_limit(output_tokens: u32) -> Option<usize> {
+    MODEL_CONTEXT_TOKENS
+        .checked_sub(output_tokens)
+        .and_then(|remaining| remaining.checked_sub(VERIFICATION_CONTEXT_RESERVE_TOKENS))
+        .filter(|remaining| *remaining > 0)
+        .and_then(|remaining| usize::try_from(remaining).ok())
+        .and_then(|remaining| remaining.checked_mul(3))
+        .map(|characters| characters.min(MAX_SYNTHESIS_REQUEST_CHARACTERS))
+}
+
+fn analysis_request_within_bounds(user_characters: usize) -> bool {
+    user_characters
+        .checked_add(ANALYSIS_SYSTEM_PROMPT.chars().count())
+        .zip(generation_input_character_limit(ANALYSIS_OUTPUT_TOKENS))
+        .is_some_and(|(total, limit)| total <= limit)
+}
+
+fn synthesis_request_user_character_limit() -> Option<usize> {
+    let system_characters = SYNTHESIS_SYSTEM_PROMPT
+        .chars()
+        .count()
+        .max(HIERARCHICAL_SYNTHESIS_SYSTEM_PROMPT.chars().count());
+    generation_input_character_limit(SYNTHESIS_OUTPUT_TOKENS)?.checked_sub(system_characters)
 }
 
 fn ensure_synthesis_request_bounds(
@@ -2554,7 +2579,7 @@ fn build_analysis_quote_catalog_for_blocks(
 
 // Historical v3 artifact validation only; current responses always hold one item.
 fn analysis_evidence_quota() -> Result<usize, PipelineFailure> {
-    let usable_tokens = ANALYSIS_OUTPUT_TOKENS
+    let usable_tokens = PREVIOUS_ANALYSIS_OUTPUT_TOKENS
         .checked_sub(ANALYSIS_RESPONSE_ENVELOPE_TOKENS)
         .ok_or_else(|| {
             stage_failure(
@@ -5714,12 +5739,20 @@ mod tests {
             (0..u32::try_from(requests.len()).expect("request count should fit u32"))
                 .collect::<Vec<_>>()
         );
-        assert!(requests.iter().all(|request| matches!(
+        assert!(requests.iter().any(|request| matches!(
             &request.output_format,
             ModelOutputFormat::JsonSchema { name, .. } if name == SYNTHESIS_SCHEMA_NAME
         )));
+        assert!(requests.iter().any(|request| matches!(
+            &request.output_format,
+            ModelOutputFormat::JsonSchema { name, .. } if name == HIERARCHICAL_SYNTHESIS_SCHEMA_NAME
+        )));
         for request in &requests {
-            assert!(request.user_prompt.chars().count() <= MAX_SYNTHESIS_REQUEST_CHARACTERS);
+            assert_eq!(request.max_output_tokens, 4_096);
+            assert!(
+                request.system_prompt.chars().count() + request.user_prompt.chars().count()
+                    <= generation_input_character_limit(SYNTHESIS_OUTPUT_TOKENS).unwrap()
+            );
             match &request.output_format {
                 ModelOutputFormat::JsonSchema { name, schema } if name == SYNTHESIS_SCHEMA_NAME => {
                     let prompt: SynthesisPrompt = serde_json::from_str(&request.user_prompt)
@@ -6192,21 +6225,19 @@ mod tests {
 
     #[test]
     fn synthesis_request_and_plan_limits_accept_maxima_and_reject_both_outer_sides() {
+        let request_limit = synthesis_request_user_character_limit().unwrap();
         assert!(synthesis_request_within_bounds(
             MAX_SYNTHESIS_ITEMS_PER_REQUEST,
-            MAX_SYNTHESIS_REQUEST_CHARACTERS
+            request_limit
         ));
-        assert!(!synthesis_request_within_bounds(
-            0,
-            MAX_SYNTHESIS_REQUEST_CHARACTERS
-        ));
+        assert!(!synthesis_request_within_bounds(0, request_limit));
         assert!(!synthesis_request_within_bounds(
             MAX_SYNTHESIS_ITEMS_PER_REQUEST + 1,
-            MAX_SYNTHESIS_REQUEST_CHARACTERS
+            request_limit
         ));
         assert!(!synthesis_request_within_bounds(
             MAX_SYNTHESIS_ITEMS_PER_REQUEST,
-            MAX_SYNTHESIS_REQUEST_CHARACTERS + 1
+            request_limit + 1
         ));
 
         let maximum_batches = MAX_SYNTHESIS_MODEL_REQUESTS / 2;
@@ -6215,6 +6246,79 @@ mod tests {
         let error = ensure_hierarchical_plan_within_budget(maximum_batches, maximum_batches + 1)
             .expect_err("one batch beyond the request-plan maximum must fail");
         assert_eq!(error.code, "SYNTHESIS_PLAN_TOO_LARGE");
+    }
+
+    #[test]
+    fn larger_output_allowances_reach_requests_and_preserve_input_and_historical_bounds() {
+        assert_eq!(ANALYSIS_OUTPUT_TOKENS, 2_048);
+        assert_eq!(SYNTHESIS_OUTPUT_TOKENS, 4_096);
+        assert_eq!(VERIFICATION_OUTPUT_TOKENS, 4_096);
+        assert_eq!(analysis_evidence_quota().unwrap(), 9);
+        let analysis_limit = generation_input_character_limit(ANALYSIS_OUTPUT_TOKENS).unwrap();
+        assert_eq!(analysis_limit, 16_000);
+        let user_limit = analysis_limit - ANALYSIS_SYSTEM_PROMPT.chars().count();
+        assert!(analysis_request_within_bounds(user_limit - 1));
+        assert!(analysis_request_within_bounds(user_limit));
+        assert!(!analysis_request_within_bounds(user_limit + 1));
+        assert!(!analysis_request_within_bounds(usize::MAX));
+        assert_eq!(
+            generation_input_character_limit(SYNTHESIS_OUTPUT_TOKENS),
+            Some(10_752)
+        );
+        assert_eq!(generation_input_character_limit(MODEL_CONTEXT_TOKENS), None);
+        assert_eq!(
+            generation_input_character_limit(
+                MODEL_CONTEXT_TOKENS - VERIFICATION_CONTEXT_RESERVE_TOKENS
+            ),
+            None
+        );
+        let synthesis_limit = synthesis_request_user_character_limit().unwrap();
+        assert!(synthesis_request_within_bounds(1, synthesis_limit));
+        assert!(!synthesis_request_within_bounds(1, synthesis_limit + 1));
+        let batches =
+            partition_synthesis_items(&[1, 2], |items| Ok(items.len() * synthesis_limit)).unwrap();
+        assert_eq!(batches, vec![vec![1], vec![2]]);
+
+        let (normalized, chunked) = sparse_page_scope_fixture(20, 400);
+        let runtime = RecordingHierarchicalRuntime::healthy();
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let synthesized = synthesize(
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert!(!synthesized.claims.is_empty());
+        let requests = runtime.requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.stage == PipelineStage::Analyze));
+        assert!(requests
+            .iter()
+            .any(|request| matches!(&request.output_format,
+            ModelOutputFormat::JsonSchema { name, .. } if name == SYNTHESIS_SCHEMA_NAME)));
+        for request in requests.iter() {
+            let expected = match request.stage {
+                PipelineStage::Analyze => 2_048,
+                PipelineStage::Synthesize => 4_096,
+                _ => panic!("unexpected stage"),
+            };
+            assert_eq!(request.max_output_tokens, expected);
+            assert!(
+                request.system_prompt.chars().count() + request.user_prompt.chars().count()
+                    <= generation_input_character_limit(expected).unwrap()
+            );
+        }
     }
 
     #[test]
@@ -6689,7 +6793,7 @@ mod tests {
             assert_eq!(error.code, "MODEL_EVIDENCE_RESPONSE_INVALID");
         }
 
-        assert_eq!(ANALYSIS_OUTPUT_TOKENS, 1_024);
+        assert_eq!(ANALYSIS_OUTPUT_TOKENS, 2_048);
         let schema = analysis_output_schema(&scope);
         assert_eq!(
             schema["properties"]["evidence"]["minItems"],
@@ -7169,6 +7273,9 @@ mod tests {
         assert!(requests
             .iter()
             .all(|request| request.stage == PipelineStage::Verify));
+        assert!(requests
+            .iter()
+            .all(|request| request.max_output_tokens == 4_096));
         assert_eq!(
             requests
                 .iter()
