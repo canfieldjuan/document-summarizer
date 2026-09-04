@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 13;
+pub const CURRENT_SCHEMA_VERSION: u32 = 14;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -271,6 +271,81 @@ ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 1
 CHECK (protocol_version IN (1, 2));
 "#;
 
+const V13_TO_V14: &str = r#"
+CREATE TABLE summary_synthesis_attempts (
+    run_id TEXT NOT NULL,
+    attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal IN (0, 1)),
+    document_id TEXT NOT NULL,
+    synthesis_version TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    synthesized_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, attempt_ordinal),
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX summary_synthesis_attempts_document_id_idx
+ON summary_synthesis_attempts(document_id);
+
+INSERT INTO summary_synthesis_attempts (
+    run_id, attempt_ordinal, document_id, synthesis_version, artifact_hash,
+    synthesized_artifact, created_at
+)
+SELECT run_id, 0, document_id, synthesis_version, artifact_hash,
+       synthesized_artifact, created_at
+FROM synthesized_documents;
+
+CREATE TRIGGER summary_synthesis_attempts_no_update
+BEFORE UPDATE ON summary_synthesis_attempts
+BEGIN
+    SELECT RAISE(ABORT, 'summary_synthesis_attempts are immutable');
+END;
+
+CREATE TRIGGER summary_synthesis_attempts_no_delete
+BEFORE DELETE ON summary_synthesis_attempts
+BEGIN
+    SELECT RAISE(ABORT, 'summary_synthesis_attempts are immutable');
+END;
+
+CREATE TABLE summary_verification_attempts (
+    run_id TEXT NOT NULL,
+    attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal IN (0, 1)),
+    document_id TEXT NOT NULL,
+    verification_version TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    verified_artifact TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, attempt_ordinal),
+    FOREIGN KEY(run_id, attempt_ordinal)
+        REFERENCES summary_synthesis_attempts(run_id, attempt_ordinal),
+    FOREIGN KEY(document_id) REFERENCES documents(document_id)
+);
+
+CREATE INDEX summary_verification_attempts_document_id_idx
+ON summary_verification_attempts(document_id);
+
+INSERT INTO summary_verification_attempts (
+    run_id, attempt_ordinal, document_id, verification_version, artifact_hash,
+    verified_artifact, created_at
+)
+SELECT run_id, 0, document_id, verification_version, artifact_hash,
+       verified_artifact, created_at
+FROM verified_documents;
+
+CREATE TRIGGER summary_verification_attempts_no_update
+BEFORE UPDATE ON summary_verification_attempts
+BEGIN
+    SELECT RAISE(ABORT, 'summary_verification_attempts are immutable');
+END;
+
+CREATE TRIGGER summary_verification_attempts_no_delete
+BEFORE DELETE ON summary_verification_attempts
+BEGIN
+    SELECT RAISE(ABORT, 'summary_verification_attempts are immutable');
+END;
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -454,6 +529,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V10_TO_V11)?;
         tx.execute_batch(V11_TO_V12)?;
         tx.execute_batch(V12_TO_V13)?;
+        tx.execute_batch(V13_TO_V14)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -505,6 +581,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 12 {
         migrate_v12_to_v13(conn)?;
+        current_version = 13;
+    }
+    if current_version == 13 {
+        migrate_v13_to_v14(conn)?;
     }
     validate(conn)
 }
@@ -584,6 +664,10 @@ fn migrate_v11_to_v12(conn: &mut Connection) -> Result<(), MigrationError> {
 
 fn migrate_v12_to_v13(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V12_TO_V13, 13)
+}
+
+fn migrate_v13_to_v14(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V13_TO_V14, 14)
 }
 
 fn migrate_additive(
@@ -774,6 +858,61 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         }
     }
 
+    for (table, columns) in [
+        (
+            "summary_synthesis_attempts",
+            [
+                "run_id",
+                "attempt_ordinal",
+                "document_id",
+                "synthesis_version",
+                "artifact_hash",
+                "synthesized_artifact",
+                "created_at",
+            ],
+        ),
+        (
+            "summary_verification_attempts",
+            [
+                "run_id",
+                "attempt_ordinal",
+                "document_id",
+                "verification_version",
+                "artifact_hash",
+                "verified_artifact",
+                "created_at",
+            ],
+        ),
+    ] {
+        for column in columns {
+            let present: u32 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                [table, column],
+                |row| row.get(0),
+            )?;
+            if present != 1 {
+                return Err(MigrationError::Invariant(format!(
+                    "{table}.{column} is missing"
+                )));
+            }
+        }
+    }
+    for trigger in [
+        "summary_synthesis_attempts_no_update",
+        "summary_synthesis_attempts_no_delete",
+        "summary_verification_attempts_no_update",
+        "summary_verification_attempts_no_delete",
+    ] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [trigger],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!("{trigger} is missing")));
+        }
+    }
+
     let foreign_key_violation: Option<String> = conn
         .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
         .optional()?;
@@ -813,6 +952,80 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
         }
+    }
+
+    #[test]
+    fn schema_v13_backfills_primary_summary_attempts_and_makes_them_immutable() {
+        let database = TestDatabase::new();
+        let mut conn = Connection::open(&database.0).expect("v13 database should open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        for migration in [
+            SCHEMA_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5, V5_TO_V6, V6_TO_V7, V7_TO_V8, V8_TO_V9,
+            V9_TO_V10, V10_TO_V11, V11_TO_V12, V12_TO_V13,
+        ] {
+            conn.execute_batch(migration)
+                .expect("v13 predecessor schema should initialize");
+        }
+        conn.pragma_update(None, "user_version", 13)
+            .expect("v13 version should persist");
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents VALUES (
+                'lineage-document', 'lineage.pdf', 'pdf', 12, 'lineage-hash',
+                '/lineage.pdf', '2026-09-04T00:00:00+00:00'
+            );
+            INSERT INTO pipeline_runs VALUES (
+                'lineage-run', 'lineage-document', '"Verified"', 17, '1.0',
+                '2026-09-04T00:00:00+00:00', '2026-09-04T00:00:01+00:00',
+                '2026-09-04T00:00:02+00:00', NULL, '"Verify"',
+                '{"total_units":0,"completed_units":0,"failed_units":0}',
+                '[]', NULL, 0, 1
+            );
+            INSERT INTO synthesized_documents VALUES (
+                'lineage-run', 'lineage-document', 'synthesis-v2', 'synthesis-hash',
+                '{"synthesis":0}', '2026-09-04T00:00:02+00:00'
+            );
+            INSERT INTO verified_documents VALUES (
+                'lineage-run', 'lineage-document', 'verification-v2', 'verification-hash',
+                '{"verification":0}', '2026-09-04T00:00:03+00:00'
+            );
+            "#,
+        )
+        .expect("v13 primary summary artifacts should persist");
+
+        migrate(&mut conn).expect("v13 schema should migrate");
+
+        assert_eq!(version(&conn).expect("version should load"), 14);
+        assert_eq!(
+            conn.query_row(
+                "SELECT synthesized_artifact FROM summary_synthesis_attempts
+                 WHERE run_id = 'lineage-run' AND attempt_ordinal = 0",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("backfilled synthesis attempt should load"),
+            r#"{"synthesis":0}"#
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT verified_artifact FROM summary_verification_attempts
+                 WHERE run_id = 'lineage-run' AND attempt_ordinal = 0",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("backfilled verification attempt should load"),
+            r#"{"verification":0}"#
+        );
+        assert!(conn
+            .execute(
+                "UPDATE summary_synthesis_attempts SET artifact_hash = 'changed'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute("DELETE FROM summary_verification_attempts", [])
+            .is_err());
     }
 
     #[test]

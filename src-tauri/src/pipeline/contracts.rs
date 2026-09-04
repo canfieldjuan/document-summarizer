@@ -488,6 +488,8 @@ pub struct VerifiedDocument {
     pub document_id: String,
     pub verification_version: String,
     #[serde(default)]
+    pub synthesis_attempt_ordinal: u32,
+    #[serde(default)]
     pub runtime_id: String,
     #[serde(default)]
     pub model_id: String,

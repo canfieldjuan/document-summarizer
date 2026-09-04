@@ -236,9 +236,9 @@ fn validate_citations_against_sources(
         .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
     let analyzed = db::get_analyzed_document(conn, run_id)?
         .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
-    let synthesized = db::get_synthesized_document(conn, run_id)?
-        .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
     let verified = db::get_verified_document(conn, run_id)?
+        .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
+    let synthesized = db::get_synthesis_attempt(conn, run_id, verified.synthesis_attempt_ordinal)?
         .ok_or_else(|| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
     crate::pipeline::summary::validate_citation_artifact(
         citations,
