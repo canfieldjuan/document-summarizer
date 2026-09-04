@@ -559,7 +559,10 @@ citations for visual-only pages remain deferred.
 
 **Status:** behavioral contract proposed for review, not yet implemented. The
 preceding section remains the description of current behavior until a separate
-implementation commit satisfies every requirement below.
+implementation commit satisfies every requirement below. When that
+implementation is accepted, its documentation change must fold these rules into
+the preceding current-behavior section and delete this entire pending section;
+the two descriptions must not remain as parallel sources of truth.
 
 ### Root cause
 
@@ -569,6 +572,14 @@ hierarchical synthesis path repeatedly reduces candidates and can offer fewer
 final claim slots than the direct path. Verification can then withhold any
 number of claims while still allowing a non-empty result to complete. A larger
 document can therefore receive a thinner accepted summary than a smaller one.
+
+A page-derived claim budget alone does not repair that mismatch. Evidence is
+currently produced per character-bounded chunk, so sparse documents can have a
+large page-derived claim budget but only one small evidence set. Requiring every
+available evidence item to survive semantic verification would make a thin but
+supported result fail only after the full model spend. Evidence production and
+verification-shortfall behavior must therefore change together with the claim
+budget.
 
 Exact quotation bytes are also still model-authored on the primary analysis
 path. Deterministic whitespace reconciliation and a second, catalog-backed
@@ -587,6 +598,15 @@ document claim budget is:
 
 `B = min(64, max(8, ceil(3 * N / 5)))`.
 
+Analysis is partitioned into page-scoped requests. For each scope containing
+`S` native-text pages, the validated analysis result must contain at least
+`F_scope = max(1, ceil(3 * S / 5))` distinct evidence items drawn from at least
+`F_scope` distinct pages. Candidate construction must make at least one eligible
+exact quote available for every native-text page in the scope. A response below
+either floor is invalid and fails in analysis; it must not silently reduce `E`.
+Consequently, across all scopes, `E` grows with native-text page count instead
+of being limited only by character-derived chunk count.
+
 The budget is monotonic in native-text page count. The direct and hierarchical
 paths must both use `B`; crossing an item or character partition boundary must
 not lower the document's final claim capacity. Synthesis must request and
@@ -595,9 +615,24 @@ validate at least `min(B, E)` distinct, non-duplicative claims and no more than
 intermediate quotas and final composition must preserve enough candidate
 capacity to meet the same document-level lower bound. It must not funnel the
 whole document through a final request whose item count silently becomes the
-claim ceiling. If semantic verification leaves fewer than `min(B, E)` supported
-claims, the run fails with a structured quality failure instead of committing a
-thin summary.
+claim ceiling.
+
+Let `T = min(B, E)` and `V` be the supported-claim count after semantic
+verification. `V = 0` remains a structured hard failure. If `0 < V < T`, the
+run records a durable coverage-shortfall warning and performs exactly one
+bounded re-synthesis from the original validated evidence; unsupported claim
+text is not evidence. The retry uses the same document budget and request-size
+limits and receives one new semantic-verification pass. If that pass supports
+zero claims, the run fails. If it supports at least one but still fewer than
+`T`, the run completes with the durable warning and only those supported claims.
+There is no third synthesis or verification attempt.
+
+The first synthesis, its verification verdicts, the retry synthesis, and the
+accepted verdicts must remain auditable and linked to the same run without
+overwriting an earlier artifact. The final verified artifact must validate
+against the synthesis attempt it actually filters. The current one-synthesis
+persisted shape cannot be treated as permission to erase or misidentify the
+first attempt.
 
 Primary analysis must use application-built quote candidates. Every candidate
 is a bounded, contiguous exact substring of one authoritative normalized block
@@ -623,15 +658,26 @@ negation, qualifications, and modal language such as `may`, `should`,
 unconditional requirements.
 
 Verification requests remain in canonical claim order and are partitioned by
-both a maximum of 16 claims and a maximum of 100,000 serialized Unicode
-characters per request. The former 100,000-character aggregate ceiling becomes
-a per-request ceiling; a catalog may exceed it in aggregate, while one claim
-that cannot fit alone fails before inference. The verifier must treat matching
-words as insufficient when a claim swaps table or matrix columns, assigns an
-action or consequence to the wrong actor, reverses or drops negation, or
-strengthens source modality. Every request and response retains the existing
-exact claim-ID coverage, verdict-enum, source-exactness, provenance, and
-fail-closed validation.
+both claim count and context-derived input size. Let `C` be the configured model
+context in tokens and `O` the configured maximum output tokens. The complete
+model-facing verification input, including system instructions and the user
+payload, must fit within
+`V_request = min(16_000, 4 * (C - O))` serialized Unicode characters; `C <= O`
+is invalid configuration. With the current 8,192-token context and 4,096-token
+output allowance, the ceiling is 16,000 characters, not 100,000. Each request
+also contains at most 16 claims.
+
+The aggregate verification input for one semantic-verification pass must not
+exceed `V_aggregate = V_request * ceil(B / 16)`, which is at most 64,000
+characters under the document budget. Both ceilings are enforced before the
+first inference request, and one claim that cannot fit alone fails before
+inference. A bounded re-synthesis receives a fresh aggregate allowance for its
+single new verification pass. The verifier must treat matching words as
+insufficient when a claim swaps table or matrix columns, assigns an action or
+consequence to the wrong actor, reverses or drops negation, or strengthens
+source modality. Every request and response retains the existing exact claim-ID
+coverage, verdict-enum, source-exactness, provenance, and fail-closed
+validation.
 
 Each processing run derives its generation seed deterministically from its
 `run_id` with a domain-separated SHA-256-to-`u64` mapping. Every `ModelRequest`
@@ -650,9 +696,11 @@ The current 900-second request deadline is not raised by this work.
 
 Behavior-version constants must advance for changed analysis, synthesis,
 verification, summary, and citation semantics while historical artifacts remain
-readable. No database migration is required unless implementation evidence
-proves that the existing persisted shapes cannot express the contract; such
-evidence requires a contract revision before code expands into storage changes.
+readable. The bounded re-synthesis must not overwrite the already-persisted
+first synthesis, and the final verification must identify the synthesis attempt
+it validates. A narrowly scoped persisted-artifact or schema change needed to
+represent that immutable attempt lineage is in scope; unrelated storage changes
+are not.
 
 ### Required change surface
 
@@ -661,11 +709,16 @@ evidence requires a contract revision before code expands into storage changes.
   verification, verifier wording, and boundary validation.
 - `pipeline/contracts.rs` and `pipeline/model.rs`: per-request seed/context,
   measured duration, provider token usage, and privacy-safe request-attempt
-  diagnostics.
+  diagnostics, including immutable synthesis-attempt identity.
+- `pipeline/db.rs` and a narrowly scoped migration if required: preserve both
+  bounded synthesis attempts and associate each verification with its input
+  attempt without overwriting historical artifacts.
 - `pipeline/service.rs`: supply the current run identity to every model stage
   without changing document identity or retry lineage.
 - `tests/office_acceptance.rs`: quality floors and request metrics in the live
   acceptance report.
+- `docs/CONTRACTS.md`: promote the accepted behavior into the current contract
+  and remove this pending section in the implementation commit.
 - Focused deterministic tests for both sides of every new budget, candidate,
   seed, verification-size, and metrics boundary.
 
@@ -681,11 +734,17 @@ evidence requires a contract revision before code expands into storage changes.
   last page remains eligible and cited; a head-only catalog cannot pass.
 - Direct and hierarchical fixtures with the same `N` and `E` prove the same
   claim bounds on both sides of the partition threshold.
+- Sparse, multi-page fixtures prove every page-scoped analysis result meets its
+  evidence-item and distinct-page floors; `E` cannot collapse to the old
+  per-chunk maximum when `N` grows without proportional characters.
+- A first-pass verification shortfall proves exactly one bounded re-synthesis
+  occurs and the warning is durable. A second positive shortfall completes with
+  only supported claims and the warning; zero supported claims still fails.
 - Retrying one failed document proves equal document identity and different
   run-derived seeds; reconstructing requests for one run proves seed stability.
 - Verification probes cover 15, 16, and 17 claims; one character below, at, and
-  above the per-request limit; and a mixed catalog requiring both count and
-  character partitioning.
+  above the derived per-request and aggregate limits; and a mixed catalog
+  requiring both count and character partitioning.
 - Request diagnostics prove elapsed time is present for success and failure,
   provider token counts are captured when supplied, missing usage remains
   explicit, and no prompt, source, output, token, or path content is logged.
