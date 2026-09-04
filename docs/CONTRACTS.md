@@ -543,11 +543,30 @@ unreported rather than estimated. Diagnostics contain no prompt, source,
 quotation, model output, credential, or private path content.
 
 Before transport, the adapter derives a non-mutating decoder projection of the
-canonical schema. It omits decoder-unsupported `uniqueItems` and large
-`maxLength` grammar expansions while retaining object closure, required
-fields, enums, non-empty strings, and array bounds. Rust remains authoritative
+canonical schema. It omits decoder-unsupported `uniqueItems` and strips numeric
+`maxLength` values only when they exceed 192 characters. Bounds from zero
+through 192 survive at every nested schema location, including analysis's
+192-character claim limit; the old 2,000- and 4,000-character grammar expansions
+remain omitted. Object closure, required fields, enums, non-empty strings, and
+array bounds survive. The analysis system prompt explicitly states that each
+`claim_text` is at most 192 characters and that each `quote_id` may appear at
+most once in the entire response. An enum constrains membership, not reuse;
+`uniqueItems` would compare whole objects rather than quote IDs.
+
+Projection tests cover zero, 191, 192, 193, 2,000, and 4,000, preserve the
+canonical input schema, and exercise small and large bounds in nested schemas.
+Prompt tests tie the stated numeric limit to the validator constant. Live
+acceptance reruns the public NARA schedule and DOL deck through the complete
+pipeline and reports claims, evidence, cited native-page fraction, request
+count, and total completion tokens for each. Any failed run remains an open
+product blocker and must lead the result report.
+
+Rust remains authoritative
 for all string sizes, uniqueness, identity, quotation, provenance, and response
-limits. The exact Ollama vocabulary-loading failure may retry once through
+limits: the validator, evidence floors, and distinct-page requirements are not
+relaxed, and invalid selections are never silently deduplicated. This change
+does not alter the endpoint, model, timeout, schema versions, or storage.
+The exact Ollama vocabulary-loading failure may retry once through
 JSON-object mode; other HTTP failures do not activate that fallback, and each
 transport attempt is diagnosed separately.
 
