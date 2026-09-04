@@ -1,5 +1,52 @@
 # Corpus and native Ollama evaluation — 2026-09-04
 
+## Latest result: the product blocker remains after the bounded-generation fix
+
+Both corpus runs still fail before delivering a summary at implementation
+commit `8160be8`, following contract commit `6cf34c4`. The code now preserves
+`maxLength` up to and including 192 and explicitly instructs the model to keep
+claims within that limit and use each quote ID at most once. All validators,
+evidence floors, budgets, the model, and the endpoint are unchanged.
+
+| First run after the change | Claims | Evidence artifact | Cited-page fraction | Requests | Completion tokens | Request time | Test time |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| NARA | Not produced | Not produced | Unavailable; 11 native-text pages | 1 | 125 | 6,510 ms | 7.09 s |
+| DOL | Not produced | Not produced | Unavailable; 111 native-text pages | 3 | 995 | 9,840 ms total | 11.68 s |
+
+Both commands exited 101. Every request used Primary transport. NARA passed
+the claim-length and quote-ID checks but failed the distinct-page floor in its
+first scope. DOL passed two scopes, then failed the unique-ID/bounded-text
+check on the third. The complete analysis schema compiled successfully in
+Ollama; no schema fallback occurred. No synthesis or verification request ran.
+These measurements supersede any expectation that the requested prompt and
+projection changes alone close the original complaint.
+
+One diagnostic rerun per public document used the same code with response
+tracing enabled. NARA again failed distinct-page coverage: its three different
+quote IDs had claim lengths 71, 70, and 126. It used 116 completion tokens in
+one request, 1,825 ms model time, and 2.41 s test time.
+DOL again failed in its third scope. Its first two scopes each returned nine
+items that passed validation (18 transient evidence items, not a persisted
+analysis artifact). The third returned nine items but repeated both `q6` and
+`q7`; all claim lengths were within 192. That diagnostic used 992 completion
+tokens across three requests, 9,839 ms model time, and 11.70 s test time.
+Several claims in its second scope reached the 192-character boundary and
+ended mid-word; decoder length enforcement alone is not semantic quality proof.
+
+The remaining gap is selection structure: an enum permits repeated members,
+and distinct quote IDs can still cite the same page. Explicit prompt wording
+did not reliably satisfy either requirement on this corpus. Closing the
+product blocker needs a further contract for reliable distinct-page/quote
+selection; this change does not silently deduplicate, lower a floor, or relax
+the validator. The narrow fix is held as a draft, not a successful corpus
+closure, and issue #29 remains open.
+
+Local gates passed: 216 library tests, one deterministic acceptance test,
+three release tests, strict clippy, and formatting. The new projection test
+failed before implementation and passed afterward; it covers 0, 191, 192,
+193, 2,000, and 4,000. Existing negative evidence/provenance tests still pass.
+Local success is separate from the failed live acceptance above.
+
 ## Corpus result: both large-document live runs fail
 
 The live acceptance runs used the tree of merged `main` at
