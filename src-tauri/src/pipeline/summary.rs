@@ -55,12 +55,29 @@ const MAX_CLAIM_CHARACTERS: usize = 2_000;
 const MAX_QUOTE_CHARACTERS: usize = 4_000;
 const CANCELLATION_OBSERVED_CODE: &str = "PIPELINE_CANCELLATION_OBSERVED";
 const GENERATION_SEED_DOMAIN: &[u8] = b"doc-sum:model-generation-seed:v1";
+const GENERATION_ATTEMPT_SEED_DOMAIN: &[u8] = b"doc-sum:model-generation-attempt-seed:v1";
+const COVERAGE_SHORTFALL_WARNING_CODE: &str = "SUMMARY_COVERAGE_SHORTFALL";
 
 pub(crate) fn generation_seed_for_run(run_id: &str) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(GENERATION_SEED_DOMAIN);
     hasher.update([0]);
     hasher.update(run_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut seed_bytes = [0_u8; 8];
+    seed_bytes.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(seed_bytes) & (i64::MAX as u64)
+}
+
+fn generation_seed_for_attempt(run_seed: u64, attempt_ordinal: u32) -> u64 {
+    if attempt_ordinal == 0 {
+        return run_seed;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(GENERATION_ATTEMPT_SEED_DOMAIN);
+    hasher.update([0]);
+    hasher.update(run_seed.to_be_bytes());
+    hasher.update(attempt_ordinal.to_be_bytes());
     let digest = hasher.finalize();
     let mut seed_bytes = [0_u8; 8];
     seed_bytes.copy_from_slice(&digest[..8]);
@@ -446,13 +463,15 @@ pub(crate) fn verify_synthesized_document_controlled(
 
     let (verifying_run, persisted_synthesis) =
         db::start_verification(conn, run_id, run.state_version)?;
-    let verified = match verify(
+    let run_seed = generation_seed_for_run(run_id);
+    let mut verified = match verify(
         runtime,
         &persisted_synthesis,
         &persisted_analysis,
         &chunked,
         &normalized,
-        generation_seed_for_run(run_id),
+        generation_seed_for_attempt(run_seed, 0),
+        0,
         control,
     ) {
         Ok(verified) => verified,
@@ -469,8 +488,117 @@ pub(crate) fn verify_synthesized_document_controlled(
             ));
         }
     };
-    complete_verification(conn, run_id, verifying_run.state_version, &verified)?;
-    Ok(verified)
+    if verified.claims.is_empty() {
+        record_verification_attempt(conn, run_id, verifying_run.state_version, 0, &verified)?;
+        return Err(persist_failure(
+            conn,
+            run_id,
+            verifying_run.state_version,
+            ActiveStage::Verification,
+            no_supported_claims_failure(),
+        ));
+    }
+
+    let coverage_met =
+        match verification_meets_coverage(&verified, &persisted_analysis, &normalized) {
+            Ok(coverage_met) => coverage_met,
+            Err(failure) => {
+                return Err(persist_failure(
+                    conn,
+                    run_id,
+                    verifying_run.state_version,
+                    ActiveStage::Verification,
+                    failure,
+                ));
+            }
+        };
+    if coverage_met {
+        complete_verification(conn, run_id, verifying_run.state_version, 0, &verified)?;
+        return Ok(verified);
+    }
+
+    add_coverage_shortfall_warning(&mut verified);
+    record_verification_attempt(conn, run_id, verifying_run.state_version, 0, &verified)?;
+
+    let retry_seed = generation_seed_for_attempt(run_seed, 1);
+    let retry_synthesis = match synthesize(
+        runtime,
+        &persisted_analysis,
+        &chunked,
+        &normalized,
+        retry_seed,
+        control,
+    ) {
+        Ok(synthesized) => synthesized,
+        Err(failure) if cancellation_observed(&failure) => {
+            return Err(SummaryPipelineError::CancellationObserved);
+        }
+        Err(failure) => {
+            return Err(persist_failure(
+                conn,
+                run_id,
+                verifying_run.state_version,
+                ActiveStage::Verification,
+                failure,
+            ));
+        }
+    };
+    record_synthesis_attempt(
+        conn,
+        run_id,
+        verifying_run.state_version,
+        1,
+        &retry_synthesis,
+    )?;
+
+    let retry_verified = match verify(
+        runtime,
+        &retry_synthesis,
+        &persisted_analysis,
+        &chunked,
+        &normalized,
+        retry_seed,
+        1,
+        control,
+    ) {
+        Ok(verified) => verified,
+        Err(failure) if cancellation_observed(&failure) => {
+            return Err(SummaryPipelineError::CancellationObserved);
+        }
+        Err(failure) => {
+            return Err(persist_failure(
+                conn,
+                run_id,
+                verifying_run.state_version,
+                ActiveStage::Verification,
+                failure,
+            ));
+        }
+    };
+    if retry_verified.claims.is_empty() {
+        record_verification_attempt(
+            conn,
+            run_id,
+            verifying_run.state_version,
+            1,
+            &retry_verified,
+        )?;
+        return Err(persist_failure(
+            conn,
+            run_id,
+            verifying_run.state_version,
+            ActiveStage::Verification,
+            no_supported_claims_failure(),
+        ));
+    }
+    complete_verification(
+        conn,
+        run_id,
+        verifying_run.state_version,
+        1,
+        &retry_verified,
+    )?;
+    Ok(retry_verified)
 }
 
 pub fn complete_verified_document(
@@ -489,18 +617,19 @@ pub fn complete_verified_document(
             run_id: run_id.to_string(),
         }
     })?;
-    let persisted_synthesis = db::get_synthesized_document(conn, run_id)?.ok_or_else(|| {
-        StoreError::DownstreamArtifactNotFound {
-            artifact_kind: "synthesized".to_string(),
-            run_id: run_id.to_string(),
-        }
-    })?;
     let verified = db::get_verified_document(conn, run_id)?.ok_or_else(|| {
         StoreError::DownstreamArtifactNotFound {
             artifact_kind: "verified".to_string(),
             run_id: run_id.to_string(),
         }
     })?;
+    let persisted_synthesis =
+        db::get_synthesis_attempt(conn, run_id, verified.synthesis_attempt_ordinal)?.ok_or_else(
+            || StoreError::DownstreamArtifactNotFound {
+                artifact_kind: "synthesis attempt".to_string(),
+                run_id: run_id.to_string(),
+            },
+        )?;
     if let Err(failure) = validate_verified_document(
         &verified,
         &persisted_synthesis,
@@ -1397,6 +1526,7 @@ impl SynthesisRequestBudget {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify(
     runtime: &dyn ModelRuntime,
     synthesized: &SynthesizedDocument,
@@ -1404,6 +1534,7 @@ fn verify(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
     generation_seed: u64,
+    synthesis_attempt_ordinal: u32,
     control: &dyn ExecutionControl,
 ) -> Result<VerifiedDocument, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Verify)?;
@@ -1469,10 +1600,15 @@ fn verify(
         .map(|(claim, _)| claim.clone())
         .collect::<Vec<_>>();
     let summary_text = render_cited_summary(&claims, analyzed)?;
-    let warnings = verification_warnings(synthesized, &claim_verifications);
+    let warnings = verification_warnings(
+        synthesized,
+        &claim_verifications,
+        synthesis_attempt_ordinal > 0,
+    );
     let verified = VerifiedDocument {
         document_id: synthesized.document_id.clone(),
         verification_version: VERIFICATION_VERSION.to_string(),
+        synthesis_attempt_ordinal,
         runtime_id: runtime.runtime_id().to_string(),
         model_id: runtime.model_id().to_string(),
         summary_text,
@@ -2986,6 +3122,7 @@ fn parse_verification_response(
 fn verification_warnings(
     synthesized: &SynthesizedDocument,
     verifications: &[ClaimVerification],
+    coverage_retry_attempted: bool,
 ) -> Vec<PipelineWarning> {
     let mut warnings = synthesized
         .warnings
@@ -2993,7 +3130,9 @@ fn verification_warnings(
         .filter(|warning| {
             !matches!(
                 warning.code.as_str(),
-                "SEMANTIC_VERIFICATION_DEFERRED" | "SEMANTIC_CLAIMS_WITHHELD"
+                "SEMANTIC_VERIFICATION_DEFERRED"
+                    | "SEMANTIC_CLAIMS_WITHHELD"
+                    | COVERAGE_SHORTFALL_WARNING_CODE
             )
         })
         .cloned()
@@ -3016,7 +3155,59 @@ fn verification_warnings(
             stage: Some(PipelineStage::Verify),
         });
     }
+    if coverage_retry_attempted {
+        warnings.push(coverage_shortfall_warning());
+    }
     warnings
+}
+
+fn coverage_shortfall_warning() -> PipelineWarning {
+    PipelineWarning {
+        code: COVERAGE_SHORTFALL_WARNING_CODE.to_string(),
+        message: "Initial semantic verification missed the claim or evidence coverage target; one bounded re-synthesis was attempted"
+            .to_string(),
+        stage: Some(PipelineStage::Verify),
+    }
+}
+
+fn add_coverage_shortfall_warning(verified: &mut VerifiedDocument) {
+    if !verified
+        .warnings
+        .iter()
+        .any(|warning| warning.code == COVERAGE_SHORTFALL_WARNING_CODE)
+    {
+        verified.warnings.push(coverage_shortfall_warning());
+    }
+}
+
+fn no_supported_claims_failure() -> PipelineFailure {
+    stage_failure(
+        PipelineStage::Verify,
+        "NO_SEMANTICALLY_SUPPORTED_CLAIMS",
+        "Semantic verification did not support any summary claim",
+        true,
+    )
+}
+
+fn verification_meets_coverage(
+    verified: &VerifiedDocument,
+    analyzed: &AnalyzedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<bool, PipelineFailure> {
+    let evidence_ids = analyzed
+        .chunks
+        .iter()
+        .flat_map(|analysis| analysis.evidence.iter())
+        .map(|evidence| evidence.evidence_id.as_str())
+        .collect::<HashSet<_>>();
+    let supported_evidence_ids = verified
+        .claims
+        .iter()
+        .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
+        .collect::<HashSet<_>>();
+    let claim_budget = document_claim_budget(normalized)?;
+    let claim_floor = synthesis_claim_floor(claim_budget, evidence_ids.len())?;
+    Ok(verified.claims.len() >= claim_floor && supported_evidence_ids == evidence_ids)
 }
 
 fn validate_analyzed_document(
@@ -3338,7 +3529,13 @@ fn validate_verified_document(
     if !verification_coverage_valid
         || verified.claims != supported_claims
         || verified.summary_text != expected_summary
-        || verified.warnings != verification_warnings(synthesized, &verified.claim_verifications)
+        || verified.synthesis_attempt_ordinal > 1
+        || verified.warnings
+            != verification_warnings(
+                synthesized,
+                &verified.claim_verifications,
+                verified.synthesis_attempt_ordinal > 0,
+            )
         || verified
             .warnings
             .iter()
@@ -3371,6 +3568,7 @@ fn validate_legacy_verified_document(
         });
     }
     if verified.document_id != synthesized.document_id
+        || verified.synthesis_attempt_ordinal != 0
         || !verified.runtime_id.is_empty()
         || !verified.model_id.is_empty()
         || verified.summary_text != synthesized.summary_text
@@ -3808,12 +4006,14 @@ fn complete_verification(
     conn: &mut Connection,
     run_id: &str,
     expected_version: u32,
+    attempt_ordinal: u32,
     verified: &VerifiedDocument,
 ) -> Result<crate::pipeline::contracts::PipelineRun, SummaryPipelineError> {
     match db::complete_verification(
         conn,
         run_id,
         expected_version,
+        attempt_ordinal,
         verified,
         verified.warnings.clone(),
     ) {
@@ -3826,6 +4026,50 @@ fn complete_verification(
             "verification",
             source,
         ),
+    }
+}
+
+fn record_synthesis_attempt(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    attempt_ordinal: u32,
+    synthesized: &SynthesizedDocument,
+) -> Result<(), SummaryPipelineError> {
+    match db::record_synthesis_attempt(conn, run_id, expected_version, attempt_ordinal, synthesized)
+    {
+        Ok(()) => Ok(()),
+        Err(source) => persist_artifact_failure(
+            conn,
+            run_id,
+            expected_version,
+            ActiveStage::Verification,
+            "synthesis attempt",
+            source,
+        )
+        .map(|_| ()),
+    }
+}
+
+fn record_verification_attempt(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    attempt_ordinal: u32,
+    verified: &VerifiedDocument,
+) -> Result<(), SummaryPipelineError> {
+    match db::record_verification_attempt(conn, run_id, expected_version, attempt_ordinal, verified)
+    {
+        Ok(()) => Ok(()),
+        Err(source) => persist_artifact_failure(
+            conn,
+            run_id,
+            expected_version,
+            ActiveStage::Verification,
+            "verification attempt",
+            source,
+        )
+        .map(|_| ()),
     }
 }
 
@@ -4034,8 +4278,9 @@ mod tests {
     use crate::pipeline::control::CancellationToken;
     use crate::pipeline::db::{
         get_analyzed_document, get_chunked_document, get_citation_artifact,
-        get_normalized_document, get_pipeline_run, get_summary_artifact, get_synthesized_document,
-        get_verified_document, init_db, list_pipeline_events,
+        get_normalized_document, get_pipeline_run, get_summary_artifact, get_synthesis_attempt,
+        get_synthesized_document, get_verification_attempt, get_verified_document, init_db,
+        list_pipeline_events,
     };
     use crate::pipeline::ingest::ingest_pdf;
     use crate::pipeline::model::OllamaRuntime;
@@ -4087,10 +4332,24 @@ mod tests {
     enum VerificationFixtureMode {
         Mixed,
         AllUnsupported,
+        ShortfallThenSupported,
+        ShortfallThenUnsupported,
     }
 
     struct VerificationFixtureRuntime {
         mode: VerificationFixtureMode,
+        verification_calls: AtomicUsize,
+        synthesis_calls: AtomicUsize,
+    }
+
+    impl VerificationFixtureRuntime {
+        fn new(mode: VerificationFixtureMode) -> Self {
+            Self {
+                mode,
+                verification_calls: AtomicUsize::new(0),
+                synthesis_calls: AtomicUsize::new(0),
+            }
+        }
     }
 
     struct RecordingHierarchicalRuntime {
@@ -4247,6 +4506,7 @@ mod tests {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             let text = match &request.output_format {
                 ModelOutputFormat::JsonSchema { name, .. } if name == VERIFICATION_SCHEMA_NAME => {
+                    let verification_call = self.verification_calls.fetch_add(1, Ordering::SeqCst);
                     let prompt: VerificationPrompt = serde_json::from_str(&request.user_prompt)
                         .expect("verification fixture prompt should deserialize");
                     let verdicts = prompt
@@ -4259,18 +4519,51 @@ mod tests {
                                 VerificationFixtureMode::AllUnsupported => {
                                     ClaimVerdict::Unsupported
                                 }
-                                VerificationFixtureMode::Mixed if index == 0 => {
+                                VerificationFixtureMode::ShortfallThenSupported
+                                    if verification_call > 0 =>
+                                {
                                     ClaimVerdict::Supported
                                 }
-                                VerificationFixtureMode::Mixed if index == 1 => {
+                                VerificationFixtureMode::ShortfallThenUnsupported
+                                    if verification_call > 0 =>
+                                {
                                     ClaimVerdict::Unsupported
                                 }
-                                VerificationFixtureMode::Mixed => ClaimVerdict::Ambiguous,
+                                VerificationFixtureMode::Mixed
+                                | VerificationFixtureMode::ShortfallThenSupported
+                                | VerificationFixtureMode::ShortfallThenUnsupported
+                                    if index == 0 =>
+                                {
+                                    ClaimVerdict::Supported
+                                }
+                                VerificationFixtureMode::Mixed
+                                | VerificationFixtureMode::ShortfallThenSupported
+                                | VerificationFixtureMode::ShortfallThenUnsupported
+                                    if index == 1 =>
+                                {
+                                    ClaimVerdict::Unsupported
+                                }
+                                VerificationFixtureMode::Mixed
+                                | VerificationFixtureMode::ShortfallThenSupported
+                                | VerificationFixtureMode::ShortfallThenUnsupported => {
+                                    ClaimVerdict::Ambiguous
+                                }
                             },
                         })
                         .collect();
                     serde_json::to_string(&RawVerificationResponse { verdicts })
                         .expect("verification fixture response should serialize")
+                }
+                ModelOutputFormat::JsonSchema { name, .. } if name == SYNTHESIS_SCHEMA_NAME => {
+                    let synthesis_call = self.synthesis_calls.fetch_add(1, Ordering::SeqCst);
+                    let mut response: RawClaimsResponse =
+                        serde_json::from_str(&fixture_model_output(request))
+                            .expect("synthesis fixture response should deserialize");
+                    if synthesis_call > 0 {
+                        response.claims[0].text.push_str(" Retry attempt.");
+                    }
+                    serde_json::to_string(&response)
+                        .expect("synthesis fixture response should serialize")
                 }
                 _ => fixture_model_output(request),
             };
@@ -4677,6 +4970,12 @@ mod tests {
             seed,
             generation_seed_for_run("run-00000000-0000-0000-0000-000000000002")
         );
+        assert_eq!(generation_seed_for_attempt(seed, 0), seed);
+        let retry_seed = generation_seed_for_attempt(seed, 1);
+        assert_eq!(retry_seed, generation_seed_for_attempt(seed, 1));
+        assert_ne!(retry_seed, seed);
+        assert!(retry_seed <= i64::MAX as u64);
+        assert_ne!(retry_seed, generation_seed_for_attempt(seed, 2));
     }
 
     #[test]
@@ -4719,10 +5018,26 @@ mod tests {
         assert!(get_synthesized_document(&conn, &run_id)
             .expect("synthesis should load")
             .is_some());
+        assert_eq!(
+            get_synthesis_attempt(&conn, &run_id, 0).expect("first synthesis attempt should load"),
+            get_synthesized_document(&conn, &run_id).expect("primary synthesis should load")
+        );
+        assert!(get_synthesis_attempt(&conn, &run_id, 1)
+            .expect("retry synthesis lookup should succeed")
+            .is_none());
         let verified = get_verified_document(&conn, &run_id)
             .expect("verification should load")
             .expect("verification should exist");
         assert_eq!(verified.verification_version, VERIFICATION_VERSION);
+        assert_eq!(verified.synthesis_attempt_ordinal, 0);
+        assert_eq!(
+            get_verification_attempt(&conn, &run_id, 0)
+                .expect("first verification attempt should load"),
+            Some(verified.clone())
+        );
+        assert!(get_verification_attempt(&conn, &run_id, 1)
+            .expect("retry verification lookup should succeed")
+            .is_none());
         assert_eq!(verified.runtime_id, "fixture-runtime");
         assert_eq!(verified.model_id, "fixture-model");
         assert_eq!(verified.claims.len(), verified.claim_verifications.len());
@@ -6294,6 +6609,7 @@ mod tests {
             &chunked,
             &normalized,
             TEST_GENERATION_SEED,
+            0,
             &UNCONTROLLED_EXECUTION,
         )
         .expect_err("permanent input failure must take precedence over runtime health");
@@ -6305,14 +6621,15 @@ mod tests {
     fn semantic_verification_withholds_unsupported_and_ambiguous_claims_with_provenance() {
         let database = TestDatabase::new();
         let (mut conn, run_id) = chunked_run(&database);
-        let runtime = VerificationFixtureRuntime {
-            mode: VerificationFixtureMode::Mixed,
-        };
+        let runtime = VerificationFixtureRuntime::new(VerificationFixtureMode::Mixed);
         let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
             .expect("a partially supported summary should complete with warnings");
         let synthesized = get_synthesized_document(&conn, &run_id)
             .expect("synthesis should load")
             .expect("synthesis should exist");
+        let retry_synthesis = get_synthesis_attempt(&conn, &run_id, 1)
+            .expect("retry synthesis should load")
+            .expect("retry synthesis should exist");
         let verified = get_verified_document(&conn, &run_id)
             .expect("verification should load")
             .expect("verification should exist");
@@ -6322,14 +6639,19 @@ mod tests {
 
         assert!(synthesized.claims.len() > 2);
         assert_eq!(run.state, PipelineState::CompleteWithWarnings);
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
         assert_eq!(verified.runtime_id, runtime.runtime_id());
         assert_eq!(verified.model_id, runtime.model_id());
-        assert_eq!(verified.claims, vec![synthesized.claims[0].clone()]);
-        assert_eq!(verified.claim_verifications.len(), synthesized.claims.len());
+        assert_eq!(verified.synthesis_attempt_ordinal, 1);
+        assert_eq!(verified.claims, vec![retry_synthesis.claims[0].clone()]);
+        assert_eq!(
+            verified.claim_verifications.len(),
+            retry_synthesis.claims.len()
+        );
         assert!(verified
             .claim_verifications
             .iter()
-            .zip(&synthesized.claims)
+            .zip(&retry_synthesis.claims)
             .all(|(verification, claim)| {
                 verification.claim_id == claim.claim_id
                     && verification.evidence_ids == claim.evidence_ids
@@ -6341,6 +6663,25 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.code == "SEMANTIC_CLAIMS_WITHHELD"));
+        assert!(completed
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.code == COVERAGE_SHORTFALL_WARNING_CODE));
+        let first_attempt = get_verification_attempt(&conn, &run_id, 0)
+            .expect("first verification attempt should load")
+            .expect("first verification attempt should exist");
+        let retry_attempt = get_verification_attempt(&conn, &run_id, 1)
+            .expect("retry verification attempt should load")
+            .expect("retry verification attempt should exist");
+        assert!(first_attempt
+            .warnings
+            .iter()
+            .any(|warning| warning.code == COVERAGE_SHORTFALL_WARNING_CODE));
+        assert_eq!(retry_attempt, verified);
+        assert!(get_synthesis_attempt(&conn, &run_id, 1)
+            .expect("retry synthesis should load")
+            .is_some());
         let events = list_pipeline_events(&conn, &run_id).expect("events should load");
         assert_eq!(
             events.last().and_then(|event| event.reason.as_deref()),
@@ -6349,19 +6690,166 @@ mod tests {
     }
 
     #[test]
+    fn first_shortfall_retries_once_and_accepts_the_supported_retry_with_a_durable_warning() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime =
+            VerificationFixtureRuntime::new(VerificationFixtureMode::ShortfallThenSupported);
+
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("a fully supported retry should complete");
+        let verified = get_verified_document(&conn, &run_id)
+            .expect("accepted verification should load")
+            .expect("accepted verification should exist");
+        let retry_synthesis = get_synthesis_attempt(&conn, &run_id, 1)
+            .expect("retry synthesis should load")
+            .expect("retry synthesis should exist");
+        let primary_synthesis = get_synthesis_attempt(&conn, &run_id, 0)
+            .expect("primary synthesis should load")
+            .expect("primary synthesis should exist");
+
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.synthesis_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(verified.synthesis_attempt_ordinal, 1);
+        assert_ne!(primary_synthesis, retry_synthesis);
+        assert_eq!(verified.claims, retry_synthesis.claims);
+        assert!(verified
+            .claim_verifications
+            .iter()
+            .all(|verification| verification.verdict == ClaimVerdict::Supported));
+        assert!(completed
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.code == COVERAGE_SHORTFALL_WARNING_CODE));
+        assert!(get_verification_attempt(&conn, &run_id, 0)
+            .expect("first verification attempt should load")
+            .is_some());
+        assert_eq!(
+            get_verification_attempt(&conn, &run_id, 1).expect("retry verification should load"),
+            Some(verified)
+        );
+        assert!(get_synthesis_attempt(&conn, &run_id, 2)
+            .expect("third synthesis lookup should succeed")
+            .is_none());
+        assert!(get_verification_attempt(&conn, &run_id, 2)
+            .expect("third verification lookup should succeed")
+            .is_none());
+    }
+
+    #[test]
+    fn retry_with_zero_supported_claims_fails_and_preserves_both_attempts() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime =
+            VerificationFixtureRuntime::new(VerificationFixtureMode::ShortfallThenUnsupported);
+
+        let error = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect_err("a retry with no supported claims must fail");
+
+        assert_eq!(error.code(), "NO_SEMANTICALLY_SUPPORTED_CLAIMS");
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
+        assert!(get_synthesis_attempt(&conn, &run_id, 0)
+            .expect("first synthesis attempt should load")
+            .is_some());
+        assert!(get_synthesis_attempt(&conn, &run_id, 1)
+            .expect("retry synthesis attempt should load")
+            .is_some());
+        assert!(get_verification_attempt(&conn, &run_id, 0)
+            .expect("first verification attempt should load")
+            .is_some());
+        let retry_verification = get_verification_attempt(&conn, &run_id, 1)
+            .expect("retry verification attempt should load")
+            .expect("retry verification attempt should exist");
+        assert!(retry_verification.claims.is_empty());
+        assert!(retry_verification
+            .warnings
+            .iter()
+            .any(|warning| warning.code == COVERAGE_SHORTFALL_WARNING_CODE));
+        assert!(get_verified_document(&conn, &run_id)
+            .expect("accepted verification query should succeed")
+            .is_none());
+        assert_eq!(
+            get_pipeline_run(&conn, &run_id)
+                .expect("run should load")
+                .expect("run should exist")
+                .state,
+            PipelineState::Failed
+        );
+    }
+
+    #[test]
+    fn attempt_lineage_survives_reopen_and_rejects_update_delete_duplicate_and_ordinal_overflow() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime =
+            VerificationFixtureRuntime::new(VerificationFixtureMode::ShortfallThenSupported);
+        summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("fixture should complete through the retry");
+        drop(conn);
+
+        let reopened = init_db(&database.0).expect("attempt database should reopen");
+        assert!(get_synthesis_attempt(&reopened, &run_id, 0)
+            .expect("first synthesis should survive reopen")
+            .is_some());
+        assert!(get_synthesis_attempt(&reopened, &run_id, 1)
+            .expect("retry synthesis should survive reopen")
+            .is_some());
+        assert!(get_verification_attempt(&reopened, &run_id, 0)
+            .expect("first verification should survive reopen")
+            .is_some());
+        assert!(get_verification_attempt(&reopened, &run_id, 1)
+            .expect("retry verification should survive reopen")
+            .is_some());
+
+        assert!(reopened
+            .execute(
+                "UPDATE summary_synthesis_attempts SET artifact_hash = 'changed'
+                 WHERE run_id = ?1 AND attempt_ordinal = 0",
+                [&run_id],
+            )
+            .is_err());
+        assert!(reopened
+            .execute(
+                "DELETE FROM summary_verification_attempts
+                 WHERE run_id = ?1 AND attempt_ordinal = 0",
+                [&run_id],
+            )
+            .is_err());
+        assert!(reopened
+            .execute(
+                "INSERT INTO summary_synthesis_attempts
+                 SELECT * FROM summary_synthesis_attempts
+                 WHERE run_id = ?1 AND attempt_ordinal = 0",
+                [&run_id],
+            )
+            .is_err());
+        assert!(reopened
+            .execute(
+                "INSERT INTO summary_synthesis_attempts (
+                    run_id, attempt_ordinal, document_id, synthesis_version, artifact_hash,
+                    synthesized_artifact, created_at
+                 ) SELECT run_id, 2, document_id, synthesis_version, artifact_hash,
+                          synthesized_artifact, created_at
+                   FROM summary_synthesis_attempts
+                  WHERE run_id = ?1 AND attempt_ordinal = 0",
+                [&run_id],
+            )
+            .is_err());
+    }
+
+    #[test]
     fn all_withheld_verdicts_persist_before_the_run_fails_without_final_artifacts() {
         let database = TestDatabase::new();
         let (mut conn, run_id) = chunked_run(&database);
-        let runtime = VerificationFixtureRuntime {
-            mode: VerificationFixtureMode::AllUnsupported,
-        };
+        let runtime = VerificationFixtureRuntime::new(VerificationFixtureMode::AllUnsupported);
         let error = summarize_chunked_document(&mut conn, &runtime, &run_id)
             .expect_err("a summary with no supported claims must fail");
         assert_eq!(error.code(), "NO_SEMANTICALLY_SUPPORTED_CLAIMS");
 
-        let verified = get_verified_document(&conn, &run_id)
-            .expect("verification should load")
-            .expect("verdict artifact should persist for audit");
+        let verified = get_verification_attempt(&conn, &run_id, 0)
+            .expect("verification attempt should load")
+            .expect("verdict attempt should persist for audit");
         assert!(verified.claims.is_empty());
         assert!(verified.summary_text.is_empty());
         assert!(!verified.claim_verifications.is_empty());
@@ -6369,6 +6857,12 @@ mod tests {
             .claim_verifications
             .iter()
             .all(|verification| verification.verdict == ClaimVerdict::Unsupported));
+        assert!(get_verified_document(&conn, &run_id)
+            .expect("accepted verification query should succeed")
+            .is_none());
+        assert!(get_verification_attempt(&conn, &run_id, 1)
+            .expect("retry verification query should succeed")
+            .is_none());
         assert!(get_summary_artifact(&conn, &run_id)
             .expect("summary query should succeed")
             .is_none());
@@ -6380,7 +6874,7 @@ mod tests {
             .expect("run should exist");
         assert_eq!(run.state, PipelineState::Failed);
         let events = list_pipeline_events(&conn, &run_id).expect("events should load");
-        assert!(events
+        assert!(!events
             .iter()
             .any(|event| event.next_state == PipelineState::Verified));
         assert!(!events.iter().any(|event| matches!(
@@ -6572,6 +7066,7 @@ mod tests {
             &chunked,
             &normalized,
             generation_seed_for_run(&run_id),
+            0,
             &UNCONTROLLED_EXECUTION,
         )
         .expect("first verification should validate");
@@ -6582,6 +7077,7 @@ mod tests {
             &chunked,
             &normalized,
             generation_seed_for_run(&run_id),
+            0,
             &UNCONTROLLED_EXECUTION,
         )
         .expect("second verification should validate");

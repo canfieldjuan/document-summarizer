@@ -101,6 +101,10 @@ pub enum StoreError {
     },
     #[error("Persisted transition lost its expected state/version for run {run_id}")]
     StaleWrite { run_id: String },
+    #[error(
+        "Verification artifact attempt ordinal {actual} does not match storage ordinal {expected}"
+    )]
+    AttemptOrdinalMismatch { expected: u32, actual: u32 },
     #[error("Invalid interrupted-run recovery transition from {state:?}")]
     InvalidRecoveryTransition { state: PipelineState },
     #[error("Pipeline run {run_id} cannot be retried: {reason}")]
@@ -860,11 +864,100 @@ pub fn get_synthesized_document(
     get_downstream_artifact(conn, run_id, SYNTHESIZED_ARTIFACT_TABLE, "synthesized")
 }
 
+pub fn get_synthesis_attempt(
+    conn: &Connection,
+    run_id: &str,
+    attempt_ordinal: u32,
+) -> Result<Option<SynthesizedDocument>, StoreError> {
+    get_summary_attempt_artifact(
+        conn,
+        run_id,
+        attempt_ordinal,
+        "summary_synthesis_attempts",
+        "synthesis_version",
+        "synthesized_artifact",
+        "synthesis attempt",
+    )
+}
+
 pub fn get_verified_document(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Option<VerifiedDocument>, StoreError> {
     get_downstream_artifact(conn, run_id, VERIFIED_ARTIFACT_TABLE, "verified")
+}
+
+pub fn get_verification_attempt(
+    conn: &Connection,
+    run_id: &str,
+    attempt_ordinal: u32,
+) -> Result<Option<VerifiedDocument>, StoreError> {
+    let artifact: Option<VerifiedDocument> = get_summary_attempt_artifact(
+        conn,
+        run_id,
+        attempt_ordinal,
+        "summary_verification_attempts",
+        "verification_version",
+        "verified_artifact",
+        "verification attempt",
+    )?;
+    if let Some(verified) = &artifact {
+        ensure_attempt_ordinal(attempt_ordinal, verified.synthesis_attempt_ordinal)?;
+    }
+    Ok(artifact)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn get_summary_attempt_artifact<T: DeserializeOwned + DownstreamArtifactMetadata>(
+    conn: &Connection,
+    run_id: &str,
+    attempt_ordinal: u32,
+    table: &str,
+    version_column: &str,
+    artifact_column: &str,
+    artifact_kind: &str,
+) -> Result<Option<T>, StoreError> {
+    let sql = format!(
+        "SELECT attempt.document_id, attempt.{version_column}, attempt.artifact_hash,
+                attempt.{artifact_column}, pipeline_runs.document_id
+         FROM {table} AS attempt
+         JOIN pipeline_runs USING (run_id)
+         WHERE attempt.run_id = ?1 AND attempt.attempt_ordinal = ?2"
+    );
+    let row = conn
+        .query_row(&sql, params![run_id, attempt_ordinal], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .optional()?;
+
+    row.map(
+        |(document_id, version, artifact_hash, artifact_json, run_document_id)| {
+            if sha256_hex(artifact_json.as_bytes()) != artifact_hash {
+                return Err(StoreError::DownstreamArtifactIntegrityMismatch {
+                    artifact_kind: artifact_kind.to_string(),
+                    run_id: run_id.to_string(),
+                });
+            }
+            let artifact: T = from_json(&artifact_json)?;
+            if artifact.document_id() != document_id
+                || artifact.version() != version
+                || document_id != run_document_id
+            {
+                return Err(StoreError::DownstreamArtifactMetadataMismatch {
+                    artifact_kind: artifact_kind.to_string(),
+                    run_id: run_id.to_string(),
+                });
+            }
+            Ok(artifact)
+        },
+    )
+    .transpose()
 }
 
 pub fn get_summary_artifact(
@@ -1598,6 +1691,7 @@ pub(super) fn complete_synthesis(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     ensure_run_document_matches(&tx, run_id, "synthesized", &synthesized.document_id)?;
     insert_synthesized_document(&tx, run_id, synthesized)?;
+    insert_synthesis_attempt(&tx, run_id, 0, synthesized)?;
     let synthesized_run = transition_in_tx(
         &tx,
         run_id,
@@ -1662,11 +1756,14 @@ pub(super) fn complete_verification(
     conn: &mut Connection,
     run_id: &str,
     expected_version: u32,
+    attempt_ordinal: u32,
     verified: &VerifiedDocument,
     warnings: Vec<PipelineWarning>,
 ) -> Result<PipelineRun, StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     ensure_run_document_matches(&tx, run_id, "verified", &verified.document_id)?;
+    ensure_attempt_ordinal(attempt_ordinal, verified.synthesis_attempt_ordinal)?;
+    insert_verification_attempt(&tx, run_id, attempt_ordinal, verified)?;
     insert_verified_document(&tx, run_id, verified)?;
     let verified_run = transition_in_tx(
         &tx,
@@ -1684,6 +1781,37 @@ pub(super) fn complete_verification(
     )?;
     tx.commit()?;
     Ok(verified_run)
+}
+
+pub(super) fn record_synthesis_attempt(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    attempt_ordinal: u32,
+    synthesized: &SynthesizedDocument,
+) -> Result<(), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_state_version(&tx, run_id, PipelineState::Verifying, expected_version)?;
+    ensure_run_document_matches(&tx, run_id, "synthesis attempt", &synthesized.document_id)?;
+    insert_synthesis_attempt(&tx, run_id, attempt_ordinal, synthesized)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(super) fn record_verification_attempt(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    attempt_ordinal: u32,
+    verified: &VerifiedDocument,
+) -> Result<(), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_state_version(&tx, run_id, PipelineState::Verifying, expected_version)?;
+    ensure_run_document_matches(&tx, run_id, "verification attempt", &verified.document_id)?;
+    ensure_attempt_ordinal(attempt_ordinal, verified.synthesis_attempt_ordinal)?;
+    insert_verification_attempt(&tx, run_id, attempt_ordinal, verified)?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub(super) fn fail_verification(
@@ -1950,6 +2078,38 @@ fn ensure_run_document_matches(
     Ok(())
 }
 
+fn ensure_run_state_version(
+    conn: &Connection,
+    run_id: &str,
+    expected_state: PipelineState,
+    expected_version: u32,
+) -> Result<(), StoreError> {
+    let run = get_pipeline_run(conn, run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    if run.state != expected_state {
+        return Err(TransitionError::StaleExpectedState {
+            expected: expected_state,
+            found: run.state,
+        }
+        .into());
+    }
+    if run.state_version != expected_version {
+        return Err(TransitionError::ConcurrentModification {
+            expected: expected_version,
+            found: run.state_version,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn ensure_attempt_ordinal(expected: u32, actual: u32) -> Result<(), StoreError> {
+    if expected != actual {
+        return Err(StoreError::AttemptOrdinalMismatch { expected, actual });
+    }
+    Ok(())
+}
+
 fn insert_parsed_document(
     conn: &Connection,
     run_id: &str,
@@ -2107,6 +2267,32 @@ fn insert_synthesized_document(
     )
 }
 
+fn insert_synthesis_attempt(
+    conn: &Connection,
+    run_id: &str,
+    attempt_ordinal: u32,
+    synthesized: &SynthesizedDocument,
+) -> Result<(), StoreError> {
+    let artifact_json = to_json(synthesized)?;
+    let artifact_hash = sha256_hex(artifact_json.as_bytes());
+    conn.execute(
+        "INSERT INTO summary_synthesis_attempts (
+            run_id, attempt_ordinal, document_id, synthesis_version, artifact_hash,
+            synthesized_artifact, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            run_id,
+            attempt_ordinal,
+            synthesized.document_id,
+            synthesized.synthesis_version,
+            artifact_hash,
+            artifact_json,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
 fn insert_verified_document(
     conn: &Connection,
     run_id: &str,
@@ -2120,6 +2306,32 @@ fn insert_verified_document(
         verified,
         VERIFIED_ARTIFACT_TABLE,
     )
+}
+
+fn insert_verification_attempt(
+    conn: &Connection,
+    run_id: &str,
+    attempt_ordinal: u32,
+    verified: &VerifiedDocument,
+) -> Result<(), StoreError> {
+    let artifact_json = to_json(verified)?;
+    let artifact_hash = sha256_hex(artifact_json.as_bytes());
+    conn.execute(
+        "INSERT INTO summary_verification_attempts (
+            run_id, attempt_ordinal, document_id, verification_version, artifact_hash,
+            verified_artifact, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            run_id,
+            attempt_ordinal,
+            verified.document_id,
+            verified.verification_version,
+            artifact_hash,
+            artifact_json,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn insert_summary_artifact(

@@ -541,8 +541,8 @@ mod tests {
         get_analyzed_document, get_chunked_document, get_citation_artifact, get_document,
         get_normalized_document, get_parsed_document, get_pipeline_run,
         get_retry_lineage_for_retry, get_retry_lineage_for_source, get_structured_document,
-        get_summary_artifact, get_synthesized_document, get_verified_document, init_db,
-        list_pipeline_events,
+        get_summary_artifact, get_synthesis_attempt, get_synthesized_document,
+        get_verified_document, init_db, list_pipeline_events,
     };
     use crate::pipeline::model::OllamaRuntime;
     use crate::pipeline::normalize::CanonicalNormalizer;
@@ -1940,9 +1940,16 @@ mod tests {
             let verified = get_verified_document(&conn, &result.run_id)
                 .expect("verification should load")
                 .expect("verification should exist");
+            let accepted_synthesis =
+                get_synthesis_attempt(&conn, &result.run_id, verified.synthesis_attempt_ordinal)
+                    .expect("accepted synthesis attempt should load")
+                    .expect("accepted synthesis attempt should exist");
             assert_eq!(verified.runtime_id, runtime.runtime_id());
             assert_eq!(verified.model_id, runtime.model_id());
-            assert_eq!(verified.claim_verifications.len(), synthesized.claims.len());
+            assert_eq!(
+                verified.claim_verifications.len(),
+                accepted_synthesis.claims.len()
+            );
             assert_eq!(verified.claims, result.citations.claims);
             let expected_state = if result.summary.warnings.is_empty() {
                 PipelineState::Complete

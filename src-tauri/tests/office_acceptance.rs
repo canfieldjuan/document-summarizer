@@ -1,11 +1,12 @@
 use document_summarizer_lib::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
 use document_summarizer_lib::pipeline::contracts::{
     ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
-    NormalizedDocument, PipelineState, StructureNode,
+    NormalizedDocument, PipelineState, SourceType, StructureNode,
 };
 use document_summarizer_lib::pipeline::db::{
-    get_chunked_document, get_citation_artifact, get_normalized_document, get_parsed_document,
-    get_pipeline_run, get_structured_document, get_summary_artifact, init_db, list_pipeline_events,
+    get_analyzed_document, get_chunked_document, get_citation_artifact, get_normalized_document,
+    get_parsed_document, get_pipeline_run, get_structured_document, get_summary_artifact, init_db,
+    list_pipeline_events,
 };
 use document_summarizer_lib::pipeline::ingest::ingest_pdf;
 use document_summarizer_lib::pipeline::model::OllamaRuntime;
@@ -575,6 +576,9 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let normalized = get_normalized_document(&conn, &result.run_id)
         .expect("normalized artifact should load")
         .expect("normalized artifact should exist");
+    let analyzed = get_analyzed_document(&conn, &result.run_id)
+        .expect("analyzed artifact should load")
+        .expect("analyzed artifact should exist");
     let blocks = normalized
         .pages
         .iter()
@@ -595,6 +599,46 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .collect::<Vec<_>>();
     cited_pages.sort_unstable();
     cited_pages.dedup();
+    let native_text_pages = normalized
+        .pages
+        .iter()
+        .filter(|page| {
+            page.content.iter().any(|block| {
+                block.source.source_type == SourceType::NativeText && !block.text.trim().is_empty()
+            })
+        })
+        .map(|page| page.page_number)
+        .collect::<HashSet<_>>();
+    let cited_native_text_pages = cited_pages
+        .iter()
+        .filter(|page| native_text_pages.contains(page))
+        .copied()
+        .collect::<HashSet<_>>();
+    let evidence_ids = analyzed
+        .chunks
+        .iter()
+        .flat_map(|analysis| analysis.evidence.iter())
+        .map(|evidence| evidence.evidence_id.as_str())
+        .collect::<HashSet<_>>();
+    let cited_evidence_ids = result
+        .citations
+        .claims
+        .iter()
+        .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
+        .collect::<HashSet<_>>();
+    let claim_budget = ((native_text_pages.len() * 3).div_ceil(5)).clamp(8, 64);
+    let claim_floor = claim_budget
+        .div_ceil(2)
+        .max(3)
+        .min(claim_budget)
+        .min(evidence_ids.len());
+    assert!(result.citations.claims.len() >= claim_floor);
+    assert!(result.citations.claims.len() <= claim_budget);
+    assert_eq!(cited_evidence_ids, evidence_ids);
+    assert!(
+        cited_native_text_pages.len() * 5 >= native_text_pages.len() * 3,
+        "at least 60 percent of native-text pages must be cited"
+    );
     for evidence in &result.citations.evidence {
         let block = blocks
             .get(evidence.block_id.as_str())
@@ -655,7 +699,11 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         "state_version": run.state_version,
         "event_count": events.len(),
         "claim_count": expected_citations.claims.len(),
+        "claim_budget": claim_budget,
+        "claim_floor": claim_floor,
         "evidence_count": expected_citations.evidence.len(),
+        "native_text_page_count": native_text_pages.len(),
+        "cited_native_text_page_count": cited_native_text_pages.len(),
         "visual_pages": visual_pages,
         "cited_pages": cited_pages,
         "warning_codes": expected_summary
