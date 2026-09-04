@@ -574,6 +574,7 @@ fn analyze(
 
     let warnings = inherited_chunk_warnings(chunked);
     let mut analyses = Vec::with_capacity(chunked.chunks.len());
+    let mut next_request_ordinal = 0u32;
     for chunk in &chunked.chunks {
         cancellation_checkpoint(control, PipelineStage::Analyze)?;
         if chunk.text.chars().count() > MAX_CHUNK_INPUT_CHARACTERS {
@@ -617,6 +618,11 @@ fn analyze(
             ));
         }
         let request = ModelRequest {
+            stage: PipelineStage::Analyze,
+            ordinal: reserve_model_request_ordinal(
+                &mut next_request_ordinal,
+                PipelineStage::Analyze,
+            )?,
             system_prompt: ANALYSIS_SYSTEM_PROMPT.to_string(),
             user_prompt,
             seed: generation_seed,
@@ -840,9 +846,11 @@ fn request_evidence_claims(
     let user_prompt = serialize_evidence_prompt(evidence, maximum_claims)?;
     ensure_synthesis_request_bounds(evidence.len(), user_prompt.chars().count())?;
     cancellation_checkpoint(control, PipelineStage::Synthesize)?;
-    request_budget.reserve()?;
+    let request_ordinal = request_budget.reserve()?;
     let response = runtime
         .generate(&ModelRequest {
+            stage: PipelineStage::Synthesize,
+            ordinal: request_ordinal,
             system_prompt: SYNTHESIS_SYSTEM_PROMPT.to_string(),
             user_prompt,
             seed: generation_seed,
@@ -876,9 +884,11 @@ fn request_candidate_claims(
     let user_prompt = serialize_candidate_prompt(candidates, maximum_claims)?;
     ensure_synthesis_request_bounds(candidates.len(), user_prompt.chars().count())?;
     cancellation_checkpoint(control, PipelineStage::Synthesize)?;
-    request_budget.reserve()?;
+    let request_ordinal = request_budget.reserve()?;
     let response = runtime
         .generate(&ModelRequest {
+            stage: PipelineStage::Synthesize,
+            ordinal: request_ordinal,
             system_prompt: HIERARCHICAL_SYNTHESIS_SYSTEM_PROMPT.to_string(),
             user_prompt,
             seed: generation_seed,
@@ -1050,7 +1060,7 @@ fn ensure_hierarchical_plan_within_budget(batch_count: usize) -> Result<(), Pipe
 }
 
 impl SynthesisRequestBudget {
-    fn reserve(&mut self) -> Result<(), PipelineFailure> {
+    fn reserve(&mut self) -> Result<u32, PipelineFailure> {
         if self.used >= MAX_SYNTHESIS_MODEL_REQUESTS {
             return Err(stage_failure(
                 PipelineStage::Synthesize,
@@ -1059,8 +1069,16 @@ impl SynthesisRequestBudget {
                 false,
             ));
         }
+        let ordinal = u32::try_from(self.used).map_err(|_| {
+            stage_failure(
+                PipelineStage::Synthesize,
+                "SYNTHESIS_PLAN_TOO_LARGE",
+                "The synthesis request ordinal exceeded the supported range",
+                false,
+            )
+        })?;
         self.used += 1;
-        Ok(())
+        Ok(ordinal)
     }
 }
 
@@ -1199,10 +1217,11 @@ fn classify_claim_support(
     cancellation_checkpoint(control, PipelineStage::Verify)?;
 
     let mut claim_verifications = Vec::with_capacity(claims.len());
-    for (prompt_claims, claim_batch) in prompt
+    for (batch_index, (prompt_claims, claim_batch)) in prompt
         .claims
         .chunks(MAX_VERIFICATION_CLAIMS_PER_REQUEST)
         .zip(claims.chunks(MAX_VERIFICATION_CLAIMS_PER_REQUEST))
+        .enumerate()
     {
         cancellation_checkpoint(control, PipelineStage::Verify)?;
         let user_prompt = serde_json::to_string(&VerificationPrompt {
@@ -1216,8 +1235,18 @@ fn classify_claim_support(
                 false,
             )
         })?;
+        let request_ordinal = u32::try_from(batch_index).map_err(|_| {
+            stage_failure(
+                PipelineStage::Verify,
+                "MODEL_REQUEST_INVALID",
+                "The verification request ordinal exceeded the supported range",
+                false,
+            )
+        })?;
         let response = runtime
             .generate(&ModelRequest {
+                stage: PipelineStage::Verify,
+                ordinal: request_ordinal,
                 system_prompt: VERIFICATION_SYSTEM_PROMPT.to_string(),
                 user_prompt,
                 seed: generation_seed,
@@ -1250,6 +1279,22 @@ fn cancellation_checkpoint(
         ));
     }
     Ok(())
+}
+
+fn reserve_model_request_ordinal(
+    next_ordinal: &mut u32,
+    stage: PipelineStage,
+) -> Result<u32, PipelineFailure> {
+    let ordinal = *next_ordinal;
+    *next_ordinal = next_ordinal.checked_add(1).ok_or_else(|| {
+        stage_failure(
+            stage,
+            "MODEL_REQUEST_INVALID",
+            "The model request ordinal exceeded the supported range",
+            false,
+        )
+    })?;
+    Ok(ordinal)
 }
 
 fn cancellation_observed(failure: &PipelineFailure) -> bool {
@@ -3202,6 +3247,7 @@ mod tests {
                 text: "{not-contract-json".to_string(),
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
             })
         }
 
@@ -3304,6 +3350,7 @@ mod tests {
                 text,
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
             })
         }
 
@@ -3355,6 +3402,7 @@ mod tests {
                 text,
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
             })
         }
 
@@ -3412,6 +3460,7 @@ mod tests {
                     code: "TEST_MODEL_FAILURE".to_string(),
                     message: "Injected local model failure".to_string(),
                     recoverable: true,
+                    request_attempts: Vec::new(),
                 });
             }
             let text = fixture_model_output(request);
@@ -3419,6 +3468,7 @@ mod tests {
                 text,
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
             })
         }
 
@@ -3428,6 +3478,7 @@ mod tests {
                     code: "TEST_MODEL_UNAVAILABLE".to_string(),
                     message: "Injected local model health failure".to_string(),
                     recoverable: true,
+                    request_attempts: Vec::new(),
                 });
             }
             Ok(())
@@ -3795,6 +3846,8 @@ mod tests {
 
         assert_eq!(synthesized.synthesis_version, SYNTHESIS_VERSION);
         assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].stage, PipelineStage::Synthesize);
+        assert_eq!(requests[0].ordinal, 0);
         let ModelOutputFormat::JsonSchema { name, .. } = &requests[0].output_format else {
             panic!("synthesis must require structured output");
         };
@@ -3855,6 +3908,17 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(requests, second_runtime.captured_requests());
         assert!(requests.len() > 1);
+        assert!(requests
+            .iter()
+            .all(|request| request.stage == PipelineStage::Synthesize));
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.ordinal)
+                .collect::<Vec<_>>(),
+            (0..u32::try_from(requests.len()).expect("request count should fit u32"))
+                .collect::<Vec<_>>()
+        );
         assert!(requests.iter().any(|request| matches!(
             &request.output_format,
             ModelOutputFormat::JsonSchema { name, .. }
@@ -4661,7 +4725,7 @@ mod tests {
             );
         }
 
-        let runtime = FakeRuntime::healthy();
+        let runtime = RecordingHierarchicalRuntime::healthy();
         let verdicts = classify_claim_support(
             &runtime,
             &prompt,
@@ -4674,9 +4738,21 @@ mod tests {
         assert!(verdicts
             .iter()
             .all(|verification| verification.verdict == ClaimVerdict::Supported));
+        let requests = runtime.captured_requests();
         assert_eq!(
-            runtime.calls.load(Ordering::SeqCst),
+            requests.len(),
             MAX_SUMMARY_CLAIMS / MAX_VERIFICATION_CLAIMS_PER_REQUEST
+        );
+        assert!(requests
+            .iter()
+            .all(|request| request.stage == PipelineStage::Verify));
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.ordinal)
+                .collect::<Vec<_>>(),
+            (0..u32::try_from(requests.len()).expect("request count should fit u32"))
+                .collect::<Vec<_>>()
         );
     }
 

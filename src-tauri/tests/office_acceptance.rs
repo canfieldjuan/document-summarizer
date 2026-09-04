@@ -44,6 +44,7 @@ struct RecordingRuntime<'a> {
     inner: &'a dyn ModelRuntime,
     requests: Mutex<Vec<ModelRequest>>,
     responses: Mutex<Vec<ModelResponse>>,
+    failures: Mutex<Vec<ModelRuntimeFailure>>,
 }
 
 impl<'a> RecordingRuntime<'a> {
@@ -52,6 +53,7 @@ impl<'a> RecordingRuntime<'a> {
             inner,
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(Vec::new()),
+            failures: Mutex::new(Vec::new()),
         }
     }
 
@@ -68,6 +70,13 @@ impl<'a> RecordingRuntime<'a> {
             .expect("recording runtime lock should not be poisoned")
             .clone()
     }
+
+    fn failures(&self) -> Vec<ModelRuntimeFailure> {
+        self.failures
+            .lock()
+            .expect("recording runtime lock should not be poisoned")
+            .clone()
+    }
 }
 
 impl ModelRuntime for RecordingRuntime<'_> {
@@ -76,12 +85,22 @@ impl ModelRuntime for RecordingRuntime<'_> {
             .lock()
             .expect("recording runtime lock should not be poisoned")
             .push(request.clone());
-        let response = self.inner.generate(request)?;
-        self.responses
-            .lock()
-            .expect("recording runtime lock should not be poisoned")
-            .push(response.clone());
-        Ok(response)
+        match self.inner.generate(request) {
+            Ok(response) => {
+                self.responses
+                    .lock()
+                    .expect("recording runtime lock should not be poisoned")
+                    .push(response.clone());
+                Ok(response)
+            }
+            Err(failure) => {
+                self.failures
+                    .lock()
+                    .expect("recording runtime lock should not be poisoned")
+                    .push(failure.clone());
+                Err(failure)
+            }
+        }
     }
 
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
@@ -132,6 +151,32 @@ fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
                 Sha256::digest(response.text.as_bytes())
             );
         }
+    }
+    eprintln!("OFFICE_LIVE_MODEL_REQUEST_ATTEMPTS");
+    let responses = runtime.responses();
+    let failures = runtime.failures();
+    for attempt in responses
+        .iter()
+        .flat_map(|response| response.request_attempts.iter())
+        .chain(
+            failures
+                .iter()
+                .flat_map(|failure| failure.request_attempts.iter()),
+        )
+    {
+        eprintln!(
+            "stage={:?}, request_ordinal={}, attempt_ordinal={}, transport={:?}, elapsed_ms={}, configured_output_tokens={}, prompt_tokens={:?}, completion_tokens={:?}, total_tokens={:?}, succeeded={}",
+            attempt.stage,
+            attempt.request_ordinal,
+            attempt.attempt_ordinal,
+            attempt.transport_attempt,
+            attempt.elapsed_milliseconds,
+            attempt.configured_output_tokens,
+            attempt.provider_usage.prompt_tokens,
+            attempt.provider_usage.completion_tokens,
+            attempt.provider_usage.total_tokens,
+            attempt.succeeded,
+        );
     }
 }
 

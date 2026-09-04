@@ -1,5 +1,6 @@
 use crate::pipeline::contracts::{
-    ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
+    ModelOutputFormat, ModelRequest, ModelRequestAttemptDiagnostic, ModelResponse, ModelRuntime,
+    ModelRuntimeFailure, ModelTokenUsage, ModelTransportAttempt,
 };
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{StatusCode, Url};
@@ -9,7 +10,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1/";
 const DEFAULT_MODEL: &str = "qwen3-30b-a3b:latest";
@@ -159,6 +160,24 @@ impl OllamaRuntime {
             )
         })
     }
+
+    fn send_chat_attempt(
+        &self,
+        request: &ModelRequest,
+        response_format: Option<serde_json::Value>,
+    ) -> Result<(StatusCode, Vec<u8>, Duration), (ModelRuntimeFailure, Duration)> {
+        let started = Instant::now();
+        let result = self
+            .send_chat(request, response_format)
+            .and_then(|response| {
+                let status = response.status();
+                read_bounded_body(response).map(|body| (status, body))
+            });
+        let elapsed = started.elapsed();
+        result
+            .map(|(status, body)| (status, body, elapsed))
+            .map_err(|failure| (failure, elapsed))
+    }
 }
 
 fn model_timeout_seconds(value: Option<&str>) -> Result<u64, ModelRuntimeFailure> {
@@ -180,17 +199,40 @@ fn model_timeout_seconds(value: Option<&str>) -> Result<u64, ModelRuntimeFailure
 
 impl ModelRuntime for OllamaRuntime {
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+        let request_started = Instant::now();
         if request.system_prompt.trim().is_empty()
             || request.user_prompt.trim().is_empty()
             || request.max_output_tokens == 0
         {
-            return Err(runtime_failure(
-                "MODEL_REQUEST_INVALID",
-                "Model request prompts and output limit must be present",
-                false,
+            return Err(with_request_attempts(
+                runtime_failure(
+                    "MODEL_REQUEST_INVALID",
+                    "Model request prompts and output limit must be present",
+                    false,
+                ),
+                vec![request_attempt_diagnostic(
+                    request,
+                    0,
+                    ModelTransportAttempt::Primary,
+                    request_started.elapsed(),
+                    ModelTokenUsage::default(),
+                    false,
+                )],
             ));
         }
-        let schema_format = response_format(&request.output_format)?;
+        let schema_format = response_format(&request.output_format).map_err(|failure| {
+            with_request_attempts(
+                failure,
+                vec![request_attempt_diagnostic(
+                    request,
+                    0,
+                    ModelTransportAttempt::Primary,
+                    request_started.elapsed(),
+                    ModelTokenUsage::default(),
+                    false,
+                )],
+            )
+        })?;
         let schema_unavailable = self.format_vocabulary_unavailable.load(Ordering::Relaxed);
         let attempted_schema = schema_format.is_some() && !schema_unavailable;
         let output_format = if schema_format.is_some() && schema_unavailable {
@@ -198,25 +240,105 @@ impl ModelRuntime for OllamaRuntime {
         } else {
             schema_format
         };
-        let mut response = self.send_chat(request, output_format)?;
-        if !response.status().is_success() && attempted_schema {
-            let status = response.status();
-            let body = read_bounded_body(response)?;
+        let mut attempts = Vec::with_capacity(if attempted_schema { 2 } else { 1 });
+        let initial_transport_attempt = if schema_unavailable && output_format.is_some() {
+            ModelTransportAttempt::CachedSchemaFallback
+        } else {
+            ModelTransportAttempt::Primary
+        };
+        let (mut status, mut body, mut elapsed) = self
+            .send_chat_attempt(request, output_format)
+            .map_err(|(failure, elapsed)| {
+                with_request_attempts(
+                    failure,
+                    vec![request_attempt_diagnostic(
+                        request,
+                        0,
+                        initial_transport_attempt.clone(),
+                        elapsed,
+                        ModelTokenUsage::default(),
+                        false,
+                    )],
+                )
+            })?;
+        if !status.is_success() && attempted_schema {
+            let usage = provider_usage(&body);
             if is_format_vocabulary_failure(status, &body) {
+                attempts.push(request_attempt_diagnostic(
+                    request,
+                    0,
+                    initial_transport_attempt.clone(),
+                    elapsed,
+                    usage,
+                    false,
+                ));
                 self.format_vocabulary_unavailable
                     .store(true, Ordering::Relaxed);
                 eprintln!(
                     "Ollama structured-output grammar is unavailable; retrying in JSON mode with strict application validation"
                 );
-                response = self.send_chat(request, Some(json_object_response_format()))?;
+                (status, body, elapsed) = self
+                    .send_chat_attempt(request, Some(json_object_response_format()))
+                    .map_err(|(failure, elapsed)| {
+                        let mut failed_attempts = attempts.clone();
+                        failed_attempts.push(request_attempt_diagnostic(
+                            request,
+                            1,
+                            ModelTransportAttempt::SchemaFallbackRetry,
+                            elapsed,
+                            ModelTokenUsage::default(),
+                            false,
+                        ));
+                        with_request_attempts(failure, failed_attempts)
+                    })?;
             } else {
-                return Err(rejected_response(status));
+                attempts.push(request_attempt_diagnostic(
+                    request,
+                    0,
+                    initial_transport_attempt.clone(),
+                    elapsed,
+                    usage,
+                    false,
+                ));
+                return Err(with_request_attempts(rejected_response(status), attempts));
             }
         }
-        if !response.status().is_success() {
-            return Err(rejected_response(response.status()));
+        let attempt_ordinal = if attempts.is_empty() { 0 } else { 1 };
+        let transport_attempt = if attempt_ordinal == 0 {
+            initial_transport_attempt
+        } else {
+            ModelTransportAttempt::SchemaFallbackRetry
+        };
+        let usage = provider_usage(&body);
+        if !status.is_success() {
+            attempts.push(request_attempt_diagnostic(
+                request,
+                attempt_ordinal,
+                transport_attempt,
+                elapsed,
+                usage,
+                false,
+            ));
+            return Err(with_request_attempts(rejected_response(status), attempts));
         }
-        let output: ChatResponse = decode_bounded_json(response)?;
+        let output: ChatResponse = serde_json::from_slice(&body).map_err(|_| {
+            attempts.push(request_attempt_diagnostic(
+                request,
+                attempt_ordinal,
+                transport_attempt.clone(),
+                elapsed,
+                usage.clone(),
+                false,
+            ));
+            with_request_attempts(
+                runtime_failure(
+                    "MODEL_RESPONSE_INVALID",
+                    "Local model returned an invalid response",
+                    true,
+                ),
+                attempts.clone(),
+            )
+        })?;
         let text = output
             .choices
             .into_iter()
@@ -224,16 +346,36 @@ impl ModelRuntime for OllamaRuntime {
             .map(|choice| choice.message.content.trim().to_string())
             .filter(|text| !text.is_empty())
             .ok_or_else(|| {
-                runtime_failure(
-                    "MODEL_RESPONSE_EMPTY",
-                    "Local model returned no summary text",
-                    true,
+                attempts.push(request_attempt_diagnostic(
+                    request,
+                    attempt_ordinal,
+                    transport_attempt.clone(),
+                    elapsed,
+                    usage.clone(),
+                    false,
+                ));
+                with_request_attempts(
+                    runtime_failure(
+                        "MODEL_RESPONSE_EMPTY",
+                        "Local model returned no summary text",
+                        true,
+                    ),
+                    attempts.clone(),
                 )
             })?;
+        attempts.push(request_attempt_diagnostic(
+            request,
+            attempt_ordinal,
+            transport_attempt,
+            elapsed,
+            usage,
+            true,
+        ));
         Ok(ModelResponse {
             text,
             runtime_id: self.runtime_id().to_string(),
             model_id: self.model_id.clone(),
+            request_attempts: attempts,
         })
     }
 
@@ -379,6 +521,55 @@ fn runtime_failure(
         code: code.into(),
         message: message.into(),
         recoverable,
+        request_attempts: Vec::new(),
+    }
+}
+
+fn with_request_attempts(
+    mut failure: ModelRuntimeFailure,
+    request_attempts: Vec<ModelRequestAttemptDiagnostic>,
+) -> ModelRuntimeFailure {
+    failure.request_attempts = request_attempts;
+    failure
+}
+
+fn request_attempt_diagnostic(
+    request: &ModelRequest,
+    attempt_ordinal: u32,
+    transport_attempt: ModelTransportAttempt,
+    elapsed: Duration,
+    provider_usage: ModelTokenUsage,
+    succeeded: bool,
+) -> ModelRequestAttemptDiagnostic {
+    ModelRequestAttemptDiagnostic {
+        stage: request.stage.clone(),
+        request_ordinal: request.ordinal,
+        attempt_ordinal,
+        transport_attempt,
+        elapsed_milliseconds: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        configured_output_tokens: request.max_output_tokens,
+        provider_usage,
+        succeeded,
+    }
+}
+
+fn provider_usage(body: &[u8]) -> ModelTokenUsage {
+    let usage = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("usage").cloned());
+    ModelTokenUsage {
+        prompt_tokens: usage
+            .as_ref()
+            .and_then(|usage| usage.get("prompt_tokens"))
+            .and_then(serde_json::Value::as_u64),
+        completion_tokens: usage
+            .as_ref()
+            .and_then(|usage| usage.get("completion_tokens"))
+            .and_then(serde_json::Value::as_u64),
+        total_tokens: usage
+            .as_ref()
+            .and_then(|usage| usage.get("total_tokens"))
+            .and_then(serde_json::Value::as_u64),
     }
 }
 
@@ -598,16 +789,49 @@ mod tests {
                         }),
                     );
                 } else {
+                    let usage = (index == 1).then(|| {
+                        serde_json::json!({
+                            "prompt_tokens": 11,
+                            "completion_tokens": 3,
+                            "total_tokens": 14
+                        })
+                    });
                     write_json_response(
                         &mut stream,
                         "200 OK",
                         &serde_json::json!({
-                            "choices": [{"message": {"content": "{\"status\":\"ok\"}"}}]
+                            "choices": [{"message": {"content": "{\"status\":\"ok\"}"}}],
+                            "usage": usage
                         }),
                     );
                 }
             }
             requests
+        });
+        (format!("http://{address}/v1/"), handle)
+    }
+
+    fn rejected_server() -> (String, thread::JoinHandle<serde_json::Value>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("loopback request should arrive");
+            let request = read_json_request(&mut stream);
+            write_json_response(
+                &mut stream,
+                "503 Service Unavailable",
+                &serde_json::json!({
+                    "error": {"message": "fixture rejection"},
+                    "usage": {
+                        "prompt_tokens": 5,
+                        "completion_tokens": 0,
+                        "total_tokens": 5
+                    }
+                }),
+            );
+            request
         });
         (format!("http://{address}/v1/"), handle)
     }
@@ -866,6 +1090,8 @@ mod tests {
         let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
             .expect("loopback runtime should configure");
         let request = ModelRequest {
+            stage: crate::pipeline::contracts::PipelineStage::Analyze,
+            ordinal: 7,
             system_prompt: "system".to_string(),
             user_prompt: "user".to_string(),
             seed: 8_675_309,
@@ -881,12 +1107,62 @@ mod tests {
             },
         };
 
-        for _ in 0..2 {
-            let response = runtime
-                .generate(&request)
-                .expect("schema fallback request should succeed");
-            assert_eq!(response.text, "{\"status\":\"ok\"}");
-        }
+        let fallback_response = runtime
+            .generate(&request)
+            .expect("schema fallback request should succeed");
+        assert_eq!(fallback_response.text, "{\"status\":\"ok\"}");
+        assert_eq!(fallback_response.request_attempts.len(), 2);
+        assert_eq!(fallback_response.request_attempts[0].stage, request.stage);
+        assert_eq!(fallback_response.request_attempts[0].request_ordinal, 7);
+        assert_eq!(fallback_response.request_attempts[0].attempt_ordinal, 0);
+        assert_eq!(
+            fallback_response.request_attempts[0].transport_attempt,
+            ModelTransportAttempt::Primary
+        );
+        assert!(!fallback_response.request_attempts[0].succeeded);
+        assert_eq!(
+            fallback_response.request_attempts[0].provider_usage,
+            ModelTokenUsage::default()
+        );
+        assert_eq!(fallback_response.request_attempts[1].attempt_ordinal, 1);
+        assert_eq!(
+            fallback_response.request_attempts[1].transport_attempt,
+            ModelTransportAttempt::SchemaFallbackRetry
+        );
+        assert!(fallback_response.request_attempts[1].succeeded);
+        assert_eq!(
+            fallback_response.request_attempts[1].provider_usage,
+            ModelTokenUsage {
+                prompt_tokens: Some(11),
+                completion_tokens: Some(3),
+                total_tokens: Some(14),
+            }
+        );
+        assert!(fallback_response
+            .request_attempts
+            .iter()
+            .all(|attempt| attempt.configured_output_tokens == 8));
+
+        let cached_response = runtime
+            .generate(&request)
+            .expect("cached JSON mode request should succeed");
+        assert_eq!(cached_response.text, "{\"status\":\"ok\"}");
+        assert_eq!(cached_response.request_attempts.len(), 1);
+        assert_eq!(
+            cached_response.request_attempts[0].transport_attempt,
+            ModelTransportAttempt::CachedSchemaFallback
+        );
+        assert!(cached_response.request_attempts[0].succeeded);
+        assert_eq!(
+            cached_response.request_attempts[0].provider_usage,
+            ModelTokenUsage::default()
+        );
+        let cached_diagnostic = serde_json::to_value(&cached_response.request_attempts[0])
+            .expect("cached request diagnostic should serialize");
+        assert!(cached_diagnostic["elapsed_milliseconds"].is_number());
+        assert!(cached_diagnostic["provider_usage"]["prompt_tokens"].is_null());
+        assert!(cached_diagnostic["provider_usage"]["completion_tokens"].is_null());
+        assert!(cached_diagnostic["provider_usage"]["total_tokens"].is_null());
         let requests = server.join().expect("loopback server should finish");
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[0]["response_format"]["type"], "json_schema");
@@ -896,6 +1172,72 @@ mod tests {
             .iter()
             .all(|request| request["reasoning_effort"] == "none"));
         assert!(requests.iter().all(|request| request["seed"] == 8_675_309));
+    }
+
+    #[test]
+    fn rejected_request_reports_elapsed_time_and_provider_usage_without_content() {
+        let (base_url, server) = rejected_server();
+        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+            .expect("loopback runtime should configure");
+        let request = ModelRequest {
+            stage: crate::pipeline::contracts::PipelineStage::Verify,
+            ordinal: 4,
+            system_prompt: "PRIVATE_SYSTEM_SENTINEL".to_string(),
+            user_prompt: "PRIVATE_SOURCE_SENTINEL".to_string(),
+            seed: 4_242,
+            max_output_tokens: 321,
+            output_format: ModelOutputFormat::Text,
+        };
+
+        let failure = runtime
+            .generate(&request)
+            .expect_err("rejected request should fail");
+        let attempt = failure
+            .request_attempts
+            .first()
+            .expect("failed request should retain one attempt diagnostic");
+        assert_eq!(attempt.stage, request.stage);
+        assert_eq!(attempt.request_ordinal, 4);
+        assert_eq!(attempt.attempt_ordinal, 0);
+        assert_eq!(attempt.transport_attempt, ModelTransportAttempt::Primary);
+        assert_eq!(attempt.configured_output_tokens, 321);
+        assert_eq!(attempt.provider_usage.prompt_tokens, Some(5));
+        assert_eq!(attempt.provider_usage.completion_tokens, Some(0));
+        assert_eq!(attempt.provider_usage.total_tokens, Some(5));
+        assert!(!attempt.succeeded);
+
+        let diagnostic_json =
+            serde_json::to_value(attempt).expect("request attempt diagnostic should serialize");
+        assert_eq!(
+            diagnostic_json,
+            serde_json::json!({
+                "stage": "Verify",
+                "request_ordinal": 4,
+                "attempt_ordinal": 0,
+                "transport_attempt": "primary",
+                "elapsed_milliseconds": attempt.elapsed_milliseconds,
+                "configured_output_tokens": 321,
+                "provider_usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 0,
+                    "total_tokens": 5
+                },
+                "succeeded": false
+            })
+        );
+        let encoded = diagnostic_json.to_string();
+        for private_content in [
+            "PRIVATE_SYSTEM_SENTINEL",
+            "PRIVATE_SOURCE_SENTINEL",
+            "PRIVATE_OUTPUT_SENTINEL",
+            "PRIVATE_TOKEN_SENTINEL",
+            "/home/private/document.pdf",
+        ] {
+            assert!(!encoded.contains(private_content));
+        }
+
+        let sent_request = server.join().expect("loopback server should finish");
+        assert_eq!(sent_request["max_tokens"], 321);
     }
 
     #[test]

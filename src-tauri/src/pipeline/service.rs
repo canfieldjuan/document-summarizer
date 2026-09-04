@@ -601,6 +601,7 @@ mod tests {
                 text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
             })
         }
 
@@ -662,6 +663,7 @@ mod tests {
                 code: "FIXTURE_RUNTIME_INTERRUPTED".to_string(),
                 message: "Fixture runtime stopped before producing output.".to_string(),
                 recoverable: true,
+                request_attempts: Vec::new(),
             })
         }
 
@@ -698,6 +700,7 @@ mod tests {
                 text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
                 model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
             })
         }
 
