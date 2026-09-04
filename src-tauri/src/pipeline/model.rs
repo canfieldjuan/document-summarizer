@@ -21,6 +21,7 @@ const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_SCHEMA_NAME_BYTES: usize = 64;
+const MAX_DECODER_STRING_LENGTH: u64 = 192;
 
 pub struct OllamaRuntime {
     client: Client,
@@ -620,11 +621,17 @@ fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_json::Value {
     };
 
     let mut projected = fields.clone();
-    // vLLM does not implement `uniqueItems`, while Ollama expands large
-    // `maxLength` values into grammar repetitions that it refuses to compile.
-    // Stage parsers remain authoritative for uniqueness and string bounds.
+    // vLLM does not implement `uniqueItems`. Retain the proven small string
+    // bounds; larger Ollama grammar repetitions can fail compilation.
+    // Stage parsers remain authoritative even when the decoder has a bound.
     projected.remove("uniqueItems");
-    projected.remove("maxLength");
+    if fields
+        .get("maxLength")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|maximum| maximum > MAX_DECODER_STRING_LENGTH)
+    {
+        projected.remove("maxLength");
+    }
 
     for keyword in ["properties", "patternProperties", "$defs", "definitions"] {
         if let Some(serde_json::Value::Object(named_schemas)) = fields.get(keyword) {
@@ -1040,9 +1047,10 @@ mod tests {
         assert!(projected["properties"]["ids"]["items"]
             .get("maxLength")
             .is_none());
-        assert!(projected["properties"]["choice"]["anyOf"][0]
-            .get("maxLength")
-            .is_none());
+        assert_eq!(
+            projected["properties"]["choice"]["anyOf"][0]["maxLength"],
+            8
+        );
         assert_eq!(
             projected["properties"]["choice"]["anyOf"][0]["enum"],
             serde_json::json!(["q1", "q2"])
@@ -1055,6 +1063,53 @@ mod tests {
             contract_schema["properties"]["ids"]["items"]["maxLength"],
             2_000
         );
+    }
+
+    #[test]
+    fn decoder_projection_preserves_small_string_bounds_and_strips_large_ones() {
+        for maximum in [0, 191, 192, 193, 2_000, 4_000] {
+            let canonical = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "evidence": {
+                        "type": "array", "minItems": 1, "maxItems": 9,
+                        "uniqueItems": true,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "claim_text": {"type": "string", "maxLength": maximum},
+                                "quote_id": {"type": "string", "enum": ["q1", "q2"]}
+                            },
+                            "required": ["quote_id", "claim_text"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["evidence"], "additionalProperties": false
+            });
+            let original = canonical.clone();
+            let format = response_format(&ModelOutputFormat::JsonSchema {
+                name: "analysis_bound_probe".to_string(),
+                schema: canonical.clone(),
+            })
+            .expect("bounded schema should project")
+            .expect("schema transport should remain enabled");
+            let projected = &format["json_schema"]["schema"];
+            let actual = &projected["properties"]["evidence"]["items"]["properties"]["claim_text"];
+            if maximum <= 192 {
+                assert_eq!(actual["maxLength"], maximum, "small bound must survive");
+            } else {
+                assert!(
+                    actual.get("maxLength").is_none(),
+                    "large bound must be omitted"
+                );
+            }
+            assert_eq!(projected["properties"]["evidence"]["maxItems"], 9);
+            assert!(projected["properties"]["evidence"]
+                .get("uniqueItems")
+                .is_none());
+            assert_eq!(canonical, original, "projection must not mutate its input");
+        }
     }
 
     #[test]
