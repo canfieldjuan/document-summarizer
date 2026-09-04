@@ -439,18 +439,56 @@ Root cause and evidence:
   items. It returned four claims referencing seven items, omitting the bare title
   "Labor Standards in Agriculture". Missing references fail synthesis immediately;
   the later verification-shortfall retry cannot repair this failure.
+- Backfill cannot detect a wrongly omitted substantive page. Mechanical noise
+  and stamp cases must be removed by Rust before inference, rather than left to
+  a general model omission decision governed by prose.
 
-Required change surface: versioned analysis/omission contracts, selection and
-paraphrase requests, analysis planning and reload validation, synthesis ranges,
+Required change surface: deterministic pre-catalog page eligibility,
+versioned analysis/omission contracts, selection and paraphrase requests,
+analysis planning and reload validation, synthesis ranges,
 coverage-error classification and bounded request repair, durable local audit
 records, and focused/live acceptance. Do not import the abandoned rewrite's
 architecture. Reuse only the narrow non-substantive-omission concept.
 
-Analysis has two separate model operations for a retained page:
+Before constructing quote candidates, Rust inspects the complete native-text
+content of each visited page with a pure, versioned eligibility filter. It does
+not change parser output, normalized source bytes, or the native-text page count.
+It returns either retain or a typed deterministic omission with the predicate
+and source fingerprint that justified it. Unknown/ambiguous input is retained.
+Two narrow mechanically recognized cases produce an empty catalog:
+
+- Scan noise: non-empty text with no Unicode-aware multi-letter word and at least
+  80 percent of non-whitespace characters in punctuation, symbol, or control
+  classes (including replacement characters). Neither word absence nor character
+  distribution alone permits omission. Recognizable substantive numeric content
+  such as amounts, percentages, units, or numeric tables vetoes this rule. The
+  captured NARA page 6 is a positive fixture; its distribution is not a reason
+  to discard a noisy page that also contains legible substantive text.
+- Isolated date/page stamp: at most 32 trimmed Unicode characters whose entire
+  content matches a numeric slash-separated date followed by a short page/form
+  marker, such as "03/10/03  A-4", with no other content. The date grammar is
+  one/two-digit month and day plus two/four-digit year; the marker is one/two
+  ASCII letters, a hyphen, and one to three digits, separated from the date by
+  whitespace. This is an anchored furniture grammar, not a generic semantic
+  "has no assertion" check. A standalone date, deadline label, amount, or any
+  additional assertion is retained. Length alone never permits omission.
+
+The filter operates on the whole page, not isolated words, cells, or fragments
+inside a substantive page. A mixed page retains its candidate content. Empty
+catalogs caused by either explicit filter result yield a recorded omission with
+zero model calls. An empty catalog caused by truncation, input limits, missing
+blocks, or construction failure is an error, not evidence of non-substantiveness.
+Exact predicates, Unicode handling, numeric-content vetoes, and threshold
+boundaries must be tested directly; do not tune thresholds to make a live
+coverage assertion pass.
+
+For a retained page, analysis has two separate model operations:
 
 1. Selection sees the page's full application-built candidate catalog and returns
-   exactly one schema-enumerated decision: a supplied quote ID or the explicit
-   non-substantive omission decision. It cannot return claim text, invented IDs,
+   exactly one schema-enumerated decision: a supplied quote ID or, only for a
+   legible heading-shaped page admitted by Rust, an explicit bare-heading
+   omission decision. The general non-substantive/noise/stamp omission options
+   are not exposed to the model. It cannot return claim text, invented IDs,
    quotation bytes, or block identity.
 2. Paraphrase sees only the selected exact quotation and fixed task instructions;
    it cannot see other candidates, prior selection messages, other page text, or
@@ -459,18 +497,24 @@ Analysis has two separate model operations for a retained page:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
-An omitted page makes only the selection call. An accepted omission records the
-typed reason NonSubstantivePageFurniture, page/chunk identity, and binding to the
-examined candidate catalog. No arbitrary free-form omission reason is accepted.
-The entire catalog must contain no substantive usable native-text fact: allowed
-cases are scan artifacts, isolated footers/date stamps, and bare headings without
-an assertion. Shortness, difficult content, redundancy, uncertainty, or failed
-verification alone are not omission reasons. A short obligation, exception,
+A model-omitted bare heading makes only the selection call; a retained page
+makes both calls. Every omission records NonSubstantivePageFurniture plus a
+bounded origin (deterministic scan noise, deterministic date/page stamp, or
+model bare heading), filter version, page/chunk identity, and complete source
+binding. Model omissions additionally bind the examined candidate catalog.
+No arbitrary free-form omission reason is accepted. Residual model judgment is
+restricted to a legible, non-assertive bare heading; it is not a fallback for
+text the mechanical filter was uncertain about. Shortness, difficult content,
+redundancy, uncertainty, or failed verification alone are not omission reasons.
+A short obligation, exception,
 deadline, table value, or substantive heading must not be omitted as furniture.
 Never treat illegibility as proof that the original document contains no facts.
-Rust permits a page-wide omission only when the examined catalog covers all of
-that page's native-text content. A truncated or input-rejected catalog cannot
-justify an omission; missing candidate text must not become missing evidence.
+Rust permits deterministic omission only after inspecting all original
+native-text content on that page. A model omission requires a complete,
+unfiltered candidate catalog covering that content. A truncated or
+input-rejected catalog cannot justify an omission; missing candidate text must
+not become missing evidence. Reload recomputes deterministic filter outcomes
+from the bound source and rejects a forged reason, origin, or version.
 
 Omissions are not EvidenceItems and never become summary claims or citations.
 Only these recorded omissions are outside the all-evidence-cited requirement;
@@ -545,10 +589,21 @@ Verification required before claiming completion:
 - Selection/paraphrase separation: a decoy candidate contains a fact absent from
   the selected quote, and captured paraphrase input demonstrably excludes it.
   Invalid selection, mixed outcome, extra field, and 192/193-character tests.
-- Recorded omission fixtures: noise, bare title and footer/stamp; negative
-  controls for short substantive obligations, exceptions, dates and table values.
-  Focused live selection probes must exercise those positive and negative cases;
-  scripted model responses alone cannot establish correct omission decisions.
+- Deterministic filter fixtures include the exact captured NARA scan-noise and
+  date-stamp pages; both yield empty catalogs and zero model calls. Test the
+  filter itself with short obligations, exceptions, standalone dates, labeled
+  deadlines, amounts, percentages, units, numeric tables, Unicode words, and
+  mixed noise/substantive content, including substantive text at the page tail.
+  These controls must retain content without relying on a model to rescue it.
+  Probe both sides of the character-ratio and length thresholds, single versus
+  multi-letter words, empty input, full versus partial stamp matches, and an
+  extra assertion added to otherwise matching furniture. Construction errors
+  must never become omissions. Recorded outcomes survive reopen and tamper tests.
+- Bare-heading model omission is tested separately: schema admission rejects
+  noise/stamp/general omission reasons and does not expose omission on body-text
+  pages. Focused live selection probes cover a true bare heading and heading-like
+  substantive obligations, exceptions and conclusions. Scripted responses alone
+  cannot establish correct model omission decisions.
   Reopen/tamper, all-omitted, mixed retained/omitted, backfill, tail and stopping
   boundary tests, plus an incomplete catalog with omitted substantive tail text.
   No silent denominator reduction or omitted-page citation.
