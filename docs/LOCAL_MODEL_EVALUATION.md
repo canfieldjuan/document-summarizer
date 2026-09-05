@@ -1,6 +1,107 @@
 # Corpus and native Ollama evaluation — updated 2026-09-05
 
-## Latest result: DOL delivers a summary but fails native-page coverage
+## Latest result: retention reaches 83 deck items; consolidation blocks delivery
+
+**NOT DONE: DOL again fails before delivering a summary.** The retention reserve
+works at analysis, but the seventh hierarchical reduction returns a foreign
+candidate identifier and fails closed before verification. NARA passes with
+warnings. The larger retention plan therefore has not yet proved a user-visible
+win on the deck; passing arithmetic and unit tests are not corpus closure.
+Contracts `bf42810` and `5dfcd90` precede implementation `8ece146`. Both runs below
+exercise that exact code with `qwen3-30b-a3b:latest`, sequentially through the
+existing Ollama adapter, without changes to acceptance, B/K, support, unit veto,
+prompts, output/context/timeout or resource ceilings.
+
+| Document | Acceptance | Delivered claims | Retained / supported-cited evidence | Cited native pages | Requests | Completion tokens | Model time | Test wall time |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| DOL deck | exit 101 | None | 83 / not verified | Not delivered | 185 | 14,470 | 158,532 ms | 160.64 s |
+| NARA | exit 0 | 6 | 10 / 7 | 7/11 (63.64%) | 28 | 3,776 | 40,684 ms | 41.49 s |
+
+### Failure: hierarchical IDs still rely on exact string reproduction
+
+The final deck response, ordinal 184, contains two distinct candidate IDs. One
+is 74 characters; the other is only 58:
+`candidate-dfdf4cd950e0d1fbfd02182ce3b376d95f9bed6792b987c8`.
+Rust constructs every candidate ID as `candidate-` plus a full SHA-256 hex digest
+(`summary.rs:4281-4311`), so the short value cannot be a supplied ID. This is
+foreign membership, not a duplicate: the parser rejects it at
+`summary.rs:3164-3173`. The captured response is complete JSON and uses 191 of
+4,096 completion tokens; it does not demonstrate output-token exhaustion.
+
+The controlling schema still accepts candidate references as arbitrary nonempty
+strings (`summary.rs:2194-2230`); unlike analysis selection, there is no supplied-ID
+enum. `request_candidate_claims` passes only the reference count into that schema
+(`summary.rs:1380-1426`). The bounded repair handles only omitted references,
+not foreign IDs (`summary/repair.rs:80-96`), so this fails immediately rather
+than taking another attempt. The validator is correctly protecting provenance.
+Do not silently repair/dedupe IDs or broaden retry admission as part of retention.
+
+Analysis made 167 requests: 83 selections and 84 paraphrases, including one
+394-character draft shortened to 276. It completed with 83 evidence items.
+Eleven initial synthesis responses produced 74 candidates, citing all 83 items;
+their counts were 8, 8, 5, 8, 8, 7, 6, 5, 8, 8 and 3. That leaves ten reductions
+needed to reach B=64. Six pair reductions validated; the seventh failed. The
+74 candidates are not a delivered summary or a completed synthesis artifact.
+There are no supported claims, supported-page fraction, withheld/lost-page
+measurements or independent-reopen proof for this run: verification never ran.
+
+This is the predicted consolidation surface growing, but not yet evidence that
+the model cannot combine the meanings. The observed stop is copying identity.
+A next contract should make pair-reduction identity application-owned or
+constrain scope-local references, preserving full evidence coverage and every
+existing rejection boundary. That change is not implemented in this slice.
+
+### Measured retention and cost
+
+| Stage | DOL requests / completion tokens / model ms | NARA requests / completion tokens / model ms |
+| --- | --- | --- |
+| Analysis | 167 / 4,298 / 71,384 | 20 / 399 / 8,641 |
+| Synthesis | 18 / 10,172 / 87,148 | 6 / 2,312 / 21,039 |
+| Verification | Not reached | 2 / 1,065 / 11,004 |
+
+All requests used Primary transport with no fallback. The deck's prior run used
+163 requests and 275.66 seconds but reached both verification passes; the new
+185-request run failed earlier in the pipeline. Its shorter wall time is **not**
+a speedup on completed work. Fresh run-derived seeds and a cold model at the
+start also preclude a controlled same-seed performance comparison.
+
+For NARA, A=7, desired reserve=16, R=11, E=10 and actual retained margin=3.
+All 11 native-text pages were inspected, with only page 12 omitted as a stamp.
+Source exhaustion prevents full reserve. Both synthesis attempts cover all ten
+items; the selected verification withholds two claims, losing three pages and
+leaving seven. The existing bounded re-synthesis ran once. Delivered supported
+evidence coverage is 70 percent, above the unchanged 60 percent gate. Full
+acceptance, exact provenance and independent database reopen pass. The source-
+level permanent-records/destruction fidelity caution remains: a model-supported
+verdict is not independent human validation. Coverage stays at 63.64 percent
+versus the prior run, while requests rise from 20 to 28 and wall time from
+34.01 to 41.49 seconds. This is enforcement, not a measured coverage increase.
+
+### Local proof and remaining scope
+
+`cargo test --offline --all-targets`: 247 library tests pass (four ignored),
+three acceptance tests pass (three external tests ignored), three release tests
+pass. `cargo clippy --offline --all-targets --all-features -- -D warnings` and
+`cargo fmt --check` both exit 0. An initial new-test compile error passed the
+wrong artifact type to a preflight helper; corrected before the passing gates.
+
+Production preflights reproduce twelve maximum-text synthesis batches and 62
+reserved calls for 83 items; the escaping fixture yields 83 batches and 204
+reserved calls, both below 256. The real verification path accepts a compact
+16-reference claim and rejects 17. Synthetic withholding tests produce 83, 67,
+66, 51 and 83 supported pages for zero loss, the one-claim reserve, insufficient
+reserve, two disjoint losses and overlapping references respectively. Historical
+page plans/identities through 7.1.0 remain readable; density/chunk independence,
+deterministic omission/backfill, source exhaustion and no repeated page work are
+covered. The capacity test rejects N=1,707 before any generation; full reserve
+ends at N=1,680, not full coverage feasibility.
+
+Logs: `/tmp/doc-sum-retention.wXKkse/dol.log` and `nara.log`. The code slice is
+implemented, but live deck acceptance remains blocked. Focused live heading
+controls and the separately sequenced durable partial-analysis/individual-attempt
+audit also remain open. PR #30 stays ready for review and unmerged.
+
+## Previous result: DOL delivers a summary but fails native-page coverage
 
 **NOT DONE: DOL acceptance still fails, now on page coverage rather than
 pipeline admission.** The pipeline delivers 56 supported claims citing 66/111

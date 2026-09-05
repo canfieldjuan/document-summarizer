@@ -502,23 +502,28 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
-#### Proposed amendment: retention reserve for verification withholding
+#### Amendment: retention reserve for verification withholding
 
-Status: contract only, not implemented. The intended change is new analysis
-version 8.0.0; versions through 7.1.0 retain their original page plans, stopping
-targets, omission validation and identities. Fold/delete this proposed section
+Status: contracts `bf42810` and `5dfcd90` precede implementation `8ece146`.
+New runs use analysis version 8.0.0; versions through 7.1.0 retain their original
+page plans, stopping
+targets, omission validation and identities. Fold/delete this amendment section
 when the complete feature lands, not while the broader materiality/audit work
 is unfinished. This amendment supersedes only the new-run retention target of
 the page-analysis contract; it does not alter supported-page acceptance.
 
+Live acceptance is not closed: the new deck run retains 83 items but fails on
+a foreign hierarchical candidate ID before verification. NARA passes at 7/11
+native pages. See `LOCAL_MODEL_EVALUATION.md` for failures, cost and proof limits.
+
 Root cause and qualifications:
 
-- Current `summary.rs:2521-2524` selects
-  min(N, max(B, ceil(3N/5))) pages, and `summary/pages.rs:482` stops when that
+- Before this amendment, `summary.rs:2521-2524` selected
+  min(N, max(B, ceil(3N/5))) pages, and `summary/pages.rs:482` stopped when that
   many items are retained. It equals the acceptance target for the deck, not
   for every document: the B floor already gives some short documents margin.
-- For N=111, acceptance requires A=ceil(3N/5)=67. The latest run retains 67,
-  then delivers supported claims citing 66, failing the unchanged target.
+- For N=111, acceptance requires A=ceil(3N/5)=67. The pre-amendment run retained 67,
+  then delivered supported claims citing 66, failing the unchanged target.
   Withholding is permitted and essential for correctness, not guaranteed on
   every run. The observations 7/8 and 66/67 do not establish survival rates,
   causal explanations for those rates, or a statistically justified margin.
@@ -615,8 +620,10 @@ paraphrase retry per retained page, 201 to 249. Omitted heading selections can
 add calls while backfilling; inspect each native page at most once, preserving
 the three-calls-per-inspected-page envelope. Verification still admits at most
 64 batches per pass and two passes. No timeout, context, token or request
-ceiling increases. These are checked arithmetic/serialization estimates, not
-executed Rust preflight tests or live results for the new retention plan.
+ceiling increases. The production Rust preflight tests on `8ece146` now reproduce
+the 62-call maximum-text and 204-call escaping envelopes for 83 items. These are
+reservations, not live call counts. The live deck used 167 analysis and 18
+synthesis calls before failing; verification did not run.
 
 Required change surface: versioned retention helpers in `summary.rs`, page plan,
 stop/backfill and historical reload dispatch in `summary/pages.rs`; acceptance
