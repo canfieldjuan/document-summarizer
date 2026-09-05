@@ -419,6 +419,57 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ### Direct verified paraphrases and explicit omissions
 
+#### Pending analysis-v12 punctuation-boundary correction
+
+Status: contract only. Implementation must land in a later commit, then this
+pending subsection must be folded into the current-behavior text and deleted.
+
+Root cause: analysis-v11 mechanical completeness requires an alphanumeric
+character immediately before terminal punctuation. A complete value statement
+ending in a numeric suffix such as `75%.` is therefore rejected, and the same
+predicate prevents the long-claim fallback from preserving it after repair.
+Separately, the phone material-marker recognizer ignores ordinary terminal
+question punctuation, so `703-696-4959?` can fail to veto model-side omission.
+The dollar-prefix example `$500.` and a phone followed by `.` are not failures:
+the former ends on the digit `0`, while the latter's period is already admitted
+inside a phone token.
+
+Required behavior:
+
+- New runs use analysis version 12. Historical analysis 11 and earlier remain
+  readable under their original completeness and omission-admission rules; a
+  predicate correction must not silently reinterpret an existing artifact.
+- Mechanical completeness accepts a terminal value suffix only when the suffix
+  is `%`, `‰`, `‱`, `°`, or a Unicode currency symbol and the preceding
+  non-whitespace character is numeric. Closing quote/bracket handling and the
+  terminal sentence-punctuation requirement remain unchanged. A standalone
+  suffix, arbitrary symbol, ellipsis, missing terminal punctuation, cut-off
+  word, or trailing whitespace remains invalid. Rust support verification, not
+  this mechanical predicate, decides whether the value is source-supported.
+- Phone-marker admission ignores ordinary leading/trailing sentence punctuation,
+  including `?`, consistently with the other marker recognizers. It retains the
+  existing seven-to-15-digit and separator requirements; malformed short/long
+  numbers and punctuation without a phone remain non-markers. Marker recognition
+  only removes the model omission option; it does not validate or summarize the
+  contact value.
+- No claim-length, decoder, prompt, runtime, model, coverage, omission-reason,
+  persistence-schema, synthesis, verification, Connect, OCR, or fixture behavior
+  changes in this correction.
+
+Verification requires both-sided boundary probes for every newly admitted value
+suffix, arbitrary/standalone-symbol negatives, closing marks, the existing
+completeness negatives, phone `.`/`?` endings, malformed digit-count boundaries,
+mixed marker text, current omission-schema denial, and historical analysis-v11
+reload. Full local tests, strict Clippy and formatting remain mandatory.
+
+Delivery process correction: an exact-head review is complete only after a
+review whose commit OID equals the current pull-request head has posted. Merge
+admission then requires a separate fresh unresolved-thread and review-state poll;
+the thread count from a previous-head review is not evidence about the final
+head. PR #30 violated this ordering when its final-head review arrived after the
+merge. This follow-up must remain open until that exact-head review and post-review
+poll complete.
+
 Status: the direct-summary and tolerant-paraphrase behavior is implemented by
 `2ed9c07` and `8b0d039`, after their separate documentation-only contracts
 `9d81f89` and `5c2c3e6`. The analysis-v11 material-marker omission admission is
