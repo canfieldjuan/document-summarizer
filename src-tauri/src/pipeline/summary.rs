@@ -1662,6 +1662,33 @@ fn delivery_page_coverage_satisfied(
         && (cited_pages.len() as u128) * 5 >= (adjusted_total as u128) * 3
 }
 
+pub(crate) fn delivery_claim_prefix_coverage_satisfied(
+    citations: &CitationArtifact,
+    delivered_claim_count: usize,
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+) -> bool {
+    if delivered_claim_count == 0 || delivered_claim_count > citations.claims.len() {
+        return false;
+    }
+    let evidence_by_id = citations
+        .evidence
+        .iter()
+        .map(|evidence| (evidence.evidence_id.as_str(), evidence))
+        .collect::<HashMap<_, _>>();
+    let mut cited_pages = HashSet::new();
+    for evidence_id in citations.claims[..delivered_claim_count]
+        .iter()
+        .flat_map(|claim| &claim.evidence_ids)
+    {
+        let Some(evidence) = evidence_by_id.get(evidence_id.as_str()) else {
+            return false;
+        };
+        cited_pages.insert(evidence.source_span.page_start);
+    }
+    delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
+}
+
 fn build_analysis_scopes(
     chunk: &crate::pipeline::contracts::DocumentChunk,
     normalized_blocks: &HashMap<&str, &NormalizedBlock>,

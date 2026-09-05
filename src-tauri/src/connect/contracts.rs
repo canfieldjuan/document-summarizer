@@ -336,7 +336,7 @@ impl JobResult {
         input: &InputArtifact,
         summary: &SummaryArtifact,
         claim_lines: &[String],
-    ) -> Result<Self, ContractBuildError> {
+    ) -> Result<(Self, usize), ContractBuildError> {
         if claim_lines.is_empty()
             || claim_lines.iter().any(String::is_empty)
             || claim_lines.join("\n\n") != summary.text
@@ -351,7 +351,7 @@ impl JobResult {
             &summary.text,
             &summary.warnings,
         ) {
-            return Ok(result);
+            return Ok((result, claim_lines.len()));
         }
 
         let mut warnings = summary.warnings.clone();
@@ -388,7 +388,7 @@ impl JobResult {
             if let Ok(result) =
                 build_summary_result(input, &summary.summary_version, &text, &warnings)
             {
-                return Ok(result);
+                return Ok((result, count));
             }
         }
         Err(ContractBuildError::InvalidSummary(
@@ -626,12 +626,13 @@ mod tests {
         let first = "Grounded first claim. [p. 1]".to_string();
         let second = format!("{}😀", "x".repeat(MAX_SUMMARY_TEXT_BYTES - first.len() - 3));
         summary.text = [first.clone(), second].join("\n\n");
-        let result = JobResult::from_summary_claim_lines(
+        let (result, delivered_claims) = JobResult::from_summary_claim_lines(
             &request.inputs[0],
             &summary,
             &[first.clone(), summary.text[first.len() + 2..].to_string()],
         )
         .expect("a whole first claim should remain deliverable");
+        assert_eq!(delivered_claims, 1);
         assert_eq!(result.outputs[0].content.text, first);
         assert!(result.outputs[0]
             .content
@@ -665,8 +666,10 @@ mod tests {
             integrity_hash: "unused-by-wire-contract".to_string(),
         };
         assert!(summary.text.len() < MAX_SUMMARY_TEXT_BYTES);
-        let result = JobResult::from_summary_claim_lines(&request.inputs[0], &summary, &lines)
-            .expect("one escaped whole claim should fit the serialized artifact ceiling");
+        let (result, delivered_claims) =
+            JobResult::from_summary_claim_lines(&request.inputs[0], &summary, &lines)
+                .expect("one escaped whole claim should fit the serialized artifact ceiling");
+        assert_eq!(delivered_claims, 1);
         let output = &result.outputs[0];
         assert!(output.content.text == lines[0]);
         assert!(output.byte_size as usize <= MAX_SUMMARY_ARTIFACT_BYTES);
