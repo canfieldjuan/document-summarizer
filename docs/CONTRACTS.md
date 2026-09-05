@@ -489,11 +489,12 @@ including complete delivered text.
   seven to 15 ASCII digits and at least one `+`, `-`, `(` or `)` separator; (c) a
   numeric date with three one-to-four-digit fields separated consistently by `/`
   or `-`, or a case-insensitive English month name followed by a one/two-digit day
-  and two/four-digit year; or (d) a five-to-64-character reference token containing
-  ASCII letters, at least two ASCII digits and `/` or `-`, with only alphanumerics,
-  `_`, `/`, `-`, `?` or `.` inside. Leading/trailing ordinary sentence punctuation
-  is ignored for marker recognition. These are omission vetoes, not validators of
-  whether an address, date, phone or reference is real. Ambiguity retains content.
+  and two/four-digit year; or (d) a five-to-64-character reference token beginning
+  with an ASCII letter, containing at least two ASCII digits and `/` or `-`, with
+  only alphanumerics, `_`, `/`, `-`, `?` or `.` inside. Leading/trailing ordinary
+  sentence punctuation is ignored for marker recognition. These are omission
+  vetoes, not validators of whether an address, date, phone or reference is real.
+  Ambiguity retains content.
   The captured short NARA form containing a job number, phone, email and dates is
   a positive veto fixture. Short scan-noise pages containing none of these remain
   eligible for the model omission outcome. The exact standalone date/page-stamp
