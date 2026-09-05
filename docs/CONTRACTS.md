@@ -608,6 +608,10 @@ text or serialized JSON does not fit, persists the largest nonempty whole-claim
 prefix satisfying both the 1 MiB text and 2 MiB JSON limits. It adds the same
 warning idempotently without mutating the pipeline artifacts. If even one whole
 claim plus required metadata and warnings cannot fit, delivery fails closed.
+Before completion, the provider recomputes both page-coverage floors from the
+exact prefix selected by wire projection; JSON-escape expansion cannot silently
+shrink a previously valid result below either floor. An under-covered wire
+prefix fails instead of being stored as a completed Connect job.
 No path splits a UTF-8 scalar, claim, citation label, or JSON escape, and no
 truncation can rescue an otherwise invalid or unsupported claim.
 
