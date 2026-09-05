@@ -419,10 +419,13 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ### Direct verified paraphrases and explicit omissions
 
-Status: implemented by `2ed9c07` and `8b0d039`, after their separate
-documentation-only contracts `9d81f89` and `5c2c3e6`. Live corpus proof is
-reported separately in LOCAL_MODEL_EVALUATION.md. This section replaces the
-retired proposal and its accumulated amendments. Historical artifacts retain
+Status: the direct-summary and tolerant-paraphrase behavior is implemented by
+`2ed9c07` and `8b0d039`, after their separate documentation-only contracts
+`9d81f89` and `5c2c3e6`. The analysis-v11 material-marker omission admission
+below is specified but not yet implemented. Its implementation must update this
+status in a later commit; contract and code must remain separate. Live corpus
+proof is reported separately in LOCAL_MODEL_EVALUATION.md. This section replaces
+the retired proposal and its accumulated amendments. Historical artifacts retain
 their original validation rules. No optional shorter-summary feature is
 introduced.
 
@@ -437,16 +440,18 @@ that source/interpretation problem; it did not originate every factual defect.
 Neither readable paraphrases nor model verdicts prove perfect faithfulness.
 
 Required change surface: analysis omission enum and page paraphrase schema/parser,
-versioned omission admission/reload, direct synthesis materialization, verification
-admission and single-pass lifecycle, coverage reporting/acceptance, fixture and
-negative tests, contract and evaluation including complete delivered text.
+versioned omission admission/reload, deterministic material-marker recognition,
+direct synthesis materialization, verification admission and single-pass lifecycle,
+coverage reporting/acceptance, fixture and negative tests, contract and evaluation
+including complete delivered text.
 
-- New runs use analysis version 10 and direct synthesis/verification/summary
-  version 5. Version 9 analysis remains readable with its 384-character
+- New runs use analysis version 11 and direct synthesis/verification/summary
+  version 5. Version 10 analysis remains readable with its complete-page-only
+  model omission admission. Version 9 remains readable with its 384-character
   validation and original omission admission; version 8 analysis and version 4
   downstream artifacts remain readable under their original limits. Existing
   citation format remains unchanged. The technical omission is rejected in
-  historical analysis.
+  historical analysis where it was never valid.
 - Carry every retained paraphrase unchanged into exactly one claim citing its
   single original evidence item, in source order. Materialize durable claim IDs
   and rendered page labels in Rust. No synthesis, assignment, pair reduction or
@@ -470,12 +475,29 @@ negative tests, contract and evaluation including complete delivered text.
 - Paraphrase has disjoint typed outcomes: claim (claim_text) and
   no_substantive_content (no claim text). Expose the latter only when the selected
   exact quote covers the complete page text, not a truncated, sampled or partial
-  catalog. Compare complete text with whitespace normalization only; no fuzzy
-  deletion of words. A selected fragment cannot establish that unseen content is
-  empty. Deterministic filters and their numeric/unit veto remain unchanged.
-  Model omission is a recorded judgment, not proof that an illegible original
-  never contained facts. Never omit substantive obligations, exceptions, values,
+  catalog, and the complete text contains no deterministic material marker.
+  Compare complete text with whitespace normalization only; no fuzzy deletion of
+  words. A selected fragment cannot establish that unseen content is empty.
+  Deterministic filters and their numeric/unit veto remain unchanged. Model
+  omission is a recorded judgment, not proof that an illegible original never
+  contained facts. Never omit substantive obligations, exceptions, values,
   uncertain or difficult assertions. Preserve a conservative keep option.
+- Material-marker admission fails toward retaining content. It vetoes model
+  omission when complete-page text contains any of: (a) an email-shaped token
+  with a nonempty ASCII local part, `@`, a dotted ASCII domain and an alphanumeric
+  final domain label; (b) a phone-shaped span of at most three whitespace tokens,
+  seven to 15 ASCII digits and at least one `+`, `-`, `(` or `)` separator; (c) a
+  numeric date with three one-to-four-digit fields separated consistently by `/`
+  or `-`, or a case-insensitive English month name followed by a one/two-digit day
+  and two/four-digit year; or (d) a five-to-64-character reference token containing
+  ASCII letters, at least two ASCII digits and `/` or `-`, with only alphanumerics,
+  `_`, `/`, `-`, `?` or `.` inside. Leading/trailing ordinary sentence punctuation
+  is ignored for marker recognition. These are omission vetoes, not validators of
+  whether an address, date, phone or reference is real. Ambiguity retains content.
+  The captured short NARA form containing a job number, phone, email and dates is
+  a positive veto fixture. Short scan-noise pages containing none of these remain
+  eligible for the model omission outcome. The exact standalone date/page-stamp
+  grammar still takes the deterministic omission path before any model request.
 - Treat 384 characters as the generation/repair target, not a correctness
   boundary. A complete, trimmed paraphrase through the 1,536-character decoder
   ceiling remains evidence and gets `LONG_CLAIM`; prefer a successful shorter
@@ -487,9 +509,11 @@ negative tests, contract and evaluation including complete delivered text.
   failures remain failures; cancellation is never converted to an omission.
 - Record ModelNoSubstantiveContent/NoSubstantiveContent using the existing page,
   chunk, source fingerprint, catalog fingerprint and filter-version audit fields.
-  Reload verifies whole-page admission and exact source/catalog binding; reject
-  unknown, duplicate, forged, mixed retained/omitted, or historically invalid
-  outcomes. Backfill as before; omissions never count as retained evidence.
+  Analysis-v11 reload verifies whole-page admission, absence of material markers
+  and exact source/catalog binding. Version-10 reload retains its original
+  whole-page-only admission. Reject unknown, duplicate, forged, mixed
+  retained/omitted, or historically invalid outcomes. Backfill as before;
+  omissions never count as retained evidence.
 - Acceptance requires at least 50 percent raw native-text-page coverage and at
   least 60 percent omission-adjusted coverage, using integer comparisons and
   nonzero denominators. Only validated material omissions leave the adjusted
@@ -706,9 +730,12 @@ opt-in; default reports continue to hide source and summary text.
 
 Local gates include exactness/provenance/fail-closed negatives, source-ordered
 direct materialization, capacity edges, actual verification batches, omission
-admission/tampering, historical reload, and single-pass lineage. Live NARA and
-DOL results must lead with failures and distinguish gate success from readability
-and source fidelity. Do not rerun until a favorable sample or change omission
+admission/tampering, historical reload, and single-pass lineage. Marker boundaries
+cover every marker class, mixed valid/invalid text, a 462-character form that must
+not receive the omission schema, short scan noise that must receive it, and the
+standalone date/page-stamp path that must make no model call. Live NARA and DOL
+results must lead with failures and distinguish gate success from readability and
+source fidelity. Do not rerun until a favorable sample or change omission
 thresholds to pass.
 
 The application service composes ingestion, parsing, normalization, structural
