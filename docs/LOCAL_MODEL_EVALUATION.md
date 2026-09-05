@@ -1,6 +1,83 @@
 # Corpus and native Ollama evaluation — updated 2026-09-05
 
-## Latest slice: direct paraphrases implemented; live control TIMED OUT
+## Latest slice: native DOL delivery passes; NARA accuracy remains limited
+
+**Residual failure first: NARA is not accuracy evidence.** Its delivered page-3
+claim still combines a permanent-record row with the next row's seven-year
+destruction instruction. The flattened OCR text layer contains that sequence and
+the verifier accepted it. The new `OCR_TEXT_LAYER_STRUCTURE_RISK` warning is
+present, but warning and exact text-layer provenance cannot reconstruct the lost
+table relationship. NARA therefore proves robust delivery and warning
+propagation only.
+
+**The original native-text coverage complaint is now closed on the DOL scale
+fixture.** The 111-page deck completed in 98.14 seconds with 82 supported direct
+claims and 82 delivered evidence items, citing 82 pages. Raw and adjusted page
+coverage were both 73.8739 percent. One claim was withheld; the run completed
+with `LONG_CLAIM`, `SEMANTIC_CLAIMS_WITHHELD` and
+`SUMMARY_COVERAGE_SHORTFALL` instead of discarding the document. Requests were
+indexed 0 through 175 (176 calls). The harness emitted per-request token usage,
+but its console output was truncated before an exact aggregate completion-token
+sum could be recovered; `01d5eab` now prints that aggregate directly for future
+runs. No aggregate is guessed here.
+
+NARA completed in 12.85 seconds with seven supported claims/evidence items,
+citing seven of 11 native-text pages: 63.64 percent raw and 100 percent adjusted
+coverage. It used 21 requests and 426 completion tokens. Page 4's extracted
+asterisk/Line-11 cross-reference is now retained. Pages 6, 7 and 11 were recorded
+as model non-substantive omissions, page 12 as a deterministic date stamp, and
+page 9 remained visual-only. Warnings were `NO_NATIVE_TEXT`,
+`ANALYSIS_PAGE_OMITTED` and `OCR_TEXT_LAYER_STRUCTURE_RISK`.
+
+The four live negative controls all remained retained: a short obligation, a
+dollar amount, a negated destruction rule and an exception-qualified approval
+rule each produced one evidence item with zero omissions. NARA's 21 recorded
+attempts all used Primary transport. DOL completed through the structured path,
+but its per-attempt transport lines fell inside the truncated console region and
+are not reasserted from memory here.
+
+The complete delivered summaries were printed between
+`OFFICE_LIVE_DELIVERED_SUMMARY` markers during each test. NARA's complete text
+was:
+
+> Item 2 (FN 213) remains active and may be used to disposition records, but the
+> remaining items on this schedule are superseded, obsolete, or not approved for
+> record disposition. [p. 1]
+>
+> The records disposal request is approved except for items marked "disapproved"
+> or "withdrawn" in column 10. [p. 2]
+>
+> Permanent. Cut off annually and transfer to WNRC. Destroy when 7 years old.
+> Supporting documentation includes coordination sheets, comments, referenced
+> documents, marked-up copy, etc. [p. 3]
+>
+> For those formats marked with an asterisk (*), see Line 11 of this form. [p. 4]
+>
+> Upon approval of this agreement, transfer all eligible (30 years old)
+> electronic records directly to NARA and pre-accession all additional records.
+> [p. 5]
+>
+> The PDF records may contain embedded files or form data, and if so, this
+> information will be captured and transferred to NARA separately from the PDFs.
+> [p. 8]
+>
+> The PDFs contain embedded fonts, including the "base 14," as confirmed by the
+> agency. [p. 10]
+
+The DOL delivered text was 17,561 characters with SHA-256
+`82f8682bc3e61e083d1c0bfe765fbc57cf4277ab2e120f24ab57daba0c3dc8ec`; the
+complete 82-paragraph text was printed in the live record. This document records
+that hash rather than copying a second 17,561-character transcript into the
+contract history.
+
+Code under test: documentation-only contract `5c2c3e6`, implementation
+`8b0d039`; local aggregate-reporting follow-up `01d5eab` does not alter pipeline
+behavior. Local all-target tests passed with 258 library tests and six ignored,
+three acceptance tests and three ignored, and three release tests. Strict clippy,
+formatting and diff checks passed. Hosted CI is not claimed; the operator requires
+local checks because private-repository Actions minutes are exhausted.
+
+## Previous slice: direct paraphrases implemented; live control timed out
 
 **NOT DONE. No new NARA or DOL delivered summary is established for this slice.
 The previous corpus failures below remain the last completed measurements.**

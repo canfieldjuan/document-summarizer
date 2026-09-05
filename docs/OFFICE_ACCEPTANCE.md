@@ -12,7 +12,7 @@ into Git, and no private customer document or OAuth material is required.
 | Form W-9 (Rev. March 2024) | `https://www.irs.gov/pub/irs-pdf/fw9.pdf` | `2d420cbb4123dcf1fb82595b2359cfbb5d81f00b9df9d359fcc7af361d093f53` | Six-page fillable tax form with dense instructions and line wrapping |
 | Federal minimum-wage poster | `https://www.dol.gov/sites/dolgov/files/WHD/legacy/files/minwagebw.pdf` | `4ed7da20aefc976733f087244818dcd109fff0d96f6a2be40743e3b59c674712` | Rotated, visually dense one-page poster |
 | Independent-contractor agreements | `https://www.grandcountyutah.gov/DocumentCenter/View/235/Agreements-for-Independent-Contractors-PDF?bidId=` | `8a849b7ebc5eb1f6a635d2a2e5b083033b74beea2bd47939c56551f73cd59013` | Eight-page office agreement packet |
-| NARA records schedule | `https://www.archives.gov/files/records-mgmt/rcs/schedules/departments/department-of-defense/office-of-the-secretary-of-defense/rg-0330/nc1-330-78-07_sf115.pdf` | `290840e408f2769b9a0ed65b73aa15c116cae3685f125358717ad15cfbd29ec8` | Twelve-page scanned/OCR form with one page lacking native text |
+| NARA records schedule | `https://www.archives.gov/files/records-mgmt/rcs/schedules/departments/department-of-defense/office-of-the-secretary-of-defense/rg-0330/nc1-330-78-07_sf115.pdf` | `290840e408f2769b9a0ed65b73aa15c116cae3685f125358717ad15cfbd29ec8` | Twelve-page scanned/OCR robustness fixture; delivery and warnings only, not table-accuracy evidence |
 | DOL workplace training deck | `https://www.dol.gov/sites/dolgov/files/WHD/legacy/files/FLSA-MSPA-H2A-091925-Public.pdf` | `12097e00b956e8f387e2cd43dd609a9cecc1ca1580c32cc3b87b60518307382b` | 111-page size/page-count stress case |
 
 Source hashes must be checked after download. A changed upstream document is a
@@ -32,7 +32,10 @@ new corpus revision and must not silently inherit these observations.
 - `office_pdf_live_ollama_summary_has_exact_durable_evidence` runs the complete
   selected-model pipeline and verifies exact quotations, provenance, integrity,
   terminal state, immutable events, unchanged source bytes, and artifact
-  equality after an independent reopen.
+  equality after an independent reopen. It requires at least 50 percent raw
+  native-text-page coverage and 60 percent material-omission-adjusted coverage.
+  Technical paraphrase omissions remain in both denominators. The known NARA
+  source hash must also deliver `OCR_TEXT_LAYER_STRUCTURE_RISK`.
 
 Raw model responses and summary text are hidden by default; reports contain
 only lengths, hashes, request schema/size metadata, and source-page sets.
