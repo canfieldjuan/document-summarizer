@@ -212,6 +212,31 @@ fn add_optional_summary(report: &mut serde_json::Value, summary: &str, reveal_te
     }
 }
 
+fn recorded_attempt_totals(runtime: &RecordingRuntime<'_>) -> (usize, u64, u64) {
+    let responses = runtime.responses();
+    let failures = runtime.failures();
+    let attempts = responses
+        .iter()
+        .flat_map(|response| response.request_attempts.iter())
+        .chain(
+            failures
+                .iter()
+                .flat_map(|failure| failure.request_attempts.iter()),
+        )
+        .collect::<Vec<_>>();
+    (
+        attempts.len(),
+        attempts
+            .iter()
+            .map(|attempt| attempt.elapsed_milliseconds)
+            .sum(),
+        attempts
+            .iter()
+            .filter_map(|attempt| attempt.provider_usage.completion_tokens)
+            .sum(),
+    )
+}
+
 fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
     let reveal_text = reveal_model_text();
     eprintln!("OFFICE_LIVE_MODEL_REQUESTS");
@@ -240,6 +265,17 @@ fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
     }
     let requests = runtime.requests();
     let responses = runtime.responses();
+    let (attempt_count, model_elapsed_milliseconds, completion_tokens) =
+        recorded_attempt_totals(runtime);
+    eprintln!(
+        "OFFICE_LIVE_MODEL_TOTALS {}",
+        json!({
+            "request_count": requests.len(),
+            "attempt_count": attempt_count,
+            "model_elapsed_milliseconds": model_elapsed_milliseconds,
+            "completion_tokens": completion_tokens,
+        })
+    );
     let paraphrase_requests = requests.iter().filter(|r| matches!(&r.output_format,
         ModelOutputFormat::JsonSchema { name, .. } if name.starts_with("document_quote_paraphrase_"))).collect::<Vec<_>>();
     let paraphrases = requests
@@ -872,6 +908,7 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
             "lost_page_count": retained_pages.difference(&cited_native_text_pages).count(),
             "wall_time_ms": started.elapsed().as_millis(),
             "request_count": runtime.requests().len(),
+            "completion_tokens": recorded_attempt_totals(&runtime).2,
             "warning_codes": result.summary.warnings.iter().map(|warning| warning.code.as_str()).collect::<Vec<_>>(),
         })
     );
@@ -1008,6 +1045,8 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         "summary_integrity_hash": expected_summary.integrity_hash,
         "citation_integrity_hash": expected_citations.integrity_hash,
         "summary_characters": expected_summary.text.chars().count(),
+        "request_count": runtime.requests().len(),
+        "completion_tokens": recorded_attempt_totals(&runtime).2,
         "summary_sha256": format!("{:x}", Sha256::digest(expected_summary.text.as_bytes())),
     });
     add_optional_summary(&mut report, &expected_summary.text, reveal_model_text());
