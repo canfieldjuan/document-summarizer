@@ -5,8 +5,8 @@ use document_summarizer_lib::pipeline::contracts::{
 };
 use document_summarizer_lib::pipeline::db::{
     get_analyzed_document, get_chunked_document, get_citation_artifact, get_normalized_document,
-    get_parsed_document, get_pipeline_run, get_structured_document, get_summary_artifact, init_db,
-    list_pipeline_events,
+    get_parsed_document, get_pipeline_run, get_structured_document, get_summary_artifact,
+    get_synthesis_attempt, get_verified_document, init_db, list_pipeline_events,
 };
 use document_summarizer_lib::pipeline::ingest::ingest_pdf;
 use document_summarizer_lib::pipeline::model::OllamaRuntime;
@@ -28,6 +28,57 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 struct TestDatabase(PathBuf);
+
+fn coverage_at_least_sixty_percent(cited: usize, total: usize) -> bool {
+    total > 0 && cited <= total && (cited as u128) * 5 >= (total as u128) * 3
+}
+
+fn evidence_coverage_accepted(
+    retained: &HashSet<&str>,
+    synthesized: &HashSet<&str>,
+    supported: &HashSet<&str>,
+) -> bool {
+    synthesized == retained
+        && supported.is_subset(retained)
+        && coverage_at_least_sixty_percent(supported.len(), retained.len())
+}
+
+#[test]
+fn coverage_gate_separates_synthesized_and_supported_evidence() {
+    let retained = HashSet::from(["a", "b", "c", "d", "e"]);
+    assert!(evidence_coverage_accepted(
+        &retained,
+        &retained,
+        &HashSet::from(["a", "b", "c"])
+    ));
+    assert!(!evidence_coverage_accepted(
+        &retained,
+        &retained,
+        &HashSet::from(["a", "b"])
+    ));
+    assert!(!evidence_coverage_accepted(
+        &retained,
+        &HashSet::from(["a", "b", "c", "d"]),
+        &HashSet::from(["a", "b", "c"])
+    ));
+    assert!(!evidence_coverage_accepted(
+        &retained,
+        &retained,
+        &HashSet::from(["a", "b", "foreign"])
+    ));
+    for (cited, total, expected) in [
+        (0, 0, false),
+        (0, 1, false),
+        (1, 1, true),
+        (2, 1, false),
+        (59, 100, false),
+        (60, 100, true),
+        (61, 100, true),
+        (600_000, 1_000_000, true),
+    ] {
+        assert_eq!(coverage_at_least_sixty_percent(cited, total), expected);
+    }
+}
 
 impl TestDatabase {
     fn new(label: &str) -> Self {
@@ -626,6 +677,27 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .iter()
         .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
         .collect::<HashSet<_>>();
+    let verified = get_verified_document(&conn, &result.run_id)
+        .expect("verification should load")
+        .expect("verification should exist");
+    let mut synthesis_attempts = Vec::new();
+    for ordinal in 0..=1 {
+        if let Some(attempt) = get_synthesis_attempt(&conn, &result.run_id, ordinal)
+            .expect("synthesis attempt should load")
+        {
+            synthesis_attempts.push((ordinal, attempt));
+        }
+    }
+    let selected_synthesis = &synthesis_attempts
+        .iter()
+        .find(|(ordinal, _)| *ordinal == verified.synthesis_attempt_ordinal)
+        .expect("selected persisted synthesis must exist")
+        .1;
+    let synthesized_evidence_ids = selected_synthesis
+        .claims
+        .iter()
+        .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
+        .collect::<HashSet<_>>();
     let claim_budget = ((native_text_pages.len() * 3).div_ceil(5)).clamp(8, 64);
     let claim_floor = claim_budget
         .div_ceil(2)
@@ -645,6 +717,9 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
             "omitted_page_count": analyzed.omissions.len(),
             "omitted_pages": analyzed.omissions.iter().map(|omission| omission.page_number).collect::<Vec<_>>(),
             "cited_evidence_count": cited_evidence_ids.len(),
+            "synthesized_evidence_count": synthesized_evidence_ids.len(),
+            "supported_evidence_fraction": cited_evidence_ids.len() as f64 / evidence_ids.len() as f64,
+            "supported_evidence_threshold": 0.6,
             "cited_native_text_page_count": cited_native_text_pages.len(),
             "native_text_page_count": native_text_pages.len(),
             "request_count": runtime.requests().len(),
@@ -653,9 +728,37 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     );
     assert!(result.citations.claims.len() >= claim_floor);
     assert!(result.citations.claims.len() <= claim_budget);
-    assert_eq!(cited_evidence_ids, evidence_ids);
+    for (_, attempt) in &synthesis_attempts {
+        let cited = attempt
+            .claims
+            .iter()
+            .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            cited, evidence_ids,
+            "every synthesized attempt must cover all retained evidence"
+        );
+    }
     assert!(
-        cited_native_text_pages.len() * 5 >= native_text_pages.len() * 3,
+        evidence_coverage_accepted(
+            &evidence_ids,
+            &synthesized_evidence_ids,
+            &cited_evidence_ids
+        ),
+        "complete synthesized coverage and at least 60 percent supported evidence required"
+    );
+    if cited_evidence_ids != evidence_ids {
+        assert!(
+            result
+                .summary
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "SUMMARY_COVERAGE_SHORTFALL"),
+            "withheld evidence must remain visible as a durable warning"
+        );
+    }
+    assert!(
+        coverage_at_least_sixty_percent(cited_native_text_pages.len(), native_text_pages.len()),
         "at least 60 percent of native-text pages must be cited"
     );
     for evidence in &result.citations.evidence {

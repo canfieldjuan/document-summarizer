@@ -21,7 +21,7 @@ const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_SCHEMA_NAME_BYTES: usize = 64;
-const MAX_DECODER_STRING_LENGTH: u64 = 192;
+pub(super) const MAX_DECODER_STRING_LENGTH: u64 = 768;
 
 pub struct OllamaRuntime {
     client: Client,
@@ -624,8 +624,9 @@ fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_json::Value {
     // Neither the production Ollama/llama.cpp grammar converter nor vLLM
     // enforces `uniqueItems`; it also compares objects, not quote-ID fields.
     // Single-item page analysis enforces uniqueness structurally in both paths.
-    // Retain the proven small string
-    // bounds; larger Ollama grammar repetitions can fail compilation.
+    // Retain bounded decoder headroom, not the paraphrase acceptance limit:
+    // a grammar ceiling can close a string before its sentence is complete.
+    // Larger Ollama grammar repetitions can fail compilation.
     // Stage parsers remain authoritative even when the decoder has a bound.
     projected.remove("uniqueItems");
     if fields
@@ -1070,7 +1071,7 @@ mod tests {
 
     #[test]
     fn decoder_projection_preserves_small_string_bounds_and_strips_large_ones() {
-        for maximum in [0, 191, 192, 193, 2_000, 4_000] {
+        for maximum in [0, 191, 192, 193, 767, 768, 769, 2_000, 4_000] {
             let canonical = serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1099,7 +1100,7 @@ mod tests {
             .expect("schema transport should remain enabled");
             let projected = &format["json_schema"]["schema"];
             let actual = &projected["properties"]["evidence"]["items"]["properties"]["claim_text"];
-            if maximum <= 192 {
+            if maximum <= MAX_DECODER_STRING_LENGTH {
                 assert_eq!(actual["maxLength"], maximum, "small bound must survive");
             } else {
                 assert!(

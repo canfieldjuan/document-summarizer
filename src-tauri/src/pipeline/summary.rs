@@ -19,7 +19,8 @@ mod eligibility;
 mod pages;
 mod repair;
 
-pub const ANALYSIS_VERSION: &str = "5.0.0";
+pub const ANALYSIS_VERSION: &str = "6.0.0";
+const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
 pub const SYNTHESIS_VERSION: &str = "4.0.0";
 pub const VERIFICATION_VERSION: &str = "4.0.0";
@@ -3442,6 +3443,7 @@ fn validate_analyzed_content(
         || !matches!(
             analyzed.analysis_version.as_str(),
             ANALYSIS_VERSION
+                | MATERIALITY_ANALYSIS_VERSION
                 | SINGLE_PAGE_ANALYSIS_VERSION
                 | PREVIOUS_ANALYSIS_VERSION
                 | LEGACY_ANALYSIS_VERSION
@@ -3458,7 +3460,11 @@ fn validate_analyzed_content(
         ));
     }
     let mut all_evidence_ids = HashSet::new();
-    if analyzed.analysis_version != ANALYSIS_VERSION
+    let materiality_analysis = matches!(
+        analyzed.analysis_version.as_str(),
+        ANALYSIS_VERSION | MATERIALITY_ANALYSIS_VERSION
+    );
+    if !materiality_analysis
         && (!analyzed.omissions.is_empty() || !analyzed.inspected_pages.is_empty())
     {
         return Err(stage_failure(
@@ -3468,14 +3474,14 @@ fn validate_analyzed_content(
             false,
         ));
     }
-    let selected_pages = if analyzed.analysis_version == ANALYSIS_VERSION {
+    let selected_pages = if materiality_analysis {
         pages::validate_plan(analyzed, chunked, normalized)?
     } else {
         analysis_selected_pages(normalized)?
     };
     let mut seen_pages = HashSet::new();
     for (analysis, chunk) in analyzed.chunks.iter().zip(&chunked.chunks) {
-        let current_scopes = if analyzed.analysis_version == ANALYSIS_VERSION {
+        let current_scopes = if materiality_analysis {
             Some(
                 normalized
                     .pages
@@ -3582,6 +3588,8 @@ fn validate_analyzed_content(
                 || evidence.chunk_id != chunk.chunk_id
                 || !allowed_blocks.contains(evidence.block_id.as_str())
                 || !canonical_bounded_text(&evidence.claim_text, claim_character_limit)
+                || (analyzed.analysis_version == ANALYSIS_VERSION
+                    && !pages::completion_valid(&evidence.claim_text))
                 || !canonical_bounded_text(&evidence.exact_quote, quote_character_limit)
                 || !block.text.contains(&evidence.exact_quote)
                 || evidence.source_span != block.source
@@ -3592,7 +3600,7 @@ fn validate_analyzed_content(
                 || !all_evidence_ids.insert(evidence.evidence_id.as_str())
                 || (matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION | SINGLE_PAGE_ANALYSIS_VERSION
+                    ANALYSIS_VERSION | MATERIALITY_ANALYSIS_VERSION | SINGLE_PAGE_ANALYSIS_VERSION
                 ) && !seen_pages.insert(evidence.source_span.page_start))
             {
                 return Err(stage_failure(
@@ -3635,7 +3643,7 @@ fn validate_analyzed_content(
     }
     if matches!(
         analyzed.analysis_version.as_str(),
-        ANALYSIS_VERSION | SINGLE_PAGE_ANALYSIS_VERSION
+        ANALYSIS_VERSION | MATERIALITY_ANALYSIS_VERSION | SINGLE_PAGE_ANALYSIS_VERSION
     ) && seen_pages != selected_pages
     {
         return Err(stage_failure(
@@ -4547,7 +4555,17 @@ pub(crate) fn fixture_model_output(request: &ModelRequest) -> String {
         }
         pages::PARAPHRASE_SCHEMA => {
             let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
-            json!({"claim_text":prompt["exact_quote"].as_str().unwrap().chars().take(MAX_ANALYSIS_CLAIM_CHARACTERS).collect::<String>().trim()}).to_string()
+            let quote = prompt["exact_quote"].as_str().unwrap();
+            // Scripted fixtures supply a complete bounded sentence. Production
+            // never edits generated text to satisfy the validator.
+            let claim = if canonical_bounded_text(quote, MAX_ANALYSIS_CLAIM_CHARACTERS)
+                && pages::completion_valid(quote)
+            {
+                quote.to_string()
+            } else {
+                "The document contains fixture content.".to_string()
+            };
+            json!({"claim_text": claim}).to_string()
         }
         ANALYSIS_SCHEMA_NAME => {
             let prompt: AnalysisPrompt = serde_json::from_str(&request.user_prompt)
@@ -8060,6 +8078,164 @@ mod tests {
         omit_headings: bool,
         synthesis_failures: usize,
         foreign_id: bool,
+    }
+
+    struct ParaphraseRepairRuntime {
+        requests: Mutex<Vec<ModelRequest>>,
+        answers: Vec<String>,
+    }
+
+    impl ModelRuntime for ParaphraseRepairRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let mut requests = self.requests.lock().unwrap();
+            let index = requests.iter().filter(|r| matches!(&r.output_format, ModelOutputFormat::JsonSchema { name, .. } if name == pages::PARAPHRASE_SCHEMA)).count();
+            requests.push(request.clone());
+            let text = if matches!(&request.output_format, ModelOutputFormat::JsonSchema { name, .. } if name == pages::PARAPHRASE_SCHEMA)
+            {
+                self.answers[index].clone()
+            } else {
+                fixture_model_output(request)
+            };
+            Ok(ModelResponse {
+                text,
+                runtime_id: self.runtime_id().into(),
+                model_id: self.model_id().into(),
+                request_attempts: Vec::new(),
+            })
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "fixture"
+        }
+        fn model_id(&self) -> &str {
+            "paraphrase-repair"
+        }
+    }
+
+    #[test]
+    fn paraphrase_retry_is_bounded_feedback_only_and_preserves_quote_binding() {
+        let (normalized, chunked) = materiality_fixture(&["Retain records forever.".into()]);
+        let bad = json!({"claim_text": "w".repeat(192)}).to_string();
+        let good = json!({"claim_text":"Retain records forever."}).to_string();
+        for (answers, expected_calls, succeeds) in [
+            (vec![good.clone()], 2, true),
+            (vec![bad.clone(), good.clone()], 3, true),
+            (vec![bad.clone(), bad], 3, false),
+            (
+                vec![
+                    json!({"claim_text":format!("{}.", "w".repeat(192))}).to_string(),
+                    good.clone(),
+                ],
+                3,
+                true,
+            ),
+            (vec!["{bad json".into()], 2, false),
+            (
+                vec![json!({"claim_text":"Valid text.", "quote_id":"foreign"}).to_string()],
+                2,
+                false,
+            ),
+        ] {
+            let runtime = ParaphraseRepairRuntime {
+                requests: Mutex::new(Vec::new()),
+                answers,
+            };
+            let result = analyze(
+                &runtime,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION,
+            );
+            assert_eq!(result.is_ok(), succeeds);
+            let requests = runtime.requests.lock().unwrap();
+            assert_eq!(requests.len(), expected_calls);
+            let ModelOutputFormat::JsonSchema { schema, .. } = &requests[1].output_format else {
+                panic!("schema")
+            };
+            assert_eq!(schema["properties"]["claim_text"]["maxLength"], 768);
+            if expected_calls == 3 {
+                assert_eq!(requests[1].user_prompt, requests[2].user_prompt);
+                assert_ne!(requests[1].seed, requests[2].seed);
+                assert_eq!(requests[2].ordinal, 2);
+                assert!(requests[2]
+                    .system_prompt
+                    .contains("Previous paraphrase rejected for:"));
+                assert!(requests[2].system_prompt.len() < 1200);
+                assert_eq!(requests[1].max_output_tokens, requests[2].max_output_tokens);
+            }
+        }
+    }
+
+    #[test]
+    fn completeness_reload_is_versioned_and_rejects_mixed_evidence() {
+        let (normalized, chunked) = materiality_fixture(&[
+            "Retain records forever.".into(),
+            "Destroy expired copies.".into(),
+        ]);
+        let runtime = materiality_runtime(false, 0, false);
+        let original = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        for (version, accepted) in [
+            (ANALYSIS_VERSION, false),
+            (MATERIALITY_ANALYSIS_VERSION, true),
+        ] {
+            let mut analyzed = original.clone();
+            analyzed.analysis_version = version.into();
+            analyzed.chunks[0].evidence[0].claim_text = "w".repeat(192);
+            for chunk in &mut analyzed.chunks {
+                for (index, item) in chunk.evidence.iter_mut().enumerate() {
+                    item.evidence_id = deterministic_evidence_id(
+                        &analyzed.document_id,
+                        version,
+                        &chunk.chunk_id,
+                        index,
+                        &item.block_id,
+                        &item.claim_text,
+                        &item.exact_quote,
+                    );
+                }
+                chunk.summary_text = chunk
+                    .evidence
+                    .iter()
+                    .map(|e| e.claim_text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            assert_eq!(
+                validate_analyzed_content(&analyzed, &chunked, &normalized).is_ok(),
+                accepted
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_paraphrase_never_persists_as_evidence_after_retry_exhaustion() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let invalid = json!({"claim_text":"w".repeat(192)}).to_string();
+        let runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![invalid.clone(), invalid],
+        };
+        assert!(analyze_chunked_document(&mut conn, &runtime, &run_id).is_err());
+        assert_eq!(runtime.requests.lock().unwrap().len(), 3);
+        assert!(get_analyzed_document(&conn, &run_id).unwrap().is_none());
+        drop(conn);
+        let reopened = init_db(&database.0).unwrap();
+        assert!(get_analyzed_document(&reopened, &run_id).unwrap().is_none());
+        assert_eq!(
+            get_pipeline_run(&reopened, &run_id).unwrap().unwrap().state,
+            PipelineState::Failed
+        );
     }
 
     impl ModelRuntime for MaterialityRuntime {
