@@ -591,6 +591,13 @@ ceiling is not admitted; analysis records one durable
 Synthesis and verification continue over the admitted nonempty prefix, which
 must still satisfy the existing raw and omission-adjusted coverage gates. A
 delivery limit is not an omission and removes no page from either denominator.
+Before accepting the early stop, Rust checks that the retained prefix itself
+already clears both floors; otherwise analysis fails immediately with the
+delivery-capacity error. The delivery warning replaces the ordinary exhausted-
+plan shortfall warning because later pages were deliberately not inspected.
+After verification, Connect recomputes both floors from the actually supported
+claim citations and fails closed before persistence if either has fallen below
+its threshold.
 The first non-fitting claim may already have consumed its selection/paraphrase
 calls because its exact bytes are unknowable earlier. Final completion checks the
 actual supported rendering against the same ceiling before persistence.
