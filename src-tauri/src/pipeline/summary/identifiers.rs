@@ -68,28 +68,6 @@ impl RequestIds {
             .ok_or_else(|| self.invalid())
     }
 
-    pub(super) fn evidence_response(&self, text: &str) -> Result<String, PipelineFailure> {
-        let mut response: RawClaimsResponse =
-            serde_json::from_str(text).map_err(|_| self.invalid())?;
-        for claim in &mut response.claims {
-            for id in &mut claim.evidence_ids {
-                *id = self.restore(id)?;
-            }
-        }
-        serde_json::to_string(&response).map_err(|_| self.invalid())
-    }
-
-    pub(super) fn candidate_response(&self, text: &str) -> Result<String, PipelineFailure> {
-        let mut response: RawCandidateClaimsResponse =
-            serde_json::from_str(text).map_err(|_| self.invalid())?;
-        for claim in &mut response.claims {
-            for id in &mut claim.candidate_ids {
-                *id = self.restore(id)?;
-            }
-        }
-        serde_json::to_string(&response).map_err(|_| self.invalid())
-    }
-
     pub(super) fn verdict_response(&self, text: &str) -> Result<String, PipelineFailure> {
         let mut response: RawVerificationResponse =
             serde_json::from_str(text).map_err(|_| self.invalid())?;
