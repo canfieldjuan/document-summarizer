@@ -19,7 +19,8 @@ mod eligibility;
 mod pages;
 mod repair;
 
-pub const ANALYSIS_VERSION: &str = "7.0.0";
+pub const ANALYSIS_VERSION: &str = "7.1.0";
+const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
@@ -3445,6 +3446,7 @@ fn validate_analyzed_content(
         || !matches!(
             analyzed.analysis_version.as_str(),
             ANALYSIS_VERSION
+                | CAPACITY_ANALYSIS_VERSION
                 | COMPLETION_ANALYSIS_VERSION
                 | MATERIALITY_ANALYSIS_VERSION
                 | SINGLE_PAGE_ANALYSIS_VERSION
@@ -3465,7 +3467,10 @@ fn validate_analyzed_content(
     let mut all_evidence_ids = HashSet::new();
     let materiality_analysis = matches!(
         analyzed.analysis_version.as_str(),
-        ANALYSIS_VERSION | COMPLETION_ANALYSIS_VERSION | MATERIALITY_ANALYSIS_VERSION
+        ANALYSIS_VERSION
+            | CAPACITY_ANALYSIS_VERSION
+            | COMPLETION_ANALYSIS_VERSION
+            | MATERIALITY_ANALYSIS_VERSION
     );
     if !materiality_analysis
         && (!analyzed.omissions.is_empty() || !analyzed.inspected_pages.is_empty())
@@ -3576,7 +3581,7 @@ fn validate_analyzed_content(
                 &evidence.exact_quote,
             );
             let claim_character_limit = match analyzed.analysis_version.as_str() {
-                ANALYSIS_VERSION => MAX_ANALYSIS_CLAIM_CHARACTERS,
+                ANALYSIS_VERSION | CAPACITY_ANALYSIS_VERSION => MAX_ANALYSIS_CLAIM_CHARACTERS,
                 LEGACY_ANALYSIS_VERSION => MAX_CLAIM_CHARACTERS,
                 _ => HISTORICAL_ANALYSIS_CLAIM_CHARACTERS,
             };
@@ -3593,7 +3598,7 @@ fn validate_analyzed_content(
                 || !canonical_bounded_text(&evidence.claim_text, claim_character_limit)
                 || (matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION | COMPLETION_ANALYSIS_VERSION
+                    ANALYSIS_VERSION | CAPACITY_ANALYSIS_VERSION | COMPLETION_ANALYSIS_VERSION
                 ) && !pages::completion_valid(&evidence.claim_text))
                 || !canonical_bounded_text(&evidence.exact_quote, quote_character_limit)
                 || !block.text.contains(&evidence.exact_quote)
@@ -3606,6 +3611,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | CAPACITY_ANALYSIS_VERSION
                         | COMPLETION_ANALYSIS_VERSION
                         | MATERIALITY_ANALYSIS_VERSION
                         | SINGLE_PAGE_ANALYSIS_VERSION
@@ -3652,6 +3658,7 @@ fn validate_analyzed_content(
     if matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | CAPACITY_ANALYSIS_VERSION
             | COMPLETION_ANALYSIS_VERSION
             | MATERIALITY_ANALYSIS_VERSION
             | SINGLE_PAGE_ANALYSIS_VERSION
@@ -8249,15 +8256,21 @@ mod tests {
             .unwrap();
         let chunked = get_chunked_document(&reopened, &run_id).unwrap().unwrap();
         validate_analyzed_content(&reloaded, &chunked, &normalized).unwrap();
-        for (length, expected) in [(192, true), (193, false), (384, false)] {
+        for (version, length, expected) in [
+            (COMPLETION_ANALYSIS_VERSION, 192, true),
+            (COMPLETION_ANALYSIS_VERSION, 193, false),
+            (COMPLETION_ANALYSIS_VERSION, 384, false),
+            (CAPACITY_ANALYSIS_VERSION, 384, true),
+            (CAPACITY_ANALYSIS_VERSION, 385, false),
+        ] {
             let mut old = reloaded.clone();
-            old.analysis_version = COMPLETION_ANALYSIS_VERSION.into();
+            old.analysis_version = version.into();
             for chunk in &mut old.chunks {
                 for (index, item) in chunk.evidence.iter_mut().enumerate() {
                     item.claim_text = format!("{}.", "t".repeat(length - 1));
                     item.evidence_id = deterministic_evidence_id(
                         &old.document_id,
-                        COMPLETION_ANALYSIS_VERSION,
+                        version,
                         &chunk.chunk_id,
                         index,
                         &item.block_id,
@@ -8367,8 +8380,8 @@ mod tests {
                 let rejected: Value = serde_json::from_str(&runtime.answers[0]).unwrap();
                 if rejected["claim_text"].as_str().unwrap().chars().count() > 384 {
                     assert_eq!(retry["rejected_draft"], rejected["claim_text"]);
-                    assert_eq!(retry["repair"]["rejected_characters"], 385);
-                    assert_eq!(retry["repair"]["target_characters"], 384);
+                    assert_eq!(retry["repair"]["rejected_words"], 1);
+                    assert_eq!(retry["repair"]["target_words"], 55);
                 } else {
                     assert!(retry.get("rejected_draft").is_none());
                 }
@@ -8400,6 +8413,7 @@ mod tests {
         .unwrap();
         for (version, accepted) in [
             (ANALYSIS_VERSION, false),
+            (CAPACITY_ANALYSIS_VERSION, false),
             (COMPLETION_ANALYSIS_VERSION, false),
             (MATERIALITY_ANALYSIS_VERSION, true),
         ] {
@@ -8644,7 +8658,7 @@ mod tests {
         assert!(requests[1].user_prompt.contains("Secret liability"));
         assert!(!requests[2].user_prompt.contains("Secret liability"));
         assert!(!requests[2].user_prompt.contains("quote_id"));
-        assert!(requests[2].system_prompt.contains("384 characters"));
+        assert!(requests[2].system_prompt.contains("55 words"));
         let ModelOutputFormat::JsonSchema { schema, .. } = &requests[1].output_format else {
             panic!("schema")
         };
