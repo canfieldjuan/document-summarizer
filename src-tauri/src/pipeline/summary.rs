@@ -34,17 +34,20 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "4.0.0";
-pub const VERIFICATION_VERSION: &str = "4.0.0";
-pub const SUMMARY_VERSION: &str = "4.0.0";
+pub const SYNTHESIS_VERSION: &str = "5.0.0";
+pub const VERIFICATION_VERSION: &str = "5.0.0";
+pub const SUMMARY_VERSION: &str = "5.0.0";
 pub const CITATION_VERSION: &str = "3.0.0";
 
 const PREVIOUS_ANALYSIS_VERSION: &str = "3.0.0";
 const LEGACY_ANALYSIS_VERSION: &str = "2.0.0";
+const HIERARCHICAL_SYNTHESIS_VERSION: &str = "4.0.0";
 const PREVIOUS_SYNTHESIS_VERSION: &str = "3.0.0";
 const LEGACY_SYNTHESIS_VERSION: &str = "2.0.0";
+const HIERARCHICAL_VERIFICATION_VERSION: &str = "4.0.0";
 const PREVIOUS_VERIFICATION_VERSION: &str = "3.0.0";
 const LEGACY_VERIFICATION_VERSION: &str = "2.0.0";
+const HIERARCHICAL_SUMMARY_VERSION: &str = "4.0.0";
 const PREVIOUS_SUMMARY_VERSION: &str = "3.0.0";
 const LEGACY_SUMMARY_VERSION: &str = "2.0.0";
 const PREVIOUS_CITATION_VERSION: &str = "2.0.0";
@@ -546,7 +549,7 @@ pub fn complete_verified_document(
     let summary_version = match verified.verification_version.as_str() {
         LEGACY_VERIFICATION_VERSION => LEGACY_SUMMARY_VERSION,
         PREVIOUS_VERIFICATION_VERSION => PREVIOUS_SUMMARY_VERSION,
-        direct::VERSION => direct::VERSION,
+        HIERARCHICAL_VERIFICATION_VERSION => HIERARCHICAL_SUMMARY_VERSION,
         _ => SUMMARY_VERSION,
     };
     let mut summary = SummaryArtifact {
@@ -814,9 +817,9 @@ fn verify(
             })
             .collect::<Result<Vec<_>, PipelineFailure>>()?,
     };
-    let verification_claim_budget = if synthesized.synthesis_version == direct::VERSION {
+    let verification_claim_budget = if synthesized.synthesis_version == SYNTHESIS_VERSION {
         direct::MAX_CLAIMS
-    } else if synthesized.synthesis_version == SYNTHESIS_VERSION {
+    } else if synthesized.synthesis_version == HIERARCHICAL_SYNTHESIS_VERSION {
         document_claim_budget(normalized)?
     } else {
         MAX_SUMMARY_CLAIMS
@@ -845,10 +848,10 @@ fn verify(
     );
     let verified = VerifiedDocument {
         document_id: synthesized.document_id.clone(),
-        verification_version: if synthesized.synthesis_version == direct::VERSION {
-            direct::VERSION.to_string()
-        } else {
+        verification_version: if synthesized.synthesis_version == SYNTHESIS_VERSION {
             VERIFICATION_VERSION.to_string()
+        } else {
+            HIERARCHICAL_VERIFICATION_VERSION.to_string()
         },
         synthesis_attempt_ordinal,
         runtime_id: runtime.runtime_id().to_string(),
@@ -1996,7 +1999,11 @@ fn parse_claims_response(
         1,
         MAX_SUMMARY_CLAIMS,
     )?;
-    materialize_cited_claims(&analyzed.document_id, SYNTHESIS_VERSION, claims)
+    materialize_cited_claims(
+        &analyzed.document_id,
+        HIERARCHICAL_SYNTHESIS_VERSION,
+        claims,
+    )
 }
 
 fn materialize_cited_claims(
@@ -2105,13 +2112,10 @@ fn verification_warnings(
     let mut warnings = synthesized
         .warnings
         .iter()
-        .filter(|warning| {
-            !matches!(
-                warning.code.as_str(),
-                "SEMANTIC_VERIFICATION_DEFERRED"
-                    | "SEMANTIC_CLAIMS_WITHHELD"
-                    | COVERAGE_SHORTFALL_WARNING_CODE
-            )
+        .filter(|warning| match warning.code.as_str() {
+            "SEMANTIC_VERIFICATION_DEFERRED" | "SEMANTIC_CLAIMS_WITHHELD" => false,
+            COVERAGE_SHORTFALL_WARNING_CODE => warning.stage == Some(PipelineStage::Analyze),
+            _ => true,
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -2135,7 +2139,7 @@ fn verification_warnings(
     }
     if coverage_retry_attempted {
         warnings.push(coverage_shortfall_warning());
-    } else if synthesized.synthesis_version == direct::VERSION && unsupported + ambiguous > 0 {
+    } else if synthesized.synthesis_version == SYNTHESIS_VERSION && unsupported + ambiguous > 0 {
         warnings.push(PipelineWarning {
             code: COVERAGE_SHORTFALL_WARNING_CODE.into(),
             message: "Some quote-bound claims were withheld; the supported result is preserved without a seed-only retry".into(),
@@ -2467,7 +2471,10 @@ fn validate_synthesized_document_without_runtime(
     validate_analyzed_content(analyzed, chunked, normalized)?;
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
-        direct::VERSION | SYNTHESIS_VERSION | PREVIOUS_SYNTHESIS_VERSION | LEGACY_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION
+            | HIERARCHICAL_SYNTHESIS_VERSION
+            | PREVIOUS_SYNTHESIS_VERSION
+            | LEGACY_SYNTHESIS_VERSION
     );
     if synthesized.document_id != analyzed.document_id
         || !synthesis_version_supported
@@ -2476,7 +2483,7 @@ fn validate_synthesized_document_without_runtime(
         || synthesized.summary_text.trim().is_empty()
         || synthesized.claims.is_empty()
         || synthesized.claims.len()
-            > if synthesized.synthesis_version == direct::VERSION {
+            > if synthesized.synthesis_version == SYNTHESIS_VERSION {
                 direct::MAX_CLAIMS
             } else {
                 MAX_SUMMARY_CLAIMS
@@ -2494,10 +2501,10 @@ fn validate_synthesized_document_without_runtime(
         analyzed,
         &synthesized.synthesis_version,
     )?;
-    if synthesized.synthesis_version == direct::VERSION {
+    if synthesized.synthesis_version == SYNTHESIS_VERSION {
         direct::validate_claim_set(synthesized, analyzed)?;
     }
-    if synthesized.synthesis_version == SYNTHESIS_VERSION {
+    if synthesized.synthesis_version == HIERARCHICAL_SYNTHESIS_VERSION {
         let claim_budget = document_claim_budget(normalized)?;
         let evidence_ids = analyzed
             .chunks
@@ -2595,10 +2602,10 @@ fn validate_verified_document(
 
     let verification_metadata_valid = verified.document_id == synthesized.document_id
         && verified.verification_version
-            == if synthesized.synthesis_version == direct::VERSION {
-                direct::VERSION
-            } else {
+            == if synthesized.synthesis_version == SYNTHESIS_VERSION {
                 VERIFICATION_VERSION
+            } else {
+                HIERARCHICAL_VERIFICATION_VERSION
             }
         && !verified.runtime_id.trim().is_empty()
         && !verified.model_id.trim().is_empty()
@@ -2625,7 +2632,7 @@ fn validate_verified_document(
         || verified.claims != supported_claims
         || verified.summary_text != expected_summary
         || verified.synthesis_attempt_ordinal > 1
-        || (verified.verification_version == direct::VERSION
+        || (verified.verification_version == VERIFICATION_VERSION
             && verified.synthesis_attempt_ordinal != 0)
         || verified.warnings
             != verification_warnings(
@@ -2924,8 +2931,8 @@ fn build_citation_artifact(
 
 pub(crate) fn expected_citation_version(summary_version: &str) -> Option<&'static str> {
     match summary_version {
-        direct::VERSION => Some(CITATION_VERSION),
         SUMMARY_VERSION => Some(CITATION_VERSION),
+        HIERARCHICAL_SUMMARY_VERSION => Some(CITATION_VERSION),
         PREVIOUS_SUMMARY_VERSION => Some(PREVIOUS_CITATION_VERSION),
         LEGACY_SUMMARY_VERSION => Some(LEGACY_CITATION_VERSION),
         _ => None,
@@ -4259,7 +4266,10 @@ mod tests {
         .expect("small synthesis should remain one pass");
         let requests = runtime.captured_requests();
 
-        assert_eq!(synthesized.synthesis_version, SYNTHESIS_VERSION);
+        assert_eq!(
+            synthesized.synthesis_version,
+            HIERARCHICAL_SYNTHESIS_VERSION
+        );
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].stage, PipelineStage::Synthesize);
         assert_eq!(requests[0].ordinal, 0);
@@ -4393,9 +4403,12 @@ mod tests {
             &mut SynthesisRequestBudget::default(),
         )
         .expect("direct synthesis should satisfy the shared bounds");
-        let direct =
-            materialize_cited_claims(&analyzed.document_id, SYNTHESIS_VERSION, direct_validated)
-                .expect("direct claims should materialize");
+        let direct = materialize_cited_claims(
+            &analyzed.document_id,
+            HIERARCHICAL_SYNTHESIS_VERSION,
+            direct_validated,
+        )
+        .expect("direct claims should materialize");
 
         let partitioned_evidence = evidence
             .iter()
@@ -4612,7 +4625,10 @@ mod tests {
             .map(|item| item.evidence_id.as_str())
             .collect::<HashSet<_>>();
 
-        assert_eq!(synthesized.synthesis_version, SYNTHESIS_VERSION);
+        assert_eq!(
+            synthesized.synthesis_version,
+            HIERARCHICAL_SYNTHESIS_VERSION
+        );
         assert!(synthesized.claims.iter().all(|claim| claim
             .evidence_ids
             .iter()
@@ -5389,11 +5405,11 @@ mod tests {
             .expect("thin version-three synthesis must retain its original validation rules");
 
         let mut current_labeled = previous.clone();
-        current_labeled.synthesis_version = SYNTHESIS_VERSION.to_string();
+        current_labeled.synthesis_version = HIERARCHICAL_SYNTHESIS_VERSION.to_string();
         for (index, claim) in current_labeled.claims.iter_mut().enumerate() {
             claim.claim_id = deterministic_claim_id(
                 &current_labeled.document_id,
-                SYNTHESIS_VERSION,
+                HIERARCHICAL_SYNTHESIS_VERSION,
                 index,
                 &claim.text,
                 &claim.evidence_ids,
@@ -6018,7 +6034,7 @@ mod tests {
             );
             let synthesized = SynthesizedDocument {
                 document_id: analyzed.document_id.clone(),
-                synthesis_version: SYNTHESIS_VERSION.into(),
+                synthesis_version: HIERARCHICAL_SYNTHESIS_VERSION.into(),
                 runtime_id: "fixture-runtime".into(),
                 model_id: "fixture-model".into(),
                 summary_text: render_cited_summary(&claims, &analyzed).unwrap(),
@@ -6941,6 +6957,51 @@ mod tests {
             get_pipeline_run(&conn, &run_id).unwrap().unwrap().state,
             PipelineState::CompleteWithWarnings
         );
+    }
+
+    #[test]
+    fn verification_preserves_analysis_shortfall_and_replaces_only_verification_warnings() {
+        let synthesized = SynthesizedDocument {
+            document_id: "warning-fixture".into(),
+            synthesis_version: SYNTHESIS_VERSION.into(),
+            runtime_id: "fixture-runtime".into(),
+            model_id: "fixture-model".into(),
+            summary_text: "Fixture.".into(),
+            source_chunk_ids: vec!["chunk".into()],
+            claims: Vec::new(),
+            warnings: vec![
+                PipelineWarning {
+                    code: COVERAGE_SHORTFALL_WARNING_CODE.into(),
+                    message: "analysis shortfall".into(),
+                    stage: Some(PipelineStage::Analyze),
+                },
+                PipelineWarning {
+                    code: COVERAGE_SHORTFALL_WARNING_CODE.into(),
+                    message: "stale verification shortfall".into(),
+                    stage: Some(PipelineStage::Verify),
+                },
+                PipelineWarning {
+                    code: "SEMANTIC_CLAIMS_WITHHELD".into(),
+                    message: "stale semantic warning".into(),
+                    stage: Some(PipelineStage::Verify),
+                },
+            ],
+        };
+        let warnings = verification_warnings(&synthesized, &[], false);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].message, "analysis shortfall");
+        assert_eq!(warnings[0].stage, Some(PipelineStage::Analyze));
+    }
+
+    #[test]
+    fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
+        assert_eq!(SYNTHESIS_VERSION, "5.0.0");
+        assert_eq!(VERIFICATION_VERSION, "5.0.0");
+        assert_eq!(SUMMARY_VERSION, "5.0.0");
+        assert_eq!(direct::VERSION, SYNTHESIS_VERSION);
+        assert_eq!(HIERARCHICAL_SYNTHESIS_VERSION, "4.0.0");
+        assert_eq!(HIERARCHICAL_VERIFICATION_VERSION, "4.0.0");
+        assert_eq!(HIERARCHICAL_SUMMARY_VERSION, "4.0.0");
     }
 
     #[test]

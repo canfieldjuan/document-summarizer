@@ -1,7 +1,7 @@
 //! Default summary: preserve quote-bound paraphrases, then verify once.
 use super::*;
 
-pub(super) const VERSION: &str = "5.0.0";
+pub(super) const VERSION: &str = SYNTHESIS_VERSION;
 pub(super) const MAX_CLAIMS: usize = 512;
 
 pub(super) fn retention_target(pages: usize) -> Result<usize, PipelineFailure> {

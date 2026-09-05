@@ -166,7 +166,11 @@ fn synthesize(
             control,
             &mut request_budget,
         )?;
-        materialize_cited_claims(&analyzed.document_id, SYNTHESIS_VERSION, claims)?
+        materialize_cited_claims(
+            &analyzed.document_id,
+            HIERARCHICAL_SYNTHESIS_VERSION,
+            claims,
+        )?
     } else {
         synthesize_hierarchically(
             runtime,
@@ -183,7 +187,7 @@ fn synthesize(
     let summary_text = render_cited_summary(&claims, analyzed)?;
     let synthesized = SynthesizedDocument {
         document_id: analyzed.document_id.clone(),
-        synthesis_version: SYNTHESIS_VERSION.to_string(),
+        synthesis_version: HIERARCHICAL_SYNTHESIS_VERSION.to_string(),
         runtime_id: runtime.runtime_id().to_string(),
         model_id: runtime.model_id().to_string(),
         summary_text,
@@ -487,7 +491,7 @@ fn synthesize_hierarchically(
     }
     materialize_cited_claims(
         &analyzed.document_id,
-        SYNTHESIS_VERSION,
+        HIERARCHICAL_SYNTHESIS_VERSION,
         candidates
             .into_iter()
             .map(|candidate| ValidatedClaim {
@@ -1256,7 +1260,7 @@ fn deterministic_candidate_id(
     let claim_index = claim_index.to_string();
     let mut parts = vec![
         document_id,
-        SYNTHESIS_VERSION,
+        HIERARCHICAL_SYNTHESIS_VERSION,
         &round,
         &batch_index,
         &claim_index,
