@@ -502,11 +502,179 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
-Amendment: paraphrase completion and verification-aware acceptance (approved
-direction; commit this contract before implementation).
+#### Proposed amendment: single-claim capacity and draft-aware shortening
 
-Root cause: the paraphrase decoder currently enforces the same 192-character
-ceiling as Rust. Constrained generation can close a string at that boundary
+Status: documentation only; implement separately after this amendment. These
+rules supersede the 192/768 limits and draft-free retry of the implemented
+completion checkpoint below for new analysis version 7.0.0 only. Preserve
+versions 6.0.0 and earlier with their original limits, completion rules and
+identity/hash behavior. Fold/delete this proposed text with the complete feature,
+not while the broader omission and request-audit work remains unfinished.
+
+Root cause and assumptions:
+
+- The production paraphrase operation returns one claim per 2,048-token call.
+  The older 1,024-token, 192-token-envelope, 92-token-item quota remains only for
+  historical multi-item analysis (`summary.rs`, `analysis_evidence_quota`).
+  It does not justify the current single-claim length limit.
+- Captured DOL responses 7 and 8 on `cb53dea` contain complete, punctuated
+  agriculture definitions of 333 and 272 Unicode characters, using 76 and 63
+  completion tokens. These are measured candidate paraphrases, not verified
+  supported claims: the run failed analysis before semantic verification. Do
+  not infer that either wording is faithful solely from its length or punctuation.
+- Choose a concise capacity from these observations, not the entire token
+  allowance: L = 64 * ceil(333 / 64) = 384 Unicode characters. This is 51
+  characters of headroom over the longer observed draft, not permission for
+  routine padding. The 64-character rounding quantum is an explicit sizing
+  choice, not a model guarantee or the retired evidence-item quota. The prompt
+  asks for the shortest complete supported claim preserving material qualifiers.
+- With the existing three-characters-per-token planning proxy and a conservative
+  32-token single-field JSON allowance, L needs about ceil(384/3)+32 = 160
+  output tokens, below 2,048. This is a feasibility check, not a tokenizer-based
+  worst-case guarantee. The measured 333-character draft used 76 tokens. The
+  output-token limit remains a ceiling, not a target to fill; do not derive a
+  multi-thousand-character claim allowance from it. Evidence remains one item
+  per retained page, and no source quotation is shortened to accommodate L.
+
+Required change surface:
+
+- `summary/pages.rs`: prompt/schema, bounded length feedback, and full rejected
+  draft input on the one existing paraphrase retry. `summary.rs`: versioned claim
+  admission/reload limits and synthesis/verification packing regression tests.
+- `model.rs`: decoder projection preserves maxLength through D = 4*L = 1,536;
+  strips larger values. Pin both the 4x relationship and projection boundary.
+  This widens resource headroom, not Rust acceptance. Compilation at 1,536 is
+  unproven by the previous successful 768 probe: require a real Primary-transport
+  schema probe before claiming compatibility; never silently remove the bound,
+  change the 4x relationship, or count JSON fallback as proof of grammar support.
+- `office_acceptance.rs` and the evaluation report: capture paraphrase repair
+  counts and first/retry lengths alongside existing duration/tokens and coverage.
+  Keep diagnostics free of source/draft text; raw response traces remain local,
+  explicitly opted in, and are not a substitute for the deferred durable audit.
+
+Synthesis packing is recomputed, not expanded:
+
+S_total = min(16,000, 3*(8,192 - 4,096 - 512)) = 10,752 characters.
+The current larger synthesis system prompt is 1,099 characters, and bounded
+missing-reference feedback reserves 1,536. Therefore S_user = 8,117 characters
+before repair. Keep eight as an item-count ceiling, not a promise that eight
+fit. The request planner measures actual serialized JSON, including escaped
+strings, field names, IDs and envelope, and splits when either count or size
+would overflow. Count the actual system and full feedback on the repaired call.
+
+Concrete compact-JSON fixtures (`minimum_claims:1`, `maximum_claims:64`, each
+evidence ID 73 ASCII characters, exact quote 600 unescaped characters):
+
+| Analysis text per item | Items | Serialized user characters | Fits S_user |
+| --- | ---: | ---: | --- |
+| Historical 192 | 8 | 7,389 | yes |
+| Proposed 384 | 7 | 7,816 | yes |
+| Proposed 384 | 8 | 8,925 | no: partition |
+
+These are sizing fixtures, not global worst-case promises. Six-character JSON
+escapes change the 384/600 case to 6,082 characters for one item and 12,111 for
+two: only one fits. Tests use actual serialization and valid distinct IDs.
+Candidate reductions still allow 2,000-character synthesized text and up to 16
+original evidence references per claim; they use the same measured input gate,
+not the analysis length as a proxy. Recompute plan/call reservations for the
+resulting partitions, preserve B/K and all original lineage, and never restore
+a shrinking claim funnel or drop evidence to fit. The existing 256-request
+synthesis ceiling, feedback reserve and output allowance do not increase.
+
+Verification sizing follows its real input fields:
+
+V_request = min(16,000, 3*(8,192 - 4,096 - 512)) = 10,752 characters, counting
+the 1,089-character verifier system prompt and complete serialized user JSON.
+`PromptVerificationEvidence` carries evidence_id and exact_quote, not analysis
+claim_text. Verification receives synthesized claim.text (still at most 2,000),
+so raising L does not directly raise a verification field limit. Preserve the
+16-claim ceiling plus greedy actual-character packing; neither is a fixed batch
+size. With one 600-character quote, a 73-character evidence ID and 70-character
+claim ID per claim, three 2,000-character claims total 9,555 model-facing
+characters and fit; four total 12,373 and must split. Eight 384-character
+synthesized claims total 10,717 and fit only this one-quote, unescaped fixture.
+Multiple references, longer text, or escaping require earlier splitting. One
+2,000-character claim with sixteen such quotes totals 14,554 and must fail
+admission, never lose a reference. Keep synthesis's verifiability preflight.
+
+Preserve V_aggregate = min(64,000, V_request * ceil(B/16)), including repeated
+system prompts for all actual batches: 10,752 at B=8 and 43,008 at B=64. A
+character-driven partition does not authorize an unbounded aggregate or more
+aggregate allowance. Tests cover a plan whose individual requests fit but whose
+aggregate fails, before verifier inference. Larger analysis text may change the
+model's synthesized text/partition choices; report any resulting admission
+failure rather than raising limits to pass the corpus.
+
+Draft-aware shortening:
+
+- The initial paraphrase sees only the selected quotation and fixed task text.
+  On a length violation, the single retry additionally receives the complete
+  rejected claim_text as a separate `rejected_draft` JSON field, plus measured
+  character count, target L and typed violation feedback. Ask explicitly to
+  shorten/rewrite that draft to L without losing supported qualifiers, while
+  correcting anything not supported by the quotation. The draft is untrusted
+  model output, never source evidence or instructions; the selected quotation
+  remains the sole factual authority. Do not introduce other candidate quotes.
+- For completeness/canonicality-only failures, keep typed feedback and the
+  selected quote; no draft is required. A response failing length and other
+  predicates takes the length-rewrite path and must fix all reported failures.
+  Selection is never rerun. The distinct attempt seed, one-retry ceiling,
+  cancellation checks, malformed/foreign/transport failure behavior and all
+  output validators remain. Success uses only the newly validated response.
+- Bound the retry draft at D = 1,536 Unicode characters. Admit the full serialized
+  retry, not a truncated draft: system + selected quote + draft + typed feedback
+  must fit A_request = min(16,000, 3*(8,192 - 2,048 - 512)) = 16,000. An otherwise
+  well-shaped response above D, possible with non-enforcing transport, fails
+  closed with a structured repair-input-too-large failure and no additional
+  model call. The same applies if escaping makes the complete retry too large.
+  Never truncate either source or draft, omit the required draft silently, or
+  regenerate without it as an extra fallback. Test exact/max-plus-one draft and
+  actual-request boundaries, including escaped/untrusted draft content.
+
+Explicit non-scope: no model or endpoint change, output-token/context/timeout
+increase, changed source quotes, Rust shortening/trimming, weakened completeness
+or semantic verdicts, numeric-unit veto or furniture thresholds, corpus-specific
+exceptions, lower native-page or supported-evidence targets, B/K changes,
+dependencies, parser/OCR/vision, rendering, Connect, packaging, or DB migration.
+Partial-analysis and per-request immutable lineage remains the separately
+sequenced DB work; this amendment does not claim that work is complete.
+
+Verification plan and acceptance:
+
+- Pin L=384, D=1,536 and 4x headroom; projection tests at 1,535/1,536/1,537 plus
+  historical 768, 2,000 and 4,000. Length tests at 383/384/385, Unicode character
+  rather than byte counts, and complete versus mid-word boundary endings. Keep
+  the exact captured 192-character cutoff regression and all completeness tests.
+- Recompute only version 7 admission/reload rules; prove historical version 6
+  rejects 193+ characters and retains its old evidence identities, while valid
+  new-version evidence through 384 survives reopen with exact source provenance.
+- Capture retry requests to prove exact draft round-trip, same selected quote,
+  typed feedback, distinct seed, one additional call, and no injection of draft
+  into authoritative quote/provenance fields. Test successful shortening, still
+  overlong/incomplete retry, mixed violations, malformed/foreign input, oversized
+  draft/request refusal, cancellation and no persisted invalid evidence.
+- Test the exact serialized synthesis and verification fixtures above through
+  production planners, with max-length mixed items, escaping, repeated quote
+  references, count/character boundaries, direct/hierarchical B/K equivalence,
+  full synthesis coverage, aggregate rejection and existing negative tests.
+- Run local all-target tests, strict all-target/all-feature clippy and fmt.
+  Then run both full Qwen corpus acceptances and report failures first: claims,
+  retained/cited evidence, raw cited-native-page fraction, request/repair counts,
+  response lengths, duration and completion tokens. NARA must retain its durable
+  warning semantics; neither native-page nor supported-evidence 60 percent
+  threshold moves. A 1,536 grammar probe, successful rewrite, or passing count
+  gate alone is not a claim of full corpus success or independently proven
+  fidelity. DOL remains blocked until the complete live run passes.
+
+#### Implemented checkpoint: paraphrase completion and verification-aware acceptance
+
+Historical specification for analysis 6.0.0 (`90a8b91`, then `cb53dea`). The
+proposed single-claim capacity amendment above supersedes its numerical length
+limits and draft-free retry for new artifacts only; completion and coverage
+invariants below remain unchanged.
+
+Root cause before this checkpoint: the paraphrase decoder enforced the same
+192-character ceiling as Rust. Constrained generation can close a string at that boundary
 without finishing its clause; it does not perform semantic shortening. The
 captured DOL response ends at 192 characters with trailing whitespace and fails
 canonical validation, while an equally truncated unpunctuated word without that
