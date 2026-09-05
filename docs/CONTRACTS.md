@@ -419,66 +419,12 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ### Direct verified paraphrases and explicit omissions
 
-#### Pending analysis-v12 punctuation-boundary correction
-
-Status: contract only. Implementation must land in a later commit, then this
-pending subsection must be folded into the current-behavior text and deleted.
-
-Root cause: analysis-v11 mechanical completeness requires an alphanumeric
-character immediately before terminal punctuation. A complete value statement
-ending in a numeric suffix such as `75%.` is therefore rejected, and the same
-predicate prevents the long-claim fallback from preserving it after repair.
-Separately, the phone material-marker recognizer ignores ordinary terminal
-question punctuation, so a non-date-shaped span such as `(703) 696-4959?` can
-fail to veto model-side omission. The compact `703-696-4959?` example is already
-retained by the independent numeric-date marker's permissive three-field shape.
-The dollar-prefix example `$500.` and a phone followed by `.` are not failures:
-the former ends on the digit `0`, while the latter's period is already admitted
-inside a phone token.
-
-Required behavior:
-
-- New runs use analysis version 12. Historical analysis 11 and earlier remain
-  readable under their original completeness and omission-admission rules; a
-  predicate correction must not silently reinterpret an existing artifact.
-- Mechanical completeness accepts a terminal value suffix only when the suffix
-  is `%`, `‰`, `‱`, `°`, or a Unicode currency symbol and the preceding
-  non-whitespace character is numeric. Closing quote/bracket handling and the
-  terminal sentence-punctuation requirement remain unchanged. A standalone
-  suffix, arbitrary symbol, ellipsis, missing terminal punctuation, cut-off
-  word, or trailing whitespace remains invalid. Rust support verification, not
-  this mechanical predicate, decides whether the value is source-supported.
-- Phone-marker admission ignores ordinary leading/trailing sentence punctuation,
-  including `?`, consistently with the other marker recognizers. It retains the
-  existing seven-to-15-digit and separator requirements; malformed short/long
-  numbers and punctuation without a phone remain non-markers. Regression proof
-  must use a parenthesized or multi-token phone that does not also satisfy the
-  numeric-date marker, and must separately pin the overlapping compact form as
-  already retained. Marker recognition only removes the model omission option;
-  it does not validate or summarize the contact value.
-- No claim-length, decoder, prompt, runtime, model, coverage, omission-reason,
-  persistence-schema, synthesis, verification, Connect, OCR, or fixture behavior
-  changes in this correction.
-
-Verification requires both-sided boundary probes for every newly admitted value
-suffix, arbitrary/standalone-symbol negatives, closing marks, the existing
-completeness negatives, phone `.`/`?` endings, malformed digit-count boundaries,
-mixed marker text, current omission-schema denial, and historical analysis-v11
-reload. Full local tests, strict Clippy and formatting remain mandatory.
-
-Delivery process correction: an exact-head review is complete only after a
-review whose commit OID equals the current pull-request head has posted. Merge
-admission then requires a separate fresh unresolved-thread and review-state poll;
-the thread count from a previous-head review is not evidence about the final
-head. PR #30 violated this ordering when its final-head review arrived after the
-merge. This follow-up must remain open until that exact-head review and post-review
-poll complete.
-
 Status: the direct-summary and tolerant-paraphrase behavior is implemented by
 `2ed9c07` and `8b0d039`, after their separate documentation-only contracts
-`9d81f89` and `5c2c3e6`. The analysis-v11 material-marker omission admission is
-implemented by `77742f4` after documentation-only contracts `e5bc59b` and
-`4344ec0`. Live corpus proof is reported separately in
+`9d81f89` and `5c2c3e6`. The material-marker omission admission and analysis-v12
+punctuation-boundary correction are implemented by `77742f4` and `12dd322` after
+their documentation-only contracts `e5bc59b`, `4344ec0`, `cc10ba6`, and
+`4e35c03`. Live corpus proof is reported separately in
 LOCAL_MODEL_EVALUATION.md. This section replaces the retired proposal and its
 accumulated amendments. Historical artifacts retain their original validation
 rules. No optional shorter-summary feature is introduced.
@@ -499,13 +445,15 @@ direct synthesis materialization, verification admission and single-pass lifecyc
 coverage reporting/acceptance, fixture and negative tests, contract and evaluation
 including complete delivered text.
 
-- New runs use analysis version 11 and direct synthesis/verification/summary
-  version 5. Version 10 analysis remains readable with its complete-page-only
-  model omission admission. Version 9 remains readable with its 384-character
-  validation and original omission admission; version 8 analysis and version 4
-  downstream artifacts remain readable under their original limits. Existing
-  citation format remains unchanged. The technical omission is rejected in
-  historical analysis where it was never valid.
+- New runs use analysis version 12 and direct synthesis/verification/summary
+  version 5. Version 11 remains readable with its original value-suffix
+  completeness and phone-token boundary rules. Version 10 analysis remains
+  readable with its complete-page-only model omission admission. Version 9
+  remains readable with its 384-character validation and original omission
+  admission; version 8 analysis and version 4 downstream artifacts remain
+  readable under their original limits. Existing citation format remains
+  unchanged. The technical omission is rejected in historical analysis where it
+  was never valid.
 - Carry every retained paraphrase unchanged into exactly one claim citing its
   single original evidence item, in source order. Materialize durable claim IDs
   and rendered page labels in Rust. No synthesis, assignment, pair reduction or
@@ -546,9 +494,11 @@ including complete delivered text.
   and two/four-digit year; or (d) a five-to-64-character reference token beginning
   with an ASCII letter, containing at least two ASCII digits and `/` or `-`, with
   only alphanumerics, `_`, `/`, `-`, `?` or `.` inside. Leading/trailing ordinary
-  sentence punctuation is ignored for marker recognition. These are omission
-  vetoes, not validators of whether an address, date, phone or reference is real.
-  Ambiguity retains content.
+  sentence punctuation, including a terminal `?` on a phone span, is ignored for
+  marker recognition. The compact `703-696-4959?` form also matches the permissive
+  numeric-date veto; the corrected phone boundary is pinned with the non-date-shaped
+  `(703) 696-4959?` form. These are omission vetoes, not validators of whether an
+  address, date, phone or reference is real. Ambiguity retains content.
   The captured short NARA form containing a job number, phone, email and dates is
   a positive veto fixture. Short scan-noise pages containing none of these remain
   eligible for the model omission outcome. The exact standalone date/page-stamp
@@ -568,13 +518,20 @@ including complete delivered text.
   response shape is claim-only: it cannot revise that page into
   `no_substantive_content`. A model materiality omission is accepted only as the
   initial complete-page outcome.
+- Mechanical completeness accepts terminal sentence punctuation after an
+  alphanumeric character. Analysis-v12 also accepts `%`, `‰`, `‱`, `°`, or a
+  Unicode currency symbol when the preceding non-whitespace character is
+  numeric, including inside the existing closing quote/bracket forms. A
+  standalone/arbitrary symbol, ellipsis, missing terminal punctuation, cut-off
+  word or trailing whitespace remains invalid. `$500.` was already valid because
+  the period follows `0`; this correction does not weaken that boundary.
 - Record ModelNoSubstantiveContent/NoSubstantiveContent using the existing page,
   chunk, source fingerprint, catalog fingerprint and filter-version audit fields.
-  Analysis-v11 reload verifies whole-page admission, absence of material markers
-  and exact source/catalog binding. Version-10 reload retains its original
-  whole-page-only admission. Reject unknown, duplicate, forged, mixed
-  retained/omitted, or historically invalid outcomes. Backfill as before;
-  omissions never count as retained evidence.
+  Analysis-v12 reload verifies whole-page admission, absence of current material
+  markers and exact source/catalog binding. Analysis-v11 reload retains the prior
+  phone boundary; version-10 reload retains its original whole-page-only admission.
+  Reject unknown, duplicate, forged, mixed retained/omitted, or historically
+  invalid outcomes. Backfill as before; omissions never count as retained evidence.
 - Acceptance requires at least 50 percent raw native-text-page coverage and at
   least 60 percent omission-adjusted coverage, using integer comparisons and
   nonzero denominators. Only validated material omissions leave the adjusted
@@ -639,10 +596,12 @@ character limit remains authoritative. The decoder ceiling is four times larger,
 The output allowance remains 2,048 tokens. Rust never truncates a draft.
 
 Completeness and length are separate predicates. Require terminal sentence
-punctuation, optionally followed by closing quotation/bracket marks; reject
-ellipsis, dangling punctuation, trailing whitespace and the captured mid-word
-cutoff. This is a mechanical completeness check, not proof of grammatical or
-semantic completeness. One bounded paraphrase repair changes the prompt with
+punctuation, optionally followed by closing quotation/bracket marks. The content
+immediately before it must end in an alphanumeric character or the bounded
+numeric value-suffix form described above. Reject ellipsis, dangling punctuation,
+trailing whitespace and the captured mid-word cutoff. This is a mechanical
+completeness check, not proof of grammatical or semantic completeness. One
+bounded paraphrase repair changes the prompt with
 typed violations; for length failures it includes the rejected draft, measured
 length/word count and the 55-word shortening target. A second failure stops.
 Malformed JSON, foreign selections and transport errors do not gain arbitrary
@@ -737,8 +696,9 @@ attempt it filters. Expected-state/version checks, cancellation races,
 transactional transitions, immutable events, source identity, row hashes and
 independent-reopen validation remain authoritative.
 
-New artifacts use analysis 11.0.0 and synthesis/verification/summary 5.0.0,
-with citation format 3.0.0 unchanged. Historical analysis 10.0.0 retains its
+New artifacts use analysis 12.0.0 and synthesis/verification/summary 5.0.0,
+with citation format 3.0.0 unchanged. Historical analysis 11.0.0 retains its
+prior terminal-value and phone-token boundaries. Analysis 10.0.0 retains its
 complete-page-only model omission admission. Analysis 9.0.0 retains the
 384-character ceiling and its original omission admission; 8.0.0 retains its
 earlier retention formula; 7.1.0/7.0.0 retain the 384-character validation era;
@@ -804,6 +764,12 @@ standalone date/page-stamp path that must make no model call. Live NARA and DOL
 results must lead with failures and distinguish gate success from readability and
 source fidelity. Do not rerun until a favorable sample or change omission
 thresholds to pass.
+
+Merge admission requires a review whose commit OID equals the current pull-request
+head, followed by a separate fresh unresolved-thread and review-state poll. A
+thread count from a previous-head review is not evidence about the final head.
+PR #30 violated this ordering when its final-head review arrived after merge; this
+correction must not repeat that process failure.
 
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
