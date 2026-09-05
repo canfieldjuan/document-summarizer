@@ -502,9 +502,10 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
-#### Proposed amendment: request-local generation identifiers
+#### Amendment: request-local generation identifiers
 
-Status: contract first; not yet implemented. Apply to all new synthesis,
+Status: contract `b884235` precedes implementation `4b4c7ed` and terminal-failure
+identity preservation `463069b`. Implemented for all new synthesis,
 candidate-reduction and verification requests, not only the failing reduction.
 Fold into current behavior when the complete feature lands. Durable artifact
 schemas, identity derivations and historical reload rules remain unchanged:
@@ -553,6 +554,8 @@ serialization/partition/preflight and verification batch materialization in
   Runtime JSON fallback/untrusted mock outputs still meet the same Rust checks.
 - Missing-reference repair feedback carries only local ordinals from the same
   mapping; never leak durable IDs or silently translate a foreign response.
+  After repair is exhausted, restore missing-reference error IDs to their
+  durable identities before returning the terminal pipeline failure.
   Preserve its existing trigger, one-repair bound and resource accounting.
 - Measure and admit the actual local-ID wire representation in partitioning,
   singleton preflight, candidate compatibility and verification batching; the

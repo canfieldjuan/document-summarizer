@@ -1,6 +1,118 @@
 # Corpus and native Ollama evaluation — updated 2026-09-05
 
-## Latest result: retention reaches 83 deck items; consolidation blocks delivery
+## Latest result: all identifier schemas constrained; DOL still fails consolidation coverage
+
+**NOT DONE: the deck still has no delivered summary.** The first pair reduction
+returns only c1 and repeats the same claim on its bounded repair, omitting c2
+again. Rust rejects it as `SYNTHESIS_MISSING_REFERENCES` before verification.
+The identifier-copying defect is fixed across synthesis, reduction and
+verification, but membership is not complete coverage. NARA passes. No validator,
+acceptance threshold, retention target, B/K, support rule or resource limit was
+relaxed to obtain these results.
+
+Contract `b884235` precedes code `4b4c7ed`; cold-audit correction `463069b` restores
+terminal missing-reference errors to durable IDs while keeping repair feedback
+local. Both final live runs below exercise exactly `463069b`, sequentially with
+`qwen3-30b-a3b:latest` through the existing Ollama adapter.
+
+| Document | Acceptance | Delivered claims | Retained / supported-cited evidence | Native pages cited | Requests | Completion tokens | Model time | Test wall time |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| DOL deck | exit 101 | None | 83 / not verified | Not delivered | 180 | 8,337 | 107,912 ms | 110.27 s |
+| NARA | exit 0 | 6 | 10 / 7 | 7/11 (63.64%) | 28 | 1,538 | 21,516 ms | 22.36 s |
+
+### What the deck actually failed
+
+Analysis completed with 83 evidence items. Eleven initial synthesis batches
+returned 6, 7, 4, 8, 6, 6, 6, 6, 8, 8 and 3 candidates: 68 total, covering all
+retained evidence. Four reductions would bring that catalog within B=64.
+The first reduction and its repair, response ordinals 178 and 179, both return
+candidate_ids=[c1] and the identical sentence about Labor Standards in Agriculture
+ensuring fair treatment and working conditions. They use 31 and 32 completion
+tokens respectively, against the unchanged 4,096 allowance. No verdict on the
+faithfulness of that sentence was obtained; verification never ran.
+
+The error is missing coverage, not a foreign or duplicated identifier. The
+schema allows each member only from the supplied c1/c2 enum, and the existing
+parser still requires both supplied candidates to be covered. Repair receives
+the missing local c2 without exposing a durable identity. After exhaustion,
+the terminal failure correctly names the durable missing candidate
+`candidate-c2aeb18f61646ad90f148284d44c65ba1f8bdf08a6b5b4dd832afdaacefe6435`.
+There is no completed synthesis artifact, supported-page measurement or DOL
+independent-reopen proof. Do not append c2 to unrelated prose, drop the candidate,
+lower coverage or add another retry to describe this as success.
+
+### Identifier and payload proof
+
+All final-run requests used Primary transport, with no JSON fallback or invalid
+identifier response. NARA exercises all three new enums through real inference,
+including verification; its full acceptance and independent reopen pass.
+`summary.rs:2206`, `:2243` and `:2267` enumerate request-local e/c/k vocabularies.
+`summary/identifiers.rs` restores exact durable identities before the existing
+Rust parsers. Candidate prompts carry evidence_count, not evidence_ids.
+Uniqueness and complete coverage remain Rust obligations, not enum guarantees.
+The shared decoder already stripped uniqueItems before transport; the two
+synthesis schemas no longer advertise the keyword either.
+
+| Comparison with pre-ordinal `8ece146` | Before | Final ordinal run |
+| --- | ---: | ---: |
+| DOL initial synthesis batches | 11 | 11 |
+| DOL initial synthesis user characters, total | 47,896 | 42,003 |
+| DOL reduction requests reached | 7, foreign ID on seventh | 2, first pair plus failed repair |
+| DOL total requests | 185 | 180 |
+| NARA initial batches per synthesis pass | 2 | 2 |
+| NARA reduction calls, both passes | 2 | 2 |
+| NARA total requests | 28 | 28 |
+| NARA completion tokens | 3,776 | 1,538 |
+| NARA test wall time | 41.49 s | 22.36 s |
+
+Thus payload overhead drops, but batch count does not. On the maximum-text
+83-item production preflight, aggregate synthesis user characters fall from
+92,683 to 86,790: 5,893 saved, with twelve batches still required. Original
+6,059-character evidence-ID arithmetic describes the whole catalog, not one
+request. Local IDs reset within batches. Maximum-text and escaping reservations
+remain 62 and 204 calls respectively, under the unchanged 256 ceiling.
+NARA's candidate user payloads total 918 characters versus 1,506 before; verifier
+user payloads total 12,709 versus 15,195. Content can differ between runs, so these
+totals are measurements, not controlled isolation of every byte or timing gain.
+DOL stops earlier in consolidation than before; fewer calls and shorter wall
+time are not a speedup on completed work. Seeds remain run-derived.
+
+Final DOL stage cost: analysis 167 calls / 4,298 completion tokens / 70,991 ms;
+synthesis 13 / 4,039 / 36,921 ms; verification not reached. Final NARA: analysis
+20 / 399 / 8,616 ms; synthesis 6 / 949 / 9,728 ms; verification 2 / 190 / 3,172 ms.
+NARA retains margin 3 above A=7, omits only the page-12 stamp, and loses three
+pages through two withheld claims. Coverage and claim count are unchanged from
+the pre-ordinal run, with existing durable warnings. The permanent-records /
+destruction source-fidelity caution remains; model support is not human review.
+
+### Verification and remaining gaps
+
+Final local gates: `cargo test --offline --all-targets` passes 250 library tests
+(four ignored), three acceptance tests (three external tests ignored), and three
+release tests. Strict all-target/all-feature clippy with warnings denied and
+fmt --check both exit 0. Tests cover exact enum vocabularies, wrong-kind and
+malformed ordinals, shuffled durable mapping, mixed/duplicate/foreign references,
+missing/duplicated verdicts, batch-local scope, candidate counts without durable
+lists, and unchanged repair maps with durable terminal errors. Preflight and
+dispatch measure the same local-ID serialization; historical reload and existing
+negative tests still pass. One initial compile ownership error and five stale
+fixture assumptions were corrected before these passing gates.
+
+Initial live probes on `4b4c7ed` produced the same outcomes: DOL failed at c2
+omission with 180 requests / 8,337 completion tokens / 118.80 s; NARA passed with
+28 / 1,538 / 26.26 s. They were repeated after the terminal-error identity fix,
+not retried until a favorable model result appeared. Logs for both checkpoints
+are in `/tmp/doc-sum-ordinals.FAOByA/`: `dol.log`, `nara.log`, `dol-final.log`,
+`nara-final.log`.
+
+The requested identifier slice is implemented and exercised across all three
+paths, but the live deck product goal remains blocked on actual consolidation
+coverage. Any next behavioral remedy requires its own contract; do not weaken
+the existing rejection. Focused live heading controls and separately sequenced
+durable partial-analysis/individual-attempt auditing remain open. PR #30 stays
+ready for review and unmerged.
+
+## Previous result: retention reaches 83 deck items; consolidation blocks delivery
 
 **NOT DONE: DOL again fails before delivering a summary.** The retention reserve
 works at analysis, but the seventh hierarchical reduction returns a foreign
