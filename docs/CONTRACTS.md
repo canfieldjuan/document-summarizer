@@ -575,6 +575,10 @@ Couplings and cost checked before committing to the margin:
 
 These are count feasibility cases, not claims that the largest documents pass
 the separate request-size, synthesis-plan or materiality gates.
+Known count limit: full sixteen-page reserve ends at N=1,680. N=1,681 through
+1,706 can still meet sixty-percent coverage but have only partial or no reserve.
+N=1,707 is the first impossible acceptance target: A=1,025 exceeds C=1,024.
+Other unchanged resource limits may reject a document earlier.
 
 For the deck, 83<=64*16. A constructive count witness is 19 pairs plus 45
 singletons: 64 claims covering 83 distinct items. In the unescaped maximum-text
@@ -586,6 +590,16 @@ Preserve the existing measured verifiability partition, candidate compatibility,
 all-evidence synthesis coverage, actual verification batch planner and all
 single-item negative checks. Never force unrelated evidence into a misleading
 claim or discard evidence to fit. An unrepresentable catalog remains an error.
+
+This trades the zero-margin page-coverage cliff for greater consolidation load:
+with an unchanged 64-claim ceiling, 67 items require at least three item-count
+reductions, whereas 83 require nineteen. Complete reference coverage already
+failed in the corpus when synthesis dropped "Labor Standards in Agriculture".
+The count witness proves only that packing exists, not that the model can find
+faithful consolidations while retaining every reference. These reductions need
+not be separate calls: initial batches may consolidate multiple items. The live
+corpus run, including coverage, request count and wall time, decides whether
+this trade works; the arithmetic alone is not acceptance evidence.
 
 Independent serialization arithmetic against the current prompt shapes gives
 R=83, L=384, quote length 600, full IDs: twelve synthesis batches (eleven of
