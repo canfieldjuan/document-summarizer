@@ -19,8 +19,8 @@ retained, verified and cited. Pages 6, 7 and 11 remained recorded model omission
 for scan noise, and the page-12 date stamp remained a deterministic omission with
 no model call. Page 3 was the single unsupported claim.
 
-The run used 21 requests, all Primary transport, 425 completion tokens and 17.77
-seconds wall time. It completed with warnings including
+The exact-head rerun used 21 requests, all Primary transport, 425 completion
+tokens and 21.58 seconds wall time. It completed with warnings including
 `OCR_TEXT_LAYER_STRUCTURE_RISK`, `ANALYSIS_PAGE_OMITTED`,
 `SEMANTIC_CLAIMS_WITHHELD` and `SUMMARY_COVERAGE_SHORTFALL`. The complete result
 survived the acceptance test's independent reopen.
@@ -60,12 +60,13 @@ The DOL delivered text was 17,393 characters with SHA-256
 Response text tracing was disabled for that earlier retry, so it proves the
 persisted artifact and acceptance metrics but does not add another transcript.
 
-Documentation-only contracts `e5bc59b` and `4344ec0` precede implementation
-`77742f4`. Local all-target tests pass with 263 library tests and six ignored,
-three acceptance tests and three ignored, and three release tests. Strict clippy,
-formatting and diff checks pass. The separate NARA live acceptance passes as
-reported above. Hosted CI is not claimed; the operator requires local checks
-because private-repository Actions minutes are exhausted.
+Documentation-only contracts `e5bc59b`, `4344ec0` and `63b6ba8` precede their
+implementations `77742f4` and `d1e9ac3`. Local all-target tests pass with 265
+library tests and six ignored, three acceptance tests and three ignored, and
+three release tests. Strict clippy, formatting and diff checks pass. The
+separate NARA live acceptance passes on the implementation head as reported
+above. Hosted CI is not claimed; the operator requires local checks because
+private-repository Actions minutes are exhausted.
 
 ## Previous slice: direct paraphrases implemented; live control timed out
 
