@@ -511,6 +511,95 @@ styles, DB migration or broader unfinished attempt-audit work, Connect, OCR,
 vision, packaging and CI. Any residual factual or omission failure is reported,
 not repaired by relaxing coverage or retrying until a favorable run appears.
 
+#### Amendment: tolerant paraphrases, technical page loss, and OCR-layer risk
+
+Status: contract only. Commit separately before implementation. This amendment
+does not make the latest live corpus result a success: DOL fails during analysis,
+and NARA passes numerical acceptance while delivering a row-fused table claim
+and omitting substantive extracted cross-reference text.
+
+Root causes and corrections:
+
+- The 384-character value is a useful generation target, not a correctness
+  boundary. A complete DOL transportation claim returned at 414 characters and
+  its shortened retry at 402, then the entire 111-page document failed. Keep
+  384 in prompt and repair feedback. Accept complete, trimmed paraphrases through
+  the existing 1,536-character decoder ceiling. Prefer a repaired target-sized
+  claim; if a complete over-target draft remains, retain it with a durable
+  `LONG_CLAIM` warning. Verification still determines semantic support and its
+  actual serialized planner must admit the larger text before synthesis persists.
+- A page whose parsed paraphrase is still noncanonical after its single repair
+  records `ParaphraseUnrepairable` / `ParaphraseUnrepairable` with page, chunk,
+  source and catalog fingerprints, then analysis continues and backfills. This
+  is a technical loss, never a materiality judgment: it remains in BOTH raw and
+  adjusted coverage denominators and gets a separate durable
+  `PARAPHRASE_UNREPAIRABLE` warning. If the first draft is complete and within
+  1,536, a failed repair falls back to that draft with `LONG_CLAIM`; do not turn
+  usable evidence into an omission. Initial selection/paraphrase transport,
+  malformed JSON or foreign schema output still fails; only the already-entered
+  bounded repair path may degrade to a recorded technical page loss.
+- The NARA table error originates in a flattened OCR text layer: row 212a's
+  `Permanent` and row 212b's `Destroy when 7 years old` coexist in one ordered
+  quote, and verification failed to recognize the lost column/row relationship.
+  No downstream stage may invent structure absent from normalized text. Add
+  `OCR_TEXT_LAYER_STRUCTURE_RISK` when any deterministic scan-noise page exists
+  or native text contains Unicode replacement character U+FFFD. The warning says
+  claims reflect the extracted text layer and table/layout relationships may be
+  lost; it does not claim a general OCR detector. Existing warning propagation
+  already renders summary warnings in the UI, so no new frontend state or API is
+  required. Exact quote/provenance and semantic verification remain unchanged.
+- The model omitted NARA page 4 even though its 214-character extracted layer
+  contains an asterisk cross-reference and attached-memo reference. Add names,
+  organizations, identifiers, dates, reference numbers and cross-references to
+  material form content in BOTH selection and complete-page omission prompts.
+  Selection alone cannot affect a one-candidate page. The model may omit only
+  after seeing the complete native-text page and deciding none of those material
+  fields or the existing obligations/exceptions/quantities/table values exists.
+- Live acceptance requires raw cited native-text-page coverage of at least 50
+  percent AND omission-adjusted coverage of at least 60 percent. Both use integer
+  comparisons and nonzero denominators. Only validated material omissions
+  (deterministic scan noise/date stamp or model non-substantive/heading judgment)
+  leave the adjusted denominator; `ParaphraseUnrepairable`, uninspected pages and
+  verification losses stay. Always report both fractions and omission origins.
+  This prevents a materiality omission from creating a passing raw result merely
+  by shrinking the adjusted denominator.
+
+Versioning and compatibility: new analysis is version 10. Version 9 retains its
+384-character validation and its original omission enum admission. Version 10
+alone admits the 1,536-character ceiling and technical omission. Retention,
+direct synthesis/verification/summary version 5, citation version 3 and schema
+version 14 remain unchanged. No migration is required because the versioned
+analysis JSON already stores enum origin/reason and warnings. Historical reload
+must reject the new technical omission and over-384 evidence.
+
+NARA is a robustness fixture, not accuracy evidence. Its live test requires
+delivery, `OCR_TEXT_LAYER_STRUCTURE_RISK`, no crash, exact text-layer quotation,
+durable provenance/reopen and both coverage floors. Reports must state that the
+known row-fused claim prevents an accuracy claim. DOL remains the native-text
+quality and scale fixture; success is delivery of the direct one-to-one summary,
+with long/technical-loss warnings reported rather than hidden.
+
+Required tests: target/hard length boundaries 383/384/385 and 1,535/1,536/1,537;
+complete over-target acceptance, successful shortening, failed repair fallback,
+and incomplete/oversized repeated failure becoming a technical omission without
+ending the document. Prove technical loss stays in both denominators, while a
+validated material omission leaves only adjusted. Probe raw coverage at 49/50
+percent and adjusted at 59/60, including zero and cited greater than total.
+Recompute required/forbidden warnings on reload; reject forged fingerprints,
+mixed evidence/omission and version-9 technical outcomes. Probe OCR risk from
+scan-noise and U+FFFD independently, clean native text without the warning, and
+the UI warning propagation path. Capture prompt text proving form fields reach
+both selection and omission decisions. Run all local tests, strict clippy, fmt,
+the substantive omission controls, then NARA and DOL once each. Print complete
+delivered summaries and report failures first, claims/evidence, raw/adjusted
+coverage, omissions, requests, completion tokens and wall time.
+
+Explicit non-scope: parser/OCR/vision/table reconstruction, changing NARA source
+bytes, claiming OCR-table accuracy, deterministic filter thresholds, quote
+catalog selection mechanics, verification support rules, exactness/provenance,
+claim/evidence/page ceilings, model/endpoint/context/output/temperature/timeout,
+database schema, optional consolidation, Connect, entitlement, packaging and CI.
+
 ### Analysis, deterministic filters and model boundaries
 
 `ModelRuntime` remains the only inference boundary. New analysis uses a
