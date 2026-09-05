@@ -58,7 +58,7 @@ const MAX_SYNTHESIS_REQUEST_CHARACTERS: usize = 16_000;
 const MAX_SYNTHESIS_ITEMS_PER_REQUEST: usize = 8;
 const MAX_SYNTHESIS_MODEL_REQUESTS: usize = 256;
 const MAX_VERIFICATION_REQUEST_CHARACTERS: usize = 16_000;
-const MAX_VERIFICATION_AGGREGATE_CHARACTERS: usize = 64_000;
+const MAX_VERIFICATION_BATCHES: usize = 64;
 const LEGACY_MAX_EVIDENCE_PER_CHUNK: usize = 64;
 const MAX_ANALYSIS_QUOTE_CHARACTERS: usize = 600;
 const MAX_ANALYSIS_SELECTION_ID_CHARACTERS: usize = 8;
@@ -291,6 +291,7 @@ struct PromptVerificationEvidence {
 struct VerificationBatch {
     user_prompt: String,
     claims: Vec<CitedClaim>,
+    #[cfg(test)]
     model_facing_characters: usize,
 }
 
@@ -1781,30 +1782,6 @@ fn classify_claim_support(
     control: &dyn ExecutionControl,
 ) -> Result<Vec<ClaimVerification>, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Verify)?;
-    if prompt.claims.is_empty()
-        || prompt.claims.len() > MAX_SUMMARY_CLAIMS
-        || prompt.claims.len() != claims.len()
-        || claims.len() > claim_budget
-        || prompt
-            .claims
-            .iter()
-            .zip(claims)
-            .any(|(prompt_claim, claim)| {
-                prompt_claim.claim_id != claim.claim_id
-                    || prompt_claim
-                        .evidence
-                        .iter()
-                        .map(|evidence| evidence.evidence_id.as_str())
-                        .ne(claim.evidence_ids.iter().map(String::as_str))
-            })
-    {
-        return Err(stage_failure(
-            PipelineStage::Verify,
-            "MODEL_REQUEST_INVALID",
-            "The semantic-verification request does not match the synthesized claim catalog",
-            false,
-        ));
-    }
     let request_character_limit =
         verification_request_character_limit(MODEL_CONTEXT_TOKENS, VERIFICATION_OUTPUT_TOKENS)?;
     let batches = plan_verification_batches(prompt, claims, claim_budget, request_character_limit)?;
@@ -1877,40 +1854,16 @@ fn verification_request_character_limit(
     Ok(proxy_characters.min(MAX_VERIFICATION_REQUEST_CHARACTERS))
 }
 
-fn verification_aggregate_character_limit(
-    request_character_limit: usize,
-    claim_budget: usize,
-) -> Result<usize, PipelineFailure> {
-    if claim_budget == 0 || claim_budget > MAX_SUMMARY_CLAIMS {
+fn ensure_verification_batch_count(batch_count: usize) -> Result<(), PipelineFailure> {
+    if !(1..=MAX_VERIFICATION_BATCHES).contains(&batch_count) {
         return Err(stage_failure(
             PipelineStage::Verify,
-            "INVALID_VERIFICATION_BUDGET",
-            "The verification aggregate limit requires a valid document claim budget",
+            "VERIFICATION_PLAN_TOO_LARGE",
+            "Verification requires a nonempty plan within the explicit batch-count limit",
             false,
         ));
     }
-    let request_count = claim_budget
-        .checked_add(MAX_VERIFICATION_CLAIMS_PER_REQUEST - 1)
-        .map(|value| value / MAX_VERIFICATION_CLAIMS_PER_REQUEST)
-        .ok_or_else(|| {
-            stage_failure(
-                PipelineStage::Verify,
-                "INVALID_VERIFICATION_BUDGET",
-                "The verification request count exceeds the supported range",
-                false,
-            )
-        })?;
-    request_character_limit
-        .checked_mul(request_count)
-        .map(|characters| characters.min(MAX_VERIFICATION_AGGREGATE_CHARACTERS))
-        .ok_or_else(|| {
-            stage_failure(
-                PipelineStage::Verify,
-                "INVALID_VERIFICATION_BUDGET",
-                "The verification aggregate character limit exceeds the supported range",
-                false,
-            )
-        })
+    Ok(())
 }
 
 fn verification_request_within_bounds(
@@ -1922,19 +1875,40 @@ fn verification_request_within_bounds(
         && model_facing_characters <= request_character_limit
 }
 
-fn verification_aggregate_within_bounds(
-    aggregate_characters: usize,
-    aggregate_character_limit: usize,
-) -> bool {
-    aggregate_characters <= aggregate_character_limit
-}
-
 fn plan_verification_batches(
     prompt: &VerificationPrompt,
     claims: &[CitedClaim],
     claim_budget: usize,
     request_character_limit: usize,
 ) -> Result<Vec<VerificationBatch>, PipelineFailure> {
+    if !(1..=MAX_SUMMARY_CLAIMS).contains(&claim_budget) {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "INVALID_VERIFICATION_BUDGET",
+            "Verification requires a valid document claim budget",
+            false,
+        ));
+    }
+    if prompt.claims.is_empty()
+        || prompt.claims.len() != claims.len()
+        || claims.len() > claim_budget
+        || prompt.claims.iter().zip(claims).any(|(input, claim)| {
+            input.claim_id != claim.claim_id
+                || input.text != claim.text
+                || input
+                    .evidence
+                    .iter()
+                    .map(|e| e.evidence_id.as_str())
+                    .ne(claim.evidence_ids.iter().map(String::as_str))
+        })
+    {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "MODEL_REQUEST_INVALID",
+            "The semantic-verification request does not match the synthesized claim catalog",
+            false,
+        ));
+    }
     let mut batches = Vec::new();
     let mut prompt_claims = Vec::new();
     let mut batch_claims = Vec::new();
@@ -1996,38 +1970,7 @@ fn plan_verification_batches(
             request_character_limit,
         )?);
     }
-    if batches.is_empty() {
-        return Err(stage_failure(
-            PipelineStage::Verify,
-            "MODEL_REQUEST_INVALID",
-            "Semantic verification requires at least one bounded request",
-            false,
-        ));
-    }
-    let aggregate_characters = batches.iter().try_fold(0usize, |total, batch| {
-        total
-            .checked_add(batch.model_facing_characters)
-            .ok_or_else(|| {
-                stage_failure(
-                    PipelineStage::Verify,
-                    "VERIFICATION_INPUT_TOO_LARGE",
-                    "The aggregate verification character count exceeds the supported range",
-                    false,
-                )
-            })
-    })?;
-    let aggregate_limit =
-        verification_aggregate_character_limit(request_character_limit, claim_budget)?;
-    if !verification_aggregate_within_bounds(aggregate_characters, aggregate_limit) {
-        return Err(stage_failure(
-            PipelineStage::Verify,
-            "VERIFICATION_INPUT_TOO_LARGE",
-            format!(
-                "The aggregate verification input ({aggregate_characters} characters) exceeds the document claim-budget allowance ({aggregate_limit} characters)"
-            ),
-            false,
-        ));
-    }
+    ensure_verification_batch_count(batches.len())?;
     Ok(batches)
 }
 
@@ -2074,6 +2017,7 @@ fn materialize_verification_batch(
     Ok(VerificationBatch {
         user_prompt,
         claims,
+        #[cfg(test)]
         model_facing_characters,
     })
 }
@@ -7316,7 +7260,7 @@ mod tests {
     }
 
     #[test]
-    fn verification_context_budget_covers_count_character_and_aggregate_boundaries() {
+    fn verification_context_budget_covers_count_character_and_batch_boundaries() {
         let request_limit =
             verification_request_character_limit(MODEL_CONTEXT_TOKENS, VERIFICATION_OUTPUT_TOKENS)
                 .expect("current verification request limit should derive");
@@ -7346,35 +7290,10 @@ mod tests {
             request_limit + 1,
             request_limit
         ));
-        assert_eq!(
-            verification_aggregate_character_limit(request_limit, 16)
-                .expect("single-batch aggregate should derive"),
-            request_limit
-        );
-        assert_eq!(
-            verification_aggregate_character_limit(request_limit, 17)
-                .expect("two-batch aggregate should derive"),
-            request_limit * 2
-        );
-        assert_eq!(
-            verification_aggregate_character_limit(request_limit, MAX_SUMMARY_CLAIMS)
-                .expect("maximum aggregate should derive"),
-            43_008
-        );
-        let aggregate_limit = verification_aggregate_character_limit(request_limit, 17)
-            .expect("aggregate should derive");
-        assert!(verification_aggregate_within_bounds(
-            aggregate_limit - 1,
-            aggregate_limit
-        ));
-        assert!(verification_aggregate_within_bounds(
-            aggregate_limit,
-            aggregate_limit
-        ));
-        assert!(!verification_aggregate_within_bounds(
-            aggregate_limit + 1,
-            aggregate_limit
-        ));
+        assert_eq!(MAX_VERIFICATION_BATCHES, 64);
+        for (count, accepted) in [(0, false), (1, true), (63, true), (64, true), (65, false)] {
+            assert_eq!(ensure_verification_batch_count(count).is_ok(), accepted);
+        }
         let error = verification_request_character_limit(
             VERIFICATION_OUTPUT_TOKENS + VERIFICATION_CONTEXT_RESERVE_TOKENS,
             VERIFICATION_OUTPUT_TOKENS,
@@ -7413,7 +7332,7 @@ mod tests {
                 .expect("current verification request limit should derive");
         let (claims, prompt) = fixture(500);
         let batches = plan_verification_batches(&prompt, &claims, 17, request_limit)
-            .expect("mixed count and character partitioning should fit its aggregate");
+            .expect("mixed count and character partitioning should fit its actual batches");
         assert_eq!(
             batches
                 .iter()
@@ -7428,9 +7347,142 @@ mod tests {
             .all(|batch| batch.model_facing_characters <= request_limit));
 
         let (claims, prompt) = fixture(1_000);
-        let error = plan_verification_batches(&prompt, &claims, 17, request_limit)
-            .expect_err("a per-request-valid but aggregate-oversized catalog must fail");
-        assert_eq!(error.code, "VERIFICATION_INPUT_TOO_LARGE");
+        let batches = plan_verification_batches(&prompt, &claims, 17, request_limit)
+            .expect("a valid size-partitioned catalog must not fail a count-derived aggregate");
+        assert!(
+            batches
+                .iter()
+                .map(|b| b.model_facing_characters)
+                .sum::<usize>()
+                > request_limit * 2
+        );
+        assert!(batches
+            .iter()
+            .all(|b| b.model_facing_characters <= request_limit));
+    }
+
+    #[test]
+    fn actual_verification_batches_bound_work_and_refuse_invalid_plans_before_calls() {
+        let fixture = |count: usize, small_prefix: usize| {
+            let prompt = VerificationPrompt {
+                claims: (0..count)
+                    .map(|i| PromptVerificationClaim {
+                        claim_id: format!("claim-{i:064x}"),
+                        text: "t".repeat(if i < small_prefix { 10 } else { 2_000 }),
+                        evidence: (0..if i < small_prefix { 1 } else { 8 })
+                            .map(|j| PromptVerificationEvidence {
+                                evidence_id: format!("evidence-{:064x}", i * 16 + j),
+                                exact_quote: "q".repeat(if i < small_prefix { 10 } else { 600 }),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            };
+            let claims = prompt
+                .claims
+                .iter()
+                .map(|c| CitedClaim {
+                    claim_id: c.claim_id.clone(),
+                    text: c.text.clone(),
+                    evidence_ids: c.evidence.iter().map(|e| e.evidence_id.clone()).collect(),
+                })
+                .collect::<Vec<_>>();
+            (prompt, claims)
+        };
+        for (count, small_prefix, expected_sizes) in [
+            (4, 0, vec![1; 4]),        // size only: count alone would allow one request
+            (33, 33, vec![16, 16, 1]), // count only
+            (32, 16, [vec![16], vec![1; 16]].concat()), // both constraints bind
+            (64, 0, vec![1; 64]),      // maximum actual batch count
+        ] {
+            let (prompt, claims) = fixture(count, small_prefix);
+            let batches = plan_verification_batches(&prompt, &claims, 64, 10_752).unwrap();
+            assert_eq!(
+                batches.iter().map(|b| b.claims.len()).collect::<Vec<_>>(),
+                expected_sizes
+            );
+            assert!(batches.iter().all(|b| verification_request_within_bounds(
+                b.claims.len(),
+                b.model_facing_characters,
+                10_752
+            )));
+            assert_eq!(
+                batches.iter().flat_map(|b| &b.claims).collect::<Vec<_>>(),
+                claims.iter().collect::<Vec<_>>()
+            );
+            if count == 64 {
+                let runtime = RecordingHierarchicalRuntime::healthy();
+                let verdicts = classify_claim_support(
+                    &runtime,
+                    &prompt,
+                    &claims,
+                    64,
+                    TEST_GENERATION_SEED,
+                    &UNCONTROLLED_EXECUTION,
+                )
+                .unwrap();
+                assert_eq!(verdicts.len(), 64);
+                assert_eq!(runtime.captured_requests().len(), 64);
+            }
+        }
+        struct NoCalls;
+        impl ModelRuntime for NoCalls {
+            fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                panic!("invalid complete plan must not reach inference")
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                panic!("invalid complete plan must not even reach runtime health")
+            }
+            fn runtime_id(&self) -> &str {
+                "no-calls"
+            }
+            fn model_id(&self) -> &str {
+                "no-calls"
+            }
+        }
+        let reject = |prompt: &VerificationPrompt, claims: &[CitedClaim], budget| {
+            assert!(plan_verification_batches(prompt, claims, budget, 10_752).is_err());
+            assert!(classify_claim_support(
+                &NoCalls,
+                prompt,
+                claims,
+                budget,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION
+            )
+            .is_err());
+        };
+        let (prompt, claims) = fixture(65, 0);
+        reject(&prompt, &claims, 64);
+        let (mut prompt, mut claims) = fixture(2, 1);
+        for budget in [0, 1, 65, usize::MAX] {
+            reject(&prompt, &claims, budget);
+        }
+        reject(&prompt, &claims[..1], 64);
+        let missing_prompt = VerificationPrompt {
+            claims: prompt.claims[..1].to_vec(),
+        };
+        reject(&missing_prompt, &claims, 64);
+        let mut mismatched = prompt.clone();
+        mismatched.claims[1].text.push('x');
+        reject(&mismatched, &claims, 64);
+        for j in 8..16 {
+            let evidence_id = format!("evidence-{:064x}", 16 + j);
+            prompt.claims[1].evidence.push(PromptVerificationEvidence {
+                evidence_id: evidence_id.clone(),
+                exact_quote: "q".repeat(600),
+            });
+            claims[1].evidence_ids.push(evidence_id);
+        }
+        reject(&prompt, &claims, 64); // valid prefix followed by oversized claim
+        reject(
+            &VerificationPrompt {
+                claims: vec![prompt.claims[1].clone()],
+            },
+            &claims[1..],
+            64,
+        );
+        reject(&VerificationPrompt { claims: vec![] }, &[], 64);
     }
 
     #[test]
@@ -8172,7 +8224,7 @@ mod tests {
     }
 
     #[test]
-    fn single_claim_capacity_verifier_packing_keeps_context_and_aggregate_guards() {
+    fn single_claim_capacity_verifier_packing_keeps_context_without_aggregate_estimate() {
         let make = |count: usize, length: usize, references: usize| {
             let prompt = VerificationPrompt {
                 claims: (0..count)
@@ -8223,19 +8275,17 @@ mod tests {
         assert!(plan_verification_batches(&too_large, &claims, 64, 10_752).is_err());
         let (individually_fits, claims) = make(4, 2_000, 1);
         let runtime = RecordingHierarchicalRuntime::healthy();
-        assert!(classify_claim_support(
+        let verdicts = classify_claim_support(
             &runtime,
             &individually_fits,
             &claims,
             8,
             TEST_GENERATION_SEED,
-            &UNCONTROLLED_EXECUTION
+            &UNCONTROLLED_EXECUTION,
         )
-        .is_err());
-        assert!(
-            runtime.captured_requests().is_empty(),
-            "aggregate failure must precede inference"
-        );
+        .expect("size-only partition must reach actual inference");
+        assert_eq!(verdicts.len(), 4);
+        assert_eq!(runtime.captured_requests().len(), 2);
     }
 
     #[test]
