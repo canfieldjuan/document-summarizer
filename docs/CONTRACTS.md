@@ -429,7 +429,9 @@ character immediately before terminal punctuation. A complete value statement
 ending in a numeric suffix such as `75%.` is therefore rejected, and the same
 predicate prevents the long-claim fallback from preserving it after repair.
 Separately, the phone material-marker recognizer ignores ordinary terminal
-question punctuation, so `703-696-4959?` can fail to veto model-side omission.
+question punctuation, so a non-date-shaped span such as `(703) 696-4959?` can
+fail to veto model-side omission. The compact `703-696-4959?` example is already
+retained by the independent numeric-date marker's permissive three-field shape.
 The dollar-prefix example `$500.` and a phone followed by `.` are not failures:
 the former ends on the digit `0`, while the latter's period is already admitted
 inside a phone token.
@@ -449,9 +451,11 @@ Required behavior:
 - Phone-marker admission ignores ordinary leading/trailing sentence punctuation,
   including `?`, consistently with the other marker recognizers. It retains the
   existing seven-to-15-digit and separator requirements; malformed short/long
-  numbers and punctuation without a phone remain non-markers. Marker recognition
-  only removes the model omission option; it does not validate or summarize the
-  contact value.
+  numbers and punctuation without a phone remain non-markers. Regression proof
+  must use a parenthesized or multi-token phone that does not also satisfy the
+  numeric-date marker, and must separately pin the overlapping compact form as
+  already retained. Marker recognition only removes the model omission option;
+  it does not validate or summarize the contact value.
 - No claim-length, decoder, prompt, runtime, model, coverage, omission-reason,
   persistence-schema, synthesis, verification, Connect, OCR, or fixture behavior
   changes in this correction.
