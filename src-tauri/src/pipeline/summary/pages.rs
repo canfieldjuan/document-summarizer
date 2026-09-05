@@ -293,6 +293,14 @@ fn whole_page_quote(scope: &AnalysisScope, quote: &str, normalized: &NormalizedD
         })
 }
 
+fn model_omission_admitted(
+    scope: &AnalysisScope,
+    quote: &str,
+    normalized: &NormalizedDocument,
+) -> bool {
+    whole_page_quote(scope, quote, normalized) && !eligibility::material_marker(quote)
+}
+
 fn paraphrase_schema(allow_omission: bool) -> Value {
     let claim = json!({"type":"object","properties":{"claim_text":{"type":"string","minLength":1,"maxLength":DECODER_CLAIM_CHARACTERS}},"required":["claim_text"],"additionalProperties":false});
     if !allow_omission {
@@ -627,7 +635,7 @@ pub(super) fn analyze(
             .ok_or_else(|| invalid("Foreign selection identifier"))?;
         let mut violations = Vec::new();
         let mut accepted = None;
-        let allow_omission = whole_page_quote(&scope, &candidate.exact_quote, normalized);
+        let allow_omission = model_omission_admitted(&scope, &candidate.exact_quote, normalized);
         let mut omitted = false;
         let mut rejected_draft = String::new();
         let mut usable_long_fallback = None;
@@ -863,9 +871,17 @@ pub(super) fn validate_plan(
                     && **actual
                         == heading_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
             (Some(actual), None)
+                if analyzed.analysis_version == ANALYSIS_VERSION
+                    && scope
+                        .quote_candidates
+                        .iter()
+                        .any(|c| model_omission_admitted(&scope, &c.exact_quote, normalized))
+                    && **actual
+                        == content_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
+            (Some(actual), None)
                 if matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION | DIRECT_ANALYSIS_VERSION
+                    TOLERANT_ANALYSIS_VERSION | DIRECT_ANALYSIS_VERSION
                 ) && scope
                     .quote_candidates
                     .iter()
@@ -873,13 +889,11 @@ pub(super) fn validate_plan(
                     && **actual
                         == content_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
             (Some(actual), None)
-                if analyzed.analysis_version == ANALYSIS_VERSION
-                    && **actual
-                        == technical_omission(
-                            &scope,
-                            &chunked.chunks[chunk_index],
-                            normalized,
-                        )? => {}
+                if matches!(
+                    analyzed.analysis_version.as_str(),
+                    ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION
+                ) && **actual
+                    == technical_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
             (None, None) if evidence_pages.contains(&page) => retained += 1,
             _ => {
                 return Err(invalid(
@@ -913,7 +927,10 @@ pub(super) fn validate_plan(
             "Exhausted page plan requires a durable shortfall warning",
         ));
     }
-    if analyzed.analysis_version == ANALYSIS_VERSION {
+    if matches!(
+        analyzed.analysis_version.as_str(),
+        ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION
+    ) {
         let expected_long_warning = analyzed
             .chunks
             .iter()

@@ -26,7 +26,8 @@ mod structural;
 #[cfg(test)]
 include!("summary/legacy_generation.rs");
 
-pub const ANALYSIS_VERSION: &str = "10.0.0";
+pub const ANALYSIS_VERSION: &str = "11.0.0";
+const TOLERANT_ANALYSIS_VERSION: &str = "10.0.0";
 const DIRECT_ANALYSIS_VERSION: &str = "9.0.0";
 const RETENTION_ANALYSIS_VERSION: &str = "8.0.0";
 const WORD_TARGET_ANALYSIS_VERSION: &str = "7.1.0";
@@ -1563,6 +1564,7 @@ fn versioned_analysis_selected_pages(
     // Historical plans and identities must not acquire new retention obligations.
     let mut selected = analysis_selected_pages(normalized)?;
     if version != ANALYSIS_VERSION
+        && version != TOLERANT_ANALYSIS_VERSION
         && version != DIRECT_ANALYSIS_VERSION
         && version != RETENTION_ANALYSIS_VERSION
     {
@@ -1579,7 +1581,10 @@ fn versioned_analysis_selected_pages(
         })
         .map(|page| page.page_number)
         .collect::<Vec<_>>();
-    let target = if matches!(version, ANALYSIS_VERSION | DIRECT_ANALYSIS_VERSION) {
+    let target = if matches!(
+        version,
+        ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION | DIRECT_ANALYSIS_VERSION
+    ) {
         direct::retention_target(pages.len())?
     } else {
         analysis_retention_target(pages.len())?
@@ -2194,6 +2199,7 @@ fn validate_analyzed_content(
         || !matches!(
             analyzed.analysis_version.as_str(),
             ANALYSIS_VERSION
+                | TOLERANT_ANALYSIS_VERSION
                 | DIRECT_ANALYSIS_VERSION
                 | RETENTION_ANALYSIS_VERSION
                 | WORD_TARGET_ANALYSIS_VERSION
@@ -2219,6 +2225,7 @@ fn validate_analyzed_content(
     let materiality_analysis = matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | TOLERANT_ANALYSIS_VERSION
             | DIRECT_ANALYSIS_VERSION
             | RETENTION_ANALYSIS_VERSION
             | WORD_TARGET_ANALYSIS_VERSION
@@ -2335,7 +2342,9 @@ fn validate_analyzed_content(
                 &evidence.exact_quote,
             );
             let claim_character_limit = match analyzed.analysis_version.as_str() {
-                ANALYSIS_VERSION => MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS,
+                ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION => {
+                    MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS
+                }
                 DIRECT_ANALYSIS_VERSION
                 | RETENTION_ANALYSIS_VERSION
                 | WORD_TARGET_ANALYSIS_VERSION
@@ -2357,6 +2366,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | TOLERANT_ANALYSIS_VERSION
                         | DIRECT_ANALYSIS_VERSION
                         | RETENTION_ANALYSIS_VERSION
                         | WORD_TARGET_ANALYSIS_VERSION
@@ -2374,6 +2384,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | TOLERANT_ANALYSIS_VERSION
                         | DIRECT_ANALYSIS_VERSION
                         | RETENTION_ANALYSIS_VERSION
                         | WORD_TARGET_ANALYSIS_VERSION
@@ -2424,6 +2435,7 @@ fn validate_analyzed_content(
     if matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | TOLERANT_ANALYSIS_VERSION
             | DIRECT_ANALYSIS_VERSION
             | RETENTION_ANALYSIS_VERSION
             | WORD_TARGET_ANALYSIS_VERSION
@@ -7643,6 +7655,112 @@ mod tests {
     }
 
     #[test]
+    fn model_omission_schema_is_marker_gated_and_version_ten_remains_readable() {
+        let form_core = "NARA job NC1-330-78-7; call (703) 696-4959 or email Luz.Ortiz@WHS.MIL about the form dated May 28, 2008. ";
+        let form = format!(
+            "{form_core}{}",
+            "x".repeat(462usize.checked_sub(form_core.chars().count()).unwrap())
+        );
+        assert_eq!(form.chars().count(), 462);
+        assert!(eligibility::material_marker(&form));
+        let (normalized, chunked) = materiality_fixture(std::slice::from_ref(&form));
+        let runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![
+                json!({"claim_text":"The form identifies NARA job NC1-330-78-7."}).to_string(),
+            ],
+        };
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(analyzed.analysis_version, ANALYSIS_VERSION);
+        assert!(analyzed.omissions.is_empty());
+        let requests = runtime.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let ModelOutputFormat::JsonSchema { schema, .. } = &requests[1].output_format else {
+            panic!("schema")
+        };
+        assert!(schema.get("anyOf").is_none());
+        assert!(!requests[1].user_prompt.contains("complete_page_text"));
+        drop(requests);
+
+        let (chunk_index, scope, deterministic, _) =
+            pages::page_scope(1, &chunked, &normalized).unwrap();
+        assert!(deterministic.is_none());
+        let mut omission =
+            pages::heading_omission(&scope, &chunked.chunks[chunk_index], &normalized).unwrap();
+        omission.origin =
+            crate::pipeline::contracts::AnalysisOmissionOrigin::ModelNoSubstantiveContent;
+        omission.reason = crate::pipeline::contracts::AnalysisOmissionReason::NoSubstantiveContent;
+        let mut historical = analyzed.clone();
+        historical.analysis_version = TOLERANT_ANALYSIS_VERSION.into();
+        historical.chunks[0].evidence.clear();
+        historical.chunks[0].summary_text.clear();
+        historical.omissions = vec![omission];
+        historical.warnings = vec![
+            PipelineWarning {
+                code: "ANALYSIS_PAGE_OMITTED".into(),
+                message: "historical fixture".into(),
+                stage: Some(PipelineStage::Analyze),
+            },
+            PipelineWarning {
+                code: COVERAGE_SHORTFALL_WARNING_CODE.into(),
+                message: "historical fixture".into(),
+                stage: Some(PipelineStage::Analyze),
+            },
+        ];
+        validate_analyzed_content(&historical, &chunked, &normalized).unwrap();
+        historical.analysis_version = ANALYSIS_VERSION.into();
+        assert!(validate_analyzed_content(&historical, &chunked, &normalized).is_err());
+
+        let mut noise = eligibility::NARA_AMBIGUOUS_PAGE.to_string();
+        while noise.chars().count() < 300 {
+            noise.push('.');
+        }
+        assert_eq!(noise.chars().count(), 300);
+        assert!(!eligibility::material_marker(&noise));
+        let (normalized, chunked) = materiality_fixture(&[noise]);
+        let runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![r#"{"outcome":"no_substantive_content"}"#.into()],
+        };
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(analyzed.omissions.len(), 1);
+        let requests = runtime.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let ModelOutputFormat::JsonSchema { schema, .. } = &requests[1].output_format else {
+            panic!("schema")
+        };
+        assert!(schema.get("anyOf").is_some());
+        assert!(requests[1].user_prompt.contains("complete_page_text"));
+
+        let (normalized, chunked) = materiality_fixture(&["03/10/03  A-4".into()]);
+        let runtime = materiality_runtime(false, 0, false);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(analyzed.omissions.len(), 1);
+        assert!(runtime.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
     #[ignore = "requires configured Ollama; substantive omission controls"]
     fn live_typed_omission_preserves_substantive_controls() {
         let runtime = crate::pipeline::model::OllamaRuntime::from_environment().unwrap();
@@ -8440,7 +8558,11 @@ mod tests {
         let form_fields =
             "names, organizations, identifiers, dates, reference numbers and cross-references";
         assert!(requests[0].system_prompt.contains(form_fields));
-        assert!(requests[1].system_prompt.contains(form_fields));
+        let ModelOutputFormat::JsonSchema { schema, .. } = &requests[1].output_format else {
+            panic!("schema")
+        };
+        assert!(schema.get("anyOf").is_none());
+        assert!(!requests[1].user_prompt.contains("complete_page_text"));
 
         let mut forged = analyzed.clone();
         forged
@@ -8450,7 +8572,7 @@ mod tests {
     }
 
     #[test]
-    fn current_long_claim_boundary_and_version_nine_reload_are_distinct() {
+    fn current_and_version_ten_long_claim_boundaries_are_distinct_from_version_nine() {
         let (normalized, chunked) = materiality_fixture(&["Retain records forever.".into()]);
         let runtime = ParaphraseRepairRuntime {
             requests: Mutex::new(Vec::new()),
@@ -8475,28 +8597,31 @@ mod tests {
             stage: Some(PipelineStage::Analyze),
         });
         assert!(validate_analyzed_content(&forged_ocr_warning, &chunked, &normalized).is_err());
-        for (length, expected) in [(1_535, true), (1_536, true), (1_537, false)] {
-            let mut current = base.clone();
-            current.chunks[0].evidence[0].claim_text = format!("{}.", "t".repeat(length - 1));
-            current.chunks[0].evidence[0].evidence_id = deterministic_evidence_id(
-                &current.document_id,
-                ANALYSIS_VERSION,
-                &current.chunks[0].chunk_id,
-                0,
-                &current.chunks[0].evidence[0].block_id,
-                &current.chunks[0].evidence[0].claim_text,
-                &current.chunks[0].evidence[0].exact_quote,
-            );
-            current.chunks[0].summary_text = current.chunks[0].evidence[0].claim_text.clone();
-            current.warnings.push(PipelineWarning {
-                code: "LONG_CLAIM".into(),
-                message: "fixture".into(),
-                stage: Some(PipelineStage::Analyze),
-            });
-            assert_eq!(
-                validate_analyzed_content(&current, &chunked, &normalized).is_ok(),
-                expected
-            );
+        for version in [ANALYSIS_VERSION, TOLERANT_ANALYSIS_VERSION] {
+            for (length, expected) in [(1_535, true), (1_536, true), (1_537, false)] {
+                let mut current = base.clone();
+                current.analysis_version = version.into();
+                current.chunks[0].evidence[0].claim_text = format!("{}.", "t".repeat(length - 1));
+                current.chunks[0].evidence[0].evidence_id = deterministic_evidence_id(
+                    &current.document_id,
+                    version,
+                    &current.chunks[0].chunk_id,
+                    0,
+                    &current.chunks[0].evidence[0].block_id,
+                    &current.chunks[0].evidence[0].claim_text,
+                    &current.chunks[0].evidence[0].exact_quote,
+                );
+                current.chunks[0].summary_text = current.chunks[0].evidence[0].claim_text.clone();
+                current.warnings.push(PipelineWarning {
+                    code: "LONG_CLAIM".into(),
+                    message: "fixture".into(),
+                    stage: Some(PipelineStage::Analyze),
+                });
+                assert_eq!(
+                    validate_analyzed_content(&current, &chunked, &normalized).is_ok(),
+                    expected
+                );
+            }
         }
         for (length, expected) in [(384, true), (385, false)] {
             let mut old = base.clone();

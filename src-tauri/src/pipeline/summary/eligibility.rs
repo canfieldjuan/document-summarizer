@@ -11,6 +11,164 @@ pub(super) enum Omission {
     DatePageStamp,
 }
 
+fn marker_token(text: &str) -> &str {
+    text.trim_matches(|c: char| {
+        matches!(
+            c,
+            ',' | ';'
+                | ':'
+                | '!'
+                | '?'
+                | '.'
+                | '"'
+                | '\''
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '('
+                | ')'
+        )
+    })
+}
+
+fn email_marker(text: &str) -> bool {
+    text.split_whitespace().any(|token| {
+        let token = marker_token(token);
+        let mut parts = token.split('@');
+        let Some(local) = parts.next() else {
+            return false;
+        };
+        let Some(domain) = parts.next() else {
+            return false;
+        };
+        if parts.next().is_some()
+            || local.is_empty()
+            || !local
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'%' | b'+' | b'-'))
+        {
+            return false;
+        }
+        let labels = domain.split('.').collect::<Vec<_>>();
+        labels.len() >= 2
+            && labels.iter().all(|label| {
+                !label.is_empty()
+                    && label
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            })
+            && labels
+                .last()
+                .is_some_and(|label| label.bytes().all(|c| c.is_ascii_alphanumeric()))
+    })
+}
+
+fn phone_marker(text: &str) -> bool {
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    for start in 0..tokens.len() {
+        let mut digits = 0usize;
+        let mut separator = false;
+        for token in tokens.iter().skip(start).take(3) {
+            let token = token.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    ',' | ';' | ':' | '!' | '"' | '\'' | '“' | '”' | '‘' | '’'
+                )
+            });
+            if token.is_empty()
+                || !token
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'(' | b')' | b'.'))
+            {
+                break;
+            }
+            digits += token.bytes().filter(u8::is_ascii_digit).count();
+            separator |= token
+                .bytes()
+                .any(|c| matches!(c, b'+' | b'-' | b'(' | b')'));
+            if (7..=15).contains(&digits) && separator {
+                return true;
+            }
+            if digits > 15 {
+                break;
+            }
+        }
+    }
+    false
+}
+
+fn numeric_date_marker(text: &str) -> bool {
+    text.split_whitespace().any(|token| {
+        let token = marker_token(token).trim_matches('.');
+        ['/', '-'].into_iter().any(|separator| {
+            let fields = token.split(separator).collect::<Vec<_>>();
+            fields.len() == 3
+                && fields.iter().all(|field| {
+                    (1..=4).contains(&field.len()) && field.bytes().all(|c| c.is_ascii_digit())
+                })
+        })
+    })
+}
+
+fn named_date_marker(text: &str) -> bool {
+    const MONTHS: &[&str] = &[
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    tokens.windows(3).any(|window| {
+        let month = marker_token(window[0]).to_ascii_lowercase();
+        let day = marker_token(window[1]).trim_matches('.');
+        let year = marker_token(window[2]).trim_matches('.');
+        MONTHS.contains(&month.as_str())
+            && (1..=2).contains(&day.len())
+            && day.bytes().all(|c| c.is_ascii_digit())
+            && matches!(year.len(), 2 | 4)
+            && year.bytes().all(|c| c.is_ascii_digit())
+    })
+}
+
+fn reference_marker(text: &str) -> bool {
+    text.split_whitespace().any(|token| {
+        let token = marker_token(token);
+        (5..=64).contains(&token.len())
+            && token
+                .bytes()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            && token.bytes().filter(u8::is_ascii_digit).count() >= 2
+            && token.bytes().any(|c| matches!(c, b'/' | b'-'))
+            && token
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'/' | b'-' | b'?' | b'.'))
+    })
+}
+
+/// Conservative veto for model-side omission. A match retains content; it does
+/// not certify that the marker is well-formed or semantically important.
+pub(super) fn material_marker(text: &str) -> bool {
+    email_marker(text)
+        || phone_marker(text)
+        || numeric_date_marker(text)
+        || named_date_marker(text)
+        || reference_marker(text)
+}
+
 fn multi_letter_word(text: &str) -> bool {
     let mut letters = 0;
     for c in text.chars() {
@@ -226,6 +384,57 @@ mod tests {
     fn captured_nara_page_is_retained_under_numeric_unit_veto() {
         assert_eq!(classify(NARA_AMBIGUOUS_PAGE), None);
         assert!(!heading_admitted(NARA_AMBIGUOUS_PAGE));
+        assert!(!material_marker(NARA_AMBIGUOUS_PAGE));
+    }
+
+    #[test]
+    fn material_markers_veto_only_recognized_identifier_shapes() {
+        for text in [
+            "Contact Luz.Ortiz@WHS.MIL. for records.",
+            "Call (703) 696-4959 for assistance.",
+            "Approved 5/19/08.",
+            "The memo is dated May 28, 2008.",
+            "NARA job NC1-330-78-7? It applies.",
+        ] {
+            assert!(material_marker(text), "expected marker in {text:?}");
+        }
+        for text in [
+            "not-an-email@",
+            "Call (70) 69-49.",
+            "Approved 5/19.",
+            "The memo is dated May 2008.",
+            "A-3",
+            "02/25/20Q8",
+            "ABC-1",
+            "plain short page furniture",
+        ] {
+            assert!(!material_marker(text), "unexpected marker in {text:?}");
+        }
+        assert!(material_marker(
+            "Noise before it; contact user@example.com; noise after it."
+        ));
+    }
+
+    #[test]
+    fn material_marker_numeric_boundaries_are_both_sided() {
+        assert!(phone_marker("123-4567"));
+        assert!(phone_marker("+123456789012345"));
+        assert!(!phone_marker("12-3456"));
+        assert!(!phone_marker("+1234567890123456"));
+
+        assert!(reference_marker("A-123"));
+        assert!(!reference_marker("A-12"));
+        let maximum = format!("A-{}", "1".repeat(62));
+        let over_maximum = format!("A-{}", "1".repeat(63));
+        assert_eq!(maximum.len(), 64);
+        assert_eq!(over_maximum.len(), 65);
+        assert!(reference_marker(&maximum));
+        assert!(!reference_marker(&over_maximum));
+
+        assert!(numeric_date_marker("1-2-03"));
+        assert!(!numeric_date_marker("1/2-03"));
+        assert!(named_date_marker("May 1, 03"));
+        assert!(!named_date_marker("May 2003"));
     }
 
     #[test]
