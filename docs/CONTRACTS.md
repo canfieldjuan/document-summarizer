@@ -502,6 +502,67 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
+Amendment: paraphrase completion and verification-aware acceptance (approved
+direction; commit this contract before implementation).
+
+Root cause: the paraphrase decoder currently enforces the same 192-character
+ceiling as Rust. Constrained generation can close a string at that boundary
+without finishing its clause; it does not perform semantic shortening. The
+captured DOL response ends at 192 characters with trailing whitespace and fails
+canonical validation, while an equally truncated unpunctuated word without that
+space passes the old predicate. Separately, live acceptance incorrectly applies
+synthesis's all-evidence rule to supported claims after verification, although
+retained ambiguous evidence is allowed to be withheld with a durable warning.
+
+Required change surface: model decoder projection, page paraphrase schema,
+prompt and bounded retry, versioned analysis admission/reload validation, and
+office acceptance's persisted synthesis/verification checks and metrics. No
+eligibility filter, unit veto, parser, source quote, model, token allowance,
+context, timeout, evidence target, or page-coverage threshold changes.
+
+Paraphrase uses a decoder maxLength of 768 characters (four times Rust's 192),
+and the adapter preserves numeric maxLength through 768, stripping larger
+values as before. This ceiling is resource headroom, not the accepted length:
+no valid claim can reach it. It cannot promise that an invalid model response
+never reaches a finite ceiling. The prompt still demands at most 192 characters,
+explicitly asking for a complete sentence instead of a cut-off clause. Rust
+accepts only non-empty, already-trimmed text at most 192 Unicode characters.
+Additionally, after optional closing quotes/brackets, it must end with terminal
+punctuation (. ! ? or their full-width counterparts), following an
+alphanumeric character with optional intervening closing quotes/brackets.
+This admits terminal punctuation either inside or outside closing quotation
+marks or parentheses. Bare words, dangling commas/colons/hyphens, ellipses,
+and unpunctuated mid-word boundary cuts fail. This is a mechanical completeness
+predicate, not a dictionary or proof of grammatical/semantic completeness;
+semantic verification remains authoritative. Never trim, truncate, append a
+period, or otherwise rewrite a model response to make it pass.
+
+An otherwise well-shaped paraphrase failing length, canonicality, or this
+completion predicate gets exactly one additional paraphrase call, with a
+distinct deterministic attempt seed and bounded feedback naming the failed
+checks. Both calls receive only the same selected quotation, never alternative
+quotes, previous generated text, or other page content. Selection is not rerun.
+A second invalid paraphrase fails closed; malformed JSON, extra fields,
+selection/provenance errors and transport failures do not enter this retry.
+The retry uses existing input/output limits, cancellation checkpoints and
+per-request diagnostics. The analysis loop is bounded by N selections and 2*N
+paraphrases; omitted pages consume no paraphrase calls. New analysis version
+6.0.0 enforces completion at ingestion and reload. Version 5.0.0 and earlier
+keep their historical validators and identity rules. Durable partial-analysis
+and repair-attempt audit remains the separately sequenced DB work, not silently
+claimed complete by this amendment.
+
+Verification plan: projection tests at 0, 191, 192, 193, 767, 768, 769, 2,000
+and 4,000; intact schemas/enums and non-mutating projection. Completion tests
+on both sides of 192, including the captured whitespace suffix, a 192-character
+mid-word cut without whitespace, valid complete sentences at the boundary,
+Unicode, closing quotes, mixed-valid/invalid items, ellipses and dangling
+punctuation. Prove rejection before persistence and on v6 reload, historical
+v5 acceptance unchanged, one feedback retry repairs an invalid answer, repeated
+failure stops after that retry, and malformed/foreign outputs do not retry.
+Local full tests, strict clippy, fmt and both live Qwen corpus runs must report
+failures first, Primary/fallback transport, request count, tokens and coverage.
+
 A model-omitted bare heading makes only the selection call; a retained page
 makes both calls. Every omission records NonSubstantivePageFurniture plus a
 bounded origin (deterministic scan noise, deterministic date/page stamp, or
@@ -522,7 +583,8 @@ not become missing evidence. Reload recomputes deterministic filter outcomes
 from the bound source and rejects a forged reason, origin, or version.
 
 Omissions are not EvidenceItems and never become summary claims or citations.
-Only these recorded omissions are outside the all-evidence-cited requirement;
+Only these recorded omissions are outside the pre-verification synthesis
+all-evidence-cited requirement;
 synthesis cannot silently discard or reclassify retained evidence. There is at
 most one outcome (evidence or omission) per inspected native-text page. Rust
 rejects mixed, duplicate, foreign-page, or incomplete outcomes. The versioned
@@ -536,7 +598,8 @@ retained evidence only. Keep K = min(B, E, max(3, ceil(B/2))) for positive E.
 Start with the existing evenly spaced page plan, then inspect previously
 unvisited pages in deterministic source order when omissions leave the target
 unmet. Stop when E reaches min(N, max(B, ceil(3*N/5))) or all native-text pages
-have outcomes. Thus at most N selections and N paraphrases run; omitted pages
+have outcomes. Thus at most N selections and 2*N paraphrases run (including the
+single bounded paraphrase repair); omitted pages
 are neither cited nor counted as evidence. Reload must validate the exact
 initial/backfill plan and stopping condition, not accept an arbitrary subset.
 If usable pages are exhausted first, persist the omissions and a coverage
@@ -548,7 +611,21 @@ at least 60 percent and separately prints omission and inspected-page counts.
 Synthesis evidence batches receive a range, not a forced exact allocation:
 retain the distributed document-floor allocation as each batch minimum, but
 allow up to min(batch evidence count, B) claims. The direct path retains K..B.
-The final artifact must still satisfy K..B and cite every retained evidence ID.
+The synthesized artifact, before verification, must satisfy K..B and cite every
+retained evidence ID. Acceptance loads the persisted synthesized attempts and
+checks complete evidence coverage there, including the selected attempt.
+Supported claims may cite fewer retained items: report supported-evidence
+coverage as distinct cited retained IDs divided by E, and gate live acceptance
+at 60 percent, separately from the unchanged 60 percent raw native-page target.
+The supported claim-count floor remains K. This acceptance threshold does not
+replace the runtime's full-coverage target: any positive supported shortfall
+still triggers the existing bounded re-synthesis and, if unresolved, completes
+with a durable coverage warning. Zero supported claims still fails closed.
+Tests must prove the warning survives database reopen, complete synthesized
+coverage with partially supported evidence can pass acceptance, missing
+synthesized evidence cannot, and either supported-evidence or native-page
+coverage below 60 percent fails. Use integer comparisons and both boundary
+sides; do not shrink E or N or special-case the corpus.
 Candidate reductions remain progress-making and preserve all original lineage.
 Preflight plans against the sum of batch maxima, not their minima, including
 worst-case reductions and repair calls under the existing 256-request ceiling.
@@ -796,7 +873,9 @@ quotation, model output, credential, or private path content.
 
 Before transport, the adapter derives a non-mutating decoder projection of the
 canonical schema. It omits decoder-unsupported `uniqueItems` and strips numeric
-`maxLength` values only when they exceed 192 characters. Bounds from zero
+`maxLength` values only when they exceed 192 characters (historical adapter
+behavior, superseded by the proposed paraphrase-completion amendment above).
+Bounds from zero
 through 192 survive at every nested schema location, including analysis's
 192-character claim limit; the old 2,000- and 4,000-character grammar expansions
 remain omitted. Object closure, required fields, enums, non-empty strings, and
