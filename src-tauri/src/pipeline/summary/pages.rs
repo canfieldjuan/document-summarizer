@@ -664,7 +664,8 @@ pub(super) fn analyze(
                     }
                 }
             };
-            if allow_omission {
+            let attempt_allows_omission = allow_omission && attempt == 0;
+            if attempt_allows_omission {
                 system.push_str(" This quotation is the complete native text of the page. If it contains no recoverable substantive content (only scan artifacts, page furniture or a bare heading), return {\"outcome\":\"no_substantive_content\"} instead of a meta-claim describing noise. Do not omit obligations, exceptions, quantities, table values or difficult or uncertain assertions. On form-shaped pages, names, organizations, identifiers, dates, reference numbers and cross-references are material and must not be omitted. This records a judgment about extracted text, not proof the original has no facts. Otherwise return claim_text as specified.");
                 user["complete_page_text"] = json!(true);
             }
@@ -680,26 +681,12 @@ pub(super) fn analyze(
                 attempt_seed,
                 &system,
                 user,
-                (PARAPHRASE_SCHEMA, paraphrase_schema(allow_omission)),
+                (
+                    PARAPHRASE_SCHEMA,
+                    paraphrase_schema(attempt_allows_omission),
+                ),
             );
-            let response = match generated {
-                Ok(response) => response,
-                Err(error) if error.code == CANCELLATION_OBSERVED_CODE => return Err(error),
-                Err(error) if attempt == 0 => return Err(error),
-                Err(_) => {
-                    if let Some(fallback) = usable_long_fallback.take() {
-                        accepted = Some(fallback);
-                    } else {
-                        analyzed.omissions.push(technical_omission(
-                            &scope,
-                            &chunked.chunks[chunk_index],
-                            normalized,
-                        )?);
-                        omitted = true;
-                    }
-                    break;
-                }
-            };
+            let response = generated?;
             let outcome: ParaphraseOutcome = match serde_json::from_str(&response.text) {
                 Ok(outcome) => outcome,
                 Err(_) if attempt == 0 => {
@@ -725,13 +712,7 @@ pub(super) fn analyze(
                 ParaphraseOutcome::Claim(claim) => claim,
                 ParaphraseOutcome::Omitted(OmittedParaphrase {
                     outcome: NoSubstantiveContent::NoSubstantiveContent,
-                }) if allow_omission && attempt == 1 && usable_long_fallback.is_some() => {
-                    accepted = usable_long_fallback.take();
-                    break;
-                }
-                ParaphraseOutcome::Omitted(OmittedParaphrase {
-                    outcome: NoSubstantiveContent::NoSubstantiveContent,
-                }) if allow_omission => {
+                }) if attempt_allows_omission => {
                     analyzed.omissions.push(content_omission(
                         &scope,
                         &chunked.chunks[chunk_index],

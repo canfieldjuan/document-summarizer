@@ -224,6 +224,21 @@ fn numeric_content(text: &str) -> bool {
         &["l", "L", "m", "g", "s", "A", "V", "W", "J", "K", "C", "F"];
     let tokens = text.split_whitespace().collect::<Vec<_>>();
     for (index, token) in tokens.iter().enumerate() {
+        let token = token.trim_matches(|c: char| matches!(c, '|' | ';' | ','));
+        for operator in ["<=", ">=", "!=", "<", ">", "=", "≤", "≥", "≠"] {
+            let value = if token == operator {
+                tokens
+                    .get(index + 1)
+                    .map(|next| next.trim_matches(|c: char| matches!(c, '|' | ';' | ',')))
+            } else {
+                token.strip_prefix(operator)
+            };
+            if value.is_some_and(|value| !value.is_empty() && value.parse::<f64>().is_ok()) {
+                return true;
+            }
+        }
+    }
+    for (index, token) in tokens.iter().enumerate() {
         let first_letter = token
             .char_indices()
             .find(|(_, c)| c.is_alphabetic())
@@ -540,6 +555,24 @@ mod tests {
         for value in ["5 L", "5l", "5 m", "5m", "4 g", "4g"] {
             let page = format!("{}\n{value}", ".".repeat(200));
             assert_eq!(classify(&page), None, "substantive unit {value}");
+        }
+    }
+
+    #[test]
+    fn single_numeric_comparisons_veto_noise_but_incomplete_operators_do_not() {
+        for text in ["|||| < 5 ||||", "|||| >=7 ||||", "|||| ≤ -2 ||||"] {
+            assert_eq!(
+                classify(text),
+                None,
+                "comparison must be retained: {text:?}"
+            );
+        }
+        for text in ["|||| < x ||||", "|||| >= ||||", "|||| <> ||||"] {
+            assert_eq!(
+                classify(text),
+                Some(Omission::ScanNoise),
+                "non-value must not defeat noise classification: {text:?}"
+            );
         }
     }
 }

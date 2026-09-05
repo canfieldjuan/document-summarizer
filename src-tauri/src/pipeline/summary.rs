@@ -8073,7 +8073,7 @@ mod tests {
         for (answers, expected_calls, succeeds) in [
             (vec![good.clone()], 2, true),
             (vec![bad.clone(), good.clone()], 3, true),
-            (vec![bad.clone(), bad], 3, true),
+            (vec![bad.clone(), bad.clone()], 3, true),
             (
                 vec![json!({"claim_text":"w".repeat(1_537)}).to_string()],
                 2,
@@ -8098,6 +8098,14 @@ mod tests {
                 2,
                 false,
             ),
+            (
+                vec![
+                    bad.clone(),
+                    json!({"outcome":"no_substantive_content"}).to_string(),
+                ],
+                3,
+                false,
+            ),
         ] {
             let runtime = ParaphraseRepairRuntime {
                 requests: Mutex::new(Vec::new()),
@@ -8119,9 +8127,20 @@ mod tests {
             let claim_schema = schema.get("anyOf").map(|v| &v[0]).unwrap_or(schema);
             assert_eq!(claim_schema["properties"]["claim_text"]["maxLength"], 1_536);
             if expected_calls == 3 {
+                let ModelOutputFormat::JsonSchema {
+                    schema: retry_schema,
+                    ..
+                } = &requests[2].output_format
+                else {
+                    panic!("schema")
+                };
+                assert!(schema.get("anyOf").is_some());
+                assert!(retry_schema.get("anyOf").is_none());
                 let initial: Value = serde_json::from_str(&requests[1].user_prompt).unwrap();
                 let retry: Value = serde_json::from_str(&requests[2].user_prompt).unwrap();
                 assert_eq!(initial["exact_quote"], retry["exact_quote"]);
+                assert!(initial["complete_page_text"].as_bool().unwrap());
+                assert!(retry.get("complete_page_text").is_none());
                 let rejected: Value = serde_json::from_str(&runtime.answers[0]).unwrap();
                 if rejected["claim_text"].as_str().unwrap().chars().count() > 384 {
                     assert_eq!(retry["rejected_draft"], rejected["claim_text"]);
@@ -8143,6 +8162,87 @@ mod tests {
                 assert_eq!(requests[1].max_output_tokens, requests[2].max_output_tokens);
             }
         }
+    }
+
+    #[test]
+    fn paraphrase_repair_transport_failure_propagates() {
+        struct RepairTransportFailureRuntime {
+            requests: Mutex<Vec<ModelRequest>>,
+        }
+
+        impl ModelRuntime for RepairTransportFailureRuntime {
+            fn generate(
+                &self,
+                request: &ModelRequest,
+            ) -> Result<ModelResponse, ModelRuntimeFailure> {
+                let mut requests = self.requests.lock().unwrap();
+                let paraphrase_index = requests
+                    .iter()
+                    .filter(|recorded| {
+                        matches!(
+                            &recorded.output_format,
+                            ModelOutputFormat::JsonSchema { name, .. }
+                                if name == pages::PARAPHRASE_SCHEMA
+                        )
+                    })
+                    .count();
+                requests.push(request.clone());
+                if matches!(
+                    &request.output_format,
+                    ModelOutputFormat::JsonSchema { name, .. }
+                        if name == pages::PARAPHRASE_SCHEMA
+                ) {
+                    if paraphrase_index == 1 {
+                        return Err(ModelRuntimeFailure {
+                            code: "MODEL_TIMEOUT".into(),
+                            message: "repair timed out".into(),
+                            recoverable: true,
+                            request_attempts: Vec::new(),
+                        });
+                    }
+                    return Ok(ModelResponse {
+                        text: json!({"claim_text":"incomplete"}).to_string(),
+                        runtime_id: self.runtime_id().into(),
+                        model_id: self.model_id().into(),
+                        request_attempts: Vec::new(),
+                    });
+                }
+                Ok(ModelResponse {
+                    text: fixture_model_output(request),
+                    runtime_id: self.runtime_id().into(),
+                    model_id: self.model_id().into(),
+                    request_attempts: Vec::new(),
+                })
+            }
+
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+
+            fn runtime_id(&self) -> &str {
+                "fixture"
+            }
+
+            fn model_id(&self) -> &str {
+                "repair-transport-failure"
+            }
+        }
+
+        let (normalized, chunked) = materiality_fixture(&["Retain records forever.".into()]);
+        let runtime = RepairTransportFailureRuntime {
+            requests: Mutex::new(Vec::new()),
+        };
+        let error = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "MODEL_TIMEOUT");
+        assert!(error.recoverable);
+        assert_eq!(runtime.requests.lock().unwrap().len(), 3);
     }
 
     #[test]
