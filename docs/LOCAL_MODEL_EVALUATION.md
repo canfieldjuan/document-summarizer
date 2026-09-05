@@ -1,6 +1,80 @@
 # Corpus and native Ollama evaluation — 2026-09-04
 
-## Latest result: larger output allowances help progress, but both Muse runs fail
+## Latest result: materiality implementation is blocked; both Qwen corpus runs fail
+
+**NOT DONE. Neither live acceptance run passed, and the current implementation
+also has a failing contract regression. Do not merge this checkpoint.** The
+approved dependency exception is committed separately as `4b5d8db`; partial code
+is checkpointed in `c8098a9`. The DB/immutable request-attempt audit slice has not
+started. The proposed contract section remains pending, not folded into current
+behavior as though the whole feature were complete.
+
+### Live observations, not acceptance evidence on the final checkpoint
+
+These exploratory runs exercised page eligibility, separate quote selection and
+quote-only paraphrase, backfill, and synthesis slack on the intermediate working
+tree **before the later short-unit veto fix**. They are not live gates on
+`c8098a9`. Both used `qwen3-30b-a3b:latest` through Ollama at port 11434, with
+the corpus hashes listed below unchanged. Context remained 8,192, analysis
+output 2,048, synthesis/verification output 4,096, and timeout 900 seconds.
+
+| Document | Delivered claims | Evidence | Cited native pages | Requests | Completion tokens | Model time | Test time |
+| --- | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| NARA | 6 | 8 persisted; 6 cited | 6/11 (54.55%) | 20 | 2,953 | 36,951 ms | 37.73 s |
+| DOL deck | None | 59 transient accepted items; no complete analysis artifact | No summary | 120 | 2,545 | 43,774 ms | 45.73 s |
+
+Both commands exited 101; all requests used Primary transport. NARA inspected
+10 pages and omitted pages 6 and 12 with no generation calls. Its first and
+second verification responses both marked the permanent-records/destruction
+claim unsupported and the claim about incoherent source text ambiguous. The
+existing verification-shortfall re-synthesis did not restore coverage. The
+pipeline returned a warning-bearing summary, but acceptance rejected its missing
+evidence references; its cited-page fraction also remains below the raw target.
+
+DOL failed at response 119, the sixtieth paraphrase. Its claim_text was exactly
+192 Unicode characters and ended `must hire any合格, `, including trailing
+whitespace and an unfinished clause. The unchanged canonical-text validator
+rejected it. That response consumed 47 completion tokens, not its 2,048-token
+allowance. An enforced string length does not guarantee a complete or canonical
+claim. No synthesis or synthesis-stage repair ran on this document.
+
+Logs: `/tmp/doc-sum-materiality.ZByf7m/nara.log` and `dol.log`. These contain
+explicitly opted-in public-corpus model responses. Metrics were extracted from
+the captured per-request diagnostics, not estimated from elapsed wall time.
+
+### Contract counterexample found during the cold audit
+
+The first numeric-content filter missed short units on punctuation-heavy pages.
+A direct negative control with `5 L` at the tail failed: it was classified as
+scan noise. The implementation now retains separated and attached short units,
+including `5 L`, `5l`, `5 m`, `5m`, `4 g`, and `4g`; those controls pass.
+
+However, the exact captured NARA page 6 fixture itself contains the token `5l`.
+It therefore triggers the conservative unit veto. The contract simultaneously
+requires that numeric content veto omission and names this page as an omission
+positive. Its unchanged positive assertion now fails. Do not weaken the unit
+veto, special-case the corpus, change thresholds, or alter the expected result
+without a contract decision. Recommended amendment: retain this ambiguous page
+and reclassify it as a negative control; retain a genuinely unit-free scan-noise
+positive. This recommendation is not an approved contract change.
+
+### Checkpoint verification and gaps
+
+- `cargo test --all-targets --offline`: 229 library tests passed, one failed,
+  four ignored; exit 101. The failure is the captured NARA noise assertion.
+  Cargo stopped before the other targets.
+- Separately, `cargo test --offline --test office_acceptance --test release_contract`:
+  one acceptance test and three release tests passed; three live/external tests
+  ignored; exit 0.
+- Strict all-target/all-feature clippy and formatting check: exit 0.
+- Cargo.lock changed only to add the direct dependency edge; no package version
+  changed. Analysis artifacts use a new version and preserve historical readers.
+- Durable successful-analysis omissions are present, but partial analysis
+  outcomes and individual synthesis-repair attempts are not yet durably audited.
+  DB integration, failure/cancellation/reopen audit tests, focused live heading
+  negative controls, and successful final-head corpus acceptance remain open.
+
+## Previous result: larger output allowances help progress, but both Muse runs fail
 
 **No product closure: neither document delivered a summary.** Contract
 `9996ed4` precedes implementation `253a6e4`. Analysis now allows 2,048 output
