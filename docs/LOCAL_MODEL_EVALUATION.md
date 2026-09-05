@@ -1,6 +1,126 @@
 # Corpus and native Ollama evaluation — updated 2026-09-05
 
-## Latest result: all identifier schemas constrained; DOL still fails consolidation coverage
+## Latest result: structural attribution works; BOTH corpus acceptances fail
+
+**NOT DONE. DOL fails before delivery on two unassigned claim texts. NARA now
+completes below acceptance, at 5/11 native pages (45.45%), versus the prior
+passing 7/11 (63.64%).** Do not bury this regression behind passing local gates
+or schema compilation. No validator, coverage target, B/K, retention, support
+rule, unit veto, timeout or resource ceiling was weakened.
+
+Contract `f4ce9d2` precedes implementation `369a871`. Both full sequential live
+runs below exercise exactly `369a871`, using `qwen3-30b-a3b:latest` and the
+existing Ollama adapter. There were no retry-until-green corpus reruns.
+
+| Document | Acceptance | Delivered claims | Retained / supported-cited evidence | Native pages cited | Requests | Completion tokens | Model time | Test wall time |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| DOL deck | exit 101 | None | 83 / not verified | Not delivered | 174 | 6,809 | 90,852 ms | 93.27 s |
+| NARA | exit 101 | 4 | 10 / 5 | 5/11 (45.45%) | 30 | 1,499 | 21,555 ms | 22.70 s |
+
+### Exact failures, not inferred from constants
+
+DOL response 173, the seventh initial synthesis request, contains eight claim
+texts and eight assignments: `[0,1,2,2,4,4,7,6]`. Every slot exists and every
+index is in range. Claim indices 3 and 5 have no assigned evidence: the former
+concerns toilet units and water-container maintenance; the latter concerns
+State Plan States and Wage and Hour Division authority. Rust rejects this as
+`MODEL_CLAIMS_RESPONSE_INVALID`: every claim needs bounded nonempty evidence.
+The preceding batches returned 8, 8, 8, 8, 3 and 8 claims with valid complete
+assignments. The array shape solves missing evidence slots, but does not ensure
+that every returned claim is used. This is the explicitly retained orphan-claim
+rejection, not a foreign identifier or token exhaustion (the failed request used
+310 of 4,096 completion tokens). No reduction or verification ran; no DOL
+delivered coverage or independent-reopen evidence exists. Do not silently delete
+the orphan texts or guess different assignments.
+
+NARA completes the pipeline with durable warnings after its existing single
+re-synthesis. Each pass initially produces eight plus two claims, then Rust
+selects two pairs for text-only reduction to B=8. All ten retained evidence items
+are cited by the synthesized set. In both passes the verifier withholds the same
+four claims: one unsupported consolidated permanent-records/destruction and
+asterisk-instruction claim, plus three ambiguous noise-description claims. The
+final supported set has four claims and five evidence items/pages. Both 60%
+supported-evidence and native-page requirements are missed; the test stops at
+the supported-evidence assertion (`office_acceptance.rs:834`), before its final
+independent reopen. Attribution to both pair members is exercised successfully;
+semantic support is not inferred from that attribution. The permanent-records
+source-fidelity caution remains, not a human-confirmed model verdict.
+
+### What is proved and what changed in cost
+
+All 174 DOL requests and all 30 NARA requests used Primary transport. The new
+initial-synthesis alternatives and text-only reduction schemas compiled with no
+JSON fallback. An early focused probe of the actual eight-alternative schema
+also passed: eight slots assigned to one consolidated claim, 36 completion
+tokens, 463 prompt tokens, 6,785 ms, Primary. The full deck additionally exercised
+different valid claim counts, including three, before the orphan failure.
+
+`summary.rs:2252` builds a complete object alternative for each feasible claim
+count, with matching exact assignment length and integer-index enum; it does
+not collapse the allowed claim-count range to a fixed number. `:2273` permits
+only one text-only reduction claim. `summary/structural.rs:13` derives durable
+evidence from ordered assignments; `:64` attributes both selected candidates;
+`:88` validates the exact pair and its metadata before inference. The existing
+durable parsers at `summary.rs:3048` and `:3144` still reject corrupt references,
+noncanonical candidate evidence, duplicate references and excess evidence.
+The loop at `:1247` is unchanged: reduce only above the budget. Verification
+retains its exact local-ID enum and missing/duplicate verdict rejection.
+
+| Comparison with ordinal baseline `463069b` | Before | Structural run |
+| --- | ---: | ---: |
+| DOL initial batches reached | 11 | 7, fails in seventh |
+| DOL reduction requests reached | 2, failed first pair and repair | 0 |
+| DOL total requests / completion tokens | 180 / 8,337 | 174 / 6,809 |
+| DOL test wall time | 110.27 s | 93.27 s |
+| NARA initial batches per synthesis pass | 2 | 2 |
+| NARA reductions across both passes | 2 | 4 |
+| NARA total requests / completion tokens | 28 / 1,538 | 30 / 1,499 |
+| NARA test wall time | 22.36 s | 22.70 s |
+
+DOL stops earlier, so its lower totals are not a completed-work speedup. NARA
+does more reduction work and delivers less supported coverage. Run-derived seeds
+and model output differ; this is measured end-to-end behavior, not a controlled
+causal isolation of each prompt edit. Actual synthesis input allowance rises
+from 8,068 to 8,143 characters only because the new prompt is shorter; the whole
+request limit remains 10,752. Maximum-text 83-item preflight still needs twelve
+batches, reserves 62 synthesis calls; escaped maximum-text cases reserve 204,
+both below the unchanged 256 ceiling. No packing improvement is claimed.
+
+Stage costs: DOL analysis 167 calls / 4,334 completion tokens / 69,198 ms;
+synthesis 7 / 2,475 / 21,654 ms. NARA analysis 20 / 382 / 8,565 ms;
+synthesis 8 / 927 / 9,868 ms; verification 2 / 190 / 3,122 ms.
+
+### Local gates, cold audit and remaining gaps
+
+`cargo test --offline --all-targets`: 253 library tests pass, five ignored;
+three acceptance tests pass, three external tests ignored; three release tests
+pass. Strict all-target/all-feature clippy with warnings denied and fmt --check
+exit 0. The focused live schema test was run explicitly; its default ignored
+status does not substitute for the two failed corpus tests. Two initial stale
+expectations (old prompt wording and its derived character allowance) were
+corrected before the final passing gates. Logs: `/tmp/doc-sum-structural.ypkpoT/`
+contains `tests.log`, `clippy.log`, `dol.log` and `nara.log`; prior full logs are
+`/tmp/doc-sum-ordinals.FAOByA/dol-final.log` and `nara-final.log`.
+
+Boundary-probe: exact assignment length and per-alternative integer vocabulary;
+short/long/mixed/out-of-range slots; empty/orphan/overfull claims; forbidden
+model ID fields; exact pair attribution and canonical durable restoration;
+duplicate/foreign/noncanonical candidate metadata rejected before a model call.
+Existing durable negative tests and historical reload tests remain passing.
+Effect-trace: model output now passes through structural attribution and then
+the unchanged durable validators; NARA exercises actual text-only pairs and
+both corpora exercise actual assignment arrays on Primary transport. The change
+removes reference transcription/omission, not semantic loss or orphan claims.
+
+Cold diff: only summary transport/schema/prompt code, its request-local helper,
+the scoped structural helper/tests and documentation changed. No acceptance
+assertions or source-selection filters changed. GAP AUDIT: NOT DONE for corpus
+closure. The requested representation changes are implemented, but resolving
+the orphan-claim failure and restoring NARA supported coverage requires further
+contracted work. The broader pending materiality/audit obligations also remain.
+PR #30 remains ready for review, not merged.
+
+## Previous result: all identifier schemas constrained; DOL still fails consolidation coverage
 
 **NOT DONE: the deck still has no delivered summary.** The first pair reduction
 returns only c1 and repeats the same claim on its bounded repair, omitting c2

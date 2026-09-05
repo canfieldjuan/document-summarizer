@@ -504,7 +504,12 @@ For a retained page, analysis has two separate model operations:
 
 #### Amendment: structural synthesis attribution
 
-Status: approved scope, contract before implementation. Supersedes only the
+Status: contract `f4ce9d2` precedes implementation `369a871`. Implemented, but
+both corpus acceptances fail: DOL returns orphan claims despite complete slots;
+NARA completes with warnings below supported-coverage acceptance. See the latest
+evaluation; do not describe structural attribution as product closure. Fold this
+into current behavior with the complete feature, preserving these proof limits.
+Supersedes only the
 synthesis/reduction response and missing-reference transport below. Verification
 keeps its enum-constrained request-local IDs. Durable schemas, identity formulas,
 historical validation, and all-evidence-cited validation remain unchanged.
