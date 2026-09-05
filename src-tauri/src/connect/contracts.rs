@@ -1,4 +1,7 @@
 use crate::pipeline::contracts::{PipelineWarning, SummaryArtifact};
+use crate::pipeline::summary::{
+    MAX_DELIVERY_SUMMARY_TEXT_BYTES, SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,7 +18,7 @@ pub const INPUT_MEDIA_TYPE: &str = "application/pdf";
 pub const OUTPUT_MEDIA_TYPE: &str = "application/vnd.local-connect.document-summary+json";
 pub const DEFAULT_MAX_INPUT_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_REQUEST_JSON_BYTES: u64 = 64 * 1024;
-pub const MAX_SUMMARY_TEXT_BYTES: usize = 1024 * 1024;
+pub const MAX_SUMMARY_TEXT_BYTES: usize = MAX_DELIVERY_SUMMARY_TEXT_BYTES;
 pub const MAX_SUMMARY_ARTIFACT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_SUMMARY_WARNINGS: usize = 256;
 
@@ -321,44 +324,118 @@ impl JobResult {
         input: &InputArtifact,
         summary: &SummaryArtifact,
     ) -> Result<Self, ContractBuildError> {
-        if summary.text.is_empty() || summary.text.len() > MAX_SUMMARY_TEXT_BYTES {
-            return Err(ContractBuildError::InvalidSummary(
-                "summary text is empty or exceeds the byte limit".to_string(),
-            ));
-        }
-        let input_artifact = ArtifactProvenance::from_input(input);
-        let warnings = summary
-            .warnings
-            .iter()
-            .map(wire_warning)
-            .collect::<Vec<_>>();
-        if warnings.len() > MAX_SUMMARY_WARNINGS || warnings.iter().any(invalid_wire_warning) {
-            return Err(ContractBuildError::InvalidSummary(
-                "summary warnings exceed count or field limits".to_string(),
-            ));
-        }
-        let content = SummaryContent {
-            summary_version: capability_summary_version(&summary.summary_version),
-            text: summary.text.clone(),
-            warnings,
-            input_artifact,
-        };
-        let bytes = serde_json::to_vec(&content)?;
-        if bytes.is_empty() || bytes.len() > MAX_SUMMARY_ARTIFACT_BYTES {
-            return Err(ContractBuildError::InvalidSummary(
-                "summary artifact exceeds the byte limit".to_string(),
-            ));
-        }
-        Ok(Self {
-            outputs: vec![SummaryOutput {
-                artifact_id: Uuid::new_v4().to_string(),
-                media_type: OUTPUT_MEDIA_TYPE.to_string(),
-                byte_size: bytes.len() as u64,
-                sha256: format!("{:x}", Sha256::digest(bytes)),
-                content,
-            }],
-        })
+        build_summary_result(
+            input,
+            &summary.summary_version,
+            &summary.text,
+            &summary.warnings,
+        )
     }
+
+    pub fn from_summary_claim_lines(
+        input: &InputArtifact,
+        summary: &SummaryArtifact,
+        claim_lines: &[String],
+    ) -> Result<(Self, usize), ContractBuildError> {
+        if claim_lines.is_empty()
+            || claim_lines.iter().any(String::is_empty)
+            || claim_lines.join("\n\n") != summary.text
+        {
+            return Err(ContractBuildError::InvalidSummary(
+                "summary claim boundaries do not match canonical text".to_string(),
+            ));
+        }
+        if let Ok(result) = build_summary_result(
+            input,
+            &summary.summary_version,
+            &summary.text,
+            &summary.warnings,
+        ) {
+            return Ok((result, claim_lines.len()));
+        }
+
+        let mut warnings = summary.warnings.clone();
+        if !warnings
+            .iter()
+            .any(|warning| warning.code == SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE)
+        {
+            warnings.push(PipelineWarning {
+                code: SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE.to_string(),
+                message: "The delivered Connect result contains the largest whole-claim prefix that fits the v1 byte limits".to_string(),
+                stage: None,
+            });
+        }
+
+        let mut prefix_bytes = 0usize;
+        let mut prefix_count = 0usize;
+        for line in claim_lines {
+            let projected = prefix_bytes
+                .checked_add(usize::from(prefix_count > 0) * 2)
+                .and_then(|bytes| bytes.checked_add(line.len()))
+                .ok_or_else(|| {
+                    ContractBuildError::InvalidSummary(
+                        "summary prefix exceeds the supported byte range".to_string(),
+                    )
+                })?;
+            if projected > MAX_SUMMARY_TEXT_BYTES {
+                break;
+            }
+            prefix_bytes = projected;
+            prefix_count += 1;
+        }
+        for count in (1..=prefix_count).rev() {
+            let text = claim_lines[..count].join("\n\n");
+            if let Ok(result) =
+                build_summary_result(input, &summary.summary_version, &text, &warnings)
+            {
+                return Ok((result, count));
+            }
+        }
+        Err(ContractBuildError::InvalidSummary(
+            "no nonempty whole-claim summary prefix fits the v1 byte limits".to_string(),
+        ))
+    }
+}
+
+fn build_summary_result(
+    input: &InputArtifact,
+    summary_version: &str,
+    text: &str,
+    warnings: &[PipelineWarning],
+) -> Result<JobResult, ContractBuildError> {
+    if text.is_empty() || text.len() > MAX_SUMMARY_TEXT_BYTES {
+        return Err(ContractBuildError::InvalidSummary(
+            "summary text is empty or exceeds the byte limit".to_string(),
+        ));
+    }
+    let input_artifact = ArtifactProvenance::from_input(input);
+    let warnings = warnings.iter().map(wire_warning).collect::<Vec<_>>();
+    if warnings.len() > MAX_SUMMARY_WARNINGS || warnings.iter().any(invalid_wire_warning) {
+        return Err(ContractBuildError::InvalidSummary(
+            "summary warnings exceed count or field limits".to_string(),
+        ));
+    }
+    let content = SummaryContent {
+        summary_version: capability_summary_version(summary_version),
+        text: text.to_string(),
+        warnings,
+        input_artifact,
+    };
+    let bytes = serde_json::to_vec(&content)?;
+    if bytes.is_empty() || bytes.len() > MAX_SUMMARY_ARTIFACT_BYTES {
+        return Err(ContractBuildError::InvalidSummary(
+            "summary artifact exceeds the byte limit".to_string(),
+        ));
+    }
+    Ok(JobResult {
+        outputs: vec![SummaryOutput {
+            artifact_id: Uuid::new_v4().to_string(),
+            media_type: OUTPUT_MEDIA_TYPE.to_string(),
+            byte_size: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+            content,
+        }],
+    })
 }
 
 pub fn job_error(code: impl Into<String>, message: impl Into<String>, retryable: bool) -> JobError {
@@ -526,5 +603,84 @@ mod tests {
             JobResult::from_summary(&request.inputs[0], &summary),
             Err(ContractBuildError::InvalidSummary(_))
         ));
+    }
+
+    #[test]
+    fn summary_text_limit_is_utf8_bytes_and_never_splits_a_scalar() {
+        let request = valid_request();
+        let mut summary = SummaryArtifact {
+            document_id: Uuid::new_v4().to_string(),
+            summary_version: "5.0.0".to_string(),
+            text: "😀".repeat(MAX_SUMMARY_TEXT_BYTES / 4),
+            warnings: vec![],
+            created_at: Utc::now(),
+            integrity_hash: "unused-by-wire-contract".to_string(),
+        };
+        assert_eq!(summary.text.len(), MAX_SUMMARY_TEXT_BYTES);
+        assert!(JobResult::from_summary(&request.inputs[0], &summary).is_ok());
+
+        summary.text.push('x');
+        assert_eq!(summary.text.len(), MAX_SUMMARY_TEXT_BYTES + 1);
+        assert!(JobResult::from_summary(&request.inputs[0], &summary).is_err());
+
+        let first = "Grounded first claim. [p. 1]".to_string();
+        let second = format!("{}😀", "x".repeat(MAX_SUMMARY_TEXT_BYTES - first.len() - 3));
+        summary.text = [first.clone(), second].join("\n\n");
+        let (result, delivered_claims) = JobResult::from_summary_claim_lines(
+            &request.inputs[0],
+            &summary,
+            &[first.clone(), summary.text[first.len() + 2..].to_string()],
+        )
+        .expect("a whole first claim should remain deliverable");
+        assert_eq!(delivered_claims, 1);
+        assert_eq!(result.outputs[0].content.text, first);
+        assert!(result.outputs[0]
+            .content
+            .text
+            .is_char_boundary(result.outputs[0].content.text.len()));
+        assert_eq!(
+            result.outputs[0]
+                .content
+                .warnings
+                .iter()
+                .filter(|warning| warning.code == SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn delivery_prefix_is_whole_idempotently_warned_and_json_bounded() {
+        let request = valid_request();
+        let lines = vec!["\"".repeat(524_280), "\"".repeat(524_280)];
+        let summary = SummaryArtifact {
+            document_id: Uuid::new_v4().to_string(),
+            summary_version: "5.0.0".to_string(),
+            text: lines.join("\n\n"),
+            warnings: vec![PipelineWarning {
+                code: SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE.to_string(),
+                message: "Pipeline admission already stopped at the delivery ceiling.".to_string(),
+                stage: Some(crate::pipeline::contracts::PipelineStage::Analyze),
+            }],
+            created_at: Utc::now(),
+            integrity_hash: "unused-by-wire-contract".to_string(),
+        };
+        assert!(summary.text.len() < MAX_SUMMARY_TEXT_BYTES);
+        let (result, delivered_claims) =
+            JobResult::from_summary_claim_lines(&request.inputs[0], &summary, &lines)
+                .expect("one escaped whole claim should fit the serialized artifact ceiling");
+        assert_eq!(delivered_claims, 1);
+        let output = &result.outputs[0];
+        assert!(output.content.text == lines[0]);
+        assert!(output.byte_size as usize <= MAX_SUMMARY_ARTIFACT_BYTES);
+        assert_eq!(
+            output
+                .content
+                .warnings
+                .iter()
+                .filter(|warning| warning.code == SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE)
+                .count(),
+            1
+        );
     }
 }

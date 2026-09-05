@@ -1,9 +1,9 @@
 use crate::pipeline::contracts::{
-    AnalyzedDocument, ChunkAnalysis, ChunkedDocument, CitationArtifact, CitedClaim, ClaimVerdict,
-    ClaimVerification, EvidenceItem, ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime,
-    ModelRuntimeFailure, NormalizedBlock, NormalizedDocument, PipelineFailure, PipelineStage,
-    PipelineWarning, SourceSpan, SummaryArtifact, SummaryArtifacts, SynthesizedDocument,
-    VerifiedDocument,
+    AnalysisOmissionReason, AnalysisPageOmission, AnalyzedDocument, ChunkAnalysis, ChunkedDocument,
+    CitationArtifact, CitedClaim, ClaimVerdict, ClaimVerification, EvidenceItem, ModelOutputFormat,
+    ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure, NormalizedBlock,
+    NormalizedDocument, PipelineFailure, PipelineStage, PipelineWarning, SourceSpan,
+    SummaryArtifact, SummaryArtifacts, SynthesizedDocument, VerifiedDocument,
 };
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, StoreError};
@@ -75,7 +75,7 @@ const MAX_ANALYSIS_SELECTION_ID_CHARACTERS: usize = 8;
 const MAX_ANALYSIS_CLAIM_CHARACTERS: usize = 384;
 const MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS: usize = 1_536;
 const HISTORICAL_ANALYSIS_CLAIM_CHARACTERS: usize = 192;
-const MAX_SUMMARY_CLAIMS: usize = 64;
+const LEGACY_MAX_SUMMARY_CLAIMS: usize = 64;
 const MAX_VERIFICATION_CLAIMS_PER_REQUEST: usize = 16;
 const MAX_EVIDENCE_PER_CLAIM: usize = 16;
 // Explicit fault-tolerance policy, not an estimated model survival rate.
@@ -86,6 +86,32 @@ const CANCELLATION_OBSERVED_CODE: &str = "PIPELINE_CANCELLATION_OBSERVED";
 const GENERATION_SEED_DOMAIN: &[u8] = b"doc-sum:model-generation-seed:v1";
 const GENERATION_ATTEMPT_SEED_DOMAIN: &[u8] = b"doc-sum:model-generation-attempt-seed:v1";
 const COVERAGE_SHORTFALL_WARNING_CODE: &str = "SUMMARY_COVERAGE_SHORTFALL";
+pub const MAX_DELIVERY_SUMMARY_TEXT_BYTES: usize = 1024 * 1024;
+pub const SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE: &str = "SUMMARY_TRUNCATED_FOR_DELIVERY";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SummaryDeliveryPolicy {
+    max_summary_text_bytes: usize,
+}
+
+impl SummaryDeliveryPolicy {
+    pub const fn connect() -> Self {
+        Self {
+            max_summary_text_bytes: MAX_DELIVERY_SUMMARY_TEXT_BYTES,
+        }
+    }
+
+    const fn max_summary_text_bytes(self) -> usize {
+        self.max_summary_text_bytes
+    }
+
+    #[cfg(test)]
+    const fn for_test(max_summary_text_bytes: usize) -> Self {
+        Self {
+            max_summary_text_bytes,
+        }
+    }
+}
 
 pub(crate) fn generation_seed_for_run(run_id: &str) -> u64 {
     let mut hasher = Sha256::new();
@@ -349,17 +375,28 @@ pub(crate) fn analyze_chunked_document_controlled(
     run_id: &str,
     control: &dyn ExecutionControl,
 ) -> Result<AnalyzedDocument, SummaryPipelineError> {
+    analyze_chunked_document_controlled_with_delivery(conn, runtime, run_id, control, None)
+}
+
+pub(crate) fn analyze_chunked_document_controlled_with_delivery(
+    conn: &mut Connection,
+    runtime: &dyn ModelRuntime,
+    run_id: &str,
+    control: &dyn ExecutionControl,
+    delivery_policy: Option<SummaryDeliveryPolicy>,
+) -> Result<AnalyzedDocument, SummaryPipelineError> {
     let run = db::get_pipeline_run(conn, run_id)?
         .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
     let normalized = db::get_normalized_document(conn, run_id)?
         .ok_or_else(|| StoreError::NormalizedArtifactNotFound(run_id.to_string()))?;
     let (analyzing_run, chunked) = db::start_analysis(conn, run_id, run.state_version)?;
-    let analyzed = match analyze(
+    let analyzed = match analyze_with_delivery(
         runtime,
         &chunked,
         &normalized,
         generation_seed_for_run(run_id),
         control,
+        delivery_policy,
     ) {
         Ok(analyzed) => analyzed,
         Err(failure) if cancellation_observed(&failure) => {
@@ -495,6 +532,14 @@ pub fn complete_verified_document(
     conn: &mut Connection,
     run_id: &str,
 ) -> Result<SummaryArtifacts, SummaryPipelineError> {
+    complete_verified_document_with_delivery(conn, run_id, None)
+}
+
+pub(crate) fn complete_verified_document_with_delivery(
+    conn: &mut Connection,
+    run_id: &str,
+    delivery_policy: Option<SummaryDeliveryPolicy>,
+) -> Result<SummaryArtifacts, SummaryPipelineError> {
     let run = db::get_pipeline_run(conn, run_id)?
         .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
     let normalized = db::get_normalized_document(conn, run_id)?
@@ -562,6 +607,19 @@ pub fn complete_verified_document(
         created_at: Utc::now(),
         integrity_hash: String::new(),
     };
+    if delivery_policy.is_some_and(|policy| summary.text.len() > policy.max_summary_text_bytes()) {
+        return Err(persist_final_failure(
+            conn,
+            run_id,
+            run.state_version,
+            stage_failure(
+                PipelineStage::Verify,
+                "SUMMARY_DELIVERY_LIMIT_EXCEEDED",
+                "The supported summary exceeds the configured delivery byte ceiling",
+                false,
+            ),
+        ));
+    }
     summary.integrity_hash = match summary.calculate_integrity_hash() {
         Ok(hash) => hash,
         Err(_) => {
@@ -597,6 +655,30 @@ pub fn complete_verified_document(
             ));
         }
     };
+    if delivery_policy.is_some() {
+        let cited_pages = citations
+            .evidence
+            .iter()
+            .map(|evidence| evidence.source_span.page_start)
+            .collect::<HashSet<_>>();
+        if !delivery_page_coverage_satisfied(
+            &cited_pages,
+            &persisted_analysis.omissions,
+            &normalized,
+        ) {
+            return Err(persist_final_failure(
+                conn,
+                run_id,
+                run.state_version,
+                stage_failure(
+                    PipelineStage::Verify,
+                    "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED",
+                    "The supported Connect summary does not satisfy raw and omission-adjusted page coverage",
+                    false,
+                ),
+            ));
+        }
+    }
     if let Err(source) = db::complete_summary(conn, run_id, run.state_version, &summary, &citations)
     {
         let failure = stage_failure(
@@ -619,6 +701,7 @@ pub fn complete_verified_document(
     Ok(SummaryArtifacts { summary, citations })
 }
 
+#[cfg(test)]
 fn analyze(
     runtime: &dyn ModelRuntime,
     chunked: &ChunkedDocument,
@@ -626,7 +709,25 @@ fn analyze(
     generation_seed: u64,
     control: &dyn ExecutionControl,
 ) -> Result<AnalyzedDocument, PipelineFailure> {
-    pages::analyze(runtime, chunked, normalized, generation_seed, control)
+    analyze_with_delivery(runtime, chunked, normalized, generation_seed, control, None)
+}
+
+fn analyze_with_delivery(
+    runtime: &dyn ModelRuntime,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+    generation_seed: u64,
+    control: &dyn ExecutionControl,
+    delivery_policy: Option<SummaryDeliveryPolicy>,
+) -> Result<AnalyzedDocument, PipelineFailure> {
+    pages::analyze(
+        runtime,
+        chunked,
+        normalized,
+        generation_seed,
+        control,
+        delivery_policy,
+    )
 }
 
 fn document_claim_budget(normalized: &NormalizedDocument) -> Result<usize, PipelineFailure> {
@@ -653,14 +754,14 @@ fn document_claim_budget(normalized: &NormalizedDocument) -> Result<usize, Pipel
                 false,
             )
         })?;
-    Ok((scaled_pages / 5).clamp(8, MAX_SUMMARY_CLAIMS))
+    Ok((scaled_pages / 5).clamp(8, LEGACY_MAX_SUMMARY_CLAIMS))
 }
 
 fn synthesis_claim_floor(
     claim_budget: usize,
     evidence_count: usize,
 ) -> Result<usize, PipelineFailure> {
-    if claim_budget == 0 || claim_budget > MAX_SUMMARY_CLAIMS || evidence_count == 0 {
+    if claim_budget == 0 || claim_budget > LEGACY_MAX_SUMMARY_CLAIMS || evidence_count == 0 {
         return Err(stage_failure(
             PipelineStage::Synthesize,
             "INVALID_SYNTHESIS_BUDGET",
@@ -824,7 +925,7 @@ fn verify(
     } else if synthesized.synthesis_version == HIERARCHICAL_SYNTHESIS_VERSION {
         document_claim_budget(normalized)?
     } else {
-        MAX_SUMMARY_CLAIMS
+        LEGACY_MAX_SUMMARY_CLAIMS
     };
     let claim_verifications = classify_claim_support(
         runtime,
@@ -979,7 +1080,9 @@ fn plan_verification_batches(
     claim_budget: usize,
     request_character_limit: usize,
 ) -> Result<Vec<VerificationBatch>, PipelineFailure> {
-    if !(1..=MAX_SUMMARY_CLAIMS).contains(&claim_budget) && claim_budget != direct::MAX_CLAIMS {
+    if !(1..=LEGACY_MAX_SUMMARY_CLAIMS).contains(&claim_budget)
+        && claim_budget != direct::MAX_CLAIMS
+    {
         return Err(stage_failure(
             PipelineStage::Verify,
             "INVALID_VERIFICATION_BUDGET",
@@ -1518,6 +1621,74 @@ fn analysis_scope_minimum(page_count: usize) -> Result<usize, PipelineFailure> {
         })
 }
 
+fn delivery_page_coverage_satisfied(
+    cited_pages: &HashSet<u32>,
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+) -> bool {
+    let native_pages = normalized
+        .pages
+        .iter()
+        .filter(|page| {
+            page.content.iter().any(|block| {
+                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
+                    && !block.text.trim().is_empty()
+            })
+        })
+        .map(|page| page.page_number)
+        .collect::<HashSet<_>>();
+    if native_pages.is_empty() || !cited_pages.is_subset(&native_pages) {
+        return false;
+    }
+    let material_omissions = omissions
+        .iter()
+        .filter(|omission| {
+            matches!(
+                omission.reason,
+                AnalysisOmissionReason::NonSubstantivePageFurniture
+                    | AnalysisOmissionReason::NoSubstantiveContent
+            )
+        })
+        .map(|omission| omission.page_number)
+        .collect::<HashSet<_>>();
+    if !material_omissions.is_subset(&native_pages) || !material_omissions.is_disjoint(cited_pages)
+    {
+        return false;
+    }
+    let adjusted_total = native_pages.len() - material_omissions.len();
+    cited_pages.len() <= adjusted_total
+        && (cited_pages.len() as u128) * 2 >= native_pages.len() as u128
+        && adjusted_total > 0
+        && (cited_pages.len() as u128) * 5 >= (adjusted_total as u128) * 3
+}
+
+pub(crate) fn delivery_claim_prefix_coverage_satisfied(
+    citations: &CitationArtifact,
+    delivered_claim_count: usize,
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+) -> bool {
+    if delivered_claim_count == 0 || delivered_claim_count > citations.claims.len() {
+        return false;
+    }
+    let evidence_by_id = citations
+        .evidence
+        .iter()
+        .map(|evidence| (evidence.evidence_id.as_str(), evidence))
+        .collect::<HashMap<_, _>>();
+    let mut cited_pages = HashSet::new();
+    for evidence_id in citations.claims[..delivered_claim_count]
+        .iter()
+        .flat_map(|claim| &claim.evidence_ids)
+    {
+        let Some(evidence) = evidence_by_id.get(evidence_id.as_str()) else {
+            return false;
+        };
+        cited_pages.insert(evidence.source_span.page_start);
+    }
+    delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
+}
+
 fn build_analysis_scopes(
     chunk: &crate::pipeline::contracts::DocumentChunk,
     normalized_blocks: &HashMap<&str, &NormalizedBlock>,
@@ -1539,7 +1710,7 @@ fn analysis_retention_target(native_pages: usize) -> Result<usize, PipelineFailu
     }
     let acceptance = analysis_scope_minimum(native_pages)?;
     let capacity = acceptance
-        .clamp(8, MAX_SUMMARY_CLAIMS)
+        .clamp(8, LEGACY_MAX_SUMMARY_CLAIMS)
         .checked_mul(MAX_EVIDENCE_PER_CLAIM)
         .ok_or_else(invalid)?;
     if acceptance > capacity {
@@ -2007,7 +2178,7 @@ fn parse_claims_response(
         analyzed,
         &allowed_evidence,
         1,
-        MAX_SUMMARY_CLAIMS,
+        LEGACY_MAX_SUMMARY_CLAIMS,
     )?;
     materialize_cited_claims(
         &analyzed.document_id,
@@ -2512,7 +2683,7 @@ fn validate_synthesized_document_without_runtime(
             > if synthesized.synthesis_version == SYNTHESIS_VERSION {
                 direct::MAX_CLAIMS
             } else {
-                MAX_SUMMARY_CLAIMS
+                LEGACY_MAX_SUMMARY_CLAIMS
             }
     {
         return Err(stage_failure(
@@ -2839,6 +3010,13 @@ fn render_cited_summary(
         .flat_map(|analysis| analysis.evidence.iter())
         .map(|item| (item.evidence_id.as_str(), item))
         .collect::<HashMap<_, _>>();
+    render_claim_lines(claims, &evidence).map(|lines| lines.join("\n\n"))
+}
+
+fn render_claim_lines(
+    claims: &[CitedClaim],
+    evidence: &HashMap<&str, &EvidenceItem>,
+) -> Result<Vec<String>, PipelineFailure> {
     claims
         .iter()
         .map(|claim| {
@@ -2870,7 +3048,26 @@ fn render_cited_summary(
             Ok(format!("{} {}", claim.text, citation_label(&spans)))
         })
         .collect::<Result<Vec<_>, PipelineFailure>>()
-        .map(|lines| lines.join("\n\n"))
+}
+
+pub(crate) fn render_citation_claim_lines(
+    artifact: &CitationArtifact,
+) -> Result<Vec<String>, PipelineFailure> {
+    let evidence = artifact
+        .evidence
+        .iter()
+        .map(|item| (item.evidence_id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    let lines = render_claim_lines(&artifact.claims, &evidence)?;
+    if lines.join("\n\n") != artifact.rendered_text {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "INVALID_CITATION_ARTIFACT",
+            "Citation claim boundaries do not reproduce the canonical rendered summary",
+            false,
+        ));
+    }
+    Ok(lines)
 }
 
 fn citation_label(spans: &[SourceSpan]) -> String {
@@ -3427,7 +3624,7 @@ pub(crate) fn fixture_model_output(request: &ModelRequest) -> String {
 mod tests {
     use super::*;
     use crate::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
-    use crate::pipeline::contracts::{ModelResponse, PipelineState};
+    use crate::pipeline::contracts::{AnalysisOmissionOrigin, ModelResponse, PipelineState};
     use crate::pipeline::control::CancellationToken;
     use crate::pipeline::db::{
         get_analyzed_document, get_chunked_document, get_citation_artifact,
@@ -4342,7 +4539,7 @@ mod tests {
         );
         assert_eq!(
             document_claim_budget(&two_hundred_pages).expect("budget should derive"),
-            MAX_SUMMARY_CLAIMS
+            LEGACY_MAX_SUMMARY_CLAIMS
         );
 
         let budget = 12;
@@ -4483,7 +4680,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            serialize_evidence_prompt(&evidence, 1, MAX_SUMMARY_CLAIMS)
+            serialize_evidence_prompt(&evidence, 1, LEGACY_MAX_SUMMARY_CLAIMS)
                 .expect("full evidence prompt should serialize")
                 .chars()
                 .count()
@@ -4850,7 +5047,7 @@ mod tests {
                 exact_quote: item.exact_quote.clone(),
             })
             .collect::<Vec<_>>();
-        let batches = partition_evidence_items(&evidence, MAX_SUMMARY_CLAIMS)
+        let batches = partition_evidence_items(&evidence, LEGACY_MAX_SUMMARY_CLAIMS)
             .expect("large evidence should partition deterministically");
         assert!(batches.len() > 1);
         let allowed = batches[0]
@@ -6503,7 +6700,7 @@ mod tests {
 
     #[test]
     fn maximum_claim_catalog_is_verified_in_bounded_complete_batches() {
-        for budget in [MAX_SUMMARY_CLAIMS, direct::MAX_CLAIMS] {
+        for budget in [LEGACY_MAX_SUMMARY_CLAIMS, direct::MAX_CLAIMS] {
             let claims = (0..budget)
                 .map(|index| CitedClaim {
                     claim_id: format!("claim-{index:064x}"),
@@ -6892,7 +7089,7 @@ mod tests {
             .iter()
             .map(|item| item.evidence_id.clone())
             .collect::<Vec<_>>();
-        let claims = (0..MAX_SUMMARY_CLAIMS)
+        let claims = (0..LEGACY_MAX_SUMMARY_CLAIMS)
             .map(|index| {
                 let text = format!("Large summary claim {index}");
                 CitedClaim {
@@ -6982,6 +7179,29 @@ mod tests {
         assert_eq!(
             get_pipeline_run(&conn, &run_id).unwrap().unwrap().state,
             PipelineState::CompleteWithWarnings
+        );
+    }
+
+    #[test]
+    fn connect_completion_rejects_supported_coverage_below_delivery_floors() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = VerificationFixtureRuntime::new(VerificationFixtureMode::Mixed);
+        analyze_chunked_document(&mut conn, &runtime, &run_id).unwrap();
+        synthesize_analyzed_document(&mut conn, &runtime, &run_id).unwrap();
+        verify_synthesized_document(&mut conn, &runtime, &run_id).unwrap();
+
+        let error = complete_verified_document_with_delivery(
+            &mut conn,
+            &run_id,
+            Some(SummaryDeliveryPolicy::connect()),
+        )
+        .expect_err("Connect completion must recheck actual supported-page coverage");
+        assert_eq!(error.code(), "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED");
+        assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+        assert_eq!(
+            get_pipeline_run(&conn, &run_id).unwrap().unwrap().state,
+            PipelineState::Failed
         );
     }
 
@@ -8136,6 +8356,145 @@ mod tests {
     }
 
     #[test]
+    fn connect_delivery_policy_stops_later_page_calls_at_whole_claim_boundary() {
+        let (normalized, chunked) = sparse_page_scope_fixture(5, 100);
+        let claim = "😀😀😀 Claim.";
+        let first = format!("{claim} [p. 1]");
+        let second = format!("{claim} [p. 2]");
+        let third = format!("{claim} [p. 3]");
+        let limit = format!("{first}\n\n{second}\n\n{third}").len();
+        let runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![json!({"claim_text":claim}).to_string(); 4],
+        };
+        let analyzed = analyze_with_delivery(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+            Some(SummaryDeliveryPolicy::for_test(limit)),
+        )
+        .expect("three covered claim lines should fit before the fourth is rejected whole");
+        assert_eq!(
+            analyzed
+                .chunks
+                .iter()
+                .flat_map(|chunk| &chunk.evidence)
+                .count(),
+            3
+        );
+        assert_eq!(analyzed.inspected_pages, vec![1, 2, 3, 4]);
+        assert_eq!(
+            analyzed
+                .warnings
+                .iter()
+                .filter(|warning| { warning.code == SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE })
+                .count(),
+            1
+        );
+        assert_eq!(runtime.requests.lock().unwrap().len(), 8);
+        assert!(analyzed
+            .warnings
+            .iter()
+            .all(|warning| warning.code != COVERAGE_SHORTFALL_WARNING_CODE));
+
+        let undercovered_runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![json!({"claim_text":claim}).to_string(); 3],
+        };
+        let undercovered_limit = format!("{first}\n\n{second}").len();
+        let error = analyze_with_delivery(
+            &undercovered_runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+            Some(SummaryDeliveryPolicy::for_test(undercovered_limit)),
+        )
+        .expect_err("a nonempty prefix below adjusted coverage must fail closed");
+        assert_eq!(error.code, "SUMMARY_DELIVERY_LIMIT_EXCEEDED");
+        assert_eq!(undercovered_runtime.requests.lock().unwrap().len(), 6);
+
+        let first_claim_runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![json!({"claim_text":claim}).to_string()],
+        };
+        let error = analyze_with_delivery(
+            &first_claim_runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+            Some(SummaryDeliveryPolicy::for_test(first.len() - 1)),
+        )
+        .expect_err("a Connect policy that cannot fit one whole claim must fail closed");
+        assert_eq!(error.code, "SUMMARY_DELIVERY_LIMIT_EXCEEDED");
+        assert_eq!(first_claim_runtime.requests.lock().unwrap().len(), 2);
+
+        let standalone_runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![json!({"claim_text":claim}).to_string(); 5],
+        };
+        let standalone = analyze(
+            &standalone_runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("standalone analysis must not inherit the Connect byte ceiling");
+        assert_eq!(
+            standalone
+                .chunks
+                .iter()
+                .flat_map(|chunk| &chunk.evidence)
+                .count(),
+            5
+        );
+        assert!(standalone
+            .warnings
+            .iter()
+            .all(|warning| warning.code != SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE));
+    }
+
+    #[test]
+    fn connect_delivery_coverage_checks_raw_and_adjusted_boundaries() {
+        let (normalized, _) = sparse_page_scope_fixture(10, 100);
+        let five_pages = (1..=5).collect::<HashSet<_>>();
+        assert!(!delivery_page_coverage_satisfied(
+            &five_pages,
+            &[],
+            &normalized
+        ));
+
+        let material_omissions = [6u32, 7]
+            .into_iter()
+            .map(|page_number| AnalysisPageOmission {
+                page_number,
+                chunk_id: format!("chunk-{page_number}"),
+                reason: AnalysisOmissionReason::NoSubstantiveContent,
+                origin: AnalysisOmissionOrigin::ModelNoSubstantiveContent,
+                filter_version: eligibility::VERSION.to_string(),
+                source_fingerprint: format!("source-{page_number}"),
+                catalog_fingerprint: Some(format!("catalog-{page_number}")),
+            })
+            .collect::<Vec<_>>();
+        assert!(delivery_page_coverage_satisfied(
+            &five_pages,
+            &material_omissions,
+            &normalized
+        ));
+
+        let four_pages = (1..=4).collect::<HashSet<_>>();
+        assert!(!delivery_page_coverage_satisfied(
+            &four_pages,
+            &material_omissions,
+            &normalized
+        ));
+    }
+
+    #[test]
     fn paraphrase_retry_is_bounded_and_preserves_quote_binding() {
         let (normalized, chunked) = materiality_fixture(&["Retain records forever.".into()]);
         let bad = json!({"claim_text": "w".repeat(192)}).to_string();
@@ -9159,6 +9518,58 @@ mod tests {
                 .expect("quick check should run"),
             "ok"
         );
+    }
+
+    #[test]
+    fn standalone_persistence_does_not_inherit_connect_delivery_limit() {
+        let database = TestDatabase::new();
+        let run_id;
+        let expected_text = "😀".repeat(MAX_DELIVERY_SUMMARY_TEXT_BYTES / 4 + 1);
+        {
+            let (mut conn, created_run_id) = synthesized_run(&database, &FakeRuntime::healthy());
+            run_id = created_run_id;
+            verify_synthesized_document(&mut conn, &FakeRuntime::healthy(), &run_id)
+                .expect("fixture should reach verified state");
+            let run = get_pipeline_run(&conn, &run_id)
+                .expect("run query should succeed")
+                .expect("verified run should exist");
+            assert_eq!(run.state, PipelineState::Verified);
+            let document_id = run.document_id.clone();
+            let now = Utc::now();
+            let mut summary = SummaryArtifact {
+                document_id: document_id.clone(),
+                summary_version: SUMMARY_VERSION.to_string(),
+                text: expected_text.clone(),
+                warnings: Vec::new(),
+                created_at: now,
+                integrity_hash: String::new(),
+            };
+            summary.integrity_hash = summary.calculate_integrity_hash().unwrap();
+            let mut citations = CitationArtifact {
+                document_id,
+                citation_version: CITATION_VERSION.to_string(),
+                summary_integrity_hash: summary.integrity_hash.clone(),
+                rendered_text: expected_text.clone(),
+                claims: Vec::new(),
+                evidence: Vec::new(),
+                created_at: now,
+                integrity_hash: String::new(),
+            };
+            citations.integrity_hash = citations.calculate_integrity_hash().unwrap();
+            db::complete_summary(&mut conn, &run_id, run.state_version, &summary, &citations)
+                .expect("standalone persistence must not apply the Connect delivery ceiling");
+        }
+
+        let reopened = init_db(&database.0).expect("database should independently reopen");
+        let persisted = get_summary_artifact(&reopened, &run_id)
+            .expect("summary query should succeed")
+            .expect("oversized standalone summary should persist");
+        assert_eq!(persisted.text, expected_text);
+        assert!(persisted.text.len() > MAX_DELIVERY_SUMMARY_TEXT_BYTES);
+        assert!(persisted
+            .warnings
+            .iter()
+            .all(|warning| warning.code != SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE));
     }
 
     #[test]

@@ -7,14 +7,21 @@ use crate::connect::entitlement::{EntitlementConfigurationError, EntitlementGate
 use crate::connect::store::{self, ConnectStoreError, StoredConnectJob};
 use crate::connect::v2;
 use crate::pipeline::chunk::DeterministicDocumentChunker;
-use crate::pipeline::contracts::{ModelRuntime, ModelRuntimeFailure};
+use crate::pipeline::contracts::{
+    AnalysisPageOmission, ModelRuntime, ModelRuntimeFailure, NormalizedDocument, SummaryArtifacts,
+};
 use crate::pipeline::db;
 use crate::pipeline::ingest::prepare_pdf_ingestion;
 use crate::pipeline::model::OllamaRuntime;
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
-use crate::pipeline::service::{process_ingested_to_summary, SummaryComponents};
+use crate::pipeline::service::{
+    process_ingested_to_summary_with_delivery_policy, SummaryComponents,
+};
 use crate::pipeline::structure::DeterministicStructureInterpreter;
+use crate::pipeline::summary::{
+    delivery_claim_prefix_coverage_satisfied, render_citation_claim_lines, SummaryDeliveryPolicy,
+};
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -795,7 +802,7 @@ fn process_job(state: ProviderState, job_id: String) {
         let normalizer = CanonicalNormalizer::new();
         let interpreter = DeterministicStructureInterpreter::new();
         let chunker = DeterministicDocumentChunker::new();
-        let summary = process_ingested_to_summary(
+        let summary = process_ingested_to_summary_with_delivery_policy(
             &mut pipeline_conn,
             &job.pipeline_run_id,
             SummaryComponents {
@@ -805,9 +812,22 @@ fn process_job(state: ProviderState, job_id: String) {
                 chunker: &chunker,
                 runtime: runtime.as_ref(),
             },
+            SummaryDeliveryPolicy::connect(),
         )?;
-        let result = JobResult::from_summary(&job.input, &summary.summary)?;
-        store::mark_completed(&conn, &job_id, &result)?;
+        let analyzed = db::get_analyzed_document(&pipeline_conn, &job.pipeline_run_id)?
+            .ok_or_else(
+                || crate::pipeline::db::StoreError::DownstreamArtifactNotFound {
+                    artifact_kind: "analyzed".to_string(),
+                    run_id: job.pipeline_run_id.clone(),
+                },
+            )?;
+        let normalized = db::get_normalized_document(&pipeline_conn, &job.pipeline_run_id)?
+            .ok_or_else(|| {
+                crate::pipeline::db::StoreError::NormalizedArtifactNotFound(
+                    job.pipeline_run_id.clone(),
+                )
+            })?;
+        persist_completed_summary(&conn, &job, &summary, &analyzed.omissions, &normalized)?;
         Ok(())
     })();
 
@@ -823,6 +843,35 @@ fn process_job(state: ProviderState, job_id: String) {
             }
         }
     }
+}
+
+fn persist_completed_summary(
+    conn: &rusqlite::Connection,
+    job: &StoredConnectJob,
+    summary: &SummaryArtifacts,
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+) -> Result<(), ProcessJobError> {
+    let claim_lines = render_citation_claim_lines(&summary.citations)
+        .map_err(crate::pipeline::summary::SummaryPipelineError::StageFailed)
+        .map_err(crate::pipeline::service::DocumentServiceError::Summary)?;
+    let (result, delivered_claim_count) =
+        JobResult::from_summary_claim_lines(&job.input, &summary.summary, &claim_lines)?;
+    if !delivery_claim_prefix_coverage_satisfied(
+        &summary.citations,
+        delivered_claim_count,
+        omissions,
+        normalized,
+    ) {
+        return Err(
+            crate::connect::contracts::ContractBuildError::InvalidSummary(
+                "delivered claim prefix does not satisfy Connect page coverage".to_string(),
+            )
+            .into(),
+        );
+    }
+    store::mark_completed(conn, &job.job_id, &result)?;
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -1644,7 +1693,12 @@ mod tests {
         CapabilityRef, InputArtifact, JobState, CAPABILITY_ID, CAPABILITY_VERSION, INPUT_MEDIA_TYPE,
     };
     use crate::connect::entitlement::{EntitlementGate, ENTITLEMENT_FILE_NAME, FEATURE_ID};
-    use crate::pipeline::contracts::{ModelRequest, ModelResponse};
+    use crate::pipeline::contracts::{
+        CitationArtifact, CitedClaim, EvidenceItem, ModelRequest, ModelResponse, SourceSpan,
+        SourceType, SummaryArtifact,
+    };
+    use crate::pipeline::normalize::normalize_document;
+    use crate::pipeline::parser::parse_document;
     use base64::{
         engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
         Engine as _,
@@ -1853,6 +1907,231 @@ mod tests {
             }],
             parameters: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn completed_connect_job_persists_a_bounded_whole_claim_prefix() {
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(&source).unwrap();
+        let request = fixture_request(&bytes);
+        let (document, run) = prepare_pdf_ingestion(
+            source.to_str().unwrap(),
+            Some(&request.inputs[0].display_name),
+        )
+        .unwrap();
+        let mut conn = db::init_db(":memory:").unwrap();
+        let (_, accepted) = store::accept_job_with_ingestion(
+            &mut conn,
+            &request,
+            &request.canonical_hash().unwrap(),
+            source.to_str().unwrap(),
+            &Uuid::new_v4().to_string(),
+            &document,
+            &run,
+        )
+        .unwrap();
+        let processing = store::mark_processing(&conn, &accepted.job_id).unwrap();
+        parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id).unwrap();
+        normalize_document(&mut conn, &CanonicalNormalizer::new(), &run.run_id).unwrap();
+        let normalized = db::get_normalized_document(&conn, &run.run_id)
+            .unwrap()
+            .unwrap();
+
+        let claim_texts = ['a', 'b', 'c', 'd']
+            .into_iter()
+            .map(|letter| format!("{}.", letter.to_string().repeat(329_999)))
+            .collect::<Vec<_>>();
+        let evidence = (1u32..=4)
+            .into_iter()
+            .map(|page| EvidenceItem {
+                evidence_id: format!("evidence-{page}"),
+                chunk_id: format!("chunk-{page}"),
+                block_id: format!("block-{page}"),
+                claim_text: claim_texts[(page - 1) as usize].clone(),
+                exact_quote: format!("quote-{page}"),
+                source_span: SourceSpan {
+                    page_start: page,
+                    page_end: page,
+                    section_id: None,
+                    source_type: SourceType::NativeText,
+                },
+            })
+            .collect::<Vec<_>>();
+        let claims = (1u32..=4)
+            .map(|page| CitedClaim {
+                claim_id: format!("claim-{page}"),
+                text: claim_texts[(page - 1) as usize].clone(),
+                evidence_ids: vec![format!("evidence-{page}")],
+            })
+            .collect::<Vec<_>>();
+        let rendered_text = claims
+            .iter()
+            .enumerate()
+            .map(|(index, claim)| format!("{} [p. {}]", claim.text, index + 1))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let now = Utc::now();
+        let summary = SummaryArtifacts {
+            summary: SummaryArtifact {
+                document_id: document.document_id.clone(),
+                summary_version: crate::pipeline::summary::SUMMARY_VERSION.to_string(),
+                text: rendered_text.clone(),
+                warnings: Vec::new(),
+                created_at: now,
+                integrity_hash: "summary-integrity".to_string(),
+            },
+            citations: CitationArtifact {
+                document_id: document.document_id,
+                citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
+                summary_integrity_hash: "summary-integrity".to_string(),
+                rendered_text,
+                claims,
+                evidence,
+                created_at: now,
+                integrity_hash: "citation-integrity".to_string(),
+            },
+        };
+
+        persist_completed_summary(&conn, &processing, &summary, &[], &normalized).unwrap();
+
+        let persisted = store::get_job(&conn, &processing.job_id).unwrap().unwrap();
+        assert_eq!(persisted.state, JobState::Completed);
+        let content = &persisted.result.unwrap().outputs[0].content;
+        let expected = summary.citations.claims[..3]
+            .iter()
+            .enumerate()
+            .map(|(index, claim)| format!("{} [p. {}]", claim.text, index + 1))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(content.text, expected);
+        assert!(content.text.len() <= crate::connect::contracts::MAX_SUMMARY_TEXT_BYTES);
+        assert_eq!(
+            content
+                .warnings
+                .iter()
+                .filter(|warning| {
+                    warning.code
+                        == crate::pipeline::summary::SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn json_bounded_prefix_cannot_complete_below_page_coverage() {
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(&source).unwrap();
+        let request = fixture_request(&bytes);
+        let (document, run) = prepare_pdf_ingestion(
+            source.to_str().unwrap(),
+            Some(&request.inputs[0].display_name),
+        )
+        .unwrap();
+        let mut conn = db::init_db(":memory:").unwrap();
+        let (_, accepted) = store::accept_job_with_ingestion(
+            &mut conn,
+            &request,
+            &request.canonical_hash().unwrap(),
+            source.to_str().unwrap(),
+            &Uuid::new_v4().to_string(),
+            &document,
+            &run,
+        )
+        .unwrap();
+        let processing = store::mark_processing(&conn, &accepted.job_id).unwrap();
+        parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id).unwrap();
+        normalize_document(&mut conn, &CanonicalNormalizer::new(), &run.run_id).unwrap();
+        let normalized = db::get_normalized_document(&conn, &run.run_id)
+            .unwrap()
+            .unwrap();
+
+        let fixed_bytes = (1u32..=3)
+            .map(|page| format!("Done. [p. {page}]").len())
+            .sum::<usize>()
+            + 4;
+        let quote_bytes = crate::connect::contracts::MAX_SUMMARY_TEXT_BYTES - fixed_bytes - 1;
+        let base = quote_bytes / 3;
+        let remainder = quote_bytes % 3;
+        let claim_texts = (0..3)
+            .map(|index| {
+                format!(
+                    "{}Done.",
+                    "\"".repeat(base + usize::from(index < remainder))
+                )
+            })
+            .collect::<Vec<_>>();
+        let evidence = (1u32..=3)
+            .map(|page| EvidenceItem {
+                evidence_id: format!("evidence-{page}"),
+                chunk_id: format!("chunk-{page}"),
+                block_id: format!("block-{page}"),
+                claim_text: claim_texts[(page - 1) as usize].clone(),
+                exact_quote: format!("quote-{page}"),
+                source_span: SourceSpan {
+                    page_start: page,
+                    page_end: page,
+                    section_id: None,
+                    source_type: SourceType::NativeText,
+                },
+            })
+            .collect::<Vec<_>>();
+        let claims = (1u32..=3)
+            .map(|page| CitedClaim {
+                claim_id: format!("claim-{page}"),
+                text: claim_texts[(page - 1) as usize].clone(),
+                evidence_ids: vec![format!("evidence-{page}")],
+            })
+            .collect::<Vec<_>>();
+        let rendered_text = claims
+            .iter()
+            .enumerate()
+            .map(|(index, claim)| format!("{} [p. {}]", claim.text, index + 1))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(
+            rendered_text.len(),
+            crate::connect::contracts::MAX_SUMMARY_TEXT_BYTES - 1
+        );
+        let now = Utc::now();
+        let summary = SummaryArtifacts {
+            summary: SummaryArtifact {
+                document_id: document.document_id.clone(),
+                summary_version: crate::pipeline::summary::SUMMARY_VERSION.to_string(),
+                text: rendered_text.clone(),
+                warnings: Vec::new(),
+                created_at: now,
+                integrity_hash: "summary-integrity".to_string(),
+            },
+            citations: CitationArtifact {
+                document_id: document.document_id,
+                citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
+                summary_integrity_hash: "summary-integrity".to_string(),
+                rendered_text,
+                claims,
+                evidence,
+                created_at: now,
+                integrity_hash: "citation-integrity".to_string(),
+            },
+        };
+        let claim_lines = render_citation_claim_lines(&summary.citations).unwrap();
+        let (_, delivered_claim_count) =
+            JobResult::from_summary_claim_lines(&processing.input, &summary.summary, &claim_lines)
+                .unwrap();
+        assert_eq!(delivered_claim_count, 2);
+
+        let error = persist_completed_summary(&conn, &processing, &summary, &[], &normalized)
+            .expect_err("a JSON-bounded prefix below coverage must not complete");
+        assert!(matches!(error, ProcessJobError::Contract(_)));
+        assert_eq!(
+            store::get_job(&conn, &processing.job_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            JobState::Processing
+        );
     }
 
     fn signed_test_entitlement(

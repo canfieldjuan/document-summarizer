@@ -19,7 +19,7 @@ pub(super) fn evidence_response(
         .map_err(|_| invalid("Synthesis must return text claims and integer assignments only"))?;
     if bounds.minimum == 0
         || bounds.minimum > bounds.maximum
-        || bounds.maximum > MAX_SUMMARY_CLAIMS
+        || bounds.maximum > LEGACY_MAX_SUMMARY_CLAIMS
         || raw.claims.len() < bounds.minimum
         || raw.claims.len() > bounds.maximum
         || raw.assignments.len() != evidence.len()

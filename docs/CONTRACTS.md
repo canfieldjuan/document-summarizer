@@ -576,6 +576,53 @@ styles, DB migration or broader unfinished attempt-audit work, Connect, OCR,
 vision, packaging and CI. Any residual factual or omission failure is reported,
 not repaired by relaxing coverage or retrying until a favorable run appears.
 
+### Delivery-scoped Connect summary byte admission
+
+Connect v1's 1 MiB UTF-8 summary-text ceiling is an optional delivery policy,
+not a standalone-summary limit. One UI-neutral pipeline constant is authoritative
+for both the Connect policy and wire projection. Standalone service calls supply
+no delivery policy and may persist and reopen a larger valid summary unchanged.
+
+For a current Connect run, analysis accumulates the exact UTF-8 bytes of whole
+rendered claim lines in source order, including blank-line separators and
+application-derived citation labels. The first claim that would exceed the
+ceiling is not admitted; analysis records one durable
+`SUMMARY_TRUNCATED_FOR_DELIVERY` warning and schedules no later page model calls.
+Synthesis and verification continue over the admitted nonempty prefix, which
+must still satisfy the existing raw and omission-adjusted coverage gates. A
+delivery limit is not an omission and removes no page from either denominator.
+Before accepting the early stop, Rust checks that the retained prefix itself
+already clears both floors; otherwise analysis fails immediately with the
+delivery-capacity error. The delivery warning replaces the ordinary exhausted-
+plan shortfall warning because later pages were deliberately not inspected.
+After verification, Connect recomputes both floors from the actually supported
+claim citations and fails closed before persistence if either has fallen below
+its threshold.
+The first non-fitting claim may already have consumed its selection/paraphrase
+calls because its exact bytes are unknowable earlier. Final completion checks the
+actual supported rendering against the same ceiling before persistence.
+
+Wire projection remains defensive for historical or resumed artifacts. It
+derives claim boundaries from the persisted citation artifact and, when complete
+text or serialized JSON does not fit, persists the largest nonempty whole-claim
+prefix satisfying both the 1 MiB text and 2 MiB JSON limits. It adds the same
+warning idempotently without mutating the pipeline artifacts. If even one whole
+claim plus required metadata and warnings cannot fit, delivery fails closed.
+Before completion, the provider recomputes both page-coverage floors from the
+exact prefix selected by wire projection; JSON-escape expansion cannot silently
+shrink a previously valid result below either floor. An under-covered wire
+prefix fails instead of being stored as a completed Connect job.
+No path splits a UTF-8 scalar, claim, citation label, or JSON escape, and no
+truncation can rescue an otherwise invalid or unsupported claim.
+
+New direct synthesis retains its 512-claim pathological ceiling. Historical
+hierarchical generation and reload retain their 64-claim compatibility ceiling,
+named `LEGACY_MAX_SUMMARY_CLAIMS`; neither value is recomputed by delivery policy.
+The boundary suite pins exact-limit and one-byte-over supplementary-plane text,
+separators and citation labels, stopped model scheduling, warning idempotence,
+whole-claim JSON fallback, standalone isolation, both claim ceilings, and a
+persisted completed Connect result.
+
 ### Analysis, deterministic filters and model boundaries
 
 `ModelRuntime` remains the only inference boundary. New analysis uses a
@@ -1008,6 +1055,12 @@ use. Completed wire output contains plain text, bounded warnings, and the input
 artifact ID/media type/size/hash, but no provider-private document/run ID,
 database shape, filesystem path, email metadata, or credentials. Provider
 output is admitted against the v1 byte/count/field limits before completion.
+Connect supplies the delivery policy before analysis; standalone calls do not.
+Current runs stop later model work at a whole-claim boundary, while final wire
+projection also bounds historical artifacts to a whole-claim prefix. The bounded
+result and delivery warning are stored with the completed Connect job; the full
+standalone pipeline artifact is never rewritten to satisfy an optional wire
+constraint.
 
 This is a same-OS-user possession boundary, not application authentication. A
 hostile process running as the same user can read the registration token; a
