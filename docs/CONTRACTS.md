@@ -461,9 +461,14 @@ Two narrow mechanically recognized cases produce an empty catalog:
   80 percent of non-whitespace characters in punctuation, symbol, or control
   classes (including replacement characters). Neither word absence nor character
   distribution alone permits omission. Recognizable substantive numeric content
-  such as amounts, percentages, units, or numeric tables vetoes this rule. The
-  captured NARA page 6 is a positive fixture; its distribution is not a reason
-  to discard a noisy page that also contains legible substantive text.
+  such as amounts, percentages, units, or numeric tables vetoes this rule.
+  Attached and separated short units, including "5l" and "5 L", are protected.
+  The exact captured NARA page 6 contains "5l" and is therefore an ambiguous-
+  content retention fixture, not an omission-positive fixture. This does not
+  assert that the original page contains a measurement; it preserves content
+  when Rust cannot safely exclude that interpretation. No named fixture is
+  exempt from the numeric veto. Use unit-free synthetic scan noise for positive
+  omission controls; a noisy distribution never overrides substantive content.
 - Isolated date/page stamp: at most 32 trimmed Unicode characters whose entire
   content matches a numeric slash-separated date followed by a short page/form
   marker, such as "03/10/03  A-4", with no other content. The date grammar is
@@ -596,9 +601,11 @@ Verification required before claiming completion:
 - Selection/paraphrase separation: a decoy candidate contains a fact absent from
   the selected quote, and captured paraphrase input demonstrably excludes it.
   Invalid selection, mixed outcome, extra field, and 192/193-character tests.
-- Deterministic filter fixtures include the exact captured NARA scan-noise and
-  date-stamp pages; both yield empty catalogs and zero model calls. Test the
-  filter itself with short obligations, exceptions, standalone dates, labeled
+- Deterministic filter fixtures retain the exact captured NARA page 6, with a
+  non-empty quote catalog and no model omission option. Unit-free synthetic scan
+  noise and the exact captured NARA date-stamp page yield empty catalogs and zero
+  model calls. The 80 percent ratio and 32-character stamp bound remain unchanged.
+  Test the filter itself with short obligations, exceptions, standalone dates, labeled
   deadlines, amounts, percentages, units, numeric tables, Unicode words, and
   mixed noise/substantive content, including substantive text at the page tail.
   These controls must retain content without relying on a model to rescue it.
