@@ -421,13 +421,12 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 Status: the direct-summary and tolerant-paraphrase behavior is implemented by
 `2ed9c07` and `8b0d039`, after their separate documentation-only contracts
-`9d81f89` and `5c2c3e6`. The analysis-v11 material-marker omission admission
-below is specified but not yet implemented. Its implementation must update this
-status in a later commit; contract and code must remain separate. Live corpus
-proof is reported separately in LOCAL_MODEL_EVALUATION.md. This section replaces
-the retired proposal and its accumulated amendments. Historical artifacts retain
-their original validation rules. No optional shorter-summary feature is
-introduced.
+`9d81f89` and `5c2c3e6`. The analysis-v11 material-marker omission admission is
+implemented by `77742f4` after documentation-only contracts `e5bc59b` and
+`4344ec0`. Live corpus proof is reported separately in
+LOCAL_MODEL_EVALUATION.md. This section replaces the retired proposal and its
+accumulated amendments. Historical artifacts retain their original validation
+rules. No optional shorter-summary feature is introduced.
 
 Root cause: useful quote-bound paraphrases are regenerated and forcibly merged
 to meet a page-derived claim target; generated grouping is a new failure surface.
@@ -673,18 +672,20 @@ attempt it filters. Expected-state/version checks, cancellation races,
 transactional transitions, immutable events, source identity, row hashes and
 independent-reopen validation remain authoritative.
 
-New artifacts use analysis 10.0.0 and synthesis/verification/summary 5.0.0,
-with citation format 3.0.0 unchanged. Historical analysis 9.0.0 retains the
+New artifacts use analysis 11.0.0 and synthesis/verification/summary 5.0.0,
+with citation format 3.0.0 unchanged. Historical analysis 10.0.0 retains its
+complete-page-only model omission admission. Analysis 9.0.0 retains the
 384-character ceiling and its original omission admission; 8.0.0 retains its
 earlier retention formula; 7.1.0/7.0.0 retain the 384-character validation era;
-6.0.0 retains 192-character completeness checks; earlier artifacts retain
-their versioned older rules. The technical omission is rejected in all those
-historical versions. Historical synthesis/verification/summary 4.0.0 retains
-the page-derived B/K and generation-attempt lineage rules when loaded;
-3.0.0 and mechanical 2.0.0 remain readable with their original citation formats.
-Resuming an already synthesized or verified checkpoint does not relabel its
-artifact or invent a new prior attempt. A new direct synthesis from validated
-older analysis is version 5, not a rewrite of the older evidence identity.
+6.0.0 retains 192-character completeness checks; earlier artifacts retain their
+versioned older rules. The technical omission is rejected in all historical
+versions where it was never valid. Historical synthesis/verification/summary
+4.0.0 retains the page-derived B/K and generation-attempt lineage rules when
+loaded; 3.0.0 and mechanical 2.0.0 remain readable with their original citation
+formats. Resuming an already synthesized or verified checkpoint does not
+relabel its artifact or invent a new prior attempt. A new direct synthesis from
+validated older analysis is version 5, not a rewrite of the older evidence
+identity.
 
 ### Runtime, reporting and explicit limits
 

@@ -1,40 +1,36 @@
 # Corpus and native Ollama evaluation — updated 2026-09-05
 
-## Latest slice: DOL passes; NARA raw coverage fails on retry
+## Latest slice: both corpus acceptances pass; NARA remains robustness-only
 
-**Failure first: the exact-head NARA retry fails the 50-percent raw page floor.**
-The pipeline delivered five supported claims, but cited only five of 11
-native-text pages (45.45 percent raw; 83.33 percent of six omission-adjusted
-pages). The model again returned `no_substantive_content` for page 4 even though
-the selection/paraphrase prompts name form identifiers, names, dates, reference
-numbers and cross-references as material. Verification correctly withheld the
-known OCR-flattened page-3 claim. The test therefore failed rather than allowing
-model omissions to manufacture a passing adjusted denominator.
+**Known fidelity limitation first: NARA is not OCR-table accuracy evidence.**
+Its flattened text layer fuses table rows on page 3. In this run verification
+withheld that derived claim as unsupported, but an earlier run accepted the same
+row-fused sentence. The new pass proves delivery, warnings, omission admission
+and no crash; it does not prove that model verification can reconstruct table
+relationships absent from extracted text. NARA remains an OCR/parser robustness
+fixture.
 
-NARA used 21 requests, 381 completion tokens and 20.35 seconds. It retained six
-evidence items and delivered five after one unsupported verdict. Warnings were
-`NO_NATIVE_TEXT`, `ANALYSIS_PAGE_OMITTED`,
-`OCR_TEXT_LAYER_STRUCTURE_RISK`, an analysis-stage
-`SUMMARY_COVERAGE_SHORTFALL`, `SEMANTIC_CLAIMS_WITHHELD`, and a verification-stage
-`SUMMARY_COVERAGE_SHORTFALL`. This directly proves the warning-propagation fix:
-verification no longer erases the earlier analysis shortfall. It does not make
-NARA accuracy evidence. The flattened OCR layer still fuses table relationships,
-and the extracted scopes for omitted pages contain substantially less text than
-an independent page rendering. NARA remains an OCR/parser robustness fixture.
+**The exact-head NARA acceptance now passes without lowering either coverage
+floor.** The pipeline retained seven evidence items and delivered six supported
+claims. It cited six of 11 native-text pages (54.55 percent raw) and six of seven
+omission-adjusted pages (85.71 percent). Page 4 was structurally denied the model
+omission option because its complete-page text contains material markers; it was
+retained, verified and cited. Pages 6, 7 and 11 remained recorded model omissions
+for scan noise, and the page-12 date stamp remained a deterministic omission with
+no model call. Page 3 was the single unsupported claim.
 
-**The DOL native-text scale fixture still passes.** The 111-page deck completed
-in 178.48 seconds with 81 supported direct claims from 83 retained evidence
-items, citing 81 pages. Raw and adjusted page coverage were both 72.97 percent.
-Two claims were withheld; the run completed with `LONG_CLAIM`,
-`SEMANTIC_CLAIMS_WITHHELD` and `SUMMARY_COVERAGE_SHORTFALL` instead of discarding
-the document. It used 176 requests and 5,657 completion tokens.
+The run used 21 requests, all Primary transport, 425 completion tokens and 17.77
+seconds wall time. It completed with warnings including
+`OCR_TEXT_LAYER_STRUCTURE_RISK`, `ANALYSIS_PAGE_OMITTED`,
+`SEMANTIC_CLAIMS_WITHHELD` and `SUMMARY_COVERAGE_SHORTFALL`. The complete result
+survived the acceptance test's independent reopen.
 
-The four live negative controls all remained retained: a short obligation, a
-dollar amount, a negated destruction rule and an exception-qualified approval
-rule each produced one evidence item with zero omissions. NARA's 21 recorded
-attempts all used Primary transport. DOL completed through the structured path;
-its per-attempt transport lines were emitted but the middle of the console record
-was truncated, so no all-primary assertion is made here.
+**The DOL native-text scale fixture still passes on the preceding exact head.**
+That recorded run retained 83 evidence items and delivered 81 supported direct
+claims, citing 81 of 111 pages (72.97 percent raw and adjusted). It used 176
+requests, 5,657 completion tokens and 178.48 seconds. DOL was not rerun for the
+marker-admission change because it recorded zero omissions and the changed path
+is the NARA short-form case.
 
 The NARA delivered summary was printed between
 `OFFICE_LIVE_DELIVERED_SUMMARY` markers. Its complete text was:
@@ -44,6 +40,9 @@ The NARA delivered summary was printed between
 > record disposition. [p. 1]
 >
 > The disposal request is subject to the provisions of 44 U.S.C. 3303a. [p. 2]
+>
+> For those formats marked with an asterisk (*), see line 11 of this form, as
+> noted in the attached memo dated May 28, 2008. [p. 4]
 >
 > Upon approval of this agreement, transfer all eligible (30 years old)
 > electronic records directly to NARA and pre-accession all additional records.
@@ -58,16 +57,15 @@ The NARA delivered summary was printed between
 
 The DOL delivered text was 17,393 characters with SHA-256
 `8436228de7271f893ed7de6b21b601e3c21766c3405439f8cfbdd0a9930cc987`.
-Response text tracing was disabled for that retry, so the run proves the persisted
-artifact and acceptance metrics but does not add another full transcript here.
+Response text tracing was disabled for that earlier retry, so it proves the
+persisted artifact and acceptance metrics but does not add another transcript.
 
-Code under test includes documentation-only contract `5c2c3e6`, implementation
-`8b0d039`, aggregate reporting `01d5eab`, and warning/version follow-up
-`4cec879`. Local all-target tests passed with 260 library tests and six ignored,
+Documentation-only contracts `e5bc59b` and `4344ec0` precede implementation
+`77742f4`. Local all-target tests pass with 263 library tests and six ignored,
 three acceptance tests and three ignored, and three release tests. Strict clippy,
-formatting and diff checks passed. The separate NARA live acceptance failed as
-reported above; DOL passed. Hosted CI is not claimed; the operator requires local
-checks because private-repository Actions minutes are exhausted.
+formatting and diff checks pass. The separate NARA live acceptance passes as
+reported above. Hosted CI is not claimed; the operator requires local checks
+because private-repository Actions minutes are exhausted.
 
 ## Previous slice: direct paraphrases implemented; live control timed out
 
