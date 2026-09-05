@@ -841,6 +841,20 @@ pub(super) fn analyze(
                     false,
                 ));
             }
+            let retained_pages = analyzed
+                .chunks
+                .iter()
+                .flat_map(|chunk| &chunk.evidence)
+                .map(|retained| retained.source_span.page_start)
+                .collect::<HashSet<_>>();
+            if !delivery_page_coverage_satisfied(&retained_pages, &analyzed.omissions, normalized) {
+                return Err(stage_failure(
+                    PipelineStage::Analyze,
+                    "SUMMARY_DELIVERY_LIMIT_EXCEEDED",
+                    "The delivery byte ceiling was reached before the retained prefix satisfied page coverage",
+                    false,
+                ));
+            }
             analyzed.warnings.push(delivery_truncation_warning());
             break;
         }
@@ -892,7 +906,12 @@ pub(super) fn analyze(
             stage: Some(PipelineStage::Analyze),
         });
     }
-    if count < target {
+    if count < target
+        && !analyzed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE)
+    {
         analyzed.warnings.push(PipelineWarning {
             code: COVERAGE_SHORTFALL_WARNING_CODE.to_string(),
             message: "All native-text pages inspected without meeting retained-evidence target"
@@ -1054,12 +1073,16 @@ pub(super) fn validate_plan(
     {
         return Err(invalid("Recorded omissions require a durable warning"));
     }
-    if retained < target
-        && !analyzed
-            .warnings
-            .iter()
-            .any(|w| w.code == COVERAGE_SHORTFALL_WARNING_CODE)
-    {
+    let has_coverage_shortfall = analyzed
+        .warnings
+        .iter()
+        .any(|warning| warning.code == COVERAGE_SHORTFALL_WARNING_CODE);
+    if delivery_stopped && has_coverage_shortfall {
+        return Err(invalid(
+            "Delivery truncation must not masquerade as exhausted page inspection",
+        ));
+    }
+    if retained < target && !delivery_stopped && !has_coverage_shortfall {
         return Err(invalid(
             "Exhausted page plan requires a durable shortfall warning",
         ));

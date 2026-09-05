@@ -1,9 +1,9 @@
 use crate::pipeline::contracts::{
-    AnalyzedDocument, ChunkAnalysis, ChunkedDocument, CitationArtifact, CitedClaim, ClaimVerdict,
-    ClaimVerification, EvidenceItem, ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime,
-    ModelRuntimeFailure, NormalizedBlock, NormalizedDocument, PipelineFailure, PipelineStage,
-    PipelineWarning, SourceSpan, SummaryArtifact, SummaryArtifacts, SynthesizedDocument,
-    VerifiedDocument,
+    AnalysisOmissionReason, AnalysisPageOmission, AnalyzedDocument, ChunkAnalysis, ChunkedDocument,
+    CitationArtifact, CitedClaim, ClaimVerdict, ClaimVerification, EvidenceItem, ModelOutputFormat,
+    ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure, NormalizedBlock,
+    NormalizedDocument, PipelineFailure, PipelineStage, PipelineWarning, SourceSpan,
+    SummaryArtifact, SummaryArtifacts, SynthesizedDocument, VerifiedDocument,
 };
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, StoreError};
@@ -655,6 +655,30 @@ pub(crate) fn complete_verified_document_with_delivery(
             ));
         }
     };
+    if delivery_policy.is_some() {
+        let cited_pages = citations
+            .evidence
+            .iter()
+            .map(|evidence| evidence.source_span.page_start)
+            .collect::<HashSet<_>>();
+        if !delivery_page_coverage_satisfied(
+            &cited_pages,
+            &persisted_analysis.omissions,
+            &normalized,
+        ) {
+            return Err(persist_final_failure(
+                conn,
+                run_id,
+                run.state_version,
+                stage_failure(
+                    PipelineStage::Verify,
+                    "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED",
+                    "The supported Connect summary does not satisfy raw and omission-adjusted page coverage",
+                    false,
+                ),
+            ));
+        }
+    }
     if let Err(source) = db::complete_summary(conn, run_id, run.state_version, &summary, &citations)
     {
         let failure = stage_failure(
@@ -1595,6 +1619,47 @@ fn analysis_scope_minimum(page_count: usize) -> Result<usize, PipelineFailure> {
                 false,
             )
         })
+}
+
+fn delivery_page_coverage_satisfied(
+    cited_pages: &HashSet<u32>,
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+) -> bool {
+    let native_pages = normalized
+        .pages
+        .iter()
+        .filter(|page| {
+            page.content.iter().any(|block| {
+                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
+                    && !block.text.trim().is_empty()
+            })
+        })
+        .map(|page| page.page_number)
+        .collect::<HashSet<_>>();
+    if native_pages.is_empty() || !cited_pages.is_subset(&native_pages) {
+        return false;
+    }
+    let material_omissions = omissions
+        .iter()
+        .filter(|omission| {
+            matches!(
+                omission.reason,
+                AnalysisOmissionReason::NonSubstantivePageFurniture
+                    | AnalysisOmissionReason::NoSubstantiveContent
+            )
+        })
+        .map(|omission| omission.page_number)
+        .collect::<HashSet<_>>();
+    if !material_omissions.is_subset(&native_pages) || !material_omissions.is_disjoint(cited_pages)
+    {
+        return false;
+    }
+    let adjusted_total = native_pages.len() - material_omissions.len();
+    cited_pages.len() <= adjusted_total
+        && (cited_pages.len() as u128) * 2 >= native_pages.len() as u128
+        && adjusted_total > 0
+        && (cited_pages.len() as u128) * 5 >= (adjusted_total as u128) * 3
 }
 
 fn build_analysis_scopes(
@@ -3532,7 +3597,7 @@ pub(crate) fn fixture_model_output(request: &ModelRequest) -> String {
 mod tests {
     use super::*;
     use crate::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
-    use crate::pipeline::contracts::{ModelResponse, PipelineState};
+    use crate::pipeline::contracts::{AnalysisOmissionOrigin, ModelResponse, PipelineState};
     use crate::pipeline::control::CancellationToken;
     use crate::pipeline::db::{
         get_analyzed_document, get_chunked_document, get_citation_artifact,
@@ -7091,6 +7156,29 @@ mod tests {
     }
 
     #[test]
+    fn connect_completion_rejects_supported_coverage_below_delivery_floors() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = VerificationFixtureRuntime::new(VerificationFixtureMode::Mixed);
+        analyze_chunked_document(&mut conn, &runtime, &run_id).unwrap();
+        synthesize_analyzed_document(&mut conn, &runtime, &run_id).unwrap();
+        verify_synthesized_document(&mut conn, &runtime, &run_id).unwrap();
+
+        let error = complete_verified_document_with_delivery(
+            &mut conn,
+            &run_id,
+            Some(SummaryDeliveryPolicy::connect()),
+        )
+        .expect_err("Connect completion must recheck actual supported-page coverage");
+        assert_eq!(error.code(), "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED");
+        assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+        assert_eq!(
+            get_pipeline_run(&conn, &run_id).unwrap().unwrap().state,
+            PipelineState::Failed
+        );
+    }
+
+    #[test]
     fn verification_preserves_analysis_shortfall_and_replaces_only_verification_warnings() {
         let synthesized = SynthesizedDocument {
             document_id: "warning-fixture".into(),
@@ -8242,14 +8330,15 @@ mod tests {
 
     #[test]
     fn connect_delivery_policy_stops_later_page_calls_at_whole_claim_boundary() {
-        let (normalized, chunked) = sparse_page_scope_fixture(4, 100);
+        let (normalized, chunked) = sparse_page_scope_fixture(5, 100);
         let claim = "😀😀😀 Claim.";
         let first = format!("{claim} [p. 1]");
         let second = format!("{claim} [p. 2]");
-        let limit = format!("{first}\n\n{second}").len();
+        let third = format!("{claim} [p. 3]");
+        let limit = format!("{first}\n\n{second}\n\n{third}").len();
         let runtime = ParaphraseRepairRuntime {
             requests: Mutex::new(Vec::new()),
-            answers: vec![json!({"claim_text":claim}).to_string(); 3],
+            answers: vec![json!({"claim_text":claim}).to_string(); 4],
         };
         let analyzed = analyze_with_delivery(
             &runtime,
@@ -8259,16 +8348,16 @@ mod tests {
             &UNCONTROLLED_EXECUTION,
             Some(SummaryDeliveryPolicy::for_test(limit)),
         )
-        .expect("two complete claim lines should fit before the third is rejected whole");
+        .expect("three covered claim lines should fit before the fourth is rejected whole");
         assert_eq!(
             analyzed
                 .chunks
                 .iter()
                 .flat_map(|chunk| &chunk.evidence)
                 .count(),
-            2
+            3
         );
-        assert_eq!(analyzed.inspected_pages, vec![1, 2, 3]);
+        assert_eq!(analyzed.inspected_pages, vec![1, 2, 3, 4]);
         assert_eq!(
             analyzed
                 .warnings
@@ -8277,7 +8366,28 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(runtime.requests.lock().unwrap().len(), 6);
+        assert_eq!(runtime.requests.lock().unwrap().len(), 8);
+        assert!(analyzed
+            .warnings
+            .iter()
+            .all(|warning| warning.code != COVERAGE_SHORTFALL_WARNING_CODE));
+
+        let undercovered_runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![json!({"claim_text":claim}).to_string(); 3],
+        };
+        let undercovered_limit = format!("{first}\n\n{second}").len();
+        let error = analyze_with_delivery(
+            &undercovered_runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+            Some(SummaryDeliveryPolicy::for_test(undercovered_limit)),
+        )
+        .expect_err("a nonempty prefix below adjusted coverage must fail closed");
+        assert_eq!(error.code, "SUMMARY_DELIVERY_LIMIT_EXCEEDED");
+        assert_eq!(undercovered_runtime.requests.lock().unwrap().len(), 6);
 
         let first_claim_runtime = ParaphraseRepairRuntime {
             requests: Mutex::new(Vec::new()),
@@ -8297,7 +8407,7 @@ mod tests {
 
         let standalone_runtime = ParaphraseRepairRuntime {
             requests: Mutex::new(Vec::new()),
-            answers: vec![json!({"claim_text":claim}).to_string(); 4],
+            answers: vec![json!({"claim_text":claim}).to_string(); 5],
         };
         let standalone = analyze(
             &standalone_runtime,
@@ -8313,12 +8423,48 @@ mod tests {
                 .iter()
                 .flat_map(|chunk| &chunk.evidence)
                 .count(),
-            4
+            5
         );
         assert!(standalone
             .warnings
             .iter()
             .all(|warning| warning.code != SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE));
+    }
+
+    #[test]
+    fn connect_delivery_coverage_checks_raw_and_adjusted_boundaries() {
+        let (normalized, _) = sparse_page_scope_fixture(10, 100);
+        let five_pages = (1..=5).collect::<HashSet<_>>();
+        assert!(!delivery_page_coverage_satisfied(
+            &five_pages,
+            &[],
+            &normalized
+        ));
+
+        let material_omissions = [6u32, 7]
+            .into_iter()
+            .map(|page_number| AnalysisPageOmission {
+                page_number,
+                chunk_id: format!("chunk-{page_number}"),
+                reason: AnalysisOmissionReason::NoSubstantiveContent,
+                origin: AnalysisOmissionOrigin::ModelNoSubstantiveContent,
+                filter_version: eligibility::VERSION.to_string(),
+                source_fingerprint: format!("source-{page_number}"),
+                catalog_fingerprint: Some(format!("catalog-{page_number}")),
+            })
+            .collect::<Vec<_>>();
+        assert!(delivery_page_coverage_satisfied(
+            &five_pages,
+            &material_omissions,
+            &normalized
+        ));
+
+        let four_pages = (1..=4).collect::<HashSet<_>>();
+        assert!(!delivery_page_coverage_satisfied(
+            &four_pages,
+            &material_omissions,
+            &normalized
+        ));
     }
 
     #[test]
