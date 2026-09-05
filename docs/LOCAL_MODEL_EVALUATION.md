@@ -1,6 +1,65 @@
 # Corpus and native Ollama evaluation — 2026-09-04
 
-## Latest result: materiality implementation is blocked; both Qwen corpus runs fail
+## Latest result: DOL still fails; NARA passes revised coverage acceptance
+
+**NOT DONE: DOL still fails analysis after its bounded paraphrase retry.**
+The contract amendment is `90a8b91`, followed by implementation `cb53dea`.
+Both live runs below exercised that exact implementation commit using
+`qwen3-30b-a3b:latest` through Ollama at port 11434. No unit veto, eligibility
+threshold, source bytes, token allowance, context, timeout, evidence target or
+native-page target changed. The decoder ceiling is now 768 characters while
+Rust still accepts at most 192, with a mechanical sentence-ending check and
+one feedback-bearing paraphrase retry. That predicate is not proof of semantic
+completeness or factual fidelity.
+
+| Document | Result | Supported claims | Retained evidence | Cited native pages | Requests | Completion tokens | Model time | Test time |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| DOL deck | exit 101 | None | 3 transient accepted items; no completed analysis artifact | No summary | 9 | 231 | 3,649 ms | 5.52 s |
+| NARA | exit 0 | 7 | 8 persisted; 7 cited by supported claims | 7/11 (63.64%) | 20 | 2,909 | 37,264 ms | 38.07 s |
+
+DOL responses 7 and 8 contain complete, terminally punctuated agriculture
+definitions of 333 and 272 Unicode characters, respectively. The second is the
+single feedback-bearing retry. Both exceed Rust's unchanged 192-character
+limit and neither reaches the 768-character decoder ceiling. They consumed
+76 and 63 completion tokens, respectively, against the unchanged 2,048-token
+allowance. Rust rejected the second response with
+`MODEL_EVIDENCE_RESPONSE_INVALID: Paraphrase failed bounded length or completion
+repair`. There was no synthesis or verification. The wider decoder removed the
+boundary-cut mechanism but did not make the model obey the requested length;
+do not describe this as product closure or token-budget exhaustion.
+
+NARA's two persisted synthesis attempts each cover all eight retained evidence
+items. Its selected supported set cites seven (87.5 percent); the native-page
+fraction separately exceeds the unchanged 60 percent target. The ambiguous
+corrupted-text claim remains withheld on both verification attempts. The run
+completed with `SUMMARY_COVERAGE_SHORTFALL`, and the acceptance test verified the
+summary, citations and events after database reopen. Page 6 remained retained;
+only the date-stamp page 12 was omitted. No paraphrase retry was needed; the
+existing single verification-shortfall re-synthesis ran. This proves the revised
+acceptance/warning behavior, not independent human validation of every claim.
+
+Every request in both runs used Primary transport; there was no schema fallback.
+The larger decoder schema therefore worked on this live runtime. Runs use new
+run-derived seeds, so comparisons are not same-seed causal benchmarks.
+Logs: `/tmp/doc-sum-completion-coverage.uubO1a/nara.log`, `dol.log`, and
+`local-tests.log`; raw response tracing was explicitly enabled for public corpus
+inputs. Counts and token usage come from captured request diagnostics.
+
+Local gates on `cb53dea`: `cargo test --offline --all-targets` exited 0 with
+236 library tests passed and four ignored, two acceptance tests passed and
+three external/live tests ignored, and three release tests passed. Strict
+clippy (`--offline --all-targets --all-features -- -D warnings`) and
+`cargo fmt --check` exited 0. Boundary tests cover decoder projection, terminal
+punctuation inside/outside quotes, cut-off words at 192 characters, whitespace,
+over-limit retry, repeated failure with no persisted analysis, historical v5
+reload, and synthesized versus supported coverage on both sides of 60 percent.
+
+The broader materiality feature remains incomplete: durable partial-analysis and
+individual repair-attempt audit, focused live heading controls, and successful
+DOL acceptance are still open. Keep the PR ready for review but do not merge it
+as a completed product fix. The pending full-feature contract is not folded away.
+
+## Previous result: materiality implementation blocked; both Qwen corpus runs fail
 
 **NOT DONE. Neither recorded live acceptance run passed. The numeric-unit
 contract conflict is now resolved and local gates pass, but this is not product
