@@ -100,6 +100,14 @@ impl RequestIds {
     }
 
     pub(super) fn localize_failure(&self, failure: PipelineFailure) -> PipelineFailure {
+        self.map_failure(failure, true)
+    }
+
+    pub(super) fn restore_failure(&self, failure: PipelineFailure) -> PipelineFailure {
+        self.map_failure(failure, false)
+    }
+
+    fn map_failure(&self, failure: PipelineFailure, to_wire: bool) -> PipelineFailure {
         if failure.code != "SYNTHESIS_MISSING_REFERENCES" {
             return failure;
         }
@@ -114,7 +122,13 @@ impl RequestIds {
                 missing
                     .missing_reference_ids
                     .iter()
-                    .map(|id| self.local(id))
+                    .map(|id| {
+                        if to_wire {
+                            self.local(id)
+                        } else {
+                            self.restore(id)
+                        }
+                    })
                     .collect::<Result<Vec<_>, _>>()
             });
         match translated {

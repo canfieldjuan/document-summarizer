@@ -1384,6 +1384,7 @@ fn request_evidence_claims(
             .map_err(|failure| ids.localize_failure(failure))
         },
     )
+    .map_err(|failure| ids.restore_failure(failure))
 }
 
 fn request_candidate_claims(
@@ -1435,6 +1436,7 @@ fn request_candidate_claims(
             .map_err(|failure| ids.localize_failure(failure))
         },
     )
+    .map_err(|failure| ids.restore_failure(failure))
 }
 
 fn serialize_evidence_prompt(
@@ -9430,6 +9432,13 @@ mod tests {
                 &UNCONTROLLED_EXECUTION,
             );
             assert_eq!(result.is_ok(), success, "{result:?}");
+            if failures == 2 && !foreign {
+                let failure = result.as_ref().unwrap_err();
+                assert!(failure
+                    .message
+                    .contains(&analyzed.chunks[0].evidence.last().unwrap().evidence_id));
+                assert!(!failure.message.contains("\"e5\""));
+            }
             let requests = runtime.requests.lock().unwrap();
             let synth = requests
                 .iter()
