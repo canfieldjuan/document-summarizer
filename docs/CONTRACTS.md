@@ -502,6 +502,98 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
+#### Amendment: direct verified paraphrases and explicit omissions
+
+Status: requested subtractive replacement, contract before implementation.
+Supersedes new-run consolidation, assignment responses, page-denominator policy
+and seed-only re-synthesis above/below. Historical artifacts retain their original
+validation rules. No optional shorter-summary feature is introduced.
+
+Root cause: useful quote-bound paraphrases are regenerated and forcibly merged
+to meet a page-derived claim target; generated grouping is a new failure surface.
+The paraphrase response cannot record non-substantive complete-page input, and
+raw-page coverage counts even explicitly omitted furniture. A seed-only retry
+does not provide new information at the configured zero temperature.
+Qualification from the trace: NARA response 5 already says "Permanent. Cut off
+annually and transfer to WNRC. Destroy when 7 years old." The later merge spreads
+that source/interpretation problem; it did not originate every factual defect.
+Neither readable paraphrases nor model verdicts prove perfect faithfulness.
+
+Required change surface: analysis omission enum and page paraphrase schema/parser,
+versioned omission admission/reload, direct synthesis materialization, verification
+admission and single-pass lifecycle, coverage reporting/acceptance, fixture and
+negative tests, contract and evaluation including complete delivered text.
+
+- New runs use analysis version 9 and direct synthesis/verification/summary
+  version 5; existing version 8 analysis and version 4 downstream artifacts
+  remain readable under their original limits. Existing citation format remains
+  unchanged. New omission enum values are rejected in historical analysis.
+- Carry every retained paraphrase unchanged into exactly one claim citing its
+  single original evidence item, in source order. Materialize durable claim IDs
+  and rendered page labels in Rust. No synthesis, assignment, pair reduction or
+  model shortening call lies on the new default path. Thus one orphan batch
+  cannot block the document: the one-to-one set is the default, not a rescue
+  based on guessed assignments. No optional consolidation or adjacency pairing
+  remains active for new runs. Historical negative tests may retain test-only
+  generation helpers; these are not an alternate production path.
+- Use 512 as an explicit pathological claim ceiling, not an output target or a
+  floor. Do not derive a minimum claim count from half that ceiling. Require a
+  nonempty supported result, exact one-to-one pre-verification coverage, and the
+  existing 60 percent supported-evidence/eligible-page acceptance measures.
+  Preflight actual verification batches against the unchanged per-request input,
+  output/context/framing limits and 64-batch ceiling. The 512 ceiling is not a
+  promise that every maximum-size catalog fits; reject impossible input before
+  inference, never drop evidence or merge to force admission.
+- Preserve the raw-size retention sample and headroom for ordinary documents;
+  new retention R=min(N,ceil(3N/5)+16,512). If raw acceptance alone exceeds 512,
+  reject as unsupported capacity before analysis instead of pretending full
+  coverage is feasible. Historical plans are not recomputed under this formula.
+- Paraphrase has disjoint typed outcomes: claim (claim_text) and
+  no_substantive_content (no claim text). Expose the latter only when the selected
+  exact quote covers the complete page text, not a truncated, sampled or partial
+  catalog. Compare complete text with whitespace normalization only; no fuzzy
+  deletion of words. A selected fragment cannot establish that unseen content is
+  empty. Deterministic filters and their numeric/unit veto remain unchanged.
+  Model omission is a recorded judgment, not proof that an illegible original
+  never contained facts. Never omit substantive obligations, exceptions, values,
+  uncertain or difficult assertions. Preserve a conservative keep option.
+- Record ModelNoSubstantiveContent/NoSubstantiveContent using the existing page,
+  chunk, source fingerprint, catalog fingerprint and filter-version audit fields.
+  Reload verifies whole-page admission and exact source/catalog binding; reject
+  unknown, duplicate, forged, mixed retained/omitted, or historically invalid
+  outcomes. Backfill as before; omissions never count as retained evidence.
+- Eligible coverage denominator is raw native-text pages minus validated recorded
+  omissions only. Uninspected, unsupported or ambiguous pages remain in it. Show
+  raw count/fraction, adjusted count/fraction, omission pages and reasons together.
+  A zero adjusted denominator is not 100 percent success: no retained evidence
+  fails explicitly. Verification losses cannot turn into omissions after the fact.
+- Verify the unchanged one-to-one claim set once. Withholding remains authoritative;
+  a nonempty result persists with durable warnings on loss, zero supported claims
+  still fails closed. Delete seed-only re-synthesis; persisted attempt lineage
+  records only the actual attempt. Do not claim run-derived seeds alone make a
+  greedy retry meaningfully different. Keep the bounded paraphrase repair because
+  it changes the prompt with typed violations and the rejected draft where needed.
+
+Verification plan: direct synthesis makes zero model calls and preserves text,
+IDs/order/exactness at 1, 83, 512 and rejected 513 items; verify actual serialized
+batch limits. Whole-page omission positives and substantive mixed/tail/short
+obligation/amount/exception negatives run against schema admission and parsing,
+not only prose. Probe partial quote denial, unknown outcomes, duplicate/mixed
+page results, fingerprint tampering, historical reload and zero denominator.
+Prove a verification loss never invokes synthesis or a second verifier pass;
+retain existing provenance, verdict and persistence failure tests. Run local
+all-target tests, strict clippy, fmt and both Qwen corpus acceptances. Print the
+complete delivered text and report raw/adjusted coverage, claims, evidence,
+omissions, requests, completion tokens and wall time, failures first. Judge
+readability and obvious source-fidelity concerns separately from numeric gates.
+
+Explicit non-scope: relaxed support/exactness/provenance or source parsing,
+retuning deterministic noise predicates, automatic repair of source meaning,
+model/endpoint/temperature/context/output/timeout changes, optional UI summary
+styles, DB migration or broader unfinished attempt-audit work, Connect, OCR,
+vision, packaging and CI. Any residual factual or omission failure is reported,
+not repaired by relaxing coverage or retrying until a favorable run appears.
+
 #### Amendment: structural synthesis attribution
 
 Status: contract `f4ce9d2` precedes implementation `369a871`. Implemented, but
