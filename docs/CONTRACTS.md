@@ -504,8 +504,8 @@ For a retained page, analysis has two separate model operations:
 
 #### Amendment: verification admission from actual batches
 
-Status: contract first; implement separately. This supersedes the aggregate
-character admission rules below, including the single-claim capacity checkpoint.
+Status: contract `98965a5` precedes implementation `446fe88`. This supersedes the
+aggregate character admission rules below, including the single-claim capacity checkpoint.
 
 Root cause: `verification_aggregate_character_limit` estimates calls from
 ceil(B/16), while the actual planner splits on serialized size as well as count.
@@ -722,13 +722,11 @@ Multiple references, longer text, or escaping require earlier splitting. One
 2,000-character claim with sixteen such quotes totals 14,554 and must fail
 admission, never lose a reference. Keep synthesis's verifiability preflight.
 
-Preserve V_aggregate = min(64,000, V_request * ceil(B/16)), including repeated
-system prompts for all actual batches: 10,752 at B=8 and 43,008 at B=64. A
-character-driven partition does not authorize an unbounded aggregate or more
-aggregate allowance. Tests cover a plan whose individual requests fit but whose
-aggregate fails, before verifier inference. Larger analysis text may change the
-model's synthesized text/partition choices; report any resulting admission
-failure rather than raising limits to pass the corpus.
+The original count-derived aggregate rule of this checkpoint is superseded by
+the actual-batch admission amendment above. Actual serialized requests must each
+fit V_request and the resulting nonempty plan must contain at most 64 batches.
+Larger text may change partition choices but cannot relax any individual request
+limit, the document claim budget, or evidence-reference coverage.
 
 Draft-aware shortening:
 
@@ -781,7 +779,7 @@ Verification plan and acceptance:
 - Test the exact serialized synthesis and verification fixtures above through
   production planners, with max-length mixed items, escaping, repeated quote
   references, count/character boundaries, direct/hierarchical B/K equivalence,
-  full synthesis coverage, aggregate rejection and existing negative tests.
+  full synthesis coverage, actual batch-count admission and existing negative tests.
 - Run local all-target tests, strict all-target/all-feature clippy and fmt.
   Then run both full Qwen corpus acceptances and report failures first: claims,
   retained/cited evidence, raw cited-native-page fraction, request/repair counts,
@@ -1092,8 +1090,8 @@ single-claim verification inputs under `V_request` while reserving the maximum
 claim-text size. Candidate pairs are compatible only when their combined
 evidence fits that conservative single-claim bound. After synthesis, Rust runs
 the actual claim catalog through the complete count, per-request character, and
-aggregate verification planner before persistence. Current-version synthesis
-artifacts must pass the same planner when loaded, so a count-legal but
+actual batch-count verification planner before persistence. Current-version
+synthesis artifacts must pass the same planner when loaded, so a count-legal but
 context-oversized claim set fails in synthesis rather than surprising the later
 verification stage.
 
@@ -1103,11 +1101,13 @@ contain at most 16 claims. With context `C = 8,192`, output allowance
 `O = 4,096`, framing reserve `R_V = 512`, and the identifier-aware
 three-character token proxy, the complete system-plus-user input limit is
 `V_request = min(16,000, 3 * (C - O - R_V)) = 10,752` Unicode characters.
-The aggregate limit for one verification pass is
-`V_aggregate = V_request * ceil(B / 16)`, capped at 64,000 characters and
-currently at most 43,008. Count, per-request character, single-claim, and
-aggregate bounds are all validated before runtime health or inference. The
-verifier must reject material relationship errors such as swapped table
+There is no count-derived aggregate character ceiling. The actual plan must
+contain at most 64 nonempty batches, each independently fitting V_request and
+the 16-claim limit. The document claim budget, prompt/catalog correspondence,
+single-claim fit and actual batch count are validated before runtime health or
+inference. Worst-case work is bounded by 64 requests per pass, or 128 over the
+existing two-pass ceiling; see the actual-batch amendment for its explicit cost.
+The verifier must reject material relationship errors such as swapped table
 columns, the wrong actor, reversed or dropped negation, or strengthened
 modality; matching words alone are insufficient.
 
@@ -1250,9 +1250,9 @@ Synthesis has no unbounded aggregate prompt: every direct, evidence-batch, and
 candidate request is capped at eight items and the context-derived
 system-plus-user input limit, and a hierarchy is capped at 256 requests.
 Verification is bounded by claim count, the
-context-derived per-request input limit, and its formula-derived aggregate
-limit before inference. A native-text-free document, an individually oversized
-item, an unrepresentable evidence catalog, or a plan beyond those limits fails
+context-derived per-request input limit, and an explicit 64-batch maximum
+per verification pass before inference. A native-text-free document, an
+individually oversized item, an unrepresentable evidence catalog, or a plan beyond those limits fails
 with a structured domain error; no summary text is invented. Cancellation is
 checked before and after every model request.
 

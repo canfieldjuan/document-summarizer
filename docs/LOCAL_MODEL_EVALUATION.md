@@ -1,6 +1,77 @@
-# Corpus and native Ollama evaluation — 2026-09-04
+# Corpus and native Ollama evaluation — updated 2026-09-05
 
-## Latest result: word targeting clears DOL analysis; verification admission blocks delivery
+## Latest result: DOL delivers a summary but fails native-page coverage
+
+**NOT DONE: DOL acceptance still fails, now on page coverage rather than
+pipeline admission.** The pipeline delivers 56 supported claims citing 66/111
+native-text pages (59.46%), below the unchanged 60 percent target. It completes
+with warnings. NARA passes. Contract `98965a5` precedes implementation
+`446fe88`; both live runs below exercised that exact implementation with
+`qwen3-30b-a3b:latest` through the existing Ollama adapter.
+
+| Document | Acceptance | Delivered claims | Retained / supported-cited evidence | Cited native pages | Requests | Completion tokens | Model time | Test time |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| DOL deck | exit 101 | 56 | 67 / 66 | 66/111 (59.46%) | 163 | 25,505 | 272,996 ms | 275.66 s |
+| NARA | exit 0 | 7 | 8 / 7 | 7/11 (63.64%) | 20 | 3,053 | 33,141 ms | 34.01 s |
+
+The requested admission fix is exercised live: DOL verification runs five
+size-based batches in each of two passes. First-pass input sizes are
+10,227, 10,167, 10,469, 10,226 and 8,569 characters (49,658 total); second-pass
+sizes are 10,287, 9,735, 10,463, 10,222 and 8,575 (49,282 total). Every request
+fits 10,752 and both plans fit the explicit 64-batch ceiling, despite exceeding
+the removed 43,008 aggregate estimate. There is no per-request or claim-budget
+relaxation. No new retries or model/context/output/timeout change.
+
+Actual DOL cost: analysis used 135 requests / 3,471 completion tokens / 62,602 ms;
+synthesis used 18 / 14,099 / 129,763 ms; verification used 10 / 7,935 / 80,631 ms.
+The existing bounded re-synthesis ran once. The analysis word-target repair
+again shortened a 394-character draft to 276. All requests used Primary
+transport, with no fallback. Fresh run-derived seeds mean these are not
+same-seed causal comparisons to earlier runs.
+
+The remaining gap is visible without blaming another admission guard: analysis
+inspected 67 pages, retained one item from each, and omitted none. The final
+supported set cites 66 items (98.51 percent evidence coverage) and clears K=32
+and B=64, but loses the one page needed for the raw page target. The first
+verification pass withheld one claim as unsupported; the second withheld one
+as ambiguous. The retained logs identify those claim IDs but do not reliably
+bind them back to a source page: full request payloads were not printed, and
+the test database is deleted on unwind. Do not infer a specific missing page
+or that the two withheld IDs describe the same claim from response order alone.
+
+Both persisted synthesis attempts cover all retained evidence; durable warnings
+include `SEMANTIC_CLAIMS_WITHHELD` and `SUMMARY_COVERAGE_SHORTFALL`. DOL fails at
+`office_acceptance.rs:821`, after these checks and before the independent-reopen
+assertions. Therefore this run is evidence of a returned/persisted summary,
+not a completed DOL reopen acceptance or independent human fidelity review.
+NARA completes the full acceptance including reopen, with its coverage warning.
+The earlier source-level fidelity caution remains.
+
+Resource trade: removing the aggregate estimate expands maximum admitted total
+work. At 64 batches of at most 10,752 characters, a pass is bounded by 688,128
+input characters; two passes permit at most 128 logical verification calls.
+This is not an unchanged aggregate envelope. Admission now uses actual batches,
+with catalog matching and claim-budget checks shared by synthesis preflight,
+synthesis reload and verification. Artifact formats/identities are unchanged.
+
+Local gates on `446fe88`: `cargo test --offline --all-targets` passed 243 library
+tests (four ignored), three acceptance tests (three external tests ignored),
+and three release tests. Strict all-target/all-feature clippy with warnings
+denied and formatting passed. The first clippy invocation found an unused
+stored size field after aggregate removal; its storage is now test-only while
+production still measures and validates every serialized batch.
+Boundary tests execute a 64-batch plan, reject 65 claims before runtime health,
+probe the batch-count guard at 0/1/63/64/65, distinguish size/count/mixed splits,
+and reject oversized singleton and mixed valid/oversized catalogs before calls.
+
+Logs: `/tmp/doc-sum-batch-admission.quGq4k/dol.log`, `nara.log`, `local-tests.log`.
+The next coverage design must account for verification withholding after the
+analysis target is reached; do not lower the target or force a supported verdict.
+Successful DOL acceptance, focused live heading controls and the separately
+sequenced durable partial-analysis/individual-attempt audit remain open.
+PR #30 stays ready for review and unmerged.
+
+## Previous result: word targeting clears DOL analysis; verification admission blocks delivery
 
 **NOT DONE: DOL still has no delivered summary.** The new failure is not
 paraphrase length: synthesis's verification preflight rejects 49,670 aggregate
