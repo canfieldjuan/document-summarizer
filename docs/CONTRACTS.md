@@ -502,6 +502,96 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
+#### Proposed amendment: request-local generation identifiers
+
+Status: contract first; not yet implemented. Apply to all new synthesis,
+candidate-reduction and verification requests, not only the failing reduction.
+Fold into current behavior when the complete feature lands. Durable artifact
+schemas, identity derivations and historical reload rules remain unchanged:
+this changes transport representations, not artifact meanings or validators.
+
+Root cause: `summary.rs:2180`, `:2218` and `:2243` accept arbitrary identifier
+strings in synthesis, reduction and verification output schemas. Analysis quote
+selection already constrains membership with an enum. The live deck reduction
+returned a foreign 58-character ID instead of a 74-character candidate ID.
+The model must not transcribe durable hashes to maintain application identity.
+Qualification: `model.rs` already removes uniqueItems before transport; the
+keyword does not reach the production decoder. Remove it from the synthesis
+and reduction schemas too, rather than advertise a nonexistent guarantee.
+
+Required change surface: summary prompt/response representations, all three
+schema builders, request-local mapping, synthesis repair feedback, actual
+serialization/partition/preflight and verification batch materialization in
+`summary.rs` and a scoped helper module if useful; fixtures and boundary tests;
+`office_acceptance.rs` metrics if needed, plus this contract and evaluation.
+
+- Every identifier copied by a model must be constrained to the exact supplied
+  vocabulary, never an unconstrained string. Synthesis evidence uses e1, e2,
+  etc.; reduction candidates c1, c2, etc.; verification claims k1, k2, etc.
+  Verification evidence also uses e-prefixed local IDs, shared consistently
+  within that request. Assignment is deterministic from the ordered request
+  inputs. Reset mappings per request/batch; keep the same map through its one
+  existing repair. No process-global map or cross-run mutable state.
+- Rust keeps full durable identities privately and maps response ordinals back
+  by exact lookup, not permissive numeric parsing. Reject foreign, malformed,
+  wrong-kind, cross-batch and duplicate references, including valid/invalid
+  mixtures. Never accept a durable ID as a fallback wire identifier. Validate
+  the restored response through all existing provenance, count, coverage and
+  identity checks before materialization or persistence.
+- Update PromptEvidenceItem, PromptSynthesisCandidate, PromptVerificationClaim,
+  PromptVerificationEvidence and RawClaim/RawCandidateClaim/RawClaimVerdict wire
+  semantics accordingly. Candidate prompts contain evidence_count, not original
+  evidence_ids. Rust still expands selected candidates to their real evidence
+  union and enforces MAX_EVIDENCE_PER_CLAIM. A count is not a semantic support
+  guarantee and must never weaken compatibility or coverage validation.
+- All three output schemas enumerate exactly their local request vocabulary.
+  Remove uniqueItems from synthesis/reduction reference arrays. Enums enforce
+  membership under constrained decoding, not uniqueness or complete coverage.
+  Rust checks distinct references per claim; all supplied references must still
+  be covered across the synthesized set. Verification still requires exactly
+  one verdict per supplied claim and rejects duplicates and missing verdicts.
+  Runtime JSON fallback/untrusted mock outputs still meet the same Rust checks.
+- Missing-reference repair feedback carries only local ordinals from the same
+  mapping; never leak durable IDs or silently translate a foreign response.
+  Preserve its existing trigger, one-repair bound and resource accounting.
+- Measure and admit the actual local-ID wire representation in partitioning,
+  singleton preflight, candidate compatibility and verification batching; the
+  planner and dispatched request must agree. Request character/count limits,
+  output/context/framing/timeout budgets and reference maxima do not increase.
+
+Cost qualification: 83 full evidence IDs occupy 6,059 characters in aggregate,
+not in one existing request. Existing requests are already partitioned and may
+repeat IDs in repair. Local ordinals remove most identity overhead; candidate
+evidence_count also removes long reference lists. Measure actual serialized
+sizes, initial synthesis batches, reduction calls, total requests, completion
+tokens and wall time before/after. Do not promise fewer batches merely from
+aggregate arithmetic; count limits still bind and successful runs do more work
+than the prior run that failed before verification.
+
+Assumptions/blockers: enum membership is a decoder guarantee only when structured
+transport is honored; Rust remains authoritative on every transport. Reusing e1
+in another request is intentional scope locality, not durable identity reuse.
+The prior deck failure is evidence for this defect, not proof that repairing
+identity will solve semantic support or consolidation. No live outcome assumed.
+
+Verification plan: inspect exact vocabularies for all three emitted schemas,
+prove a foreign ordinal is outside the grammar vocabulary and rejected in Rust,
+and prove valid shuffled ordinals restore exactly their corresponding durable
+identities. Probe empty/single/multiple, wrong-kind, malformed, mixed, duplicate,
+cross-batch and missing references/verdicts; missing-reference retry must retain
+the original local map. Assert no durable identity occurs in any model-facing
+payload/schema/feedback; candidate prompts carry counts only. Pin actual wire
+serialization at size edges and 83-item maximum-text/escaping batch envelopes.
+Preserve historical artifact reload and all existing negative tests. Run local
+all-target tests, strict clippy and fmt, then both full Qwen corpus acceptances,
+reporting failures first with packing, coverage and measured request cost.
+
+Explicit non-scope: altered semantic verdicts, uniqueness/provenance/coverage
+relaxation, ID guessing or silent dedupe, lower acceptance or retention, changed
+B/K, extra retries, model/endpoint/context/output/timeout or resource increases,
+eligibility/unit veto, parser/OCR/vision, DB migration or audit expansion, CI,
+Connect, packaging and unrelated refactoring.
+
 #### Amendment: retention reserve for verification withholding
 
 Status: contracts `bf42810` and `5dfcd90` precede implementation `8ece146`.
