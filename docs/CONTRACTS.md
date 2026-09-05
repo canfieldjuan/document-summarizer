@@ -581,6 +581,18 @@ resulting partitions, preserve B/K and all original lineage, and never restore
 a shrinking claim funnel or drop evidence to fit. The existing 256-request
 synthesis ceiling, feedback reserve and output allowance do not increase.
 
+Pre-implementation cost clarification: 10,752 is already the effective total
+input bound, not a new reduction from 16,000. Both ordinary synthesis and its
+repair enforce the context-derived bound today. At B=64, a 59-item maximum-size
+fixture changes from eight batches at L=192 to nine at L=384. Maximum candidate
+count stays 59, so no reduction request is required; preflight reserves 16 versus
+18 calls including one repair per request. Also exercise E=67 (the 111-native-
+page plan's target): nine versus ten batches, maximum three reduction requests,
+24 versus 26 reserved calls. These are size-envelope/planning comparisons, not
+measurements of the earlier transient evidence texts or promised live call
+counts. Before live acceptance, run these fixtures through the production
+partitioner and sum-of-batch-maxima preflight under the unchanged 256 ceiling.
+
 Verification sizing follows its real input fields:
 
 V_request = min(16,000, 3*(8,192 - 4,096 - 512)) = 10,752 characters, counting

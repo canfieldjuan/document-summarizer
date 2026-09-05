@@ -1,5 +1,45 @@
 # Corpus and native Ollama evaluation — 2026-09-04
 
+## Pre-implementation finding: nominal cap is not the effective synthesis bound
+
+The claim that the 16,000-character constant currently admits over-context
+synthesis requests is contradicted by the executable call path. In the
+`573ad48` source tree, `summary.rs:1531` computes
+min(16,000, 3*(8,192-4,096-512)) = 10,752; `summary.rs:1549` subtracts system
+text and repair reserve before ordinary request admission. `summary/repair.rs:52`
+also checks the full repaired system-plus-user request against that derived
+bound before generating. Git history shows the context-derived helper already
+landed in `253a6e4`, with the larger output allowances. This amendment does not
+introduce that guard or lower an effective 16,000 limit to 10,752.
+
+The nominal constant is easy to misread in isolation. Record that documentation
+hazard, not an unproven runtime defect: no bypass was found in the current direct,
+evidence-batch or reduction request paths. Earlier unexplained model behavior
+cannot be attributed to a context overflow from the nominal constant alone.
+The three-characters-per-token proxy is still not a tokenizer proof, and the
+actual Ollama context configuration remains a separate evaluation concern.
+
+Cost before the new claim limit lands: for 59 retained evidence items and B=64,
+maximum-length, unescaped items require eight batches at L=192 versus nine at
+L=384. Neither requires candidate reduction because 59 is below 64. The
+sum-of-batch-maxima preflight reserves 16 versus 18 model calls including the
+bounded request repair. At E=67, the planned target for 111 native-text pages,
+the analogous envelopes are nine versus ten batches and three possible
+reduction requests, reserving 24 versus 26 calls. The ceiling stays 256.
+These are arithmetic envelopes, not execution of the Rust preflight yet; the
+implementation must exercise both evidence counts through production planning
+before live inference. Actual shorter text, escaping and model consolidation
+can produce different batch/call counts.
+
+Early decoder probe, before implementation: a direct OpenAI-compatible Ollama
+request using qwen3-30b-a3b:latest, named strict JSON schema, maxLength 1,536,
+temperature 0, seed 42, reasoning_effort none and max_tokens 2,048 returned
+HTTP 200 with a complete claim and finish_reason stop. It used 68 prompt and
+23 completion tokens in 367 ms, with no fallback attempt. This is a controlled
+schema-compatibility probe, not a corpus run or proof of adapter wiring; the
+implemented adapter and both corpus runs still require live verification.
+Trace: `/tmp/doc-sum-single-claim.Lea4n8/decoder-probe.log`.
+
 ## Latest result: DOL still fails; NARA passes revised coverage acceptance
 
 **NOT DONE: DOL still fails analysis after its bounded paraphrase retry.**
