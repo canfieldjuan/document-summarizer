@@ -584,6 +584,13 @@ exactness/provenance/verdict rules, Connect, packaging, dependencies, or output
 rendering changes. Existing allowances remain 2,048 analysis, 4,096 synthesis,
 4,096 verification, context assumption 8,192, and timeout 900 seconds.
 
+Approved dependency exception: promote the already locked unicode-properties
+0.1.4 to a direct dependency, pinned to that version with general-category
+support, solely for the filter's Unicode predicates. No dependency upgrades or
+other new dependencies are authorized. This does not change the 80 percent or
+32-character thresholds. Verify category handling and the unchanged lockfile
+package versions alongside the direct filter boundary tests.
+
 Verification required before claiming completion:
 
 - Selection/paraphrase separation: a decoy candidate contains a fact absent from
