@@ -818,6 +818,150 @@ thread count from a previous-head review is not evidence about the final head.
 PR #30 violated this ordering when its final-head review arrived after merge; this
 correction must not repeat that process failure.
 
+### Pending native Ollama and Qwen-family runtime contract
+
+Status: this section is proposed behavior. It is not implemented by the current
+OpenAI-compatible adapter. Contract and implementation must remain separate
+commits. When the implementation and qualification matrix land, fold the final
+behavior into the current runtime sections and delete this pending section so a
+reader cannot mistake a proposal for shipped behavior.
+
+#### Root cause and required change surface
+
+The current adapter reaches loopback Ollama through its OpenAI-compatible route,
+selects one model from an environment variable and plans every request against a
+compiled 8,192-token context. That cannot represent an installed model's actual
+maximum context, a locally qualified safe context, a stage-specific hybrid
+profile or the immutable model identity used by an in-flight run. A model with a
+larger usable context is needlessly constrained; a model with a smaller usable
+context can receive an oversized request. An environment-only model choice is
+also not a user setting and cannot make resumed work reproducible.
+
+Replace that boundary with native loopback Ollama discovery and chat. The change
+surface includes the model adapter, request budgeting, model/profile settings,
+stage routing, immutable run identity, the desktop runtime-status projection and
+UI, persistence and historical reload, plus the live corpus harness and its
+evaluation record. Schema work, if required for immutable run identity, lands
+last as a separately reviewable implementation commit. It does not weaken or
+redefine summary quality, provenance or verification.
+
+#### Native transport and discovery
+
+Production generation uses native `POST /api/chat`; discovery uses `/api/tags`
+and `POST /api/show`. Requests retain temperature zero, the run-derived seed,
+the stage output allowance and the projected JSON schema. Native options carry
+the qualified `num_ctx` and `num_predict`; the schema is sent in `format`.
+Responses record provider prompt and completion counts when supplied. The same
+loopback-only URL, no-proxy, no-redirect, bounded credential-file, timeout,
+diagnostic-redaction and exact schema-fallback boundaries remain authoritative.
+
+Discovery admits only Qwen-family architectures that the application explicitly
+supports. An installed descriptor records the exact Ollama name and digest,
+byte size, architecture, parameter-size and quantization metadata when reported,
+the model maximum context read from architecture-scoped `model_info`, and its
+qualification state. Names, filenames and display metadata are not capability
+proof. Missing, malformed, zero or implausible context metadata leaves a model
+visible but unqualified; it never silently falls back to 8,192. Non-Qwen models
+remain visible only as unsupported installed entries and cannot be selected.
+
+#### Qualified profiles, context and token planning
+
+A selectable model profile is keyed by immutable model digest, Qwen tokenizer
+family and profile version. It carries a measured safe context no greater than
+the discovered model maximum, supported stages and corpus qualification result.
+There is no free-form context slider. A profile whose digest no longer matches
+the installed model becomes unavailable until it is qualified again.
+
+Every request uses the selected stage profile's context. The runtime exposes
+that value to the planner; analysis and verification therefore need not share a
+context. Input admission counts the actual serialized native system/user/schema
+payload with an application-pinned tokenizer for that Qwen tokenizer family,
+then reserves the output allowance and an explicit framing margin. Qwen 3 and
+Qwen 3.5/3.8 tokenizer assets and versions are distinct. Character limits remain
+defense-in-depth payload caps, not token estimates. A request that cannot fit the
+qualified context fails before inference with measured token counts; the adapter
+does not ask Ollama to truncate or expand context implicitly.
+
+The supported candidate matrix is Qwen 3.5 4B, Qwen 3.5 9B, base Qwen 3.8 27B,
+Jack Qwen 3.8 27B Coder and the existing Qwen 3 30B-A3B baseline. The locally
+available Jack GGUF is a distinct candidate, not an alias for base Qwen 3.8 and
+not presumed equivalent from its filename or footprint. Models below 4B are not
+exposed as product presets in this slice. A weak candidate must not reduce the
+baseline build's limits, prompts, validators, coverage targets or verifier
+standard.
+
+#### User settings and stage routing
+
+The desktop exposes installed Qwen descriptors and qualified presets, including
+model size, family, maximum context, qualified effective context and disabled
+reason. The user selects a persisted preset in the application rather than by
+editing an environment variable. Settings are written atomically in the private
+application-data directory; malformed, unknown, unsupported or stale-digest
+values fail closed to an explicit unavailable state, never to an arbitrary
+installed model. A settings change affects new runs only.
+
+A full preset routes analysis and verification to the same model and is offered
+only after that exact digest passes the full qualification contract. A hybrid
+preset routes selection/paraphrase to the chosen qualified smaller model and
+verification to the strongest installed qualified verifier. Routing is based on
+the typed request stage, not prompt inspection. Direct synthesis remains local
+and deterministic. A hybrid preset cannot route verification to a model with a
+lower verifier qualification tier merely because it is smaller or currently
+selected. If the required verifier is absent or changed, starting the run fails
+before document work rather than silently weakening verification.
+
+#### Immutable run identity and historical behavior
+
+A new run snapshots the preset/profile versions, actual Ollama names and digests,
+per-stage qualified contexts and tokenizer versions before the first model call.
+Every generated artifact continues to record the actual runtime/model identity
+that produced it. Continuation uses the snapshot and refuses a missing or changed
+model; it never switches because the global setting changed. A retry run inherits
+the source run's snapshot unless an explicitly user-started new run selects the
+current preset. Historical runs without a snapshot remain readable under their
+stored legacy runtime/model identifiers and compiled historical budgeting rules;
+they are not relabeled as native or qualified.
+
+#### Qualification and acceptance evidence
+
+Unit and integration evidence must cover native request projection, schema and
+usage parsing; exact stage routing; model-maximum versus qualified-context
+boundaries; malformed and stale discovery; loopback and redirect rejection;
+atomic setting recovery; immutable continuation; and both sides of every token
+admission boundary. Tests prove that a small analysis model cannot become the
+verifier through a falsy/default path and that downstream code uses the admitted
+profile and counted payload rather than raw settings or character proxies.
+
+Each candidate is run through the same live NARA robustness fixture and DOL
+product fixture without changing prompts, validators, timeouts or acceptance
+thresholds between models. The record includes exact model name and digest,
+preset and stage routing, discovered maximum and qualified contexts, tokenizer
+version, claims, evidence, raw and adjusted cited-page fractions, omissions and
+withheld claims, per-stage request and token counts, wall time, schema fallback
+and failure. Failures lead the report. NARA proves delivery and warning behavior
+on an OCR-layer stress document, not table accuracy. DOL must deliver at the
+existing product thresholds before a model is eligible for a full preset.
+Hybrid qualification additionally requires the selected small model to complete
+analysis and the qualified verifier to preserve the same verification contract.
+
+The existing Qwen 3 30B-A3B result is the non-regression baseline. A smaller
+candidate may improve footprint or analysis latency, but it does not become a
+full preset solely because it loads, returns valid JSON or produces more claims.
+Jack and base Qwen 3.8 are reported separately. Qualification is evidence for an
+exact digest and profile, not a blanket claim about every quantization or model
+carrying the same family name.
+
+#### Explicit non-scope and deployment boundary
+
+This slice does not add non-Qwen providers, cloud inference, arbitrary endpoint
+entry, model downloading/importing from the UI, a context slider, automatic
+quantization choice, OCR/vision, parser changes, prompt loosening, timeout
+increases, coverage reductions or verifier bypass. Ollama model-store relocation
+and GGUF import are operator deployment steps, documented and performed
+copy-first on the development machine; application code never scans arbitrary
+filesystem paths or mutates the Ollama store. Existing models are not deleted as
+part of migration or qualification.
+
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
 Thin Tauri commands select concrete adapters, invoke that service, report
