@@ -502,6 +502,60 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
+#### Amendment: word-targeted paraphrase generation
+
+Status: contract first; implement separately. This narrowly changes the generation
+target, not evidence admission. It supersedes character-targeted wording in the
+single-claim checkpoint below. New analysis version 7.1.0 keeps version 7.0.0
+admission and identity rules; historical artifacts remain readable unchanged.
+
+Root cause: the captured DOL draft is 392 Unicode characters and approximately
+61 whitespace-delimited words. The character-targeted retry repeated it. It
+passed mechanical completion, but never reached factual verification: faithful
+output is not established by that trace. Word-targeting is an empirical attempt
+to improve compliance, not a guarantee that models cannot count characters or
+that 55 words necessarily fit 384 characters.
+
+Required change surface: `summary/pages.rs` initial/retry prompts and tests;
+`summary.rs` prompt-version compatibility and integration tests; existing live
+metrics and evaluation. Keep the schema ceiling 1,536, Rust maximum 384,
+single-retry limit and complete selected quotation unchanged. No packing change.
+
+- Ask for the shortest complete claim in at most 55 words, preserving supported
+  actors, actions, modality, negation, exceptions and quantities. Do not expose
+  a numeric character target in the generation instructions or retry feedback.
+- Rust supplies an approximate draft word count using `split_whitespace().count()`
+  (Unicode whitespace; hyphenated strings remain one segment). For an overlong
+  draft the retry receives that count and a 55-word target along with the full
+  untrusted draft and the same authoritative quotation. Ask to rewrite it to
+  55 words or fewer, with the same supported meaning. If already under that
+  target, request shorter phrasing rather than padding or repeating the draft.
+- Words are a soft generation target only. A complete 56-word claim within 384
+  characters is not rejected for word count; a one-word 385-character claim
+  still fails length admission. Completeness, semantic support, exactness and
+  provenance remain independent requirements. No Rust trimming/truncation.
+- Keep measured character lengths in local diagnostics, not as a model counting
+  obligation. Count words deterministically only for feedback; no tokenizer or
+  language-specific dependency is introduced.
+
+Explicit non-scope: no tolerance band yet, decoder/resource/context/token or
+timeout increase, changed coverage/eligibility thresholds, source edits, parser,
+DB migration, extra attempts, model/endpoint change or silent omission.
+
+Verification plan: test the captured 61-word draft feedback, whitespace/Unicode
+counting, already-under-word-target overlong drafts, initial/retry word wording,
+absence of numeric character targets, unchanged 383/384/385 admission and
+1,535/1,536/1,537 decoder/draft boundaries, historical reload and exact binding.
+Run local all-target tests, strict clippy, formatting and both Qwen corpus
+acceptances. Record failures first, all existing metrics and actual retry lengths.
+
+Conditional next step if live character overshoot survives: specify a separate
+contract amendment before any tolerance implementation. A 512-character hard
+maximum with a durable warning above 384 must be used by actual packing and
+versioned reload, not only the validator. Recompute production planner reservations
+instead of trusting rounded call estimates; semantic support and complete text
+must never become optional. This word-target amendment makes no such change.
+
 #### Proposed amendment: single-claim capacity and draft-aware shortening
 
 Status: approved in `573ad48`, clarified in `869e458`, implemented separately
