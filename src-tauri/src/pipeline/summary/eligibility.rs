@@ -216,13 +216,24 @@ pub(super) fn heading_admitted(text: &str) -> bool {
 }
 
 #[cfg(test)]
+pub(super) const NARA_AMBIGUOUS_PAGE: &str = "....... �� \n\n--� \n\n·.,( \n...• ... \n\n\n\n \n\n  \n 5l  • \n\n- .. \n\n ·\"' -·• \n·-J.. \n.. , \n.,. \n-4\n\n.; \n\n. .:-J ...... \n\n,.: ... \n\n.:1 \n..... .... \n!~";
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    const NARA_NOISE: &str = "....... �� \n\n--� \n\n·.,( \n...• ... \n\n\n\n \n\n  \n 5l  • \n\n- .. \n\n ·\"' -·• \n·-J.. \n.. , \n.,. \n-4\n\n.; \n\n. .:-J ...... \n\n,.: ... \n\n.:1 \n..... .... \n!~";
 
     #[test]
-    fn captured_nara_furniture_is_mechanically_recognized() {
-        assert_eq!(classify(NARA_NOISE), Some(Omission::ScanNoise));
+    fn captured_nara_page_is_retained_under_numeric_unit_veto() {
+        assert_eq!(classify(NARA_AMBIGUOUS_PAGE), None);
+        assert!(!heading_admitted(NARA_AMBIGUOUS_PAGE));
+    }
+
+    #[test]
+    fn unit_free_noise_and_captured_stamp_are_omitted() {
+        assert_eq!(
+            classify("....... ��\n--�\n·.,(\n...• ..."),
+            Some(Omission::ScanNoise)
+        );
         assert_eq!(classify("03/10/03  A-4"), Some(Omission::DatePageStamp));
     }
 
@@ -291,7 +302,7 @@ mod tests {
             }
         }
         assert_eq!(
-            classify(&format!("{NARA_NOISE}\nRecords must be retained.")),
+            classify(&format!("{NARA_AMBIGUOUS_PAGE}\nRecords must be retained.")),
             None
         );
     }
@@ -300,7 +311,7 @@ mod tests {
     fn heading_admission_does_not_admit_obligations_or_body_text() {
         assert!(heading_admitted("Labor Standards in Agriculture"));
         for text in [
-            NARA_NOISE,
+            NARA_AMBIGUOUS_PAGE,
             "03/10/03 A-4",
             "Pay Now",
             "Records Must Be Retained",

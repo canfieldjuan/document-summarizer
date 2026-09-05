@@ -8216,6 +8216,38 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_nara_page_retains_catalog_without_model_omission_option() {
+        let (normalized, chunked) = materiality_fixture(&[eligibility::NARA_AMBIGUOUS_PAGE.into()]);
+        let (_, scope, omission, heading) = pages::page_scope(1, &chunked, &normalized).unwrap();
+        assert!(omission.is_none());
+        assert!(!heading);
+        assert!(!scope.quote_candidates.is_empty());
+        assert_eq!(
+            scope.quote_candidates[0].exact_quote,
+            eligibility::NARA_AMBIGUOUS_PAGE
+        );
+
+        let runtime = materiality_runtime(true, 0, false);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert!(analyzed.omissions.is_empty());
+        assert_eq!(analyzed.chunks[0].evidence.len(), 1);
+        let requests = runtime.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let ModelOutputFormat::JsonSchema { schema, .. } = &requests[0].output_format else {
+            panic!("schema")
+        };
+        assert_eq!(schema["properties"]["selection"]["enum"], json!(["q1"]));
+        assert!(!requests[0].user_prompt.contains(pages::OMIT_HEADING));
+    }
+
+    #[test]
     fn materiality_all_omitted_is_not_invented_evidence() {
         let (normalized, chunked) =
             materiality_fixture(&["03/10/03  A-4".into(), "....... ��".into()]);
