@@ -876,11 +876,15 @@ Every request uses the selected stage profile's context. The runtime exposes
 that value to the planner; analysis and verification therefore need not share a
 context. Input admission counts the actual serialized native system/user/schema
 payload with an application-pinned tokenizer for that Qwen tokenizer family,
-then reserves the output allowance and an explicit framing margin. Qwen 3 and
-Qwen 3.5/3.8 tokenizer assets and versions are distinct. Character limits remain
-defense-in-depth payload caps, not token estimates. A request that cannot fit the
-qualified context fails before inference with measured token counts; the adapter
-does not ask Ollama to truncate or expand context implicitly.
+then reserves the output allowance and an explicit framing margin. The pinned
+asset may be reconstructed from Ollama's verbose GGUF token and merge tables
+only when their canonical fingerprint and pre-tokenizer kind exactly match the
+profile; missing or changed metadata fails before inference. Qwen 3 and Qwen
+3.5/3.8 tokenizer fingerprints, pre-tokenizer implementations and versions are
+distinct. Character limits remain defense-in-depth payload caps, not token
+estimates. A request that cannot fit the qualified context fails before
+inference with measured token counts; the adapter does not ask Ollama to
+truncate or expand context implicitly.
 
 The supported candidate matrix is Qwen 3.5 4B, Qwen 3.5 9B, base Qwen 3.8 27B,
 Jack Qwen 3.8 27B Coder and the existing Qwen 3 30B-A3B baseline. The locally
