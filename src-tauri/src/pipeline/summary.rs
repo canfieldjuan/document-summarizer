@@ -26,7 +26,8 @@ mod structural;
 #[cfg(test)]
 include!("summary/legacy_generation.rs");
 
-pub const ANALYSIS_VERSION: &str = "11.0.0";
+pub const ANALYSIS_VERSION: &str = "12.0.0";
+const PUNCTUATION_ANALYSIS_VERSION: &str = "11.0.0";
 const TOLERANT_ANALYSIS_VERSION: &str = "10.0.0";
 const DIRECT_ANALYSIS_VERSION: &str = "9.0.0";
 const RETENTION_ANALYSIS_VERSION: &str = "8.0.0";
@@ -1564,6 +1565,7 @@ fn versioned_analysis_selected_pages(
     // Historical plans and identities must not acquire new retention obligations.
     let mut selected = analysis_selected_pages(normalized)?;
     if version != ANALYSIS_VERSION
+        && version != PUNCTUATION_ANALYSIS_VERSION
         && version != TOLERANT_ANALYSIS_VERSION
         && version != DIRECT_ANALYSIS_VERSION
         && version != RETENTION_ANALYSIS_VERSION
@@ -1583,7 +1585,10 @@ fn versioned_analysis_selected_pages(
         .collect::<Vec<_>>();
     let target = if matches!(
         version,
-        ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION | DIRECT_ANALYSIS_VERSION
+        ANALYSIS_VERSION
+            | PUNCTUATION_ANALYSIS_VERSION
+            | TOLERANT_ANALYSIS_VERSION
+            | DIRECT_ANALYSIS_VERSION
     ) {
         direct::retention_target(pages.len())?
     } else {
@@ -2199,6 +2204,7 @@ fn validate_analyzed_content(
         || !matches!(
             analyzed.analysis_version.as_str(),
             ANALYSIS_VERSION
+                | PUNCTUATION_ANALYSIS_VERSION
                 | TOLERANT_ANALYSIS_VERSION
                 | DIRECT_ANALYSIS_VERSION
                 | RETENTION_ANALYSIS_VERSION
@@ -2225,6 +2231,7 @@ fn validate_analyzed_content(
     let materiality_analysis = matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | PUNCTUATION_ANALYSIS_VERSION
             | TOLERANT_ANALYSIS_VERSION
             | DIRECT_ANALYSIS_VERSION
             | RETENTION_ANALYSIS_VERSION
@@ -2342,7 +2349,7 @@ fn validate_analyzed_content(
                 &evidence.exact_quote,
             );
             let claim_character_limit = match analyzed.analysis_version.as_str() {
-                ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION => {
+                ANALYSIS_VERSION | PUNCTUATION_ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION => {
                     MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS
                 }
                 DIRECT_ANALYSIS_VERSION
@@ -2366,13 +2373,18 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | PUNCTUATION_ANALYSIS_VERSION
                         | TOLERANT_ANALYSIS_VERSION
                         | DIRECT_ANALYSIS_VERSION
                         | RETENTION_ANALYSIS_VERSION
                         | WORD_TARGET_ANALYSIS_VERSION
                         | CAPACITY_ANALYSIS_VERSION
                         | COMPLETION_ANALYSIS_VERSION
-                ) && !pages::completion_valid(&evidence.claim_text))
+                ) && !(if analyzed.analysis_version == ANALYSIS_VERSION {
+                    pages::completion_valid(&evidence.claim_text)
+                } else {
+                    pages::completion_valid_v11(&evidence.claim_text)
+                }))
                 || !canonical_bounded_text(&evidence.exact_quote, quote_character_limit)
                 || !block.text.contains(&evidence.exact_quote)
                 || evidence.source_span != block.source
@@ -2384,6 +2396,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | PUNCTUATION_ANALYSIS_VERSION
                         | TOLERANT_ANALYSIS_VERSION
                         | DIRECT_ANALYSIS_VERSION
                         | RETENTION_ANALYSIS_VERSION
@@ -2435,6 +2448,7 @@ fn validate_analyzed_content(
     if matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | PUNCTUATION_ANALYSIS_VERSION
             | TOLERANT_ANALYSIS_VERSION
             | DIRECT_ANALYSIS_VERSION
             | RETENTION_ANALYSIS_VERSION
@@ -7761,6 +7775,62 @@ mod tests {
     }
 
     #[test]
+    fn question_terminated_phone_denies_v12_omission_and_v11_remains_readable() {
+        let phone = "Call (703) 696-4959?".to_string();
+        assert!(eligibility::material_marker(&phone));
+        assert!(!eligibility::material_marker_v11(&phone));
+        let (normalized, chunked) = materiality_fixture(std::slice::from_ref(&phone));
+        let runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![json!({"claim_text":"Call 703-696-4959?"}).to_string()],
+        };
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let requests = runtime.requests.lock().unwrap();
+        let ModelOutputFormat::JsonSchema { schema, .. } = &requests[1].output_format else {
+            panic!("schema")
+        };
+        assert!(schema.get("anyOf").is_none());
+        assert!(!requests[1].user_prompt.contains("complete_page_text"));
+        drop(requests);
+
+        let (chunk_index, scope, deterministic, _) =
+            pages::page_scope(1, &chunked, &normalized).unwrap();
+        assert!(deterministic.is_none());
+        let mut omission =
+            pages::heading_omission(&scope, &chunked.chunks[chunk_index], &normalized).unwrap();
+        omission.origin =
+            crate::pipeline::contracts::AnalysisOmissionOrigin::ModelNoSubstantiveContent;
+        omission.reason = crate::pipeline::contracts::AnalysisOmissionReason::NoSubstantiveContent;
+        let mut historical = analyzed.clone();
+        historical.analysis_version = PUNCTUATION_ANALYSIS_VERSION.into();
+        historical.chunks[0].evidence.clear();
+        historical.chunks[0].summary_text.clear();
+        historical.omissions = vec![omission];
+        historical.warnings = vec![
+            PipelineWarning {
+                code: "ANALYSIS_PAGE_OMITTED".into(),
+                message: "historical fixture".into(),
+                stage: Some(PipelineStage::Analyze),
+            },
+            PipelineWarning {
+                code: COVERAGE_SHORTFALL_WARNING_CODE.into(),
+                message: "historical fixture".into(),
+                stage: Some(PipelineStage::Analyze),
+            },
+        ];
+        validate_analyzed_content(&historical, &chunked, &normalized).unwrap();
+        historical.analysis_version = ANALYSIS_VERSION.into();
+        assert!(validate_analyzed_content(&historical, &chunked, &normalized).is_err());
+    }
+
+    #[test]
     #[ignore = "requires configured Ollama; substantive omission controls"]
     fn live_typed_omission_preserves_substantive_controls() {
         let runtime = crate::pipeline::model::OllamaRuntime::from_environment().unwrap();
@@ -8346,6 +8416,7 @@ mod tests {
         .unwrap();
         for (version, accepted) in [
             (ANALYSIS_VERSION, false),
+            (PUNCTUATION_ANALYSIS_VERSION, false),
             (WORD_TARGET_ANALYSIS_VERSION, false),
             (CAPACITY_ANALYSIS_VERSION, false),
             (COMPLETION_ANALYSIS_VERSION, false),
@@ -8378,6 +8449,41 @@ mod tests {
                 accepted
             );
         }
+    }
+
+    #[test]
+    fn value_suffix_completion_is_current_only_on_artifact_reload() {
+        let (normalized, chunked) = materiality_fixture(&["The applicable rate is 75%.".into()]);
+        let runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![json!({"claim_text":"The applicable rate is 75%."}).to_string()],
+        };
+        let current = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        validate_analyzed_content(&current, &chunked, &normalized).unwrap();
+
+        let mut historical = current.clone();
+        historical.analysis_version = PUNCTUATION_ANALYSIS_VERSION.into();
+        for chunk in &mut historical.chunks {
+            for (index, evidence) in chunk.evidence.iter_mut().enumerate() {
+                evidence.evidence_id = deterministic_evidence_id(
+                    &historical.document_id,
+                    PUNCTUATION_ANALYSIS_VERSION,
+                    &chunk.chunk_id,
+                    index,
+                    &evidence.block_id,
+                    &evidence.claim_text,
+                    &evidence.exact_quote,
+                );
+            }
+        }
+        assert!(validate_analyzed_content(&historical, &chunked, &normalized).is_err());
     }
 
     #[test]
@@ -8697,7 +8803,11 @@ mod tests {
             stage: Some(PipelineStage::Analyze),
         });
         assert!(validate_analyzed_content(&forged_ocr_warning, &chunked, &normalized).is_err());
-        for version in [ANALYSIS_VERSION, TOLERANT_ANALYSIS_VERSION] {
+        for version in [
+            ANALYSIS_VERSION,
+            PUNCTUATION_ANALYSIS_VERSION,
+            TOLERANT_ANALYSIS_VERSION,
+        ] {
             for (length, expected) in [(1_535, true), (1_536, true), (1_537, false)] {
                 let mut current = base.clone();
                 current.analysis_version = version.into();

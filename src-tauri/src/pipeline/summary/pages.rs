@@ -2,6 +2,7 @@ use super::*;
 use crate::pipeline::contracts::{
     AnalysisOmissionOrigin, AnalysisOmissionReason, AnalysisPageOmission, DocumentChunk,
 };
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 pub(super) const SELECTION_SCHEMA: &str = "document_page_quote_selection_v4";
 pub(super) const PARAPHRASE_SCHEMA: &str = "document_quote_paraphrase_v5";
@@ -15,19 +16,39 @@ fn approximate_words(text: &str) -> usize {
     text.split_whitespace().count()
 }
 
-// Mechanical completeness only; factual/semantic support still requires verification.
-pub(super) fn completion_valid(text: &str) -> bool {
+fn completion_valid_for_version(text: &str, value_suffixes: bool) -> bool {
     let closers = ['"', '\'', '”', '’', ')', ']', '}'];
     let ending = text.trim_end_matches(closers);
     let Some(terminal) = ending.chars().last() else {
         return false;
     };
-    matches!(terminal, '.' | '!' | '?' | '。' | '！' | '？')
-        && ending[..ending.len() - terminal.len_utf8()]
-            .trim_end_matches(closers)
+    if !matches!(terminal, '.' | '!' | '?' | '。' | '！' | '？') {
+        return false;
+    }
+    let content = ending[..ending.len() - terminal.len_utf8()].trim_end_matches(closers);
+    let Some(last) = content.chars().last() else {
+        return false;
+    };
+    if last.is_alphanumeric() {
+        return true;
+    }
+    value_suffixes
+        && (matches!(last, '%' | '‰' | '‱' | '°')
+            || last.general_category() == GeneralCategory::CurrencySymbol)
+        && content[..content.len() - last.len_utf8()]
+            .trim_end()
             .chars()
             .last()
-            .is_some_and(char::is_alphanumeric)
+            .is_some_and(char::is_numeric)
+}
+
+// Mechanical completeness only; factual/semantic support still requires verification.
+pub(super) fn completion_valid(text: &str) -> bool {
+    completion_valid_for_version(text, true)
+}
+
+pub(super) fn completion_valid_v11(text: &str) -> bool {
+    completion_valid_for_version(text, false)
 }
 
 fn paraphrase_violations(text: &str) -> Vec<&'static str> {
@@ -188,6 +209,14 @@ mod completion_tests {
             "Retain records.",
             "Is approval required?",
             "Stop!",
+            "The applicable rate is 75%.",
+            "The applicable rate is 75 %.",
+            "The applicable rate is 75‰.",
+            "The applicable rate is 75‱.",
+            "The temperature is 75°.",
+            "The amount is 500€.",
+            "The amount is $500.",
+            "The policy says \"the applicable rate is 75%.\"",
             "保存记录。",
             "必须保留！",
             "允许吗？",
@@ -208,12 +237,28 @@ mod completion_tests {
             "Retain records-",
             "Retain records...",
             "Retain records…",
+            "The applicable rate is %.",
+            "The temperature is °.",
+            "The amount is €.",
+            "The applicable rate is 75&.",
+            "The applicable rate is 75%",
             ".",
             "\"\"",
             "Retain records .",
         ] {
             assert!(!paraphrase_violations(invalid).is_empty(), "{invalid:?}");
         }
+        for historical_invalid in [
+            "The applicable rate is 75%.",
+            "The applicable rate is 75‰.",
+            "The applicable rate is 75‱.",
+            "The temperature is 75°.",
+            "The amount is 500€.",
+        ] {
+            assert!(completion_valid(historical_invalid));
+            assert!(!completion_valid_v11(historical_invalid));
+        }
+        assert!(completion_valid_v11("The amount is $500."));
     }
 
     #[test]
@@ -299,6 +344,14 @@ fn model_omission_admitted(
     normalized: &NormalizedDocument,
 ) -> bool {
     whole_page_quote(scope, quote, normalized) && !eligibility::material_marker(quote)
+}
+
+fn model_omission_admitted_v11(
+    scope: &AnalysisScope,
+    quote: &str,
+    normalized: &NormalizedDocument,
+) -> bool {
+    whole_page_quote(scope, quote, normalized) && !eligibility::material_marker_v11(quote)
 }
 
 fn paraphrase_schema(allow_omission: bool) -> Value {
@@ -860,6 +913,13 @@ pub(super) fn validate_plan(
                     && **actual
                         == content_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
             (Some(actual), None)
+                if analyzed.analysis_version == PUNCTUATION_ANALYSIS_VERSION
+                    && scope.quote_candidates.iter().any(|c| {
+                        model_omission_admitted_v11(&scope, &c.exact_quote, normalized)
+                    })
+                    && **actual
+                        == content_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
+            (Some(actual), None)
                 if matches!(
                     analyzed.analysis_version.as_str(),
                     TOLERANT_ANALYSIS_VERSION | DIRECT_ANALYSIS_VERSION
@@ -872,7 +932,7 @@ pub(super) fn validate_plan(
             (Some(actual), None)
                 if matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION
+                    ANALYSIS_VERSION | PUNCTUATION_ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION
                 ) && **actual
                     == technical_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
             (None, None) if evidence_pages.contains(&page) => retained += 1,
@@ -910,7 +970,7 @@ pub(super) fn validate_plan(
     }
     if matches!(
         analyzed.analysis_version.as_str(),
-        ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION
+        ANALYSIS_VERSION | PUNCTUATION_ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION
     ) {
         let expected_long_warning = analyzed
             .chunks

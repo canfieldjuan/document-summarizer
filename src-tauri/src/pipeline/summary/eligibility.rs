@@ -68,7 +68,7 @@ fn email_marker(text: &str) -> bool {
     })
 }
 
-fn phone_marker(text: &str) -> bool {
+fn phone_marker_with_question_boundary(text: &str, trim_question: bool) -> bool {
     let tokens = text.split_whitespace().collect::<Vec<_>>();
     for start in 0..tokens.len() {
         let mut digits = 0usize;
@@ -78,7 +78,7 @@ fn phone_marker(text: &str) -> bool {
                 matches!(
                     c,
                     ',' | ';' | ':' | '!' | '"' | '\'' | '“' | '”' | '‘' | '’'
-                )
+                ) || (trim_question && c == '?')
             });
             if token.is_empty()
                 || !token
@@ -100,6 +100,14 @@ fn phone_marker(text: &str) -> bool {
         }
     }
     false
+}
+
+fn phone_marker(text: &str) -> bool {
+    phone_marker_with_question_boundary(text, true)
+}
+
+fn phone_marker_v11(text: &str) -> bool {
+    phone_marker_with_question_boundary(text, false)
 }
 
 fn numeric_date_marker(text: &str) -> bool {
@@ -164,6 +172,14 @@ fn reference_marker(text: &str) -> bool {
 pub(super) fn material_marker(text: &str) -> bool {
     email_marker(text)
         || phone_marker(text)
+        || numeric_date_marker(text)
+        || named_date_marker(text)
+        || reference_marker(text)
+}
+
+pub(super) fn material_marker_v11(text: &str) -> bool {
+    email_marker(text)
+        || phone_marker_v11(text)
         || numeric_date_marker(text)
         || named_date_marker(text)
         || reference_marker(text)
@@ -434,8 +450,17 @@ mod tests {
     fn material_marker_numeric_boundaries_are_both_sided() {
         assert!(phone_marker("123-4567"));
         assert!(phone_marker("+123456789012345"));
+        assert!(phone_marker("Call 703-696-4959."));
+        assert!(phone_marker("Call 703-696-4959?"));
+        assert!(!phone_marker_v11("Call 703-696-4959?"));
+        assert!(phone_marker("Call (703) 696-4959?"));
+        assert!(!phone_marker_v11("Call (703) 696-4959?"));
+        assert!(material_marker_v11("Call 703-696-4959?"));
+        assert!(!material_marker_v11("Call (703) 696-4959?"));
         assert!(!phone_marker("12-3456"));
         assert!(!phone_marker("+1234567890123456"));
+        assert!(!phone_marker("Call 12-3456?"));
+        assert!(!phone_marker("Question?"));
 
         assert!(reference_marker("A-123"));
         assert!(!reference_marker("A-12"));
