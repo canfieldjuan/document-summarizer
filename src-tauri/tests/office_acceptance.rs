@@ -1,7 +1,7 @@
 use document_summarizer_lib::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
 use document_summarizer_lib::pipeline::contracts::{
-    ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
-    NormalizedDocument, PipelineState, SourceType, StructureNode,
+    AnalysisOmissionReason, ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime,
+    ModelRuntimeFailure, NormalizedDocument, PipelineState, SourceType, StructureNode,
 };
 use document_summarizer_lib::pipeline::db::{
     get_analyzed_document, get_chunked_document, get_citation_artifact, get_normalized_document,
@@ -31,6 +31,18 @@ struct TestDatabase(PathBuf);
 
 fn coverage_at_least_sixty_percent(cited: usize, total: usize) -> bool {
     total > 0 && cited <= total && (cited as u128) * 5 >= (total as u128) * 3
+}
+
+fn coverage_at_least_fifty_percent(cited: usize, total: usize) -> bool {
+    total > 0 && cited <= total && (cited as u128) * 2 >= total as u128
+}
+
+fn omission_reduces_adjusted_denominator(reason: &AnalysisOmissionReason) -> bool {
+    matches!(
+        reason,
+        AnalysisOmissionReason::NonSubstantivePageFurniture
+            | AnalysisOmissionReason::NoSubstantiveContent
+    )
 }
 
 fn evidence_coverage_accepted(
@@ -80,6 +92,26 @@ fn coverage_gate_separates_synthesized_and_supported_evidence() {
     ] {
         assert_eq!(coverage_at_least_sixty_percent(cited, total), expected);
     }
+    for (cited, total, expected) in [
+        (0, 0, false),
+        (0, 1, false),
+        (1, 1, true),
+        (2, 1, false),
+        (49, 100, false),
+        (50, 100, true),
+        (51, 100, true),
+    ] {
+        assert_eq!(coverage_at_least_fifty_percent(cited, total), expected);
+    }
+    assert!(omission_reduces_adjusted_denominator(
+        &AnalysisOmissionReason::NonSubstantivePageFurniture
+    ));
+    assert!(omission_reduces_adjusted_denominator(
+        &AnalysisOmissionReason::NoSubstantiveContent
+    ));
+    assert!(!omission_reduces_adjusted_denominator(
+        &AnalysisOmissionReason::ParaphraseUnrepairable
+    ));
 }
 
 impl TestDatabase {
@@ -771,8 +803,20 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .collect::<HashSet<_>>();
     assert!(omitted_pages.is_subset(&native_text_pages));
     assert!(omitted_pages.is_disjoint(&cited_native_text_pages));
+    let material_omitted_pages = analyzed
+        .omissions
+        .iter()
+        .filter(|omission| omission_reduces_adjusted_denominator(&omission.reason))
+        .map(|omission| omission.page_number)
+        .collect::<HashSet<_>>();
+    let technical_omitted_pages = analyzed
+        .omissions
+        .iter()
+        .filter(|omission| !omission_reduces_adjusted_denominator(&omission.reason))
+        .map(|omission| omission.page_number)
+        .collect::<HashSet<_>>();
     let adjusted_native_text_pages = native_text_pages
-        .difference(&omitted_pages)
+        .difference(&material_omitted_pages)
         .copied()
         .collect::<HashSet<_>>();
     let acceptance_pages = (native_text_pages.len() * 3).div_ceil(5);
@@ -806,6 +850,8 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
             "inspected_page_count": analyzed.inspected_pages.len(),
             "omitted_page_count": analyzed.omissions.len(),
             "omitted_pages": analyzed.omissions.iter().map(|omission| omission.page_number).collect::<Vec<_>>(),
+            "material_omitted_pages": material_omitted_pages,
+            "technical_omitted_pages": technical_omitted_pages,
             "cited_evidence_count": cited_evidence_ids.len(),
             "synthesized_evidence_count": synthesized_evidence_ids.len(),
             "supported_evidence_fraction": cited_evidence_ids.len() as f64 / evidence_ids.len() as f64,
@@ -867,9 +913,26 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         );
     }
     assert!(
-        coverage_at_least_sixty_percent(cited_native_text_pages.len(), adjusted_native_text_pages.len()),
-        "at least 60 percent of non-omitted native-text pages must be cited; raw coverage remains reported"
+        coverage_at_least_fifty_percent(cited_native_text_pages.len(), native_text_pages.len()),
+        "at least 50 percent of all native-text pages must be cited"
     );
+    assert!(
+        coverage_at_least_sixty_percent(
+            cited_native_text_pages.len(),
+            adjusted_native_text_pages.len()
+        ),
+        "at least 60 percent of materially non-omitted native-text pages must be cited"
+    );
+    if source_hash == "290840e408f2769b9a0ed65b73aa15c116cae3685f125358717ad15cfbd29ec8" {
+        assert!(
+            result
+                .summary
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "OCR_TEXT_LAYER_STRUCTURE_RISK"),
+            "the scanned NARA robustness fixture must expose OCR text-layer structure risk"
+        );
+    }
     for evidence in &result.citations.evidence {
         let block = blocks
             .get(evidence.block_id.as_str())

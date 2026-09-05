@@ -26,7 +26,8 @@ mod structural;
 #[cfg(test)]
 include!("summary/legacy_generation.rs");
 
-pub const ANALYSIS_VERSION: &str = "9.0.0";
+pub const ANALYSIS_VERSION: &str = "10.0.0";
+const DIRECT_ANALYSIS_VERSION: &str = "9.0.0";
 const RETENTION_ANALYSIS_VERSION: &str = "8.0.0";
 const WORD_TARGET_ANALYSIS_VERSION: &str = "7.1.0";
 const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
@@ -67,6 +68,7 @@ const LEGACY_MAX_EVIDENCE_PER_CHUNK: usize = 64;
 const MAX_ANALYSIS_QUOTE_CHARACTERS: usize = 600;
 const MAX_ANALYSIS_SELECTION_ID_CHARACTERS: usize = 8;
 const MAX_ANALYSIS_CLAIM_CHARACTERS: usize = 384;
+const MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS: usize = 1_536;
 const HISTORICAL_ANALYSIS_CLAIM_CHARACTERS: usize = 192;
 const MAX_SUMMARY_CLAIMS: usize = 64;
 const MAX_VERIFICATION_CLAIMS_PER_REQUEST: usize = 16;
@@ -1229,7 +1231,7 @@ fn analysis_output_schema(scope: &AnalysisScope) -> Value {
                         "claim_text": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": MAX_ANALYSIS_CLAIM_CHARACTERS
+                            "maxLength": MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS
                         }
                     },
                     "required": ["quote_id", "claim_text"],
@@ -1557,7 +1559,10 @@ fn versioned_analysis_selected_pages(
 ) -> Result<HashSet<u32>, PipelineFailure> {
     // Historical plans and identities must not acquire new retention obligations.
     let mut selected = analysis_selected_pages(normalized)?;
-    if version != ANALYSIS_VERSION && version != RETENTION_ANALYSIS_VERSION {
+    if version != ANALYSIS_VERSION
+        && version != DIRECT_ANALYSIS_VERSION
+        && version != RETENTION_ANALYSIS_VERSION
+    {
         return Ok(selected);
     }
     let pages = normalized
@@ -1571,7 +1576,7 @@ fn versioned_analysis_selected_pages(
         })
         .map(|page| page.page_number)
         .collect::<Vec<_>>();
-    let target = if version == ANALYSIS_VERSION {
+    let target = if matches!(version, ANALYSIS_VERSION | DIRECT_ANALYSIS_VERSION) {
         direct::retention_target(pages.len())?
     } else {
         analysis_retention_target(pages.len())?
@@ -1908,7 +1913,7 @@ fn parse_evidence_response(
     let mut evidence_ids = HashSet::new();
     let mut evidence = Vec::with_capacity(raw.evidence.len());
     for (index, raw_item) in raw.evidence.into_iter().enumerate() {
-        if !canonical_bounded_text(&raw_item.claim_text, MAX_ANALYSIS_CLAIM_CHARACTERS)
+        if !canonical_bounded_text(&raw_item.claim_text, MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS)
             || !selected_quotes.insert(raw_item.quote_id.clone())
         {
             return Err(stage_failure(
@@ -2185,6 +2190,7 @@ fn validate_analyzed_content(
         || !matches!(
             analyzed.analysis_version.as_str(),
             ANALYSIS_VERSION
+                | DIRECT_ANALYSIS_VERSION
                 | RETENTION_ANALYSIS_VERSION
                 | WORD_TARGET_ANALYSIS_VERSION
                 | CAPACITY_ANALYSIS_VERSION
@@ -2209,6 +2215,7 @@ fn validate_analyzed_content(
     let materiality_analysis = matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | DIRECT_ANALYSIS_VERSION
             | RETENTION_ANALYSIS_VERSION
             | WORD_TARGET_ANALYSIS_VERSION
             | CAPACITY_ANALYSIS_VERSION
@@ -2324,7 +2331,8 @@ fn validate_analyzed_content(
                 &evidence.exact_quote,
             );
             let claim_character_limit = match analyzed.analysis_version.as_str() {
-                ANALYSIS_VERSION
+                ANALYSIS_VERSION => MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS,
+                DIRECT_ANALYSIS_VERSION
                 | RETENTION_ANALYSIS_VERSION
                 | WORD_TARGET_ANALYSIS_VERSION
                 | CAPACITY_ANALYSIS_VERSION => MAX_ANALYSIS_CLAIM_CHARACTERS,
@@ -2345,6 +2353,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | DIRECT_ANALYSIS_VERSION
                         | RETENTION_ANALYSIS_VERSION
                         | WORD_TARGET_ANALYSIS_VERSION
                         | CAPACITY_ANALYSIS_VERSION
@@ -2361,6 +2370,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | DIRECT_ANALYSIS_VERSION
                         | RETENTION_ANALYSIS_VERSION
                         | WORD_TARGET_ANALYSIS_VERSION
                         | CAPACITY_ANALYSIS_VERSION
@@ -2410,6 +2420,7 @@ fn validate_analyzed_content(
     if matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | DIRECT_ANALYSIS_VERSION
             | RETENTION_ANALYSIS_VERSION
             | WORD_TARGET_ANALYSIS_VERSION
             | CAPACITY_ANALYSIS_VERSION
@@ -6282,7 +6293,7 @@ mod tests {
 
         let valid_indices = vec![0];
         let accepted = parse_evidence_response(
-            &response_for(&valid_indices, MAX_ANALYSIS_CLAIM_CHARACTERS),
+            &response_for(&valid_indices, MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS),
             &chunked.document_id,
             chunk,
             &normalized_blocks,
@@ -6292,20 +6303,20 @@ mod tests {
         .expect("the exact evidence floor across distinct pages should pass");
         assert_eq!(accepted.len(), scope.minimum_evidence);
         let error = parse_evidence_response(
-            &response_for(&valid_indices, MAX_ANALYSIS_CLAIM_CHARACTERS + 1),
+            &response_for(&valid_indices, MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS + 1),
             &chunked.document_id,
             chunk,
             &normalized_blocks,
             &scope,
             0,
         )
-        .expect_err("an analysis claim beyond the output-derived bound must fail closed");
+        .expect_err("an analysis claim beyond the decoder hard bound must fail closed");
         assert_eq!(error.code, "MODEL_EVIDENCE_RESPONSE_INVALID");
 
         let schema = analysis_output_schema(&scope);
         assert_eq!(
             schema["properties"]["evidence"]["items"]["properties"]["claim_text"]["maxLength"],
-            MAX_ANALYSIS_CLAIM_CHARACTERS
+            MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS
         );
     }
 
@@ -7514,6 +7525,9 @@ mod tests {
         bad.omissions.push(bad.omissions[0].clone());
         assert!(validate_analyzed_content(&bad, &chunked, &normalized).is_err());
         let mut old = analyzed.clone();
+        old.analysis_version = DIRECT_ANALYSIS_VERSION.into();
+        validate_analyzed_content(&old, &chunked, &normalized).unwrap();
+        let mut old = analyzed.clone();
         old.analysis_version = RETENTION_ANALYSIS_VERSION.into();
         assert!(validate_analyzed_content(&old, &chunked, &normalized).is_err());
         assert!(direct::synthesize(
@@ -7811,6 +7825,8 @@ mod tests {
             (CAPACITY_ANALYSIS_VERSION, 385, false),
             (WORD_TARGET_ANALYSIS_VERSION, 384, true),
             (WORD_TARGET_ANALYSIS_VERSION, 385, false),
+            (DIRECT_ANALYSIS_VERSION, 384, true),
+            (DIRECT_ANALYSIS_VERSION, 385, false),
         ] {
             let mut old = reloaded.clone();
             old.analysis_version = version.into();
@@ -7878,16 +7894,16 @@ mod tests {
         for (answers, expected_calls, succeeds) in [
             (vec![good.clone()], 2, true),
             (vec![bad.clone(), good.clone()], 3, true),
-            (vec![bad.clone(), bad], 3, false),
+            (vec![bad.clone(), bad], 3, true),
             (
                 vec![json!({"claim_text":"w".repeat(1_537)}).to_string()],
                 2,
-                false,
+                true,
             ),
             (
                 vec![json!({"claim_text":"w".repeat(385)}).to_string(); 2],
                 3,
-                false,
+                true,
             ),
             (
                 vec![
@@ -7951,6 +7967,90 @@ mod tests {
     }
 
     #[test]
+    fn complete_long_paraphrase_is_retained_and_unrepairable_text_is_audited() {
+        let (normalized, chunked) = materiality_fixture(&["Retain records forever.".into()]);
+        let initial = format!("{}.", "a".repeat(413));
+        let shortened = format!("{}.", "b".repeat(401));
+        for (answers, expected_text) in [
+            (
+                vec![
+                    json!({"claim_text":initial}).to_string(),
+                    json!({"claim_text":shortened}).to_string(),
+                ],
+                shortened.as_str(),
+            ),
+            (
+                vec![
+                    json!({"claim_text":initial}).to_string(),
+                    json!({"claim_text":"incomplete"}).to_string(),
+                ],
+                initial.as_str(),
+            ),
+        ] {
+            let runtime = ParaphraseRepairRuntime {
+                requests: Mutex::new(Vec::new()),
+                answers,
+            };
+            let analyzed = analyze(
+                &runtime,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            assert_eq!(analyzed.chunks[0].evidence[0].claim_text, expected_text);
+            assert!(analyzed
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "LONG_CLAIM"));
+            validate_analyzed_content(&analyzed, &chunked, &normalized).unwrap();
+            let mut missing_warning = analyzed.clone();
+            missing_warning
+                .warnings
+                .retain(|warning| warning.code != "LONG_CLAIM");
+            assert!(validate_analyzed_content(&missing_warning, &chunked, &normalized).is_err());
+        }
+
+        let invalid = json!({"claim_text":"incomplete"}).to_string();
+        let runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![invalid.clone(), invalid],
+        };
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert!(analyzed
+            .chunks
+            .iter()
+            .all(|chunk| chunk.evidence.is_empty()));
+        assert_eq!(analyzed.omissions.len(), 1);
+        assert_eq!(
+            analyzed.omissions[0].origin,
+            crate::pipeline::contracts::AnalysisOmissionOrigin::ParaphraseUnrepairable
+        );
+        assert!(analyzed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PARAPHRASE_UNREPAIRABLE"));
+        validate_analyzed_content(&analyzed, &chunked, &normalized).unwrap();
+        let mut missing_warning = analyzed.clone();
+        missing_warning
+            .warnings
+            .retain(|warning| warning.code != "PARAPHRASE_UNREPAIRABLE");
+        assert!(validate_analyzed_content(&missing_warning, &chunked, &normalized).is_err());
+
+        let mut historical = analyzed.clone();
+        historical.analysis_version = DIRECT_ANALYSIS_VERSION.into();
+        assert!(validate_analyzed_content(&historical, &chunked, &normalized).is_err());
+    }
+
+    #[test]
     fn completeness_reload_is_versioned_and_rejects_mixed_evidence() {
         let (normalized, chunked) = materiality_fixture(&[
             "Retain records forever.".into(),
@@ -8002,23 +8102,42 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_paraphrase_never_persists_as_evidence_after_retry_exhaustion() {
+    fn incomplete_paraphrase_persists_only_as_a_technical_omission() {
         let database = TestDatabase::new();
         let (mut conn, run_id) = chunked_run(&database);
         let invalid = json!({"claim_text":"w".repeat(192)}).to_string();
         let runtime = ParaphraseRepairRuntime {
             requests: Mutex::new(Vec::new()),
-            answers: vec![invalid.clone(), invalid],
+            answers: vec![invalid; 100],
         };
-        assert!(analyze_chunked_document(&mut conn, &runtime, &run_id).is_err());
-        assert_eq!(runtime.requests.lock().unwrap().len(), 3);
-        assert!(get_analyzed_document(&conn, &run_id).unwrap().is_none());
+        let analyzed = analyze_chunked_document(&mut conn, &runtime, &run_id).unwrap();
+        let requests = runtime.requests.lock().unwrap();
+        let paraphrase_requests = requests
+            .iter()
+            .filter(|request| matches!(&request.output_format, ModelOutputFormat::JsonSchema { name, .. } if name == pages::PARAPHRASE_SCHEMA))
+            .count();
+        assert_eq!(paraphrase_requests, analyzed.omissions.len() * 2);
+        drop(requests);
+        assert!(analyzed
+            .chunks
+            .iter()
+            .all(|chunk| chunk.evidence.is_empty()));
+        assert!(!analyzed.omissions.is_empty());
+        assert!(analyzed.omissions.iter().all(|omission| omission.reason
+            == crate::pipeline::contracts::AnalysisOmissionReason::ParaphraseUnrepairable));
+        assert_eq!(
+            get_analyzed_document(&conn, &run_id).unwrap().unwrap(),
+            analyzed
+        );
         drop(conn);
         let reopened = init_db(&database.0).unwrap();
-        assert!(get_analyzed_document(&reopened, &run_id).unwrap().is_none());
+        assert_eq!(
+            get_analyzed_document(&reopened, &run_id).unwrap().unwrap(),
+            analyzed
+        );
         assert_eq!(
             get_pipeline_run(&reopened, &run_id).unwrap().unwrap().state,
-            PipelineState::Failed
+            PipelineState::Analyzed
         );
     }
 
@@ -8169,6 +8288,10 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.code == COVERAGE_SHORTFALL_WARNING_CODE));
+        assert!(analyzed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "OCR_TEXT_LAYER_STRUCTURE_RISK"));
         let mut decoded: AnalyzedDocument =
             serde_json::from_str(&serde_json::to_string(&analyzed).unwrap()).unwrap();
         validate_analyzed_content(&decoded, &chunked, &normalized).unwrap();
@@ -8216,6 +8339,123 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!(pages::OMIT_HEADING)));
+    }
+
+    #[test]
+    fn form_materiality_and_ocr_structure_risk_reach_delivered_warnings() {
+        let text = "National Archives job NC1-330-78-7; see the attached memo dated May 28, 2008.";
+        let (mut normalized, mut chunked) = materiality_fixture(&[text.into()]);
+        normalized.pages[0].content[0].text.push('�');
+        chunked.chunks[0].text = normalized.pages[0].content[0].text.clone();
+        let runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![json!({"claim_text":"The form references National Archives job NC1-330-78-7 and an attached memo dated May 28, 2008."}).to_string()],
+        };
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert!(analyzed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "OCR_TEXT_LAYER_STRUCTURE_RISK"));
+        let synthesized = direct::synthesize(
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert!(synthesized
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "OCR_TEXT_LAYER_STRUCTURE_RISK"));
+        let requests = runtime.requests.lock().unwrap();
+        let form_fields =
+            "names, organizations, identifiers, dates, reference numbers and cross-references";
+        assert!(requests[0].system_prompt.contains(form_fields));
+        assert!(requests[1].system_prompt.contains(form_fields));
+
+        let mut forged = analyzed.clone();
+        forged
+            .warnings
+            .retain(|warning| warning.code != "OCR_TEXT_LAYER_STRUCTURE_RISK");
+        assert!(validate_analyzed_content(&forged, &chunked, &normalized).is_err());
+    }
+
+    #[test]
+    fn current_long_claim_boundary_and_version_nine_reload_are_distinct() {
+        let (normalized, chunked) = materiality_fixture(&["Retain records forever.".into()]);
+        let runtime = ParaphraseRepairRuntime {
+            requests: Mutex::new(Vec::new()),
+            answers: vec![json!({"claim_text":"Retain records forever."}).to_string()],
+        };
+        let base = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert!(!base
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "OCR_TEXT_LAYER_STRUCTURE_RISK"));
+        let mut forged_ocr_warning = base.clone();
+        forged_ocr_warning.warnings.push(PipelineWarning {
+            code: "OCR_TEXT_LAYER_STRUCTURE_RISK".into(),
+            message: "forged".into(),
+            stage: Some(PipelineStage::Analyze),
+        });
+        assert!(validate_analyzed_content(&forged_ocr_warning, &chunked, &normalized).is_err());
+        for (length, expected) in [(1_535, true), (1_536, true), (1_537, false)] {
+            let mut current = base.clone();
+            current.chunks[0].evidence[0].claim_text = format!("{}.", "t".repeat(length - 1));
+            current.chunks[0].evidence[0].evidence_id = deterministic_evidence_id(
+                &current.document_id,
+                ANALYSIS_VERSION,
+                &current.chunks[0].chunk_id,
+                0,
+                &current.chunks[0].evidence[0].block_id,
+                &current.chunks[0].evidence[0].claim_text,
+                &current.chunks[0].evidence[0].exact_quote,
+            );
+            current.chunks[0].summary_text = current.chunks[0].evidence[0].claim_text.clone();
+            current.warnings.push(PipelineWarning {
+                code: "LONG_CLAIM".into(),
+                message: "fixture".into(),
+                stage: Some(PipelineStage::Analyze),
+            });
+            assert_eq!(
+                validate_analyzed_content(&current, &chunked, &normalized).is_ok(),
+                expected
+            );
+        }
+        for (length, expected) in [(384, true), (385, false)] {
+            let mut old = base.clone();
+            old.analysis_version = DIRECT_ANALYSIS_VERSION.into();
+            old.chunks[0].evidence[0].claim_text = format!("{}.", "t".repeat(length - 1));
+            old.chunks[0].evidence[0].evidence_id = deterministic_evidence_id(
+                &old.document_id,
+                DIRECT_ANALYSIS_VERSION,
+                &old.chunks[0].chunk_id,
+                0,
+                &old.chunks[0].evidence[0].block_id,
+                &old.chunks[0].evidence[0].claim_text,
+                &old.chunks[0].evidence[0].exact_quote,
+            );
+            old.chunks[0].summary_text = old.chunks[0].evidence[0].claim_text.clone();
+            assert_eq!(
+                validate_analyzed_content(&old, &chunked, &normalized).is_ok(),
+                expected
+            );
+        }
     }
 
     #[test]

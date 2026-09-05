@@ -480,12 +480,14 @@ pub enum AnalysisOmissionOrigin {
     DatePageStamp,
     ModelBareHeading,
     ModelNoSubstantiveContent,
+    ParaphraseUnrepairable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnalysisOmissionReason {
     NonSubstantivePageFurniture,
     NoSubstantiveContent,
+    ParaphraseUnrepairable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
