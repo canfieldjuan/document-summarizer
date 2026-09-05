@@ -507,6 +507,12 @@ including complete delivered text.
   `PARAPHRASE_UNREPAIRABLE`, continue and backfill. This technical loss remains
   in both page-coverage denominators. Initial malformed, foreign or transport
   failures remain failures; cancellation is never converted to an omission.
+  A repair transport/provider failure also propagates as a runtime failure; only
+  a successfully received but mechanically unusable repair may become the
+  technical omission. Once the initial response contains a claim, the repair
+  response shape is claim-only: it cannot revise that page into
+  `no_substantive_content`. A model materiality omission is accepted only as the
+  initial complete-page outcome.
 - Record ModelNoSubstantiveContent/NoSubstantiveContent using the existing page,
   chunk, source fingerprint, catalog fingerprint and filter-version audit fields.
   Analysis-v11 reload verifies whole-page admission, absence of material markers
@@ -595,6 +601,10 @@ characters. Letters separated only by combining marks count as a word. Unknown,
 private-use or format characters veto noise classification. Recognizable numeric
 content vetoes the noise rule, including numeric tables, standalone numbers,
 dates/values, currency or percent quantities, and recognized single-letter units.
+An operator followed by a numeric value, including a single-digit comparison
+such as `< 5`, is recognizable numeric content even when it is the only value
+on a punctuation-heavy page. Operator/value recognition must not depend on two
+numeric tokens or a multi-digit run.
 The captured NARA page containing `5l` is retained by the unit veto; the
 deterministic filter must not be tuned to remove it.
 
