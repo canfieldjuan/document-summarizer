@@ -504,8 +504,10 @@ For a retained page, analysis has two separate model operations:
 
 #### Proposed amendment: single-claim capacity and draft-aware shortening
 
-Status: documentation only; implement separately after this amendment. These
-rules supersede the 192/768 limits and draft-free retry of the implemented
+Status: approved in `573ad48`, clarified in `869e458`, implemented separately
+in `897d2e9`; DOL live acceptance remains blocked, as recorded in
+`LOCAL_MODEL_EVALUATION.md`. These rules supersede the 192/768 limits and
+draft-free retry of the implemented
 completion checkpoint below for new analysis version 7.0.0 only. Preserve
 versions 6.0.0 and earlier with their original limits, completion rules and
 identity/hash behavior. Fold/delete this proposed text with the complete feature,

@@ -1,6 +1,82 @@
 # Corpus and native Ollama evaluation — 2026-09-04
 
+## Latest result: DOL still fails length repair; NARA passes
+
+**NOT DONE: DOL still produces no summary.** On implementation `897d2e9`,
+its nineteenth paraphrase returned 392 characters against Rust's 384 limit.
+The single draft-aware shortening request returned the identical 392-character
+sentence. Both are complete and punctuated; this is a length-only rejection,
+not decoder truncation, malformed JSON, or output-token exhaustion. The earlier
+333-character agriculture definition now passes, but the next observed failure
+is not fixed. Do not raise another limit or claim corpus closure from this run.
+
+Contract `573ad48` and the pre-implementation correction `869e458` precede code
+`897d2e9`. Both full acceptances below ran that exact code commit, sequentially,
+using `qwen3-30b-a3b:latest` through the existing Ollama adapter. No coverage,
+eligibility, completeness, token/context/timeout, synthesis or verification
+allowance was relaxed.
+
+| Document | Result | Supported claims | Retained evidence | Cited native pages | Requests | Completion tokens | Model time | Test time |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| DOL deck | exit 101 | None | 18 transient accepted items; no completed analysis artifact | No summary | 39 | 1,016 | 16,128 ms | 18.01 s |
+| NARA | exit 0 | 7 | 8 persisted; 7 cited by supported claims | 7/11 (63.64%) | 20 | 2,896 | 33,717 ms | 34.50 s |
+
+DOL response ordinals 37 and 38 each used 72 completion tokens against 2,048.
+The retry metric records `draft_characters:392`, so the actual live shortening
+request did receive the rejected draft. Its request has more input than the
+initial call (408 versus 248 prompt tokens); the response text is nevertheless
+identical. There were 20 paraphrase calls, including exactly one repair. No
+synthesis or verification ran. The 18-item count is reconstructed from the
+successful response prefix and the fail-before-persistence control flow, not
+a durable partial-analysis artifact. New run-derived seeds mean this is not a
+same-seed causal benchmark against earlier runs.
+
+NARA made eight paraphrase calls, with lengths 179, 107, 75, 147, 87, 151, 57
+and 72; none needed repair. Both synthesis attempts covered all eight retained
+items. Verification withheld the corrupted-text claim, and the delivered set
+cites seven items (87.5 percent). The acceptance verified the durable
+`SUMMARY_COVERAGE_SHORTFALL` warning and database-reopened summary/citations.
+This is automated coverage/support acceptance, not independent factual review:
+the accepted permanent-records/destruction wording still warrants source-level
+fidelity review, and a passing same-model verifier does not settle that concern.
+
+All requests used Primary transport, with no schema fallback. The 1,536
+decoder schema therefore compiled both in the early controlled probe below
+and through the actual application adapter on the corpus. Unit tests prove
+that the retry sends the draft and accepts a valid scripted rewrite, not that
+Qwen reliably shortens it; this live retry did not do so.
+
+The production preflight fixtures now executed successfully: at E=59, L=192
+versus 384 produces eight versus nine batches and reserves 16 versus 18 calls,
+with no reductions. At E=67 the respective reservations are 24 versus 26 calls,
+with a maximum of three reductions in both cases. Both remain below 256.
+Escaping, individual verification overflow and aggregate overflow are also
+tested through the real planners, including rejection before model inference.
+These are maximum-text fixtures at the deck's evidence counts, not a live DOL
+synthesis measurement: this run failed before synthesis.
+
+Local gates: `cargo test --offline --all-targets` exited 0 with 241 library
+tests passed and four ignored; three acceptance tests passed and three external
+tests ignored; three release tests passed. Strict clippy
+(`--offline --all-targets --all-features -- -D warnings`) and `cargo fmt --check`
+exited 0. The initial suite exposed a mock synthesis response whose size grew
+with the unrelated analysis cap; keeping that mock's original concise size
+restored its intended persistence test path, without changing production
+verification limits. Dedicated new tests cover maximum-size packing instead.
+
+Logs: `/tmp/doc-sum-single-claim.Lea4n8/nara.log`, `dol.log`,
+`local-tests-final.log`, and `decoder-probe.log`. Raw response tracing was
+explicitly enabled for these public corpus documents; new routine paraphrase
+metrics contain lengths/ordinals only, not source or draft text.
+
+Remaining gaps: successful DOL acceptance, focused live heading controls, and
+the separately sequenced durable partial-analysis/individual-attempt audit.
+PR #30 stays ready for review, but must not merge as a completed product fix.
+
 ## Pre-implementation finding: nominal cap is not the effective synthesis bound
+
+The following records the pre-implementation checkpoint; completed verification
+and its remaining failures are reported above.
 
 The claim that the 16,000-character constant currently admits over-context
 synthesis requests is contradicted by the executable call path. In the
@@ -40,7 +116,7 @@ schema-compatibility probe, not a corpus run or proof of adapter wiring; the
 implemented adapter and both corpus runs still require live verification.
 Trace: `/tmp/doc-sum-single-claim.Lea4n8/decoder-probe.log`.
 
-## Latest result: DOL still fails; NARA passes revised coverage acceptance
+## Previous result: DOL still fails; NARA passes revised coverage acceptance
 
 **NOT DONE: DOL still fails analysis after its bounded paraphrase retry.**
 The contract amendment is `90a8b91`, followed by implementation `cb53dea`.
