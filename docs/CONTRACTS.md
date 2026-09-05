@@ -504,7 +504,9 @@ For a retained page, analysis has two separate model operations:
 
 #### Amendment: word-targeted paraphrase generation
 
-Status: contract first; implement separately. This narrowly changes the generation
+Status: contract `0f108e5` precedes implementation `05d046f`. DOL analysis now
+completes; the separate verification aggregate gate blocks live delivery (see
+`LOCAL_MODEL_EVALUATION.md`). This narrowly changes the generation
 target, not evidence admission. It supersedes character-targeted wording in the
 single-claim checkpoint below. New analysis version 7.1.0 keeps version 7.0.0
 admission and identity rules; historical artifacts remain readable unchanged.

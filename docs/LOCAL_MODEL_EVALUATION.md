@@ -1,6 +1,70 @@
 # Corpus and native Ollama evaluation — 2026-09-04
 
-## Latest result: DOL still fails length repair; NARA passes
+## Latest result: word targeting clears DOL analysis; verification admission blocks delivery
+
+**NOT DONE: DOL still has no delivered summary.** The new failure is not
+paraphrase length: synthesis's verification preflight rejects 49,670 aggregate
+input characters against the unchanged 43,008 allowance. No verifier request
+ran. Contract `0f108e5` precedes implementation `05d046f`; both live runs below
+exercised that exact code commit with Qwen through the existing Ollama adapter.
+
+| Document | Result | Supported claims | Evidence | Cited native pages | Requests | Completion tokens | Model time | Test time |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| DOL deck | exit 101 | None; 60 unverified synthesis candidates | 67 completed analysis items; all referenced by synthesis candidates | No delivered summary | 144 | 10,535 | 132,455 ms | 134.97 s |
+| NARA | exit 0 | 7 | 8 persisted; 7 cited by supported claims | 7/11 (63.64%) | 20 | 3,036 | 35,144 ms | 36.29 s |
+
+The prompt-only experiment worked at the analysis boundary in this run. DOL's
+earlier failing position (response 37) now returns 356 characters / 55 words.
+A later response (109) still overshoots at 394 characters / 62 words, but the
+single word-targeted retry (110) returns 276 characters / 42 words. The model
+therefore performed a real shortening this time; no tolerance band was needed
+to complete analysis. This is not a claim that word targeting guarantees length
+compliance or that unverified paraphrases are factually faithful.
+
+DOL analysis used 135 requests (67 selections, 68 paraphrases including one
+repair), 3,471 completion tokens and 67,509 ms. Synthesis used nine requests,
+7,064 completion tokens and 64,946 ms. Their candidate counts were
+6, 6, 8, 8, 8, 5, 8, 8 and 3, totaling 60 claims referencing all 67 distinct
+evidence IDs. No reduction was needed to reach B=64. The analysis artifact
+completed before synthesis started; the rejected candidate catalog is not a
+completed synthesis/verification artifact or a delivered summary.
+
+The new blocker is explicit in `summary.rs:1880` and `:2007`: aggregate allowance
+is min(64,000, V_request * ceil(B/16)), whereas actual greedy batches split by
+both count and serialized size and repeat the system prompt. For B=64 that
+allowance is 43,008. The real catalog requires 49,670, exceeding it by 6,662,
+even though each individual request passed its own guard. The preflight fails
+closed before verification, wrapped as `MODEL_CLAIMS_RESPONSE_INVALID` at
+synthesis. This is the previously unit-tested aggregate refusal now encountered
+on the live deck, not a context overflow or a paraphrase regression. Changing
+the aggregate resource contract is a separate decision; this change does not
+raise it, drop references, lower coverage, or silently skip verification.
+
+NARA retains its durable `SUMMARY_COVERAGE_SHORTFALL` warning after the existing
+bounded re-synthesis. Eight paraphrases needed no repair, with lengths
+177, 107, 183, 147, 92, 151, 85 and 122. Supported evidence coverage is 87.5
+percent. Reopen and provenance acceptance passed; the source-level fidelity
+caution in the prior evaluation remains, despite the model's supported verdicts.
+All requests on both documents used Primary transport; no schema fallback.
+Fresh run-derived seeds prevent treating this as a controlled same-seed trial.
+
+Local gates on `05d046f`: `cargo test --offline --all-targets` exited 0 with
+242 library tests passed / four ignored, three acceptance tests passed / three
+external tests ignored, and three release tests passed. Strict all-target,
+all-feature clippy with warnings denied and `cargo fmt --check` both exited 0.
+Tests exercise 61-word feedback, Unicode whitespace counting, short 56-word
+admission versus a rejected 385-character one-word claim, draft/source binding,
+unchanged character/decoder boundaries and historical version reload. Analysis
+version is 7.1.0; the 384 Rust and 1,536 decoder bounds and all packing remain.
+Logs: `/tmp/doc-sum-word-target.9G27eb/dol.log` and `nara.log`.
+
+Do not add the conditional 512-character tolerance band on this evidence: the
+bounded retry cleared the observed overshoot. Next work needs a contract for the
+verification aggregate resource budget; successful DOL acceptance, live heading
+controls and separately sequenced durable request/partial-analysis auditing
+remain open. PR #30 stays ready but unmerged.
+
+## Previous result: DOL still fails length repair; NARA passes
 
 **NOT DONE: DOL still produces no summary.** On implementation `897d2e9`,
 its nineteenth paraphrase returned 392 characters against Rust's 384 limit.
