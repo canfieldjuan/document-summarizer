@@ -1,6 +1,92 @@
 # Corpus and native Ollama evaluation — updated 2026-09-05
 
-## Latest result: structural attribution works; BOTH corpus acceptances fail
+## Latest slice: direct paraphrases implemented; live control TIMED OUT
+
+**NOT DONE. No new NARA or DOL delivered summary is established for this slice.
+The previous corpus failures below remain the last completed measurements.**
+The live substantive-omission control test failed with
+`MODEL_RUNTIME_UNAVAILABLE` / `MODEL_ANALYSIS: Local model request failed`, exit
+101 after 900.01 seconds, with no control outcome returned. NARA and DOL were
+not started behind that failed probe. Local green gates do not settle whether
+the omission model decisions are sound or the delivered direct summary is
+readable and faithful. No new delivered text exists to print.
+
+| Current slice | Claims / evidence | Raw / adjusted cited pages | Requests / completion tokens | Result |
+| --- | --- | --- | --- | --- |
+| NARA | Not measured | Not measured | Not run | Pending available Ollama |
+| DOL | Not measured | Not measured | Not run | Pending available Ollama |
+
+Observed runtime contention, not an isolated pipeline diagnosis: the website
+generator's `build.py examples/prospect-plumber-template.json` process had an
+established connection to the same Ollama throughout the probe and remained
+connected after it timed out. Server load logs reported Parallel=1, context
+40,960, 42/49 layers on GPU and an output layer on CPU; `/api/ps` confirmed the
+selected `qwen3-30b-a3b:latest` model. The application still plans against its
+unchanged 8,192 context assumption; this adapter does not set context. No other
+job was interrupted, runtime restarted, context changed or timeout raised.
+An idle-runtime rerun is needed to distinguish queue contention from any new
+schema/runtime failure and to obtain comparable timing. The failed control was
+`DOC_SUM_MODEL_NAME=qwen3-30b-a3b:latest
+DOC_SUM_MODEL_BASE_URL=http://127.0.0.1:11434/v1/
+cargo test --offline --lib live_typed_omission_preserves_substantive_controls
+-- --ignored --nocapture` from `src-tauri`.
+
+Documentation-only contract `9d81f89` precedes implementation `2ed9c07`.
+The new default carries each retained paraphrase unchanged into one claim and
+verifies once. No generation, assignment-array or adjacency-reduction call lies
+on that path. This removes the observed orphan/forced-merge failure surface,
+not semantic verification or the possibility of an incorrect paraphrase.
+
+Correction to the diagnosis: NARA analysis response 5 already says
+"Permanent. Cut off annually and transfer to WNRC. Destroy when 7 years old."
+The later merge did not originate every source/interpretation defect. The
+original deck paraphrases are often readable, but that alone does not prove
+all their details are entailed by the selected quotations.
+
+New paraphrase omissions are typed and source/catalog-bound. The option is
+exposed only when the selected quote contains the complete page text, compared
+with whitespace normalization only. Partial quote input cannot omit unseen tail
+content. Full-page admission is not a semantic oracle: a mistaken model omission
+remains possible and is recorded as a judgment, not as proof the original has no
+facts. Deterministic filters, including the numeric/unit veto, are unchanged.
+Raw and omission-adjusted coverage are printed together. Unsupported,
+ambiguous and uninspected pages cannot silently reduce the denominator.
+
+### Local verification and cold diff audit
+
+On the implementation tree, `cargo test --offline --all-targets` passes:
+255 library tests, six ignored; three acceptance tests, three ignored; three
+release tests. `cargo clippy --offline --all-targets --all-features -- -D warnings`,
+`cargo fmt --check` and the explicit formatting check for the test-only included
+file pass. A serial all-target run also passes. Earlier parallel runs exposed
+an unrelated entitlement child-lock test failure; that test passed in isolation
+and in the final parallel run. No entitlement code was changed, and this does
+not establish a fix for that intermittent test behavior. Hosted CI is not
+claimed green; the operator requires local checks instead of private Actions
+minutes.
+
+| Changed surface | Actual effect / contract trace | Verification |
+| --- | --- | --- |
+| `summary/direct.rs:20` | Source-ordered unchanged paraphrases with one original evidence binding, ceiling 512; no model call | 1/83/512 accepted, 0/513 rejected; removed/reordered/rewritten/rebound claims rejected |
+| `summary.rs:399`, `:445` | Route production to direct materialization and a single verifier pass; retain zero-supported failure and versioned reload | Direct request capture; shortfall/persistence/reopen and existing negative tests |
+| `summary/pages.rs:268`, `:284` | Complete-page admission and disjoint typed omission schema, recorded audit and backfill | Partial/mixed/unknown/forged/duplicate/historical omission rejection; live substantive controls remain pending |
+| `contracts.rs:479` | Explicit omission origin and reason, no schema migration | Serialization plus source/catalog/version validation tests |
+| `db.rs:1786` | Remove unused retry-synthesis write wrapper; retain immutable attempt storage/read paths | SQL immutability, transaction failure and independent-reopen tests |
+| `service.rs:1044` | Analyzed checkpoint now needs verification only, not synthesis generation | Continuation test expects the reduced request count |
+| `summary/identifiers.rs:90` | Obsolete generation-error mapping is test-only; verifier ordinals remain production | Existing enum, identity and verdict negative tests |
+| `summary/legacy_generation.rs:1`, `summary.rs:25` | Retired generation logic retained only as test fixtures, not an alternate production path | Existing synthesis/reduction/assignment negative tests still pass |
+| `office_acceptance.rs:765` | Actual omission-adjusted denominator with raw reporting and opt-in complete delivered text | Existing zero/below/exact/above coverage boundary tests and report privacy tests; live proof pending |
+| `CONTRACTS.md:418` | Fold and delete superseded proposed/amendment text into current versioned behavior | Compared against production routing, filters, version and request limits |
+
+boundary-probe: direct capacity and tampered binding; whole-page versus partial
+omission, mixed/unknown outcomes and forged fingerprints; verifier plan at the
+new claim ceiling and all existing single-claim/batch-count size boundaries pass.
+effect-trace: eliminate forced consolidation | production calls direct::synthesize
+and then verify once | captured calls contain no synthesis generation, direct
+text/bindings are unchanged, and a withheld claim causes no second verifier pass.
+These are deterministic source-path proofs, not live quality approval.
+
+## Previous structural run: BOTH corpus acceptances fail
 
 **NOT DONE. DOL fails before delivery on two unassigned claim texts. NARA now
 completes below acceptance, at 5/11 native pages (45.45%), versus the prior
