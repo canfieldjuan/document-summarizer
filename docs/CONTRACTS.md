@@ -502,6 +502,61 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
+#### Amendment: verification admission from actual batches
+
+Status: contract first; implement separately. This supersedes the aggregate
+character admission rules below, including the single-claim capacity checkpoint.
+
+Root cause: `verification_aggregate_character_limit` estimates calls from
+ceil(B/16), while the actual planner splits on serialized size as well as count.
+The completed DOL analysis/synthesis attempt on `05d046f` consequently failed
+before verification at 49,670 aggregate characters versus 43,008. The aggregate
+check actually runs after partitioning, not before it; it prevents inference,
+not planning. It is not needed for per-request context safety, but removing it
+does expand the admitted total work. Preserve an explicit finite work bound.
+
+Required change surface: `summary.rs` shared verification planner, its admission
+helpers and boundary/integration tests; contract and live evaluation. Use the
+same planner for synthesis admission, persisted synthesis reload and verification.
+
+- Keep B, maximum 64 claims, 16 claims per request, and V_request=10,752 unchanged.
+  Validate catalog cardinality, claim budget and prompt/claim correspondence in
+  the shared planner, before batching, so no caller can silently zip a mismatched
+  catalog or bypass the claim bound.
+- Plan the actual nonempty batches in canonical order using full serialized
+  system-plus-user size and count. Every materialized batch must fit both limits.
+  A single oversized claim, including one after a valid prefix, fails the whole
+  plan before runtime health or inference. Do not split a claim's references,
+  truncate text, omit claims or change semantic verdict requirements.
+- Replace the aggregate ceiling with explicit MAX_VERIFICATION_BATCHES=64 per
+  pass. Check actual planned batch count. This admits the worst legal partition
+  of one batch per claim without inventing another estimated calls-per-claim
+  ratio. Empty plans and counts beyond the maximum fail before any calls.
+- Delete the formula-derived aggregate constant/helpers and rejection, not
+  recompute an aggregate from the resulting batch count. Total work remains
+  bounded: at most 64 * 10,752 = 688,128 input characters and 64 configured
+  output allowances per pass; the existing single re-synthesis permits at most
+  two passes, hence 128 logical verification calls. These are worst-case caps,
+  not promised live cost. Transport fallback policy and timeout are unchanged.
+- No artifact format, identity/version or migration changes: the classification
+  contract is unchanged, only resource admission is broadened. Existing valid
+  persisted artifacts must still reopen, with source/claim integrity validated.
+
+Explicit non-scope: paraphrase/decoder bounds, prompts, synthesis budget/funnel,
+coverage or materiality changes, larger context/output/timeout, model/endpoint,
+DB audit implementation, parser, packaging or CI. No new retries.
+
+Verification: prove a size-only split, count-only split, mixed count-and-size
+split, actual 64-batch catalog, and 65-claim catalog rejected before calls;
+also probe the batch-count guard directly at 0/1/63/64/65. The over-limit catalog
+also exceeds the unchanged claim bound and should fail that earlier admission.
+Test oversized singleton and mixed valid/oversized prefix, mismatched lengths,
+zero/overlarge claim budget, complete reference coverage and zero runtime calls
+on refused plans. Replace old aggregate-negative tests with positive admission
+and actual inference tests while retaining per-request negatives. Run local
+all-target tests, strict clippy/fmt, and both full Qwen corpus acceptances;
+record failures first and the real verification request/token costs.
+
 #### Amendment: word-targeted paraphrase generation
 
 Status: contract `0f108e5` precedes implementation `05d046f`. DOL analysis now
