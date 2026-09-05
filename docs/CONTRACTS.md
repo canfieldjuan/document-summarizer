@@ -502,6 +502,80 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
+#### Amendment: structural synthesis attribution
+
+Status: approved scope, contract before implementation. Supersedes only the
+synthesis/reduction response and missing-reference transport below. Verification
+keeps its enum-constrained request-local IDs. Durable schemas, identity formulas,
+historical validation, and all-evidence-cited validation remain unchanged.
+
+Root cause: the reduction loop already runs only above the document claim budget
+and sends a Rust-selected compatible pair for one output claim. Returning c1
+alone communicates no legitimate grouping decision and nevertheless fails the
+run. Initial synthesis does choose groups, but lists of references permit a
+supplied item to disappear. Membership enums do not enforce complete coverage.
+
+Required change surface: summary wire structs, schemas, prompts, request parsing,
+request-local transport helpers, fixture runtimes and boundary tests; this
+contract and LOCAL_MODEL_EVALUATION.md. Keep durable attribution validation as a
+separate application-owned boundary, never a permissive fallback wire format.
+
+- Reduction returns exactly one text-only claim. RawCandidateClaim has no
+  candidate_ids field. Rust attributes the output to both supplied candidates,
+  expands their original evidence union, and runs the existing uniqueness,
+  canonical-order, known-evidence and MAX_EVIDENCE_PER_CLAIM checks. Reject a
+  request other than an exact pair/one-claim bound before inference. Reject any
+  model-supplied reference field, including foreign/cross-batch IDs; validate
+  candidate metadata too. Attribution does not make unsupported prose supported.
+- Initial synthesis returns {claims:[{text:...}], assignments:[integer,...]}.
+  Assignment position i denotes supplied evidence position i; its value denotes
+  the zero-based claim index. Rust owns the ordered request mapping and derives
+  citations, never taking source identities from the response. Every supplied
+  item has exactly one slot; each accepted claim must have assigned evidence.
+- Preserve the existing minimum/maximum claim range, not a new fixed floor equal
+  to ceiling. For every feasible count k in minimum..=min(maximum,N), emit a
+  complete object alternative under root anyOf: claims has minItems=maxItems=k,
+  assignments has minItems=maxItems=N, and each assignment is an integer enum
+  0..k-1. Do not mix properties and anyOf at the same schema node. At most eight
+  alternatives are needed because a request supplies at most eight items. This
+  ties index bounds to the actual claim count, not merely its upper allowance.
+  All alternatives reject additional fields. No feasible count fails admission.
+- Rust independently rejects malformed JSON, empty claims, short/long/mixed or
+  out-of-range assignments, unassigned claims, overfull claims, unknown or
+  duplicate request metadata, and model-supplied ID fields. Preserve canonical
+  durable ordering, exactness, provenance and complete synthesized-set coverage.
+  Grammar guarantees apply only to completed constrained output; fallback,
+  truncation and untrusted mocks remain subject to all Rust checks.
+- Reference-omission repair is no longer a normal reachable trigger for these
+  responses: short/malformed assignment arrays fail validation, never get padded
+  or silently repaired. Do not add retries or raise request reserves. Existing
+  bounded re-synthesis after verification shortfall is unchanged.
+
+Assumptions/proof boundary: positional attribution guarantees recorded citation
+coverage, not that every source fact is represented in the generated text.
+Preserve semantic verification unchanged and report this limitation. A claim
+with assigned but unused evidence can still omit meaning; no automatic support
+or completeness verdict is inferred from assignments. The live test must prove
+the alternatives compile on the actual Qwen/Ollama primary transport before a
+full corpus run. Failure is a blocker, not permission to silently loosen schema.
+
+Verification plan: prove exact pair attribution with no response IDs; test
+foreign/cross-batch fields and corrupt candidate metadata. For every feasible
+claim-count alternative test N-1/N/N+1 slots, -1/0/k-1/k indices, empty and orphan
+claims, wrong types, mixed valid/invalid slots and canonical durable restoration.
+Exercise the real request path and schema projection, including distinct valid
+claim counts. Preserve the existing negative durable-validator tests. Measure
+actual serialized packing and reserve at 83 evidence items; run local all-target
+tests, strict clippy and fmt, then both Qwen corpus acceptances. Report failures
+first, claims, evidence, cited-page fraction, initial/reduction batches, requests,
+completion tokens and wall time; do not compare a failed partial run as equal
+work to a completed run.
+
+Explicit non-scope: changed B/K, retention or page target, semantic support,
+unit veto/eligibility, quote selection/paraphrase, context/output/timeouts or
+resource ceilings, parser/OCR/vision, model/endpoint, DB or audit expansion,
+historical artifact formats, Connect, packaging, CI and unrelated cleanup.
+
 #### Amendment: request-local generation identifiers
 
 Status: contract `b884235` precedes implementation `4b4c7ed` and terminal-failure
