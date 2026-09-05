@@ -2,12 +2,27 @@
 
 ## Latest result: materiality implementation is blocked; both Qwen corpus runs fail
 
-**NOT DONE. Neither live acceptance run passed, and the current implementation
-also has a failing contract regression. Do not merge this checkpoint.** The
+**NOT DONE. Neither recorded live acceptance run passed. The numeric-unit
+contract conflict is now resolved and local gates pass, but this is not product
+closure. Do not merge this checkpoint.** The
 approved dependency exception is committed separately as `4b5d8db`; partial code
 is checkpointed in `c8098a9`. The DB/immutable request-attempt audit slice has not
 started. The proposed contract section remains pending, not folded into current
 behavior as though the whole feature were complete.
+
+Approved fixture correction: contract `a3011eb` precedes test-only change
+`f7594eb`. NARA page 6 is retained under the unchanged numeric-unit veto; a
+unit-free synthetic noise fixture remains an omission positive. The actual
+page-analysis path preserves its exact quote catalog and offers only supplied
+quote IDs, never the model omission option. No production filter, threshold,
+token allowance, validator, or model changed in this correction.
+
+Local gates on `f7594eb`: `cargo test --all-targets --offline` exited 0 with
+232 library tests passed and four ignored, one acceptance test passed and three
+external/live tests ignored, and three release tests passed. Strict clippy
+(`--all-targets --all-features --offline -- -D warnings`) and `cargo fmt --check`
+also exited 0. Neither corpus was rerun for this contract/test-only correction;
+the exploratory live results below remain failures, not final-head acceptance.
 
 ### Live observations, not acceptance evidence on the final checkpoint
 
@@ -42,7 +57,7 @@ Logs: `/tmp/doc-sum-materiality.ZByf7m/nara.log` and `dol.log`. These contain
 explicitly opted-in public-corpus model responses. Metrics were extracted from
 the captured per-request diagnostics, not estimated from elapsed wall time.
 
-### Contract counterexample found during the cold audit
+### Contract counterexample found during the cold audit, now resolved
 
 The first numeric-content filter missed short units on punctuation-heavy pages.
 A direct negative control with `5 L` at the tail failed: it was classified as
@@ -50,15 +65,17 @@ scan noise. The implementation now retains separated and attached short units,
 including `5 L`, `5l`, `5 m`, `5m`, `4 g`, and `4g`; those controls pass.
 
 However, the exact captured NARA page 6 fixture itself contains the token `5l`.
-It therefore triggers the conservative unit veto. The contract simultaneously
-requires that numeric content veto omission and names this page as an omission
-positive. Its unchanged positive assertion now fails. Do not weaken the unit
-veto, special-case the corpus, change thresholds, or alter the expected result
-without a contract decision. Recommended amendment: retain this ambiguous page
-and reclassify it as a negative control; retain a genuinely unit-free scan-noise
-positive. This recommendation is not an approved contract change.
+It therefore triggers the conservative unit veto. The earlier contract required
+both numeric-content protection and omission of this page; its positive assertion
+failed. The operator approved retaining the ambiguous page and making it a
+negative control. Contract `a3011eb` records that decision without a threshold
+change or corpus-specific exemption. Tests in `f7594eb` preserve the original
+captured bytes, verify retention through candidate construction and the emitted
+selection schema, and keep unit-free scan noise and the captured stamp as
+omission positives. This does not establish that the original page contains an
+actual measurement; it avoids discarding ambiguous content.
 
-### Checkpoint verification and gaps
+### Earlier c8098a9 checkpoint verification and remaining gaps
 
 - `cargo test --all-targets --offline`: 229 library tests passed, one failed,
   four ignored; exit 101. The failure is the captured NARA noise assertion.
