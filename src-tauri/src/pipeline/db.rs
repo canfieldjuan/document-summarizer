@@ -1783,21 +1783,6 @@ pub(super) fn complete_verification(
     Ok(verified_run)
 }
 
-pub(super) fn record_synthesis_attempt(
-    conn: &mut Connection,
-    run_id: &str,
-    expected_version: u32,
-    attempt_ordinal: u32,
-    synthesized: &SynthesizedDocument,
-) -> Result<(), StoreError> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    ensure_run_state_version(&tx, run_id, PipelineState::Verifying, expected_version)?;
-    ensure_run_document_matches(&tx, run_id, "synthesis attempt", &synthesized.document_id)?;
-    insert_synthesis_attempt(&tx, run_id, attempt_ordinal, synthesized)?;
-    tx.commit()?;
-    Ok(())
-}
-
 pub(super) fn record_verification_attempt(
     conn: &mut Connection,
     run_id: &str,

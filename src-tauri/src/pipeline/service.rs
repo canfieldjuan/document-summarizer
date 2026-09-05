@@ -1041,7 +1041,7 @@ mod tests {
 
             match checkpoint {
                 ContinuationCheckpoint::Analyzed => {
-                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 2);
+                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 1);
                     assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 1);
                 }
                 ContinuationCheckpoint::Synthesized => {

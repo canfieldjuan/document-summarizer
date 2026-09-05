@@ -417,148 +417,338 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ## Local summary artifacts
 
-`ModelRuntime` is the only inference boundary. A request may select plain text
-or a named, bounded JSON Schema output contract. Current analysis version
-`3.0.0` uses application-built quote candidates rather than model-authored
-quotation bytes. Each candidate is a bounded contiguous exact substring of one
-authoritative normalized block and carries a scope-local ordinal such as `q1`,
-plus fixed block/page provenance and a durable content-derived identity that the
-model never sees. The response schema enumerates exactly the supplied ordinals.
-The model returns one ordinal and bounded claim text per evidence item; Rust
-rejects empty, duplicate, foreign, mixed-validity, or over-limit selections and
-materializes the exact quotation, block identity, `SourceSpan`, and durable
-evidence ID. Exact quotation and provenance therefore hold by construction, and
-historical repair warnings remain readable without a current quote-copy repair
-request.
+### Direct verified paraphrases and explicit omissions
 
-Analysis partitions each chunk into source-ordered page scopes. Candidate
-construction gives every native-text page/block an eligible quotation before an
-earlier block receives additional capacity, so a bounded catalog cannot silently
-drop the tail. Let `A` be the 1,024-token analysis output allowance,
-`R_A = 192` the response-envelope reserve, and `I_A = 92` the bounded
-quote-ID/claim-item allowance. The response quota is
-`Q_A = floor((A - R_A) / I_A) = 9`, and one scope contains at most
-`S_max = floor(5 * Q_A / 3) = 15` native-text pages; character bounds may
-split it further. For a scope containing `S` native-text pages, Rust requires
-`F_scope = max(1, ceil(3 * S / 5))` distinct evidence items from at least that
-many distinct pages and rejects an under-floor response. Scope-local IDs are at
-most eight ASCII characters, analysis claim text is at most 192 characters,
-and each request remains bounded before inference.
+Status: the direct-summary and tolerant-paraphrase behavior is implemented by
+`2ed9c07` and `8b0d039`, after their separate documentation-only contracts
+`9d81f89` and `5c2c3e6`. The analysis-v11 material-marker omission admission is
+implemented by `77742f4` after documentation-only contracts `e5bc59b` and
+`4344ec0`. Live corpus proof is reported separately in
+LOCAL_MODEL_EVALUATION.md. This section replaces the retired proposal and its
+accumulated amendments. Historical artifacts retain their original validation
+rules. No optional shorter-summary feature is introduced.
 
-For synthesis version `4.0.0`, `N` is the native-text page count and `E`
-is the validated evidence count. The document claim budget and floor are:
+Root cause: useful quote-bound paraphrases are regenerated and forcibly merged
+to meet a page-derived claim target; generated grouping is a new failure surface.
+The paraphrase response cannot record non-substantive complete-page input, and
+raw-page coverage counts even explicitly omitted furniture. A seed-only retry
+does not provide new information at the configured zero temperature.
+Qualification from the trace: NARA response 5 already says "Permanent. Cut off
+annually and transfer to WNRC. Destroy when 7 years old." The later merge spreads
+that source/interpretation problem; it did not originate every factual defect.
+Neither readable paraphrases nor model verdicts prove perfect faithfulness.
 
-`B = min(64, max(8, ceil(3 * N / 5)))`
+Required change surface: analysis omission enum and page paraphrase schema/parser,
+versioned omission admission/reload, deterministic material-marker recognition,
+direct synthesis materialization, verification admission and single-pass lifecycle,
+coverage reporting/acceptance, fixture and negative tests, contract and evaluation
+including complete delivered text.
 
-`K = min(B, E, max(3, ceil(B / 2)))`.
+- New runs use analysis version 11 and direct synthesis/verification/summary
+  version 5. Version 10 analysis remains readable with its complete-page-only
+  model omission admission. Version 9 remains readable with its 384-character
+  validation and original omission admission; version 8 analysis and version 4
+  downstream artifacts remain readable under their original limits. Existing
+  citation format remains unchanged. The technical omission is rejected in
+  historical analysis where it was never valid.
+- Carry every retained paraphrase unchanged into exactly one claim citing its
+  single original evidence item, in source order. Materialize durable claim IDs
+  and rendered page labels in Rust. No synthesis, assignment, pair reduction or
+  model shortening call lies on the new default path. Thus one orphan batch
+  cannot block the document: the one-to-one set is the default, not a rescue
+  based on guessed assignments. No optional consolidation or adjacency pairing
+  remains active for new runs. Historical negative tests may retain test-only
+  generation helpers; these are not an alternate production path.
+- Use 512 as an explicit pathological claim ceiling, not an output target or a
+  floor. Do not derive a minimum claim count from half that ceiling. Require a
+  nonempty supported result, exact one-to-one pre-verification coverage, and the
+  existing 60 percent supported-evidence/eligible-page acceptance measures.
+  Preflight actual verification batches against the unchanged per-request input,
+  output/context/framing limits and 64-batch ceiling. The 512 ceiling is not a
+  promise that every maximum-size catalog fits; reject impossible input before
+  inference, never drop evidence or merge to force admission.
+- Preserve the raw-size retention sample and headroom for ordinary documents;
+  new retention R=min(N,ceil(3N/5)+16,512). If raw acceptance alone exceeds 512,
+  reject as unsupported capacity before analysis instead of pretending full
+  coverage is feasible. Historical plans are not recomputed under this formula.
+- Paraphrase has disjoint typed outcomes: claim (claim_text) and
+  no_substantive_content (no claim text). Expose the latter only when the selected
+  exact quote covers the complete page text, not a truncated, sampled or partial
+  catalog, and the complete text contains no deterministic material marker.
+  Compare complete text with whitespace normalization only; no fuzzy deletion of
+  words. A selected fragment cannot establish that unseen content is empty.
+  Deterministic filters and their numeric/unit veto remain unchanged. Model
+  omission is a recorded judgment, not proof that an illegible original never
+  contained facts. Never omit substantive obligations, exceptions, values,
+  uncertain or difficult assertions. Preserve a conservative keep option.
+- Material-marker admission fails toward retaining content. It vetoes model
+  omission when complete-page text contains any of: (a) an email-shaped token
+  with a nonempty ASCII local part, `@`, a dotted ASCII domain and an alphanumeric
+  final domain label; (b) a phone-shaped span of at most three whitespace tokens,
+  seven to 15 ASCII digits and at least one `+`, `-`, `(` or `)` separator; (c) a
+  numeric date with three one-to-four-digit fields separated consistently by `/`
+  or `-`, or a case-insensitive English month name followed by a one/two-digit day
+  and two/four-digit year; or (d) a five-to-64-character reference token beginning
+  with an ASCII letter, containing at least two ASCII digits and `/` or `-`, with
+  only alphanumerics, `_`, `/`, `-`, `?` or `.` inside. Leading/trailing ordinary
+  sentence punctuation is ignored for marker recognition. These are omission
+  vetoes, not validators of whether an address, date, phone or reference is real.
+  Ambiguity retains content.
+  The captured short NARA form containing a job number, phone, email and dates is
+  a positive veto fixture. Short scan-noise pages containing none of these remain
+  eligible for the model omission outcome. The exact standalone date/page-stamp
+  grammar still takes the deterministic omission path before any model request.
+- Treat 384 characters as the generation/repair target, not a correctness
+  boundary. A complete, trimmed paraphrase through the 1,536-character decoder
+  ceiling remains evidence and gets `LONG_CLAIM`; prefer a successful shorter
+  repair but never truncate. If the single repair cannot produce a mechanically
+  complete result and no usable long draft exists, record
+  `ParaphraseUnrepairable` with the source/catalog bindings, warn with
+  `PARAPHRASE_UNREPAIRABLE`, continue and backfill. This technical loss remains
+  in both page-coverage denominators. Initial malformed, foreign or transport
+  failures remain failures; cancellation is never converted to an omission.
+  A repair transport/provider failure also propagates as a runtime failure; only
+  a successfully received but mechanically unusable repair may become the
+  technical omission. Once the initial response contains a claim, the repair
+  response shape is claim-only: it cannot revise that page into
+  `no_substantive_content`. A model materiality omission is accepted only as the
+  initial complete-page outcome.
+- Record ModelNoSubstantiveContent/NoSubstantiveContent using the existing page,
+  chunk, source fingerprint, catalog fingerprint and filter-version audit fields.
+  Analysis-v11 reload verifies whole-page admission, absence of material markers
+  and exact source/catalog binding. Version-10 reload retains its original
+  whole-page-only admission. Reject unknown, duplicate, forged, mixed
+  retained/omitted, or historically invalid outcomes. Backfill as before;
+  omissions never count as retained evidence.
+- Acceptance requires at least 50 percent raw native-text-page coverage and at
+  least 60 percent omission-adjusted coverage, using integer comparisons and
+  nonzero denominators. Only validated material omissions leave the adjusted
+  denominator; technical omissions, uninspected, unsupported or ambiguous pages
+  remain in it. Show raw and adjusted counts/fractions plus omission pages,
+  origins and reasons together. A zero adjusted denominator is not success: no
+  retained evidence fails explicitly. Verification losses cannot turn into
+  omissions after the fact.
+- Treat names, organizations, identifiers, dates, reference numbers and
+  cross-references as material on form-shaped pages in both selection and
+  complete-page omission prompts. Emit `OCR_TEXT_LAYER_STRUCTURE_RISK` when a
+  deterministic scan-noise page exists or native text contains U+FFFD. The
+  warning says claims reflect the extracted layer and layout/table relationships
+  may be lost; it is not a general OCR detector. Existing warning propagation
+  renders it in the UI. NARA remains a robustness fixture, not OCR-table accuracy
+  evidence, because its known row-fused claim survives semantic verification.
+- Verify the unchanged one-to-one claim set once. Withholding remains authoritative;
+  a nonempty result persists with durable warnings on loss, zero supported claims
+  still fails closed. Delete seed-only re-synthesis; persisted attempt lineage
+  records only the actual attempt. Do not claim run-derived seeds alone make a
+  greedy retry meaningfully different. Keep the bounded paraphrase repair because
+  it changes the prompt with typed violations and the rejected draft where needed.
 
-Both direct and hierarchical synthesis use those document-level bounds.
-Every accepted synthesis contains at least `K` and at most `B` distinct
-claims, every claim cites supplied evidence, and the union of cited evidence IDs
-covers all `E`. Related evidence may consolidate into one coherent claim.
-Requests are partitioned deterministically in source order with at most eight
-items and 16,000 Unicode characters each. Hierarchical candidate reductions
-preserve original evidence lineage and document-level capacity through bounded
-pairwise composition; the whole document is never funneled through a final
-request whose batch size becomes the claim ceiling. The complete synthesis plan
-is capped at 256 model requests, and no claim may expand beyond 16 original
-evidence items. Rust derives final claim IDs, restores canonical evidence order,
-renders authoritative page labels, and persists every source chunk ID exactly
-once in source order.
+Verification requirements: direct synthesis makes zero model calls and preserves text,
+IDs/order/exactness at 1, 83, 512 and rejected 513 items; verify actual serialized
+batch limits. Whole-page omission positives and partial/mixed/tail negatives run against
+schema admission and parsing. Live short-obligation/amount/exception controls
+check the model's judgment separately: full-page admission cannot mechanically
+prove that a model omission is correct. Probe partial quote denial, unknown outcomes, duplicate/mixed
+page results, fingerprint tampering, historical reload and zero denominator.
+Prove a verification loss never invokes synthesis or a second verifier pass;
+retain existing provenance, verdict and persistence failure tests. Run local
+all-target tests, strict clippy, fmt and both Qwen corpus acceptances. Print the
+complete delivered text and report raw/adjusted coverage, claims, evidence,
+omissions, requests, completion tokens and wall time, failures first. Judge
+readability and obvious source-fidelity concerns separately from numeric gates.
 
-Synthesis also preserves downstream verifiability. Before inference, Rust
-proves that the evidence catalog can be assigned to no more than `B`
-single-claim verification inputs under `V_request` while reserving the maximum
-claim-text size. Candidate pairs are compatible only when their combined
-evidence fits that conservative single-claim bound. After synthesis, Rust runs
-the actual claim catalog through the complete count, per-request character, and
-aggregate verification planner before persistence. Current-version synthesis
-artifacts must pass the same planner when loaded, so a count-legal but
-context-oversized claim set fails in synthesis rather than surprising the later
-verification stage.
+Explicit non-scope: relaxed support/exactness/provenance or source parsing,
+retuning deterministic noise predicates, automatic repair of source meaning,
+model/endpoint/temperature/context/output/timeout changes, optional UI summary
+styles, DB migration or broader unfinished attempt-audit work, Connect, OCR,
+vision, packaging and CI. Any residual factual or omission failure is reported,
+not repaired by relaxing coverage or retrying until a favorable run appears.
 
-Verification version `4.0.0` classifies every synthesized claim against only
-its validated exact quotations. Requests stay in canonical claim order and
-contain at most 16 claims. With context `C = 8,192`, output allowance
-`O = 4,096`, framing reserve `R_V = 512`, and the identifier-aware
-three-character token proxy, the complete system-plus-user input limit is
-`V_request = min(16,000, 3 * (C - O - R_V)) = 10,752` Unicode characters.
-The aggregate limit for one verification pass is
-`V_aggregate = V_request * ceil(B / 16)`, capped at 64,000 characters and
-currently at most 43,008. Count, per-request character, single-claim, and
-aggregate bounds are all validated before runtime health or inference. The
-verifier must reject material relationship errors such as swapped table
-columns, the wrong actor, reversed or dropped negation, or strengthened
-modality; matching words alone are insufficient.
+### Analysis, deterministic filters and model boundaries
 
-Rust requires one unique `supported`, `unsupported`, or `ambiguous`
-verdict for every claim and restores provenance from persisted artifacts. Let
-`V` be the supported-claim count and `E_V` the evidence cited by supported
-claims. `V = 0` is a structured hard failure. If `0 < V < K` or `E_V`
-does not cover all `E`, the first verdict artifact records
-`SUMMARY_COVERAGE_SHORTFALL` and the run performs exactly one bounded
-re-synthesis from the original validated evidence with the same budgets and one
-fresh verification pass. A retry supporting zero claims fails. A positive
-second shortfall completes with only supported claims and the durable warning;
-there is no third attempt. Unsupported and ambiguous claims remain auditable
-and add `SEMANTIC_CLAIMS_WITHHELD`, but only supported claims reach displayed
-text and citations.
+`ModelRuntime` remains the only inference boundary. New analysis uses a
+page-local selection call followed by a quote-only paraphrase call. Selection
+receives an application-built candidate list and an enum of short local IDs;
+it cannot supply quotation bytes or durable identities. Paraphrase receives
+only the selected quotation, never other candidates. Rust restores the exact
+substring, authoritative block, source span and deterministic evidence ID.
+Neither selection nor paraphrase proves semantic support; verification remains
+required. The candidate builder covers the page's blocks and tail within the
+existing bounded catalog and fails on construction/input errors.
 
-Schema version 14 stores synthesis and verification attempts in append-only
-tables keyed by run and attempt ordinal. Ordinal zero is written atomically with
-the primary synthesis; retry synthesis and both verdict sets are appended
-without overwriting it. The accepted `VerifiedDocument` names the synthesis
-ordinal it filters, and final-summary and workspace validation load that exact
-attempt. Update and delete triggers make attempt history immutable; migration
-backfills existing primary summary artifacts as ordinal zero. Artifact JSON,
-version, document identity, creation time, and SHA-256 row hash remain checked
-on retrieval.
+The current claim-text limit is 384 Unicode characters, based on the observed
+faithful 333-character regulatory draft rounded up with modest headroom, not the
+retired multi-item output-packing quota. Generation targets 55 words; Rust's
+character limit remains authoritative. The decoder ceiling is four times larger,
+1,536 characters, to avoid forcing a string closed at the acceptance boundary.
+The output allowance remains 2,048 tokens. Rust never truncates a draft.
 
-Current artifacts use analysis version `3.0.0`, synthesis, verification, and
-summary version `4.0.0`, and citation version `3.0.0`. Previously persisted
-semantic synthesis, verification, and summary version `3.0.0` artifacts and
-citation version `2.0.0` retain their original validation rules; mechanical
-version `2.0.0` summary artifacts and citation version `1.0.0` remain readable
-separately. Continuation from a pre-upgrade `SYNTHESIZED`, `VERIFIED`, or
-completed checkpoint does not apply current-version invariants retroactively.
+Completeness and length are separate predicates. Require terminal sentence
+punctuation, optionally followed by closing quotation/bracket marks; reject
+ellipsis, dangling punctuation, trailing whitespace and the captured mid-word
+cutoff. This is a mechanical completeness check, not proof of grammatical or
+semantic completeness. One bounded paraphrase repair changes the prompt with
+typed violations; for length failures it includes the rejected draft, measured
+length/word count and the 55-word shortening target. A second failure stops.
+Malformed JSON, foreign selections and transport errors do not gain arbitrary
+retries. Each call retains input limits, cancellation checks and diagnostics.
 
-The supported runtime adapter is Ollama through its loopback OpenAI-compatible
-API, defaulting to `http://127.0.0.1:11434/v1/` and
-`qwen3-30b-a3b:latest`. Each generation request retains the 900-second
-deadline; connection and health checks have separate shorter limits. Deployment
-overrides remain `DOC_SUM_MODEL_BASE_URL`, `DOC_SUM_MODEL_NAME`,
-`DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional
-`DOC_SUM_MODEL_API_TOKEN_FILE`. The adapter accepts only plain HTTP on exact
-IPv4 or IPv6 loopback, disables proxies and redirects, and reads only this
-application's bounded token file. Prompts mark document and evidence text as
-untrusted data, temperature is zero, and reasoning is disabled.
+Filter version 1.0.0 is unchanged. Inspect the complete original normalized page
+before admitting a deterministic omission. Empty or uncertain input is retained.
+The scan-noise predicate requires BOTH no Unicode-aware multi-letter word and
+at least 80 percent punctuation/symbol/control characters among non-whitespace
+characters. Letters separated only by combining marks count as a word. Unknown,
+private-use or format characters veto noise classification. Recognizable numeric
+content vetoes the noise rule, including numeric tables, standalone numbers,
+dates/values, currency or percent quantities, and recognized single-letter units.
+An operator followed by a numeric value, including a single-digit comparison
+such as `< 5`, is recognizable numeric content even when it is the only value
+on a punctuation-heavy page. Operator/value recognition must not depend on two
+numeric tokens or a multi-digit run.
+The captured NARA page containing `5l` is retained by the unit veto; the
+deterministic filter must not be tuned to remove it.
 
-Each run derives a signed-range generation seed from a domain-separated SHA-256
-mapping of its `run_id`; a distinct domain-separated attempt seed makes the
-bounded re-synthesis a genuine second generation while preserving reproducible
-requests for one run/attempt. Every logical request records stage, ordinal,
-locally measured elapsed time, configured output limit, transport attempt, and
-provider-reported prompt/completion/total token counts. Missing usage remains
-unreported rather than estimated. Diagnostics contain no prompt, source,
-quotation, model output, credential, or private path content.
+The separate date/page-stamp predicate is anchored to the entire trimmed page,
+at most 32 Unicode characters, with exactly two whitespace-separated fields.
+The date has one/two ASCII month digits, one/two day digits and two/four year
+digits separated by slashes. The marker has one/two ASCII letters, a hyphen and
+one to three ASCII digits. Standalone dates, added assertions and partial matches
+do not qualify. The captured `03/10/03  A-4` is a positive fixture. This is
+a narrow grammar, not a general assertion detector or calendar validator.
 
-Before transport, the adapter derives a non-mutating decoder projection of the
-canonical schema. It omits decoder-unsupported `uniqueItems` and large
-`maxLength` grammar expansions while retaining object closure, required
-fields, enums, non-empty strings, and array bounds. Rust remains authoritative
-for all string sizes, uniqueness, identity, quotation, provenance, and response
-limits. The exact Ollama vocabulary-loading failure may retry once through
-JSON-object mode; other HTTP failures do not activate that fallback, and each
-transport attempt is diagnosed separately.
+Bare-heading omission remains an optional selection outcome only on Rust-admitted
+heading-shaped complete pages: short letter/whitespace-only title-shaped text,
+without the versioned assertion/obligation/exception markers. This is admission
+for model judgment, not proof of non-substantiveness. The new paraphrase omission
+is separate and requires the complete-page quote binding described above.
+A model's mistaken materiality judgment remains a residual risk even when that
+binding is valid. A short obligation, exception, amount, table value or uncertain
+assertion must be retained; live controls complement, not replace, filter tests.
 
-Historical synthesis `3.0.0` and `2.0.0` artifacts retain their original
-identity and coverage rules. Semantic verification `3.0.0` retains its original
-single-attempt behavior, while mechanical verification `2.0.0` may produce
-paired summary `2.0.0` and citation `1.0.0` with
-`SEMANTIC_VERIFICATION_DEFERRED`. Final summary and citation artifacts carry
-content-integrity hashes, citations bind the exact summary hash and rendered
-text, and retrieval revalidates the accepted verdict against its named
-synthesis attempt.
+Analysis starts from the versioned evenly spaced plan, including the tail, then
+backfills unvisited native-text pages in deterministic source order until R
+retained pages or exhaustion. Each inspected page has exactly one evidence item
+or recorded omission. Omissions do not count toward R. At most N selections and
+2*N paraphrases can run, including the single repair; deterministic omissions
+need no model call, heading omissions need no paraphrase. Inspected order,
+stopping condition, unique outcomes, source and catalog fingerprints are
+revalidated on reload. An exhausted target produces a durable warning, not
+fabricated evidence. Zero retained evidence fails explicitly after analysis is
+persisted. Partial analysis that fails before a valid artifact is committed is
+not promised durable per-request decision storage; that broader audit remains
+deferred.
+
+### Verification, persistence and historical compatibility
+
+New synthesis is deterministic materialization, not generation. It preserves
+every retained paraphrase, its single evidence binding and source order, with
+claim identifiers derived under version 5. Its validator reconstructs the
+expected set and rejects omission, reordering, rewritten text or rebound sources.
+No optional consolidation, assignment response or adjacency reduction is on
+the production path. Historical generation helpers are compiled only in tests
+to retain their negative regression fixtures.
+
+The complete verification plan must fit before any verifier inference.
+Requests use request-local `k1` claim IDs and local evidence metadata; the
+response claim ID is an enum of exactly the current batch's IDs. Rust restores
+durable identities and requires one unique valid verdict per supplied claim,
+rejecting missing, duplicated, foreign or mixed-invalid results. No model-copied
+identifier may be an unconstrained string. Enums enforce membership, not
+uniqueness or semantic support.
+
+Each batch is bounded by 16 claims and the actual serialized system-plus-user
+size. With assumed context C=8,192, output O=4,096, framing reserve 512 and the
+three-character token proxy, input is at most
+`min(16_000, 3*(C-O-512)) = 10,752` Unicode characters. The actual plan has at
+most 64 nonempty batches. There is no count-derived aggregate-character estimate.
+A claim too large to fit alone or a plan beyond the batch limit fails before
+inference; nothing is silently dropped. The proxy is conservative planning,
+not exact tokenization or a claim that the adapter configures model context.
+
+The verifier receives only claims and their exact quotations, not outside
+facts. Its prompt checks actor/action/object relationships, swapped table
+columns, wrong actors, negation, modality, exceptions, purpose and quantities.
+Only supported claims reach final text and citations. Unsupported and ambiguous
+verdicts remain auditable. Nonempty withholding produces durable warnings
+without another synthesis/verifier pass. Zero supported claims still fails
+closed. A supported verdict is the model's judgment, not human fact-checking.
+
+Schema version 14 remains unchanged. Synthesis/verification attempt tables are
+append-only, keyed by run and ordinal, with immutable SQL triggers. New runs
+write the actual direct synthesis and single verification as ordinal zero.
+Historical ordinal-one attempts remain readable; new version-5 verification
+cannot claim ordinal one. The accepted verification names the exact synthesis
+attempt it filters. Expected-state/version checks, cancellation races,
+transactional transitions, immutable events, source identity, row hashes and
+independent-reopen validation remain authoritative.
+
+New artifacts use analysis 11.0.0 and synthesis/verification/summary 5.0.0,
+with citation format 3.0.0 unchanged. Historical analysis 10.0.0 retains its
+complete-page-only model omission admission. Analysis 9.0.0 retains the
+384-character ceiling and its original omission admission; 8.0.0 retains its
+earlier retention formula; 7.1.0/7.0.0 retain the 384-character validation era;
+6.0.0 retains 192-character completeness checks; earlier artifacts retain their
+versioned older rules. The technical omission is rejected in all historical
+versions where it was never valid. Historical synthesis/verification/summary
+4.0.0 retains the page-derived B/K and generation-attempt lineage rules when
+loaded; 3.0.0 and mechanical 2.0.0 remain readable with their original citation
+formats. Resuming an already synthesized or verified checkpoint does not
+relabel its artifact or invent a new prior attempt. A new direct synthesis from
+validated older analysis is version 5, not a rewrite of the older evidence
+identity.
+
+### Runtime, reporting and explicit limits
+
+The supported runtime remains loopback Ollama through the OpenAI-compatible
+API, default `http://127.0.0.1:11434/v1/`, model `qwen3-30b-a3b:latest`.
+The timeout remains 900 seconds, with separate short connection/health limits.
+The adapter rejects non-loopback HTTP hosts, credentials in the URL, proxies
+and redirects; optional credentials come from its bounded token file.
+Deployment environment overrides remain unchanged. All source text is marked
+untrusted in prompts. Temperature remains zero and the request asks for
+`reasoning_effort: "none"`; template/runtime behavior must be measured.
+
+Run-derived signed-range seeds remain in requests for reproducibility. A changed
+seed alone is not represented as a meaningful greedy retry. Actual paraphrase
+repair changes its input. Each logical request records stage/ordinal, output
+allowance, elapsed time, transport and provider prompt/completion/total tokens.
+Missing usage is not estimated. Ordinary diagnostics contain no source text,
+prompt, model response, credential or private path.
+
+Decoder projection remains non-mutating. Unsupported `uniqueItems` is removed;
+numeric `maxLength` survives up to 1,536 and is stripped above it. Object
+closure, required fields, enums and supported cardinality bounds survive.
+Rust remains authoritative for exactness, identity, uniqueness, completeness
+and accepted lengths. Only the exact vocabulary-loading failure may retry in
+JSON-object mode; other failures do not trigger that fallback. Transport
+success is not proof of semantic correctness.
+
+Analysis system-plus-user input remains
+`min(16_000, 3*(8192-2048-512)) = 16,000` characters.
+Source chunks retain their 100,000-character admission guard. The claim ceiling
+does not remove page/catalog/input/output/verifier constraints. New direct
+synthesis has no model-request budget to exhaust; the old 256-request
+synthesis budget applies only to historical generation fixtures, not a
+new run-wide guarantee. Requests are cancellable at the existing boundaries.
+
+Live acceptance proves complete pre-verification evidence coverage and at least
+60 percent supported-evidence and omission-adjusted native-page coverage, with
+a nonempty result and no more than 512 claims. Print raw and adjusted fractions,
+recorded omission origins/pages, retained/supported evidence, request/stage
+counts, tokens and wall time together. Neither uninspected pages nor withheld
+claims reduce the denominator. A zero denominator is not a passing fraction.
+Print complete delivered text only through the existing explicit source-text
+opt-in; default reports continue to hide source and summary text.
+
+Local gates include exactness/provenance/fail-closed negatives, source-ordered
+direct materialization, capacity edges, actual verification batches, omission
+admission/tampering, historical reload, and single-pass lineage. Marker boundaries
+cover every marker class, mixed valid/invalid text, a 462-character form that must
+not receive the omission schema, short scan noise that must receive it, and the
+standalone date/page-stamp path that must make no model call. Live NARA and DOL
+results must lead with failures and distinguish gate success from readability and
+source fidelity. Do not rerun until a favorable sample or change omission
+thresholds to pass.
 
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
@@ -597,43 +787,13 @@ currently verified Debian package; AppImage, RPM, macOS, and Windows packaging
 remain separate target-platform work. A supported Linux package must contain the
 desktop executable, desktop entry, and icons without legacy probe executables.
 
-Current limits are conservative. Source chunks remain bounded at 100,000
-Unicode characters. Analysis is bounded by its output-derived evidence quota,
-page-scope size, quote/claim lengths, and request input. Synthesis has no
-unbounded aggregate prompt: every direct, evidence-batch, and candidate request
-is capped at eight items and 16,000 Unicode characters, and a hierarchy is
-capped at 256 requests. Verification is bounded by claim count, the
-context-derived per-request input limit, and its formula-derived aggregate
-limit before inference. A native-text-free document, an individually oversized
-item, an unrepresentable evidence catalog, or a plan beyond those limits fails
-with a structured domain error; no summary text is invented. Cancellation is
-checked before and after every model request.
-
-Live native-text acceptance requires the final supported claim count to be at
-least `K` and no greater than `B`, complete validated-evidence coverage, and
-citations to at least 60 percent of native-text pages. Visual-only pages are
-excluded from that ratio. Deterministic boundary tests cover direct and
-hierarchical parity, tail eligibility, sparse page scopes, quote-ID admission,
-claim/evidence floors, synthesis-to-verification safe and oversized candidate
-pairs, final-catalog admission, request-size edges, zero/positive verification
-shortfalls, attempt immutability, exact quotation bytes, provenance, and
-fail-closed persistence.
-
-Connect, entitlement, packaging, OCR/vision, parsing, model selection, and
-customer-visible presentation are outside the summary-quality behavior. The
-delivered UI continues to render cited claim cards; changing it to prose is a
-separate product decision. Independent source-fact verification, visual-page
-citations, and PDF-viewer navigation also remain deferred. This work does not
-raise the timeout, change dependencies, or broaden storage beyond immutable
-summary-attempt lineage.
-
-A later, separately contracted adapter evaluation may compare the current
-OpenAI-compatible endpoint with Ollama's native `POST /api/chat`. That
-evaluation must test explicit `options.num_ctx`, preserve the same Rust
-validation and loopback/privacy boundary, and measure output quality, latency,
-request metrics, and failure behavior. It must also record GPU inventory, model
-residency, configured context, and KV-cache memory under the actual precision
-and concurrency. No native-endpoint cutover is part of the current contract.
+Connect, entitlement, packaging, parsing, OCR/vision, model choice, endpoint,
+context and customer-visible presentation changes remain outside this slice.
+The UI continues to render cited claim cards; optional prose consolidation and
+PDF-viewer navigation are separate product decisions. A later native Ollama
+evaluation may test `options.num_ctx`, schema format, GPU residency and
+KV-cache costs under a separately stated runtime configuration. This slice
+does not perform that cutover.
 
 ## Stable checkpoint continuation
 

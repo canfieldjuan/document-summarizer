@@ -1,12 +1,12 @@
 use document_summarizer_lib::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
 use document_summarizer_lib::pipeline::contracts::{
-    ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
-    NormalizedDocument, PipelineState, SourceType, StructureNode,
+    AnalysisOmissionReason, ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime,
+    ModelRuntimeFailure, NormalizedDocument, PipelineState, SourceType, StructureNode,
 };
 use document_summarizer_lib::pipeline::db::{
     get_analyzed_document, get_chunked_document, get_citation_artifact, get_normalized_document,
-    get_parsed_document, get_pipeline_run, get_structured_document, get_summary_artifact, init_db,
-    list_pipeline_events,
+    get_parsed_document, get_pipeline_run, get_structured_document, get_summary_artifact,
+    get_synthesis_attempt, get_verified_document, init_db, list_pipeline_events,
 };
 use document_summarizer_lib::pipeline::ingest::ingest_pdf;
 use document_summarizer_lib::pipeline::model::OllamaRuntime;
@@ -28,6 +28,91 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 struct TestDatabase(PathBuf);
+
+fn coverage_at_least_sixty_percent(cited: usize, total: usize) -> bool {
+    total > 0 && cited <= total && (cited as u128) * 5 >= (total as u128) * 3
+}
+
+fn coverage_at_least_fifty_percent(cited: usize, total: usize) -> bool {
+    total > 0 && cited <= total && (cited as u128) * 2 >= total as u128
+}
+
+fn omission_reduces_adjusted_denominator(reason: &AnalysisOmissionReason) -> bool {
+    matches!(
+        reason,
+        AnalysisOmissionReason::NonSubstantivePageFurniture
+            | AnalysisOmissionReason::NoSubstantiveContent
+    )
+}
+
+fn evidence_coverage_accepted(
+    retained: &HashSet<&str>,
+    synthesized: &HashSet<&str>,
+    supported: &HashSet<&str>,
+) -> bool {
+    synthesized == retained
+        && supported.is_subset(retained)
+        && coverage_at_least_sixty_percent(supported.len(), retained.len())
+}
+
+#[test]
+fn coverage_gate_separates_synthesized_and_supported_evidence() {
+    let retained = HashSet::from(["a", "b", "c", "d", "e"]);
+    assert!(evidence_coverage_accepted(
+        &retained,
+        &retained,
+        &HashSet::from(["a", "b", "c"])
+    ));
+    assert!(!evidence_coverage_accepted(
+        &retained,
+        &retained,
+        &HashSet::from(["a", "b"])
+    ));
+    assert!(!evidence_coverage_accepted(
+        &retained,
+        &HashSet::from(["a", "b", "c", "d"]),
+        &HashSet::from(["a", "b", "c"])
+    ));
+    assert!(!evidence_coverage_accepted(
+        &retained,
+        &retained,
+        &HashSet::from(["a", "b", "foreign"])
+    ));
+    for (cited, total, expected) in [
+        (0, 0, false),
+        (0, 1, false),
+        (1, 1, true),
+        (2, 1, false),
+        (59, 100, false),
+        (60, 100, true),
+        (61, 100, true),
+        (66, 111, false),
+        (67, 111, true),
+        (600_000, 1_000_000, true),
+    ] {
+        assert_eq!(coverage_at_least_sixty_percent(cited, total), expected);
+    }
+    for (cited, total, expected) in [
+        (0, 0, false),
+        (0, 1, false),
+        (1, 1, true),
+        (2, 1, false),
+        (49, 100, false),
+        (50, 100, true),
+        (51, 100, true),
+    ] {
+        assert_eq!(coverage_at_least_fifty_percent(cited, total), expected);
+    }
+    assert!(omission_reduces_adjusted_denominator(
+        &AnalysisOmissionReason::NonSubstantivePageFurniture
+    ));
+    assert!(omission_reduces_adjusted_denominator(
+        &AnalysisOmissionReason::NoSubstantiveContent
+    ));
+    assert!(!omission_reduces_adjusted_denominator(
+        &AnalysisOmissionReason::ParaphraseUnrepairable
+    ));
+}
 
 impl TestDatabase {
     fn new(label: &str) -> Self {
@@ -127,6 +212,31 @@ fn add_optional_summary(report: &mut serde_json::Value, summary: &str, reveal_te
     }
 }
 
+fn recorded_attempt_totals(runtime: &RecordingRuntime<'_>) -> (usize, u64, u64) {
+    let responses = runtime.responses();
+    let failures = runtime.failures();
+    let attempts = responses
+        .iter()
+        .flat_map(|response| response.request_attempts.iter())
+        .chain(
+            failures
+                .iter()
+                .flat_map(|failure| failure.request_attempts.iter()),
+        )
+        .collect::<Vec<_>>();
+    (
+        attempts.len(),
+        attempts
+            .iter()
+            .map(|attempt| attempt.elapsed_milliseconds)
+            .sum(),
+        attempts
+            .iter()
+            .filter_map(|attempt| attempt.provider_usage.completion_tokens)
+            .sum(),
+    )
+}
+
 fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
     let reveal_text = reveal_model_text();
     eprintln!("OFFICE_LIVE_MODEL_REQUESTS");
@@ -153,6 +263,34 @@ fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
             );
         }
     }
+    let requests = runtime.requests();
+    let responses = runtime.responses();
+    let (attempt_count, model_elapsed_milliseconds, completion_tokens) =
+        recorded_attempt_totals(runtime);
+    eprintln!(
+        "OFFICE_LIVE_MODEL_TOTALS {}",
+        json!({
+            "request_count": requests.len(),
+            "attempt_count": attempt_count,
+            "model_elapsed_milliseconds": model_elapsed_milliseconds,
+            "completion_tokens": completion_tokens,
+        })
+    );
+    let paraphrase_requests = requests.iter().filter(|r| matches!(&r.output_format,
+        ModelOutputFormat::JsonSchema { name, .. } if name.starts_with("document_quote_paraphrase_"))).collect::<Vec<_>>();
+    let paraphrases = requests
+        .iter()
+        .zip(&responses)
+        .filter_map(|(request, response)| paraphrase_metric(request, response))
+        .collect::<Vec<_>>();
+    eprintln!(
+        "OFFICE_LIVE_PARAPHRASE_METRICS {}",
+        json!({
+            "calls": paraphrase_requests.len(),
+            "repairs": paraphrase_requests.iter().filter(|r| serde_json::from_str::<serde_json::Value>(&r.user_prompt).is_ok_and(|u| u.get("repair").is_some())).count(),
+            "responses": paraphrases
+        })
+    );
     eprintln!("OFFICE_LIVE_MODEL_REQUEST_ATTEMPTS");
     let responses = runtime.responses();
     let failures = runtime.failures();
@@ -178,6 +316,50 @@ fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
             attempt.provider_usage.total_tokens,
             attempt.succeeded,
         );
+    }
+}
+
+fn paraphrase_metric(
+    request: &ModelRequest,
+    response: &ModelResponse,
+) -> Option<serde_json::Value> {
+    let ModelOutputFormat::JsonSchema { name, .. } = &request.output_format else {
+        return None;
+    };
+    if !name.starts_with("document_quote_paraphrase_") {
+        return None;
+    }
+    let user: serde_json::Value = serde_json::from_str(&request.user_prompt).ok()?;
+    let output: serde_json::Value = serde_json::from_str(&response.text).ok()?;
+    Some(json!({
+        "request_ordinal":request.ordinal,
+        "is_retry":user.get("repair").is_some(),
+        "draft_characters":user.get("rejected_draft").and_then(|s| s.as_str()).map(|s| s.chars().count()),
+        "claim_characters":output.get("claim_text").and_then(|s| s.as_str()).map(|s| s.chars().count())
+    }))
+}
+
+#[test]
+fn paraphrase_length_metrics_do_not_expose_source_or_rejected_draft() {
+    let request = ModelRequest {
+        stage:document_summarizer_lib::pipeline::contracts::PipelineStage::Analyze,
+        ordinal:4, seed:42, max_output_tokens:2048, system_prompt:"private instruction".into(),
+        user_prompt:json!({"exact_quote":"private source", "rejected_draft":"secret draft", "repair":{"target_characters":384}}).to_string(),
+        output_format:ModelOutputFormat::JsonSchema { name:"document_quote_paraphrase_v3".into(), schema:json!({}) }
+    };
+    let response = ModelResponse {
+        text: json!({"claim_text":"A claim."}).to_string(),
+        runtime_id: "fixture".into(),
+        model_id: "fixture".into(),
+        request_attempts: Vec::new(),
+    };
+    let metric = paraphrase_metric(&request, &response).unwrap();
+    assert_eq!(
+        metric,
+        json!({"request_ordinal":4,"is_retry":true,"draft_characters":12,"claim_characters":8})
+    );
+    for secret in ["private", "secret draft", "A claim."] {
+        assert!(!metric.to_string().contains(secret));
     }
 }
 
@@ -526,6 +708,7 @@ fn office_pdf_live_ollama_analysis_satisfies_evidence_contract() {
 #[test]
 #[ignore = "requires one external PDF in DOC_SUM_OFFICE_PDF and configured Ollama"]
 fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
+    let started = std::time::Instant::now();
     let paths = configured_paths("DOC_SUM_OFFICE_PDF");
     assert_eq!(paths.len(), 1, "DOC_SUM_OFFICE_PDF must contain one path");
     let source = &paths[0];
@@ -626,19 +809,167 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .iter()
         .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
         .collect::<HashSet<_>>();
-    let claim_budget = ((native_text_pages.len() * 3).div_ceil(5)).clamp(8, 64);
-    let claim_floor = claim_budget
-        .div_ceil(2)
-        .max(3)
-        .min(claim_budget)
-        .min(evidence_ids.len());
+    let verified = get_verified_document(&conn, &result.run_id)
+        .expect("verification should load")
+        .expect("verification should exist");
+    let mut synthesis_attempts = Vec::new();
+    for ordinal in 0..=1 {
+        if let Some(attempt) = get_synthesis_attempt(&conn, &result.run_id, ordinal)
+            .expect("synthesis attempt should load")
+        {
+            synthesis_attempts.push((ordinal, attempt));
+        }
+    }
+    let selected_synthesis = &synthesis_attempts
+        .iter()
+        .find(|(ordinal, _)| *ordinal == verified.synthesis_attempt_ordinal)
+        .expect("selected persisted synthesis must exist")
+        .1;
+    let synthesized_evidence_ids = selected_synthesis
+        .claims
+        .iter()
+        .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
+        .collect::<HashSet<_>>();
+    let claim_budget = 512;
+    let claim_floor = 1;
+    let omitted_pages = analyzed
+        .omissions
+        .iter()
+        .map(|o| o.page_number)
+        .collect::<HashSet<_>>();
+    assert!(omitted_pages.is_subset(&native_text_pages));
+    assert!(omitted_pages.is_disjoint(&cited_native_text_pages));
+    let material_omitted_pages = analyzed
+        .omissions
+        .iter()
+        .filter(|omission| omission_reduces_adjusted_denominator(&omission.reason))
+        .map(|omission| omission.page_number)
+        .collect::<HashSet<_>>();
+    let technical_omitted_pages = analyzed
+        .omissions
+        .iter()
+        .filter(|omission| !omission_reduces_adjusted_denominator(&omission.reason))
+        .map(|omission| omission.page_number)
+        .collect::<HashSet<_>>();
+    let adjusted_native_text_pages = native_text_pages
+        .difference(&material_omitted_pages)
+        .copied()
+        .collect::<HashSet<_>>();
+    let acceptance_pages = (native_text_pages.len() * 3).div_ceil(5);
+    let desired_headroom = 16;
+    let retention_target = native_text_pages
+        .len()
+        .min(acceptance_pages + desired_headroom)
+        .min(claim_budget);
+    let retained_pages = analyzed
+        .chunks
+        .iter()
+        .flat_map(|chunk| &chunk.evidence)
+        .map(|item| item.source_span.page_start)
+        .collect::<HashSet<_>>();
+    let withheld_claim_count = verified
+        .claim_verifications
+        .iter()
+        .filter(|v| {
+            v.verdict != document_summarizer_lib::pipeline::contracts::ClaimVerdict::Supported
+        })
+        .count();
+    // Print delivered metrics before quality assertions: a thin result must not
+    // disappear from the report merely because the acceptance gate rejects it.
+    eprintln!(
+        "OFFICE_LIVE_DELIVERED_METRICS {}",
+        json!({
+            "claim_count": result.citations.claims.len(),
+            "claim_budget": claim_budget,
+            "claim_floor": claim_floor,
+            "validated_evidence_count": evidence_ids.len(),
+            "inspected_page_count": analyzed.inspected_pages.len(),
+            "omitted_page_count": analyzed.omissions.len(),
+            "omitted_pages": analyzed.omissions.iter().map(|omission| omission.page_number).collect::<Vec<_>>(),
+            "material_omitted_pages": material_omitted_pages,
+            "technical_omitted_pages": technical_omitted_pages,
+            "cited_evidence_count": cited_evidence_ids.len(),
+            "synthesized_evidence_count": synthesized_evidence_ids.len(),
+            "supported_evidence_fraction": cited_evidence_ids.len() as f64 / evidence_ids.len() as f64,
+            "supported_evidence_threshold": 0.6,
+            "cited_native_text_page_count": cited_native_text_pages.len(),
+            "native_text_page_count": native_text_pages.len(),
+            "raw_cited_page_fraction": cited_native_text_pages.len() as f64 / native_text_pages.len() as f64,
+            "adjusted_native_text_page_count": adjusted_native_text_pages.len(),
+            "adjusted_cited_page_fraction": if adjusted_native_text_pages.is_empty() { None } else { Some(cited_native_text_pages.len() as f64 / adjusted_native_text_pages.len() as f64) },
+            "omissions": analyzed.omissions,
+            "acceptance_page_target": acceptance_pages,
+            "desired_retention_headroom": desired_headroom,
+            "retention_target": retention_target,
+            "retained_page_count": retained_pages.len(),
+            "actual_retained_margin": retained_pages.len().saturating_sub(acceptance_pages),
+            "full_retention_reserve": retained_pages.len() >= acceptance_pages + desired_headroom,
+            "withheld_claim_count": withheld_claim_count,
+            "lost_page_count": retained_pages.difference(&cited_native_text_pages).count(),
+            "wall_time_ms": started.elapsed().as_millis(),
+            "request_count": runtime.requests().len(),
+            "completion_tokens": recorded_attempt_totals(&runtime).2,
+            "warning_codes": result.summary.warnings.iter().map(|warning| warning.code.as_str()).collect::<Vec<_>>(),
+        })
+    );
+    if reveal_model_text() {
+        println!(
+            "OFFICE_LIVE_DELIVERED_SUMMARY\n{}\nOFFICE_LIVE_DELIVERED_SUMMARY_END",
+            result.summary.text
+        );
+    }
     assert!(result.citations.claims.len() >= claim_floor);
     assert!(result.citations.claims.len() <= claim_budget);
-    assert_eq!(cited_evidence_ids, evidence_ids);
+    for (_, attempt) in &synthesis_attempts {
+        let cited = attempt
+            .claims
+            .iter()
+            .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            cited, evidence_ids,
+            "every synthesized attempt must cover all retained evidence"
+        );
+    }
     assert!(
-        cited_native_text_pages.len() * 5 >= native_text_pages.len() * 3,
-        "at least 60 percent of native-text pages must be cited"
+        evidence_coverage_accepted(
+            &evidence_ids,
+            &synthesized_evidence_ids,
+            &cited_evidence_ids
+        ),
+        "complete synthesized coverage and at least 60 percent supported evidence required"
     );
+    if cited_evidence_ids != evidence_ids {
+        assert!(
+            result
+                .summary
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "SUMMARY_COVERAGE_SHORTFALL"),
+            "withheld evidence must remain visible as a durable warning"
+        );
+    }
+    assert!(
+        coverage_at_least_fifty_percent(cited_native_text_pages.len(), native_text_pages.len()),
+        "at least 50 percent of all native-text pages must be cited"
+    );
+    assert!(
+        coverage_at_least_sixty_percent(
+            cited_native_text_pages.len(),
+            adjusted_native_text_pages.len()
+        ),
+        "at least 60 percent of materially non-omitted native-text pages must be cited"
+    );
+    if source_hash == "290840e408f2769b9a0ed65b73aa15c116cae3685f125358717ad15cfbd29ec8" {
+        assert!(
+            result
+                .summary
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "OCR_TEXT_LAYER_STRUCTURE_RISK"),
+            "the scanned NARA robustness fixture must expose OCR text-layer structure risk"
+        );
+    }
     for evidence in &result.citations.evidence {
         let block = blocks
             .get(evidence.block_id.as_str())
@@ -714,6 +1045,8 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         "summary_integrity_hash": expected_summary.integrity_hash,
         "citation_integrity_hash": expected_citations.integrity_hash,
         "summary_characters": expected_summary.text.chars().count(),
+        "request_count": runtime.requests().len(),
+        "completion_tokens": recorded_attempt_totals(&runtime).2,
         "summary_sha256": format!("{:x}", Sha256::digest(expected_summary.text.as_bytes())),
     });
     add_optional_summary(&mut report, &expected_summary.text, reveal_model_text());
