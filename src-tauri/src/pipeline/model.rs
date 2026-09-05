@@ -21,7 +21,7 @@ const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_SCHEMA_NAME_BYTES: usize = 64;
-pub(super) const MAX_DECODER_STRING_LENGTH: u64 = 768;
+pub(super) const MAX_DECODER_STRING_LENGTH: u64 = 1_536;
 
 pub struct OllamaRuntime {
     client: Client,
@@ -1071,7 +1071,9 @@ mod tests {
 
     #[test]
     fn decoder_projection_preserves_small_string_bounds_and_strips_large_ones() {
-        for maximum in [0, 191, 192, 193, 767, 768, 769, 2_000, 4_000] {
+        for maximum in [
+            0, 191, 192, 193, 767, 768, 769, 1_535, 1_536, 1_537, 2_000, 4_000,
+        ] {
             let canonical = serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -204,6 +204,23 @@ fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
             );
         }
     }
+    let requests = runtime.requests();
+    let responses = runtime.responses();
+    let paraphrase_requests = requests.iter().filter(|r| matches!(&r.output_format,
+        ModelOutputFormat::JsonSchema { name, .. } if name.starts_with("document_quote_paraphrase_"))).collect::<Vec<_>>();
+    let paraphrases = requests
+        .iter()
+        .zip(&responses)
+        .filter_map(|(request, response)| paraphrase_metric(request, response))
+        .collect::<Vec<_>>();
+    eprintln!(
+        "OFFICE_LIVE_PARAPHRASE_METRICS {}",
+        json!({
+            "calls": paraphrase_requests.len(),
+            "repairs": paraphrase_requests.iter().filter(|r| serde_json::from_str::<serde_json::Value>(&r.user_prompt).is_ok_and(|u| u.get("repair").is_some())).count(),
+            "responses": paraphrases
+        })
+    );
     eprintln!("OFFICE_LIVE_MODEL_REQUEST_ATTEMPTS");
     let responses = runtime.responses();
     let failures = runtime.failures();
@@ -229,6 +246,50 @@ fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
             attempt.provider_usage.total_tokens,
             attempt.succeeded,
         );
+    }
+}
+
+fn paraphrase_metric(
+    request: &ModelRequest,
+    response: &ModelResponse,
+) -> Option<serde_json::Value> {
+    let ModelOutputFormat::JsonSchema { name, .. } = &request.output_format else {
+        return None;
+    };
+    if !name.starts_with("document_quote_paraphrase_") {
+        return None;
+    }
+    let user: serde_json::Value = serde_json::from_str(&request.user_prompt).ok()?;
+    let output: serde_json::Value = serde_json::from_str(&response.text).ok()?;
+    Some(json!({
+        "request_ordinal":request.ordinal,
+        "is_retry":user.get("repair").is_some(),
+        "draft_characters":user.get("rejected_draft").and_then(|s| s.as_str()).map(|s| s.chars().count()),
+        "claim_characters":output.get("claim_text").and_then(|s| s.as_str()).map(|s| s.chars().count())
+    }))
+}
+
+#[test]
+fn paraphrase_length_metrics_do_not_expose_source_or_rejected_draft() {
+    let request = ModelRequest {
+        stage:document_summarizer_lib::pipeline::contracts::PipelineStage::Analyze,
+        ordinal:4, seed:42, max_output_tokens:2048, system_prompt:"private instruction".into(),
+        user_prompt:json!({"exact_quote":"private source", "rejected_draft":"secret draft", "repair":{"target_characters":384}}).to_string(),
+        output_format:ModelOutputFormat::JsonSchema { name:"document_quote_paraphrase_v3".into(), schema:json!({}) }
+    };
+    let response = ModelResponse {
+        text: json!({"claim_text":"A claim."}).to_string(),
+        runtime_id: "fixture".into(),
+        model_id: "fixture".into(),
+        request_attempts: Vec::new(),
+    };
+    let metric = paraphrase_metric(&request, &response).unwrap();
+    assert_eq!(
+        metric,
+        json!({"request_ordinal":4,"is_retry":true,"draft_characters":12,"claim_characters":8})
+    );
+    for secret in ["private", "secret draft", "A claim."] {
+        assert!(!metric.to_string().contains(secret));
     }
 }
 
