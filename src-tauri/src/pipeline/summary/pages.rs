@@ -4,7 +4,7 @@ use crate::pipeline::contracts::{
 };
 
 pub(super) const SELECTION_SCHEMA: &str = "document_page_quote_selection_v4";
-pub(super) const PARAPHRASE_SCHEMA: &str = "document_quote_paraphrase_v4";
+pub(super) const PARAPHRASE_SCHEMA: &str = "document_quote_paraphrase_v5";
 const PARAPHRASE_TARGET_WORDS: usize = 55;
 const DECODER_CLAIM_CHARACTERS: usize = MAX_ANALYSIS_CLAIM_CHARACTERS * 4;
 pub(super) const OMIT_HEADING: &str = "omit_bare_heading";
@@ -246,6 +246,58 @@ struct Selection {
 #[serde(deny_unknown_fields)]
 struct Paraphrase {
     claim_text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OmittedParaphrase {
+    outcome: NoSubstantiveContent,
+}
+#[derive(Deserialize)]
+enum NoSubstantiveContent {
+    #[serde(rename = "no_substantive_content")]
+    NoSubstantiveContent,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ParaphraseOutcome {
+    Claim(Paraphrase),
+    Omitted(OmittedParaphrase),
+}
+
+fn whole_page_quote(scope: &AnalysisScope, quote: &str, normalized: &NormalizedDocument) -> bool {
+    normalized
+        .pages
+        .iter()
+        .find(|p| scope.page_numbers == [p.page_number])
+        .is_some_and(|page| {
+            let full = page
+                .content
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            !full.trim().is_empty() && full.split_whitespace().eq(quote.split_whitespace())
+        })
+}
+
+fn paraphrase_schema(allow_omission: bool) -> Value {
+    let claim = json!({"type":"object","properties":{"claim_text":{"type":"string","minLength":1,"maxLength":DECODER_CLAIM_CHARACTERS}},"required":["claim_text"],"additionalProperties":false});
+    if !allow_omission {
+        return claim;
+    }
+    json!({"anyOf":[claim, {"type":"object","properties":{"outcome":{"type":"string","enum":["no_substantive_content"]}},"required":["outcome"],"additionalProperties":false}]})
+}
+
+fn content_omission(
+    scope: &AnalysisScope,
+    chunk: &DocumentChunk,
+    normalized: &NormalizedDocument,
+) -> Result<AnalysisPageOmission, PipelineFailure> {
+    let mut omission = heading_omission(scope, chunk, normalized)?;
+    omission.origin = AnalysisOmissionOrigin::ModelNoSubstantiveContent;
+    omission.reason = AnalysisOmissionReason::NoSubstantiveContent;
+    Ok(omission)
 }
 
 fn invalid(message: &str) -> PipelineFailure {
@@ -533,10 +585,12 @@ pub(super) fn analyze(
             .ok_or_else(|| invalid("Foreign selection identifier"))?;
         let mut violations = Vec::new();
         let mut accepted = None;
+        let allow_omission = whole_page_quote(&scope, &candidate.exact_quote, normalized);
+        let mut omitted = false;
         let mut rejected_draft = String::new();
         for attempt in 0..=1 {
             cancellation_checkpoint(control, PipelineStage::Analyze)?;
-            let (system, user) = if attempt == 0 {
+            let (mut system, mut user) = if attempt == 0 {
                 (
                     PARAPHRASE_PROMPT.to_string(),
                     json!({"exact_quote":candidate.exact_quote}),
@@ -544,6 +598,10 @@ pub(super) fn analyze(
             } else {
                 retry_input(&candidate.exact_quote, &rejected_draft, &violations)?
             };
+            if allow_omission {
+                system.push_str(" This quotation is the complete native text of the page. If it contains no recoverable substantive content (only scan artifacts, page furniture or a bare heading), return {\"outcome\":\"no_substantive_content\"} instead of a meta-claim describing noise. Do not omit obligations, exceptions, quantities, table values or difficult or uncertain assertions. This records a judgment about extracted text, not proof the original has no facts. Otherwise return claim_text as specified.");
+                user["complete_page_text"] = json!(true);
+            }
             let attempt_seed = if attempt == 0 {
                 seed
             } else {
@@ -556,19 +614,38 @@ pub(super) fn analyze(
                 attempt_seed,
                 &system,
                 user,
-                (
-                    PARAPHRASE_SCHEMA,
-                    json!({"type":"object","properties":{"claim_text":{"type":"string","minLength":1,"maxLength":DECODER_CLAIM_CHARACTERS}},"required":["claim_text"],"additionalProperties":false}),
-                ),
+                (PARAPHRASE_SCHEMA, paraphrase_schema(allow_omission)),
             )?;
-            let paraphrase: Paraphrase = serde_json::from_str(&response.text)
-                .map_err(|_| invalid("Paraphrase must contain only claim_text"))?;
+            let outcome: ParaphraseOutcome = serde_json::from_str(&response.text)
+                .map_err(|_| invalid("Paraphrase must be a claim or an admitted typed omission"))?;
+            let paraphrase = match outcome {
+                ParaphraseOutcome::Claim(claim) => claim,
+                ParaphraseOutcome::Omitted(OmittedParaphrase {
+                    outcome: NoSubstantiveContent::NoSubstantiveContent,
+                }) if allow_omission => {
+                    analyzed.omissions.push(content_omission(
+                        &scope,
+                        &chunked.chunks[chunk_index],
+                        normalized,
+                    )?);
+                    omitted = true;
+                    break;
+                }
+                _ => {
+                    return Err(invalid(
+                        "A partial quotation cannot authorize a page omission",
+                    ))
+                }
+            };
             violations = paraphrase_violations(&paraphrase.claim_text);
             if violations.is_empty() {
                 accepted = Some(paraphrase);
                 break;
             }
             rejected_draft = paraphrase.claim_text;
+        }
+        if omitted {
+            continue;
         }
         let paraphrase = accepted
             .ok_or_else(|| invalid("Paraphrase failed bounded length or completion repair"))?;
@@ -587,7 +664,7 @@ pub(super) fn analyze(
             .join("\n");
     }
     if !analyzed.omissions.is_empty() {
-        analyzed.warnings.push(PipelineWarning { code: "ANALYSIS_PAGE_OMITTED".to_string(), message: format!("{} inspected pages omitted as recorded page furniture; native-text coverage denominator unchanged", analyzed.omissions.len()), stage: Some(PipelineStage::Analyze) });
+        analyzed.warnings.push(PipelineWarning { code: "ANALYSIS_PAGE_OMITTED".to_string(), message: format!("{} inspected pages omitted with source-bound judgments; report raw and omission-adjusted coverage separately", analyzed.omissions.len()), stage: Some(PipelineStage::Analyze) });
     }
     if count < target {
         analyzed.warnings.push(PipelineWarning {
@@ -635,6 +712,14 @@ pub(super) fn validate_plan(
                 if heading
                     && **actual
                         == heading_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
+            (Some(actual), None)
+                if analyzed.analysis_version == ANALYSIS_VERSION
+                    && scope
+                        .quote_candidates
+                        .iter()
+                        .any(|c| whole_page_quote(&scope, &c.exact_quote, normalized))
+                    && **actual
+                        == content_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
             (None, None) if evidence_pages.contains(&page) => retained += 1,
             _ => {
                 return Err(invalid(

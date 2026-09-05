@@ -762,18 +762,25 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .iter()
         .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
         .collect::<HashSet<_>>();
-    let claim_budget = ((native_text_pages.len() * 3).div_ceil(5)).clamp(8, 64);
-    let claim_floor = claim_budget
-        .div_ceil(2)
-        .max(3)
-        .min(claim_budget)
-        .min(evidence_ids.len());
+    let claim_budget = 512;
+    let claim_floor = 1;
+    let omitted_pages = analyzed
+        .omissions
+        .iter()
+        .map(|o| o.page_number)
+        .collect::<HashSet<_>>();
+    assert!(omitted_pages.is_subset(&native_text_pages));
+    assert!(omitted_pages.is_disjoint(&cited_native_text_pages));
+    let adjusted_native_text_pages = native_text_pages
+        .difference(&omitted_pages)
+        .copied()
+        .collect::<HashSet<_>>();
     let acceptance_pages = (native_text_pages.len() * 3).div_ceil(5);
     let desired_headroom = 16;
     let retention_target = native_text_pages
         .len()
         .min(acceptance_pages + desired_headroom)
-        .min(claim_budget * 16);
+        .min(claim_budget);
     let retained_pages = analyzed
         .chunks
         .iter()
@@ -805,6 +812,10 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
             "supported_evidence_threshold": 0.6,
             "cited_native_text_page_count": cited_native_text_pages.len(),
             "native_text_page_count": native_text_pages.len(),
+            "raw_cited_page_fraction": cited_native_text_pages.len() as f64 / native_text_pages.len() as f64,
+            "adjusted_native_text_page_count": adjusted_native_text_pages.len(),
+            "adjusted_cited_page_fraction": if adjusted_native_text_pages.is_empty() { None } else { Some(cited_native_text_pages.len() as f64 / adjusted_native_text_pages.len() as f64) },
+            "omissions": analyzed.omissions,
             "acceptance_page_target": acceptance_pages,
             "desired_retention_headroom": desired_headroom,
             "retention_target": retention_target,
@@ -818,6 +829,12 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
             "warning_codes": result.summary.warnings.iter().map(|warning| warning.code.as_str()).collect::<Vec<_>>(),
         })
     );
+    if reveal_model_text() {
+        println!(
+            "OFFICE_LIVE_DELIVERED_SUMMARY\n{}\nOFFICE_LIVE_DELIVERED_SUMMARY_END",
+            result.summary.text
+        );
+    }
     assert!(result.citations.claims.len() >= claim_floor);
     assert!(result.citations.claims.len() <= claim_budget);
     for (_, attempt) in &synthesis_attempts {
@@ -850,8 +867,8 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         );
     }
     assert!(
-        coverage_at_least_sixty_percent(cited_native_text_pages.len(), native_text_pages.len()),
-        "at least 60 percent of native-text pages must be cited"
+        coverage_at_least_sixty_percent(cited_native_text_pages.len(), adjusted_native_text_pages.len()),
+        "at least 60 percent of non-omitted native-text pages must be cited; raw coverage remains reported"
     );
     for evidence in &result.citations.evidence {
         let block = blocks

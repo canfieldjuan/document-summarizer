@@ -479,11 +479,13 @@ pub enum AnalysisOmissionOrigin {
     ScanNoise,
     DatePageStamp,
     ModelBareHeading,
+    ModelNoSubstantiveContent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnalysisOmissionReason {
     NonSubstantivePageFurniture,
+    NoSubstantiveContent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

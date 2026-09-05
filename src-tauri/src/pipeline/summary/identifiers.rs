@@ -77,14 +77,17 @@ impl RequestIds {
         serde_json::to_string(&response).map_err(|_| self.invalid())
     }
 
+    #[cfg(test)]
     pub(super) fn localize_failure(&self, failure: PipelineFailure) -> PipelineFailure {
         self.map_failure(failure, true)
     }
 
+    #[cfg(test)]
     pub(super) fn restore_failure(&self, failure: PipelineFailure) -> PipelineFailure {
         self.map_failure(failure, false)
     }
 
+    #[cfg(test)]
     fn map_failure(&self, failure: PipelineFailure, to_wire: bool) -> PipelineFailure {
         if failure.code != "SYNTHESIS_MISSING_REFERENCES" {
             return failure;
