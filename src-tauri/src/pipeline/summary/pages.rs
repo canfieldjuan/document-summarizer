@@ -267,7 +267,14 @@ pub(super) fn fingerprint<T: Serialize>(value: &T) -> Result<String, PipelineFai
 }
 
 pub(super) fn plan(normalized: &NormalizedDocument) -> Result<(Vec<u32>, usize), PipelineFailure> {
-    let selected = analysis_selected_pages(normalized)?;
+    versioned_plan(normalized, ANALYSIS_VERSION)
+}
+
+fn versioned_plan(
+    normalized: &NormalizedDocument,
+    version: &str,
+) -> Result<(Vec<u32>, usize), PipelineFailure> {
+    let selected = versioned_analysis_selected_pages(normalized, version)?;
     let all = normalized
         .pages
         .iter()
@@ -599,7 +606,7 @@ pub(super) fn validate_plan(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<HashSet<u32>, PipelineFailure> {
-    let (plan, target) = plan(normalized)?;
+    let (plan, target) = versioned_plan(normalized, &analyzed.analysis_version)?;
     let mut evidence_pages = HashSet::new();
     for evidence in analyzed.chunks.iter().flat_map(|c| &c.evidence) {
         if !evidence_pages.insert(evidence.source_span.page_start) {

@@ -74,6 +74,8 @@ fn coverage_gate_separates_synthesized_and_supported_evidence() {
         (59, 100, false),
         (60, 100, true),
         (61, 100, true),
+        (66, 111, false),
+        (67, 111, true),
         (600_000, 1_000_000, true),
     ] {
         assert_eq!(coverage_at_least_sixty_percent(cited, total), expected);
@@ -638,6 +640,7 @@ fn office_pdf_live_ollama_analysis_satisfies_evidence_contract() {
 #[test]
 #[ignore = "requires one external PDF in DOC_SUM_OFFICE_PDF and configured Ollama"]
 fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
+    let started = std::time::Instant::now();
     let paths = configured_paths("DOC_SUM_OFFICE_PDF");
     assert_eq!(paths.len(), 1, "DOC_SUM_OFFICE_PDF must contain one path");
     let source = &paths[0];
@@ -765,6 +768,25 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .max(3)
         .min(claim_budget)
         .min(evidence_ids.len());
+    let acceptance_pages = (native_text_pages.len() * 3).div_ceil(5);
+    let desired_headroom = 16;
+    let retention_target = native_text_pages
+        .len()
+        .min(acceptance_pages + desired_headroom)
+        .min(claim_budget * 16);
+    let retained_pages = analyzed
+        .chunks
+        .iter()
+        .flat_map(|chunk| &chunk.evidence)
+        .map(|item| item.source_span.page_start)
+        .collect::<HashSet<_>>();
+    let withheld_claim_count = verified
+        .claim_verifications
+        .iter()
+        .filter(|v| {
+            v.verdict != document_summarizer_lib::pipeline::contracts::ClaimVerdict::Supported
+        })
+        .count();
     // Print delivered metrics before quality assertions: a thin result must not
     // disappear from the report merely because the acceptance gate rejects it.
     eprintln!(
@@ -783,6 +805,15 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
             "supported_evidence_threshold": 0.6,
             "cited_native_text_page_count": cited_native_text_pages.len(),
             "native_text_page_count": native_text_pages.len(),
+            "acceptance_page_target": acceptance_pages,
+            "desired_retention_headroom": desired_headroom,
+            "retention_target": retention_target,
+            "retained_page_count": retained_pages.len(),
+            "actual_retained_margin": retained_pages.len().saturating_sub(acceptance_pages),
+            "full_retention_reserve": retained_pages.len() >= acceptance_pages + desired_headroom,
+            "withheld_claim_count": withheld_claim_count,
+            "lost_page_count": retained_pages.difference(&cited_native_text_pages).count(),
+            "wall_time_ms": started.elapsed().as_millis(),
             "request_count": runtime.requests().len(),
             "warning_codes": result.summary.warnings.iter().map(|warning| warning.code.as_str()).collect::<Vec<_>>(),
         })

@@ -19,7 +19,8 @@ mod eligibility;
 mod pages;
 mod repair;
 
-pub const ANALYSIS_VERSION: &str = "7.1.0";
+pub const ANALYSIS_VERSION: &str = "8.0.0";
+const WORD_TARGET_ANALYSIS_VERSION: &str = "7.1.0";
 const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
@@ -67,6 +68,8 @@ const HISTORICAL_ANALYSIS_CLAIM_CHARACTERS: usize = 192;
 const MAX_SUMMARY_CLAIMS: usize = 64;
 const MAX_VERIFICATION_CLAIMS_PER_REQUEST: usize = 16;
 const MAX_EVIDENCE_PER_CLAIM: usize = 16;
+// Explicit fault-tolerance policy, not an estimated model survival rate.
+const RETENTION_WITHHELD_CLAIM_RESERVE: usize = 1;
 const MAX_CLAIM_CHARACTERS: usize = 2_000;
 const MAX_QUOTE_CHARACTERS: usize = 4_000;
 const CANCELLATION_OBSERVED_CODE: &str = "PIPELINE_CANCELLATION_OBSERVED";
@@ -2502,6 +2505,84 @@ fn build_analysis_scopes(
     build_versioned_analysis_scopes(chunk, normalized_blocks, false)
 }
 
+fn analysis_retention_target(native_pages: usize) -> Result<usize, PipelineFailure> {
+    let invalid = || {
+        stage_failure(
+            PipelineStage::Analyze,
+            "INVALID_ANALYSIS_BUDGET",
+            "Retention requires native-text pages and checked coverage arithmetic",
+            false,
+        )
+    };
+    if native_pages == 0 {
+        return Err(invalid());
+    }
+    let acceptance = analysis_scope_minimum(native_pages)?;
+    let capacity = acceptance
+        .clamp(8, MAX_SUMMARY_CLAIMS)
+        .checked_mul(MAX_EVIDENCE_PER_CLAIM)
+        .ok_or_else(invalid)?;
+    if acceptance > capacity {
+        return Err(stage_failure(
+            PipelineStage::Analyze,
+            "ANALYSIS_COVERAGE_CAPACITY_UNSATISFIABLE",
+            "Native-page acceptance exceeds the bounded claim-reference capacity",
+            false,
+        ));
+    }
+    let reserve = RETENTION_WITHHELD_CLAIM_RESERVE
+        .checked_mul(MAX_EVIDENCE_PER_CLAIM)
+        .ok_or_else(invalid)?;
+    Ok(native_pages
+        .min(acceptance.checked_add(reserve).ok_or_else(invalid)?)
+        .min(capacity))
+}
+
+fn versioned_analysis_selected_pages(
+    normalized: &NormalizedDocument,
+    version: &str,
+) -> Result<HashSet<u32>, PipelineFailure> {
+    // Historical plans and identities must not acquire new retention obligations.
+    let mut selected = analysis_selected_pages(normalized)?;
+    if version != ANALYSIS_VERSION {
+        return Ok(selected);
+    }
+    let pages = normalized
+        .pages
+        .iter()
+        .filter(|page| {
+            page.content.iter().any(|block| {
+                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
+                    && !block.text.trim().is_empty()
+            })
+        })
+        .map(|page| page.page_number)
+        .collect::<Vec<_>>();
+    let target = analysis_retention_target(pages.len())?;
+    let unused = pages
+        .into_iter()
+        .filter(|page| !selected.contains(page))
+        .collect::<Vec<_>>();
+    let additional = target.checked_sub(selected.len()).ok_or_else(|| {
+        stage_failure(
+            PipelineStage::Analyze,
+            "INVALID_ANALYSIS_BUDGET",
+            "Retention cannot shrink the historical sample",
+            false,
+        )
+    })?;
+    // Spread additions over the unused pages, preserving every old selection.
+    for index in 0..additional {
+        let position = if additional <= 1 {
+            unused.len() / 2
+        } else {
+            ((index as u128 * (unused.len() - 1) as u128) / (additional - 1) as u128) as usize
+        };
+        selected.insert(unused[position]);
+    }
+    Ok(selected)
+}
+
 fn analysis_selected_pages(
     normalized: &NormalizedDocument,
 ) -> Result<HashSet<u32>, PipelineFailure> {
@@ -3390,6 +3471,7 @@ fn validate_analyzed_content(
         || !matches!(
             analyzed.analysis_version.as_str(),
             ANALYSIS_VERSION
+                | WORD_TARGET_ANALYSIS_VERSION
                 | CAPACITY_ANALYSIS_VERSION
                 | COMPLETION_ANALYSIS_VERSION
                 | MATERIALITY_ANALYSIS_VERSION
@@ -3412,6 +3494,7 @@ fn validate_analyzed_content(
     let materiality_analysis = matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | WORD_TARGET_ANALYSIS_VERSION
             | CAPACITY_ANALYSIS_VERSION
             | COMPLETION_ANALYSIS_VERSION
             | MATERIALITY_ANALYSIS_VERSION
@@ -3525,7 +3608,9 @@ fn validate_analyzed_content(
                 &evidence.exact_quote,
             );
             let claim_character_limit = match analyzed.analysis_version.as_str() {
-                ANALYSIS_VERSION | CAPACITY_ANALYSIS_VERSION => MAX_ANALYSIS_CLAIM_CHARACTERS,
+                ANALYSIS_VERSION | WORD_TARGET_ANALYSIS_VERSION | CAPACITY_ANALYSIS_VERSION => {
+                    MAX_ANALYSIS_CLAIM_CHARACTERS
+                }
                 LEGACY_ANALYSIS_VERSION => MAX_CLAIM_CHARACTERS,
                 _ => HISTORICAL_ANALYSIS_CLAIM_CHARACTERS,
             };
@@ -3542,7 +3627,10 @@ fn validate_analyzed_content(
                 || !canonical_bounded_text(&evidence.claim_text, claim_character_limit)
                 || (matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION | CAPACITY_ANALYSIS_VERSION | COMPLETION_ANALYSIS_VERSION
+                    ANALYSIS_VERSION
+                        | WORD_TARGET_ANALYSIS_VERSION
+                        | CAPACITY_ANALYSIS_VERSION
+                        | COMPLETION_ANALYSIS_VERSION
                 ) && !pages::completion_valid(&evidence.claim_text))
                 || !canonical_bounded_text(&evidence.exact_quote, quote_character_limit)
                 || !block.text.contains(&evidence.exact_quote)
@@ -3555,6 +3643,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | WORD_TARGET_ANALYSIS_VERSION
                         | CAPACITY_ANALYSIS_VERSION
                         | COMPLETION_ANALYSIS_VERSION
                         | MATERIALITY_ANALYSIS_VERSION
@@ -3602,6 +3691,7 @@ fn validate_analyzed_content(
     if matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | WORD_TARGET_ANALYSIS_VERSION
             | CAPACITY_ANALYSIS_VERSION
             | COMPLETION_ANALYSIS_VERSION
             | MATERIALITY_ANALYSIS_VERSION
@@ -6814,10 +6904,313 @@ mod tests {
     }
 
     #[test]
+    fn retention_capacity_boundaries_and_historical_sample_subset() {
+        for (n, a, b, target) in [
+            (1, 1, 8, 1),
+            (11, 7, 8, 11),
+            (20, 12, 12, 20),
+            (111, 67, 64, 83),
+            (1680, 1008, 64, 1024),
+            (1681, 1009, 64, 1024),
+            (1706, 1024, 64, 1024),
+        ] {
+            let (normalized, _) = sparse_page_scope_fixture(n, 40);
+            assert_eq!(analysis_scope_minimum(n).unwrap(), a);
+            assert_eq!(document_claim_budget(&normalized).unwrap(), b);
+            assert_eq!(analysis_retention_target(n).unwrap(), target);
+            assert_eq!(
+                synthesis_claim_floor(b, target).unwrap(),
+                b.div_ceil(2).max(3).min(target)
+            );
+            let old = analysis_selected_pages(&normalized).unwrap();
+            let new = versioned_analysis_selected_pages(&normalized, ANALYSIS_VERSION).unwrap();
+            assert_eq!(new.len(), target);
+            assert!(old.is_subset(&new));
+            assert!(new.contains(&(n as u32)));
+            eprintln!("RETENTION_BOUNDARY N={n} A={a} B={b} R={target}");
+        }
+        for n in 1..=1706 {
+            let a = analysis_scope_minimum(n).unwrap();
+            assert!(analysis_retention_target(n).unwrap() >= n.min(a.clamp(8, 64).max(a)));
+        }
+        for n in [0, usize::MAX / 3 + 1, usize::MAX] {
+            assert!(analysis_retention_target(n).is_err());
+        }
+        let (normalized, chunked) = sparse_page_scope_fixture(1707, 40);
+        let runtime = RecordingHierarchicalRuntime::healthy();
+        let error = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "ANALYSIS_COVERAGE_CAPACITY_UNSATISFIABLE");
+        assert!(runtime.captured_requests().is_empty());
+    }
+
+    #[test]
+    fn retention_reload_preserves_historical_plans_and_identity() {
+        let (normalized, chunked) = sparse_page_scope_fixture(111, 40);
+        let runtime = RecordingHierarchicalRuntime::healthy();
+        let current = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(current.inspected_pages.len(), 83);
+        let old = analysis_selected_pages(&normalized).unwrap();
+        assert_eq!(old.len(), 67);
+        for version in [
+            WORD_TARGET_ANALYSIS_VERSION,
+            CAPACITY_ANALYSIS_VERSION,
+            COMPLETION_ANALYSIS_VERSION,
+            MATERIALITY_ANALYSIS_VERSION,
+            SINGLE_PAGE_ANALYSIS_VERSION,
+        ] {
+            let mut historical = current.clone();
+            historical.analysis_version = version.into();
+            historical.inspected_pages.retain(|page| old.contains(page));
+            if version == SINGLE_PAGE_ANALYSIS_VERSION {
+                historical.inspected_pages.clear();
+            }
+            for chunk in &mut historical.chunks {
+                chunk
+                    .evidence
+                    .retain(|e| old.contains(&e.source_span.page_start));
+                for (index, e) in chunk.evidence.iter_mut().enumerate() {
+                    e.evidence_id = deterministic_evidence_id(
+                        &historical.document_id,
+                        version,
+                        &chunk.chunk_id,
+                        index,
+                        &e.block_id,
+                        &e.claim_text,
+                        &e.exact_quote,
+                    );
+                }
+                chunk.summary_text = chunk
+                    .evidence
+                    .iter()
+                    .map(|e| e.claim_text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            let reloaded: AnalyzedDocument =
+                serde_json::from_str(&serde_json::to_string(&historical).unwrap()).unwrap();
+            assert_eq!(reloaded, historical);
+            validate_analyzed_content(&reloaded, &chunked, &normalized).unwrap();
+            historical.analysis_version = ANALYSIS_VERSION.into();
+            assert!(validate_analyzed_content(&historical, &chunked, &normalized).is_err());
+        }
+    }
+
+    #[test]
+    fn retention_backfills_without_duplicate_work_or_furniture_calls() {
+        let mut texts = (1..=111)
+            .map(|n| format!("Page {n}: records must be retained."))
+            .collect::<Vec<_>>();
+        texts[0] = "03/10/03  A-4".into();
+        texts[110] = "....... ��".into();
+        let (normalized, chunked) = materiality_fixture(&texts);
+        let runtime = materiality_runtime(false, 0, false);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(analyzed.chunks[0].evidence.len(), 83);
+        assert_eq!(analyzed.omissions.len(), 2);
+        assert_eq!(analyzed.inspected_pages.len(), 85);
+        assert_eq!(
+            analyzed
+                .inspected_pages
+                .iter()
+                .collect::<HashSet<_>>()
+                .len(),
+            85
+        );
+        assert_eq!(runtime.requests.lock().unwrap().len(), 166);
+        assert!(!analyzed
+            .warnings
+            .iter()
+            .any(|w| w.code == COVERAGE_SHORTFALL_WARNING_CODE));
+        validate_analyzed_content(&analyzed, &chunked, &normalized).unwrap();
+    }
+
+    #[test]
+    fn retention_reserve_survives_only_the_stated_withholding_budget() {
+        struct WithholdingRuntime {
+            ids: HashSet<String>,
+        }
+        impl ModelRuntime for WithholdingRuntime {
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+            fn runtime_id(&self) -> &str {
+                "fixture-runtime"
+            }
+            fn model_id(&self) -> &str {
+                "fixture-model"
+            }
+            fn generate(
+                &self,
+                request: &ModelRequest,
+            ) -> Result<ModelResponse, ModelRuntimeFailure> {
+                assert_eq!(request.stage, PipelineStage::Verify);
+                let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                Ok(ModelResponse {
+                    text: json!({"verdicts": prompt["claims"].as_array().unwrap().iter().map(|claim| {
+                        json!({"claim_id": claim["claim_id"], "verdict": if self.ids.contains(claim["claim_id"].as_str().unwrap()) { "ambiguous" } else { "supported" }})
+                    }).collect::<Vec<_>>()}).to_string(),
+                    runtime_id: self.runtime_id().into(), model_id: self.model_id().into(), request_attempts: vec![],
+                })
+            }
+        }
+        for (retained, withheld, overlap, expected) in [
+            (83, 0, false, 83),
+            (83, 1, false, 67),
+            (82, 1, false, 66),
+            (83, 2, false, 51),
+            (83, 1, true, 83),
+        ] {
+            let texts = (0..111)
+                .map(|i| {
+                    if i < retained {
+                        format!("Page {i}: records must be retained.")
+                    } else {
+                        "03/10/03  A-4".into()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let (normalized, chunked) = materiality_fixture(&texts);
+            let analyzed = analyze(
+                &materiality_runtime(false, 0, false),
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            let evidence = analyzed
+                .chunks
+                .iter()
+                .flat_map(|c| &c.evidence)
+                .collect::<Vec<_>>();
+            assert_eq!(evidence.len(), retained);
+            let groups = std::iter::once(&evidence[..16])
+                .chain(std::iter::once(&evidence[16..32]))
+                .chain(evidence[32..].chunks(1))
+                .collect::<Vec<_>>();
+            let mut raw = groups
+                .iter()
+                .enumerate()
+                .map(|(i, group)| {
+                    json!({
+                        "text": format!("Records in group {i} must be retained."),
+                        "evidence_ids": group.iter().map(|e| &e.evidence_id).collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            if overlap {
+                raw.push(json!({"text":"Additional support covers the first group.",
+                    "evidence_ids": evidence[..16].iter().map(|e| &e.evidence_id).collect::<Vec<_>>()}));
+            }
+            let claims =
+                parse_claims_response(&json!({"claims": raw.clone()}).to_string(), &analyzed)
+                    .unwrap();
+            let prompt_evidence = evidence
+                .iter()
+                .map(|e| PromptEvidenceItem {
+                    evidence_id: e.evidence_id.clone(),
+                    claim_text: e.claim_text.clone(),
+                    exact_quote: e.exact_quote.clone(),
+                })
+                .collect::<Vec<_>>();
+            ensure_claim_catalog_is_verifiable(&claims, &prompt_evidence, 64).unwrap();
+            raw[0]["evidence_ids"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!(evidence[16].evidence_id));
+            assert!(
+                parse_claims_response(&json!({"claims":raw}).to_string(), &analyzed).is_err(),
+                "17 references must still fail"
+            );
+            let synthesized = SynthesizedDocument {
+                document_id: analyzed.document_id.clone(),
+                synthesis_version: SYNTHESIS_VERSION.into(),
+                runtime_id: "fixture-runtime".into(),
+                model_id: "fixture-model".into(),
+                summary_text: render_cited_summary(&claims, &analyzed).unwrap(),
+                source_chunk_ids: chunked.chunks.iter().map(|c| c.chunk_id.clone()).collect(),
+                claims,
+                warnings: analyzed.warnings.clone(),
+            };
+            let runtime = WithholdingRuntime {
+                ids: synthesized
+                    .claims
+                    .iter()
+                    .take(withheld)
+                    .map(|c| c.claim_id.clone())
+                    .collect(),
+            };
+            let verified = verify(
+                &runtime,
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                0,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            let cited_ids = verified
+                .claims
+                .iter()
+                .flat_map(|c| &c.evidence_ids)
+                .collect::<HashSet<_>>();
+            let cited_pages = evidence
+                .iter()
+                .filter(|e| cited_ids.contains(&e.evidence_id))
+                .map(|e| e.source_span.page_start)
+                .collect::<HashSet<_>>();
+            assert_eq!(cited_pages.len(), expected);
+            assert_eq!(cited_pages.len() * 5 >= 111 * 3, expected >= 67);
+            assert!(verified.claims.len() >= synthesis_claim_floor(64, retained).unwrap());
+            assert_eq!(
+                verified
+                    .claim_verifications
+                    .iter()
+                    .filter(|v| v.verdict == ClaimVerdict::Ambiguous)
+                    .count(),
+                withheld
+            );
+            eprintln!("RETENTION_WITHHOLDING E={retained} withheld={withheld} overlap={overlap} supported_pages={expected}");
+        }
+    }
+
+    #[test]
     fn page_plan_bounds_requests_covers_tail_and_rejects_missing_or_extra_evidence() {
-        for (pages, target) in [(1, 1), (5, 5), (8, 8), (9, 8), (11, 8), (20, 12), (111, 67)] {
+        for (pages, target) in [
+            (1, 1),
+            (5, 5),
+            (8, 8),
+            (9, 9),
+            (11, 11),
+            (20, 20),
+            (111, 83),
+        ] {
             let (normalized, chunked) = sparse_page_scope_fixture(pages, 400);
-            let selected = analysis_selected_pages(&normalized).expect("page plan");
+            let selected = versioned_analysis_selected_pages(&normalized, ANALYSIS_VERSION)
+                .expect("page plan");
             assert_eq!(selected.len(), target);
             assert!(selected.contains(&normalized.pages[0].page_number));
             assert!(selected.contains(&normalized.pages[pages - 1].page_number));
@@ -6919,8 +7312,11 @@ mod tests {
     fn page_selection_is_density_and_chunk_independent_and_excludes_visual_only_pages() {
         let (sparse, one_chunk) = sparse_page_scope_fixture(20, 400);
         let (dense, _) = sparse_page_scope_fixture(20, 4_000);
-        let selected = analysis_selected_pages(&sparse).unwrap();
-        assert_eq!(selected, analysis_selected_pages(&dense).unwrap());
+        let selected = versioned_analysis_selected_pages(&sparse, ANALYSIS_VERSION).unwrap();
+        assert_eq!(
+            selected,
+            versioned_analysis_selected_pages(&dense, ANALYSIS_VERSION).unwrap()
+        );
         let mut split = one_chunk.clone();
         split.chunks = sparse
             .pages
@@ -6948,14 +7344,14 @@ mod tests {
             &UNCONTROLLED_EXECUTION,
         )
         .unwrap();
-        assert_eq!(runtime.requests.lock().unwrap().len(), 24);
+        assert_eq!(runtime.requests.lock().unwrap().len(), 40);
         assert_eq!(
             analyzed
                 .chunks
                 .iter()
                 .filter(|chunk| chunk.evidence.is_empty())
                 .count(),
-            8
+            0
         );
         validate_analyzed_content(&analyzed, &split, &sparse).unwrap();
         let mut visual = sparse.clone();
@@ -6964,7 +7360,10 @@ mod tests {
         page.content.clear();
         page.requires_visual_processing = true;
         visual.pages.push(page);
-        assert_eq!(analysis_selected_pages(&visual).unwrap(), selected);
+        assert_eq!(
+            versioned_analysis_selected_pages(&visual, ANALYSIS_VERSION).unwrap(),
+            selected
+        );
     }
 
     #[test]
@@ -8170,6 +8569,7 @@ mod tests {
             (384, 59, 9, 18),
             (192, 67, 9, 24),
             (384, 67, 10, 26),
+            (384, 83, 12, 62),
         ] {
             let evidence = (0..count)
                 .map(|index| PromptEvidenceItem {
@@ -8179,6 +8579,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             let batches = partition_evidence_items(&evidence, 64).unwrap();
+            ensure_evidence_coverage_is_representable(&evidence, 64).unwrap();
             let maxima = batches.iter().map(|b| b.len().min(64)).sum::<usize>();
             let reductions = maxima.saturating_sub(64);
             ensure_hierarchical_plan_within_budget(batches.len(), reductions).unwrap();
@@ -8221,6 +8622,18 @@ mod tests {
             12_111
         );
         assert_eq!(partition_evidence_items(&stress, 64).unwrap().len(), 2);
+        let stress = (0..83)
+            .map(|index| PromptEvidenceItem {
+                evidence_id: format!("evidence-{index:064x}"),
+                ..stress[0].clone()
+            })
+            .collect::<Vec<_>>();
+        let batches = partition_evidence_items(&stress, 64).unwrap();
+        ensure_evidence_coverage_is_representable(&stress, 64).unwrap();
+        assert_eq!(batches.len(), 83);
+        ensure_hierarchical_plan_within_budget(batches.len(), 19).unwrap();
+        assert_eq!(2 * (batches.len() + 19), 204);
+        eprintln!("DECK_ESCAPING_PREFLIGHT evidence=83 batches=83 reserved_calls=204 ceiling=256");
     }
 
     #[test]
@@ -8312,6 +8725,8 @@ mod tests {
             (COMPLETION_ANALYSIS_VERSION, 384, false),
             (CAPACITY_ANALYSIS_VERSION, 384, true),
             (CAPACITY_ANALYSIS_VERSION, 385, false),
+            (WORD_TARGET_ANALYSIS_VERSION, 384, true),
+            (WORD_TARGET_ANALYSIS_VERSION, 385, false),
         ] {
             let mut old = reloaded.clone();
             old.analysis_version = version.into();
@@ -8463,6 +8878,7 @@ mod tests {
         .unwrap();
         for (version, accepted) in [
             (ANALYSIS_VERSION, false),
+            (WORD_TARGET_ANALYSIS_VERSION, false),
             (CAPACITY_ANALYSIS_VERSION, false),
             (COMPLETION_ANALYSIS_VERSION, false),
             (MATERIALITY_ANALYSIS_VERSION, true),
@@ -8666,9 +9082,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(analyzed.omissions.len(), 2);
-        assert_eq!(analyzed.inspected_pages.len(), 14);
-        assert_eq!(analyzed.chunks[0].evidence.len(), 12);
-        assert_eq!(runtime.requests.lock().unwrap().len(), 24);
+        assert_eq!(analyzed.inspected_pages.len(), 20);
+        assert_eq!(analyzed.chunks[0].evidence.len(), 18);
+        assert_eq!(runtime.requests.lock().unwrap().len(), 36);
+        assert!(analyzed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == COVERAGE_SHORTFALL_WARNING_CODE));
         let mut decoded: AnalyzedDocument =
             serde_json::from_str(&serde_json::to_string(&analyzed).unwrap()).unwrap();
         validate_analyzed_content(&decoded, &chunked, &normalized).unwrap();
