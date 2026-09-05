@@ -468,6 +468,34 @@ pub struct AnalyzedDocument {
     pub model_id: String,
     pub chunks: Vec<ChunkAnalysis>,
     pub warnings: Vec<PipelineWarning>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omissions: Vec<AnalysisPageOmission>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inspected_pages: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnalysisOmissionOrigin {
+    ScanNoise,
+    DatePageStamp,
+    ModelBareHeading,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnalysisOmissionReason {
+    NonSubstantivePageFurniture,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisPageOmission {
+    pub page_number: u32,
+    pub chunk_id: String,
+    pub reason: AnalysisOmissionReason,
+    pub origin: AnalysisOmissionOrigin,
+    pub filter_version: String,
+    pub source_fingerprint: String,
+    pub catalog_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
