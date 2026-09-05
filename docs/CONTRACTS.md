@@ -502,6 +502,144 @@ For a retained page, analysis has two separate model operations:
    to competing candidates during paraphrase; it does not make hallucination
    impossible. Semantic verification and all existing negative checks remain.
 
+#### Proposed amendment: retention reserve for verification withholding
+
+Status: contract only, not implemented. The intended change is new analysis
+version 8.0.0; versions through 7.1.0 retain their original page plans, stopping
+targets, omission validation and identities. Fold/delete this proposed section
+when the complete feature lands, not while the broader materiality/audit work
+is unfinished. This amendment supersedes only the new-run retention target of
+the page-analysis contract; it does not alter supported-page acceptance.
+
+Root cause and qualifications:
+
+- Current `summary.rs:2521-2524` selects
+  min(N, max(B, ceil(3N/5))) pages, and `summary/pages.rs:482` stops when that
+  many items are retained. It equals the acceptance target for the deck, not
+  for every document: the B floor already gives some short documents margin.
+- For N=111, acceptance requires A=ceil(3N/5)=67. The latest run retains 67,
+  then delivers supported claims citing 66, failing the unchanged target.
+  Withholding is permitted and essential for correctness, not guaranteed on
+  every run. The observations 7/8 and 66/67 do not establish survival rates,
+  causal explanations for those rates, or a statistically justified margin.
+- Re-synthesis can improve wording and recover support for an existing item;
+  it cannot introduce a source page absent from the retained evidence catalog.
+  Do not treat re-synthesis as the reserve or assert it can never improve support.
+
+Retention rule and guarantee:
+
+- N counts the same native-text pages as acceptance, before furniture omissions.
+  A=ceil(3N/5), B=clamp(A,8,64), M=MAX_EVIDENCE_PER_CLAIM=16.
+  Choose an explicit fault-tolerance policy of W=1 withheld claim, not an
+  estimated average model loss rate. Requested headroom H=W*M=16 pages.
+- Count-based evidence capacity C=B*M. When A>C, reject the mathematically
+  unrepresentable coverage target with a structured capacity error before
+  analysis inference. Otherwise R=min(N, A+H, C) is the retained-page target.
+  Checked integer arithmetic is required; no overflow or default substitution.
+  R never decreases the historical target for a count-feasible document.
+- Extend the existing evenly spaced selected-page set, rather than replace it
+  with a different sample: add deterministic unused pages distributed across
+  the document until R pages are selected. Preserve the document tail and all
+  originally selected pages. Then retain the existing deterministic unused-page
+  backfill for omissions. Stop at R retained items or exhaust eligible pages;
+  omission admission/predicates and one evidence item per page are unchanged.
+- Let E be the actual retained distinct-page count. Complete pre-verification
+  evidence coverage means withholding w claims can remove at most w*M uniquely
+  cited pages; shared references can only reduce that loss. Thus E>=A+16
+  guarantees at least A cited pages after at most one withheld claim, provided
+  all other claims are supported. No duplicate/filler evidence is permitted.
+- This is a page-coverage guarantee only, conditional on actual E and the stated
+  withholding budget. It is not a claim of semantic faithfulness, a guarantee
+  against arbitrary withholding, or a guarantee of the separate claim floor K.
+  If synthesis returns exactly K claims, withholding one can still violate K;
+  changing that floor or requesting claim-count slack is not included here.
+- Source exhaustion, valid omissions, or C may prevent full headroom. Retain
+  available substantive evidence without inventing items or relaxing omissions.
+  Record N, A, desired headroom, R, actual E, max(0,E-A), whether E>=A+H,
+  withheld-claim count and lost-page count in acceptance metrics. Existing
+  shortfall warnings and zero-supported hard failure remain unchanged. A
+  natural small-document cap is not falsely described as full fault tolerance.
+
+Couplings and cost checked before committing to the margin:
+
+| Case | N | A | B | C | R | Planned headroom R-A |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| One native page | 1 | 1 | 8 | 128 | 1 | 0 |
+| NARA native pages | 11 | 7 | 8 | 128 | 11 | 4 |
+| Sparse twenty-page document | 20 | 12 | 12 | 192 | 20 | 8 |
+| Deck native pages | 111 | 67 | 64 | 1,024 | 83 | 16 |
+| Full count reserve edge | 1,680 | 1,008 | 64 | 1,024 | 1,024 | 16 |
+| Partial count reserve | 1,681 | 1,009 | 64 | 1,024 | 1,024 | 15 |
+| No count reserve | 1,706 | 1,024 | 64 | 1,024 | 1,024 | 0 |
+| Impossible count coverage | 1,707 | 1,025 | 64 | 1,024 | reject | none |
+
+These are count feasibility cases, not claims that the largest documents pass
+the separate request-size, synthesis-plan or materiality gates.
+
+For the deck, 83<=64*16. A constructive count witness is 19 pairs plus 45
+singletons: 64 claims covering 83 distinct items. In the unescaped maximum-text
+fixture, a 2,000-character synthesized claim with two 600-character quotations
+and full identifiers totals 4,628 verifier input characters, within 10,752.
+Ten such references total 10,300 and fit; eleven total 11,009 and fail. Therefore
+B*M is only a necessary count ceiling, not proof that arbitrary text fits.
+Preserve the existing measured verifiability partition, candidate compatibility,
+all-evidence synthesis coverage, actual verification batch planner and all
+single-item negative checks. Never force unrelated evidence into a misleading
+claim or discard evidence to fit. An unrepresentable catalog remains an error.
+
+Independent serialization arithmetic against the current prompt shapes gives
+R=83, L=384, quote length 600, full IDs: twelve synthesis batches (eleven of
+seven items, one of six) under S_user=8,117. Sum of batch maxima is 83, so the
+existing conservative plan reserves at most 19 reduction requests and
+2*(12+19)=62 calls including bounded request repair, versus 26 for E=67.
+Even a one-item-per-batch partition would reserve 2*(83+19)=204, below 256,
+provided every individual item fits. This does not prove that all future
+candidate pairs will be semantically or structurally compatible.
+
+Without omissions, ordinary analysis calls rise from 134 to 166; with one
+paraphrase retry per retained page, 201 to 249. Omitted heading selections can
+add calls while backfilling; inspect each native page at most once, preserving
+the three-calls-per-inspected-page envelope. Verification still admits at most
+64 batches per pass and two passes. No timeout, context, token or request
+ceiling increases. These are checked arithmetic/serialization estimates, not
+executed Rust preflight tests or live results for the new retention plan.
+
+Required change surface: versioned retention helpers in `summary.rs`, page plan,
+stop/backfill and historical reload dispatch in `summary/pages.rs`; acceptance
+metrics/fixtures in `office_acceptance.rs`, and evaluation documentation. No DB
+migration or new artifact fields are required; derive metrics from versioned
+plans and existing evidence/verdict/omission artifacts. Before live implementation
+acceptance, exercise the 83-item envelopes through the production Rust planners.
+
+Verification plan:
+
+- Pin the table above, zero-native-text error, checked-arithmetic boundaries,
+  unchanged B/K, and the old-target-subset/new-target property across sparse,
+  dense, direct and hierarchical fixtures. Preserve historical 7.1.0 and older
+  reload without requiring the new larger target or rewriting identities.
+- Exercise omission/backfill and source exhaustion with partial/full reserve;
+  assert no model calls for deterministic furniture and no repeated page work.
+- Construct 83-page evidence with full synthesis coverage and short quotations
+  that let the 16-reference claim fit the real request bound. Withhold one claim
+  uniquely covering 16 pages: 67 remain and the page gate passes. With 82 pages,
+  the same loss leaves 66 and fails. Probe zero loss, overlapping references,
+  two disjoint 16-page losses, and small-document caps without claiming an
+  unconditional pass. Preserve real support verdicts, K and source provenance.
+- Run actual synthesis partition/count reservations and verification-safe
+  coverage preflight on the 83-item maximum-text and escaping fixtures; a
+  singleton or incompatible catalog must still fail before the affected model
+  stage. Test 16 versus 17 evidence references per claim and exact size edges.
+- Run local all-target tests, strict clippy, fmt and both full Qwen corpus
+  acceptances. Record failures first with claims, evidence, native-page fraction,
+  actual retained margin, withheld/lost pages, request counts, tokens, durations
+  and complete reopen assertions. A margin calculation alone is not closure.
+
+Explicit non-scope: lower page/evidence acceptance, changed K/B or semantic
+verdicts, forced support, corpus-specific rules, broader omission discretion,
+parser/OCR/vision, model choice/endpoint, paraphrase/decoder/output/context or
+timeout increases, extra re-synthesis passes, CI, packaging, DB/attempt-audit
+implementation. The remaining audit work stays separately sequenced.
+
 #### Amendment: verification admission from actual batches
 
 Status: contract `98965a5` precedes implementation `446fe88`. This supersedes the
