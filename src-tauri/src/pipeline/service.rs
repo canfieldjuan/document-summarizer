@@ -15,9 +15,10 @@ use crate::pipeline::summary::{
     analyze_chunked_document, synthesize_analyzed_document, verify_synthesized_document,
 };
 use crate::pipeline::summary::{
-    analyze_chunked_document_controlled, complete_verified_document,
+    analyze_chunked_document_controlled, analyze_chunked_document_controlled_with_delivery,
+    complete_verified_document, complete_verified_document_with_delivery,
     synthesize_analyzed_document_controlled, verify_synthesized_document_controlled,
-    SummaryPipelineError,
+    SummaryDeliveryPolicy, SummaryPipelineError,
 };
 use chrono::Utc;
 use rusqlite::Connection;
@@ -442,6 +443,42 @@ pub fn process_ingested_to_summary(
     components: SummaryComponents<'_>,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     process_ingested_to_summary_controlled(conn, run_id, components, &UNCONTROLLED_EXECUTION)
+}
+
+pub fn process_ingested_to_summary_with_delivery_policy(
+    conn: &mut Connection,
+    run_id: &str,
+    components: SummaryComponents<'_>,
+    delivery_policy: SummaryDeliveryPolicy,
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    parse_document(conn, components.parser, run_id)?;
+    normalize_document(conn, components.normalizer, run_id)?;
+    structure_document(conn, components.interpreter, run_id)?;
+    chunk_document(conn, components.chunker, run_id)?;
+    analyze_chunked_document_controlled_with_delivery(
+        conn,
+        components.runtime,
+        run_id,
+        &UNCONTROLLED_EXECUTION,
+        Some(delivery_policy),
+    )?;
+    synthesize_analyzed_document_controlled(
+        conn,
+        components.runtime,
+        run_id,
+        &UNCONTROLLED_EXECUTION,
+    )?;
+    verify_synthesized_document_controlled(
+        conn,
+        components.runtime,
+        run_id,
+        &UNCONTROLLED_EXECUTION,
+    )?;
+    Ok(complete_verified_document_with_delivery(
+        conn,
+        run_id,
+        Some(delivery_policy),
+    )?)
 }
 
 pub(crate) fn process_ingested_to_summary_controlled(

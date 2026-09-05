@@ -576,6 +576,42 @@ styles, DB migration or broader unfinished attempt-audit work, Connect, OCR,
 vision, packaging and CI. Any residual factual or omission failure is reported,
 not repaired by relaxing coverage or retrying until a favorable run appears.
 
+### Delivery-scoped Connect summary byte admission
+
+Connect v1's 1 MiB UTF-8 summary-text ceiling is an optional delivery policy,
+not a standalone-summary limit. One UI-neutral pipeline constant is authoritative
+for both the Connect policy and wire projection. Standalone service calls supply
+no delivery policy and may persist and reopen a larger valid summary unchanged.
+
+For a current Connect run, analysis accumulates the exact UTF-8 bytes of whole
+rendered claim lines in source order, including blank-line separators and
+application-derived citation labels. The first claim that would exceed the
+ceiling is not admitted; analysis records one durable
+`SUMMARY_TRUNCATED_FOR_DELIVERY` warning and schedules no later page model calls.
+Synthesis and verification continue over the admitted nonempty prefix, which
+must still satisfy the existing raw and omission-adjusted coverage gates. A
+delivery limit is not an omission and removes no page from either denominator.
+The first non-fitting claim may already have consumed its selection/paraphrase
+calls because its exact bytes are unknowable earlier. Final completion checks the
+actual supported rendering against the same ceiling before persistence.
+
+Wire projection remains defensive for historical or resumed artifacts. It
+derives claim boundaries from the persisted citation artifact and, when complete
+text or serialized JSON does not fit, persists the largest nonempty whole-claim
+prefix satisfying both the 1 MiB text and 2 MiB JSON limits. It adds the same
+warning idempotently without mutating the pipeline artifacts. If even one whole
+claim plus required metadata and warnings cannot fit, delivery fails closed.
+No path splits a UTF-8 scalar, claim, citation label, or JSON escape, and no
+truncation can rescue an otherwise invalid or unsupported claim.
+
+New direct synthesis retains its 512-claim pathological ceiling. Historical
+hierarchical generation and reload retain their 64-claim compatibility ceiling,
+named `LEGACY_MAX_SUMMARY_CLAIMS`; neither value is recomputed by delivery policy.
+The boundary suite pins exact-limit and one-byte-over supplementary-plane text,
+separators and citation labels, stopped model scheduling, warning idempotence,
+whole-claim JSON fallback, standalone isolation, both claim ceilings, and a
+persisted completed Connect result.
+
 ### Analysis, deterministic filters and model boundaries
 
 `ModelRuntime` remains the only inference boundary. New analysis uses a
@@ -1008,6 +1044,12 @@ use. Completed wire output contains plain text, bounded warnings, and the input
 artifact ID/media type/size/hash, but no provider-private document/run ID,
 database shape, filesystem path, email metadata, or credentials. Provider
 output is admitted against the v1 byte/count/field limits before completion.
+Connect supplies the delivery policy before analysis; standalone calls do not.
+Current runs stop later model work at a whole-claim boundary, while final wire
+projection also bounds historical artifacts to a whole-claim prefix. The bounded
+result and delivery warning are stored with the completed Connect job; the full
+standalone pipeline artifact is never rewritten to satisfy an optional wire
+constraint.
 
 This is a same-OS-user possession boundary, not application authentication. A
 hostile process running as the same user can read the registration token; a
@@ -1015,106 +1057,3 @@ future trusted broker or OS package identity would be required to change that
 threat model. Launch-on-demand, multiple-provider selection, callbacks,
 workflow automation, remote execution, and cross-machine discovery are not
 implemented.
-
-### Pending delivery-scoped summary byte admission
-
-Status: contract only. Implementation must land separately after review. When
-implemented, this subsection is folded into the current Connect and local-summary
-behavior above and then deleted; it must not remain as a competing proposed path.
-
-Root cause: Connect v1 permits at most 1 MiB of UTF-8 summary text, but that
-limit is checked only while projecting an already-completed `SummaryArtifact`
-into a `JobResult`. The Connect worker therefore performs and persists the full
-pipeline run before discovering that its output cannot be delivered. Applying
-the Connect ceiling unconditionally while committing a summary would move the
-failure without avoiding model work and would incorrectly impose an optional
-wire constraint on standalone summaries. The direct path can retain 512 claims,
-and a mechanically complete long claim may contain as many as 1,536 Unicode
-scalar values, so character-count bounds do not prove that rendered UTF-8 fits
-the Connect byte ceiling.
-
-Required change surface: introduce one UI-neutral authoritative constant for
-the Connect summary-text byte ceiling and have both the optional pipeline
-delivery policy and the v1 wire contract use it. The standalone service supplies
-no delivery policy. The Connect worker supplies a policy before analysis starts;
-do not infer origin from persisted summary contents or apply the ceiling to every
-pipeline run.
-
-- For a current direct Connect run, accumulate the exact projected UTF-8 bytes
-  of whole rendered claim lines in source order, including the separating blank
-  lines and application-derived citation labels. After a retained paraphrase is
-  available, admit it only when its complete projected line fits. If it does not
-  fit, discard neither bytes nor part of a claim: record durable
-  `SUMMARY_TRUNCATED_FOR_DELIVERY`, stop scheduling later page-analysis model
-  calls, and continue synthesis and verification over the admitted prefix. A
-  supported result must still satisfy the existing nonempty, raw-page and
-  omission-adjusted coverage gates. Delivery capacity is not a new omission
-  origin and does not remove pages from either denominator. If the byte ceiling
-  is reached before those existing gates can be met, fail closed after the
-  bounded partial run rather than weakening coverage or relabeling substantive
-  input as furniture.
-- Verification can only remove claims from that admitted prefix, so it cannot
-  enlarge the projected text. Before completion, render the actual supported
-  claims and assert that a Connect-scoped result fits the authoritative text
-  ceiling. This assertion is defense in depth for projection drift; it must not
-  run for standalone work and must not replace the earlier stop that avoids
-  later model calls.
-- Delivery remains defensive for historical artifacts, resumed work produced
-  before the policy, and any projection mismatch. Build the Connect wire result
-  from the persisted citation artifact's whole claim boundaries, not by slicing
-  the rendered string. If the complete text or serialized JSON artifact exceeds
-  its existing v1 limit, return the largest nonempty source-ordered prefix for
-  which both limits pass, and add `SUMMARY_TRUNCATED_FOR_DELIVERY` to the wire
-  result. Persist that bounded result and warning with the Connect job. Do not
-  mutate, replace, or invalidate the pipeline's persisted summary or citation
-  artifacts. If even one whole claim plus required metadata and warnings cannot
-  fit, retain the existing fail-closed delivery error.
-- Warning insertion is idempotent. The pipeline and wire projection must never
-  emit duplicate `SUMMARY_TRUNCATED_FOR_DELIVERY` warnings. Existing warning
-  count/field validation and the 2 MiB serialized-artifact ceiling remain
-  authoritative; required warnings are never silently discarded to make room.
-- UTF-8 byte length, not Unicode scalar count, grapheme count or model token
-  count, controls admission. Never split a code point, claim, citation label or
-  JSON escape sequence. The delivered text must equal an exact prefix of the
-  canonical whole-claim rendering and must carry provenance only for delivered
-  claims.
-
-The apparent 64-versus-512 claim-ceiling conflict is two live compatibility
-budgets, not dead code. New direct synthesis uses the 512-claim pathological
-ceiling. Historical hierarchical generation, validation and reload still use
-the 64-claim ceiling under which those artifacts were created. Rename the latter
-to make its legacy scope explicit everywhere it remains live; do not remove or
-recompute historical validation, and do not change either numeric value.
-
-Assumptions and blockers: current direct synthesis preserves one retained
-paraphrase as one source-ordered claim, which makes its eventual claim line
-projectable without another model call. Exact bytes are unknown until a
-paraphrase response exists, so the first whole claim that does not fit may have
-consumed its selection/paraphrase calls; avoiding waste means bounding that loss
-and stopping all later page calls, not claiming zero inference occurred. The
-existing coverage gates can make a pathological Connect input unsatisfiable
-within 1 MiB. That case remains an explicit bounded failure because this slice
-does not authorize lower coverage. No character-count estimate may be used to
-pretend the byte capacity is known earlier.
-
-Verification requirements: pin exact-limit and one-byte-over behavior with
-supplementary-plane Unicode; prove that a four-byte scalar straddling the limit
-is never split; prove separators and citation labels are included in the byte
-projection; prove a Connect-scoped current run stops scheduling later model
-calls and records one durable warning; prove that delivery returns the largest
-whole-claim prefix with one warning when a pre-policy persisted artifact is too
-large; prove a first claim that cannot fit still fails closed; and exercise JSON
-escaping against the serialized-artifact ceiling. A standalone summary above
-the Connect text ceiling must persist, reopen and render in full without a
-delivery warning. Historical 64-claim and current direct 512-claim boundary
-tests must pass after the legacy rename. Run all Rust targets, strict Clippy,
-format checking, acceptance/release tests, and a focused Connect provider test
-that observes the bounded persisted job result rather than only a helper return.
-
-Explicit non-scope: model, prompt, endpoint, context, timeout, analysis claim
-lengths, direct or historical claim ceilings, evidence retention formula,
-verification support rules, raw or adjusted coverage thresholds, omission
-classification, standalone presentation, Connect input limits, protocol/media
-versions, entitlement, database schema/migration, packaging, OCR/vision and the
-later native `/api/chat` evaluation. No truncation may be used to turn an
-otherwise invalid or unsupported claim into deliverable output.

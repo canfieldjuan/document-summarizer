@@ -611,6 +611,7 @@ pub(super) fn analyze(
     normalized: &NormalizedDocument,
     seed: u64,
     control: &dyn ExecutionControl,
+    delivery_policy: Option<SummaryDeliveryPolicy>,
 ) -> Result<AnalyzedDocument, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Analyze)?;
     validate_chunked_document(chunked)?;
@@ -640,6 +641,7 @@ pub(super) fn analyze(
     };
     let mut ordinal = 0;
     let mut count = 0;
+    let mut projected_delivery_bytes = 0usize;
     for page in plan {
         if count == target {
             break;
@@ -809,9 +811,41 @@ pub(super) fn analyze(
         let paraphrase = accepted.ok_or_else(|| {
             invalid("Paraphrase did not produce a valid outcome after bounded repair")
         })?;
-        let analysis = &mut analyzed.chunks[chunk_index];
         let materialized = parse_evidence_response(&json!({"evidence":[{"quote_id":selected.selection,"claim_text":paraphrase.claim_text}]}).to_string(),
-            &chunked.document_id, &chunked.chunks[chunk_index], &blocks, &scope, analysis.evidence.len())?;
+            &chunked.document_id, &chunked.chunks[chunk_index], &blocks, &scope, analyzed.chunks[chunk_index].evidence.len())?;
+        let evidence = materialized.first().ok_or_else(|| {
+            invalid("A successful page paraphrase must materialize exactly one evidence item")
+        })?;
+        let line = format!(
+            "{} {}",
+            evidence.claim_text,
+            citation_label(std::slice::from_ref(&evidence.source_span))
+        );
+        let projected = projected_delivery_bytes
+            .checked_add(usize::from(count > 0) * 2)
+            .and_then(|bytes| bytes.checked_add(line.len()))
+            .ok_or_else(|| {
+                stage_failure(
+                    PipelineStage::Analyze,
+                    "SUMMARY_DELIVERY_LIMIT_INVALID",
+                    "Projected delivery bytes exceed the supported arithmetic range",
+                    false,
+                )
+            })?;
+        if delivery_policy.is_some_and(|policy| projected > policy.max_summary_text_bytes()) {
+            if count == 0 {
+                return Err(stage_failure(
+                    PipelineStage::Analyze,
+                    "SUMMARY_DELIVERY_LIMIT_EXCEEDED",
+                    "The configured delivery byte ceiling cannot fit one whole rendered claim",
+                    false,
+                ));
+            }
+            analyzed.warnings.push(delivery_truncation_warning());
+            break;
+        }
+        projected_delivery_bytes = projected;
+        let analysis = &mut analyzed.chunks[chunk_index];
         analysis.evidence.extend(materialized);
         count += 1;
     }
@@ -870,12 +904,39 @@ pub(super) fn analyze(
     Ok(analyzed)
 }
 
+fn delivery_truncation_warning() -> PipelineWarning {
+    PipelineWarning {
+        code: SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE.to_string(),
+        message: "Connect delivery byte ceiling reached; later page analysis was not scheduled"
+            .to_string(),
+        stage: Some(PipelineStage::Analyze),
+    }
+}
+
 pub(super) fn validate_plan(
     analyzed: &AnalyzedDocument,
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<HashSet<u32>, PipelineFailure> {
     let (plan, target) = versioned_plan(normalized, &analyzed.analysis_version)?;
+    let delivery_warning_count = analyzed
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE)
+        .count();
+    if delivery_warning_count > 1
+        || (delivery_warning_count == 1
+            && analyzed
+                .warnings
+                .iter()
+                .find(|warning| warning.code == SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE)
+                != Some(&delivery_truncation_warning()))
+    {
+        return Err(invalid(
+            "Delivery truncation requires one canonical durable warning",
+        ));
+    }
+    let delivery_stopped = delivery_warning_count == 1;
     let mut evidence_pages = HashSet::new();
     for evidence in analyzed.chunks.iter().flat_map(|c| &c.evidence) {
         if !evidence_pages.insert(evidence.source_span.page_start) {
@@ -897,6 +958,13 @@ pub(super) fn validate_plan(
             break;
         }
         expected.push(page);
+        if delivery_stopped
+            && analyzed.inspected_pages.last() == Some(&page)
+            && !evidence_pages.contains(&page)
+            && !omitted.contains_key(&page)
+        {
+            break;
+        }
         let (chunk_index, scope, deterministic, heading) = page_scope(page, chunked, normalized)?;
         match (omitted.get(&page), deterministic) {
             (Some(actual), Some(required)) if **actual == required => {}
@@ -943,12 +1011,40 @@ pub(super) fn validate_plan(
             }
         }
     }
-    if expected != analyzed.inspected_pages
-        || expected.len() != evidence_pages.len() + omitted.len()
-    {
+    let expected_outcomes = evidence_pages.len() + omitted.len() + usize::from(delivery_stopped);
+    if expected != analyzed.inspected_pages || expected.len() != expected_outcomes {
         return Err(invalid(
             "Analysis does not match deterministic initial/backfill stopping plan",
         ));
+    }
+    if delivery_stopped {
+        let mut retained_evidence = analyzed
+            .chunks
+            .iter()
+            .flat_map(|chunk| &chunk.evidence)
+            .collect::<Vec<_>>();
+        retained_evidence.sort_by_key(|evidence| evidence.source_span.page_start);
+        if retained_evidence.is_empty() {
+            return Err(invalid(
+                "Delivery truncation cannot produce an empty summary prefix",
+            ));
+        }
+        let rendered = retained_evidence
+            .iter()
+            .map(|evidence| {
+                format!(
+                    "{} {}",
+                    evidence.claim_text,
+                    citation_label(std::slice::from_ref(&evidence.source_span))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if rendered.len() > MAX_DELIVERY_SUMMARY_TEXT_BYTES || retained >= target {
+            return Err(invalid(
+                "Delivery truncation must retain a bounded prefix below the normal target",
+            ));
+        }
     }
     if !omitted.is_empty()
         && !analyzed

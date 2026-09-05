@@ -572,7 +572,7 @@ fn request_evidence_claims(
         serialize_evidence_prompt(evidence, claim_bounds.minimum, claim_bounds.maximum)?;
     if claim_bounds.minimum == 0
         || claim_bounds.minimum > claim_bounds.maximum
-        || claim_bounds.maximum > MAX_SUMMARY_CLAIMS
+        || claim_bounds.maximum > LEGACY_MAX_SUMMARY_CLAIMS
         || claim_bounds.minimum > evidence.len()
     {
         return Err(stage_failure(
@@ -986,7 +986,7 @@ fn parse_evidence_claims_response(
     })?;
     if minimum_claims == 0
         || minimum_claims > maximum_claims
-        || maximum_claims > MAX_SUMMARY_CLAIMS
+        || maximum_claims > LEGACY_MAX_SUMMARY_CLAIMS
         || raw.claims.len() < minimum_claims
         || raw.claims.len() > maximum_claims
     {
@@ -1082,7 +1082,7 @@ fn parse_candidate_claims_response(
     })?;
     if minimum_claims == 0
         || minimum_claims > maximum_claims
-        || maximum_claims > MAX_SUMMARY_CLAIMS
+        || maximum_claims > LEGACY_MAX_SUMMARY_CLAIMS
         || raw.claims.len() < minimum_claims
         || raw.claims.len() > maximum_claims
     {
