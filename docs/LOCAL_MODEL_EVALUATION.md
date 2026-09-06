@@ -57,7 +57,16 @@ not nominal multi-model support that weakens the product for the smaller files.
 Contract commits `76b209b` and `34f036b` precede native runtime/settings commit
 `3a75d04`; immutable run-profile persistence lands last in implementation commit
 `4d42890` as schema version 15. Discovery credential parity is hardened in
-`9bc9afc`. The local all-target gate passes with 287 library
+`9bc9afc`. A cold-diff audit then found two implementation gaps before final
+review. An unreadable `/api/show` response for one installed model aborted the
+whole catalog instead of leaving that model visible but unqualified, and desktop
+retry/continuation rebuilt the current global preset before comparing it with
+the persisted run snapshot. The corrected boundary isolates only per-model
+metadata failures while keeping transport/authentication fatal, and reconstructs
+continuation/retry runtimes from the immutable admitted snapshot; new runs alone
+use the current setting.
+
+The local all-target gate passes with 292 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
