@@ -2,6 +2,35 @@
 
 This document tracks the vertical slices and architectural decisions for the Document Summarizer.
 
+## Qwen 3.8 direct-GGUF runtime (2026-09-06)
+
+**Status**: Implemented and live-qualified locally
+
+- Added explicit GGUF registration and an opt-in full preset for the exact Jack
+  Qwen 3.8 27B Coder file. The application uses an exact-manifest,
+  descriptor-bound llama.cpp child directly; it does not use LM Studio or
+  import the GGUF into Ollama.
+- Preserved the Qwen 3 30B-A3B Ollama preset as the default and strongest
+  verifier. No smaller candidate changes prompts, validators, output budgets,
+  page-coverage thresholds or other shared product behavior.
+- Added typed runtime identity to settings and immutable run snapshots, plus
+  runtime-profile leases so a selection change cannot unload a model beneath
+  active desktop or Connect work. Idle direct children are cleared before an
+  Ollama runtime is constructed.
+- Direct requests use a pinned minimal Qwen ChatML token sequence, exact
+  `/tokenize` admission and `/completion` with one projected JSON schema. The
+  embedded template and schema fallback are not admitted. Parent descriptors
+  remain close-on-exec, file identity is rechecked after load and at stage
+  health, and rejected responses retain any token usage the provider supplied.
+- NARA delivered 8 supported claims from 8 evidence items across 8/11 raw pages
+  in 21 requests and 667 completion tokens. DOL delivered 83/83 supported
+  claims across 83/111 raw pages in 180 requests and 6,960 completion tokens.
+  Both completed with warnings and zero schema-fallback attempts.
+- The first direct start was safely refused while another local application had
+  loaded the qualified Ollama runner. The app did not terminate unrelated work;
+  the unchanged corpus run passed after that workload completed. Cross-process
+  handoff remains a recoverable admission boundary, not silent preemption.
+
 ## Slice 0: Repository and Architecture Foundation
 **Status**: Implemented
 

@@ -1,6 +1,46 @@
-# Corpus and native Ollama evaluation — updated 2026-09-05
+# Corpus and local Qwen runtime evaluation — updated 2026-09-06
 
-## Qwen-family qualification: four candidates fail; baseline passes
+## Direct Jack Qwen 3.8 27B qualification
+
+**Failure first.** The first NARA start was refused because another local
+application loaded the qualified Qwen Ollama runner after the direct adapter's
+release check. The app did not terminate that foreign workload or start a
+second large runner. After that workload completed, the unchanged direct run
+passed both corpus documents. This remains a recoverable handoff race rather
+than proof that unrelated local model work can be preempted safely.
+
+The exact Jack GGUF
+`e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041`
+is now qualified as an opt-in full preset through the app-managed llama.cpp
+runtime. The file was used directly: no LM Studio runtime, Ollama import,
+prompt change, validator relaxation, timeout increase or acceptance-threshold
+change was used for these results.
+
+| Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
+| --- | --- | --- | ---: | ---: | ---: |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 43.045 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,960 | 273.473 s | 0 |
+
+NARA used 20 analysis requests and one verification request, with 452 and 215
+completion tokens respectively. DOL used 174 analysis requests and six
+verification requests, with 5,204 and 1,756 completion tokens respectively.
+Neither used synthesis or schema fallback, and every admitted request reported
+prompt and completion token accounting that matched the direct adapter's
+preflight.
+
+The qualified runtime is the exact `llama-server` and llama/ggml library bundle
+recorded in `docs/CONTRACTS.md`, at an 8,192-token effective context. A
+controlled structured-output probe counted 3,761 prompt tokens through the
+GGUF's embedded OpenAI-compatible template and 22 through the pinned minimal
+Qwen ChatML sequence. The embedded template is therefore not qualified for
+this application.
+
+The earlier native-Ollama findings below remain useful historical evidence.
+They do not describe the new direct Jack path: the 4B and 9B candidates remain
+unqualified, base Qwen 3.8 remains unqualified, and the Qwen 3 30B-A3B Ollama
+preset remains the default and strongest verifier.
+
+## Previous native-Ollama qualification: four candidates fail; baseline passes
 
 **Failures first. Neither smaller model qualifies, and neither Qwen 3.8 27B
 GGUF can initialize in the current Ollama runtime.** No prompt, validator,
