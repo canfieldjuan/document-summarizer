@@ -1211,7 +1211,7 @@ carrying the same family name.
 Direct Jack qualification used the unchanged prompts, validators, 900-second
 timeout, 8,192-token context and corpus gates. With the pinned minimal template,
 NARA delivered 8 supported claims from 8 evidence items across 8 of 11
-native-text pages in 21 requests and 653 completion tokens; DOL delivered 83
+native-text pages in 21 requests and 667 completion tokens; DOL delivered 83
 supported claims from 83 evidence items across 83 of 111 pages in 180 requests
 and 6,954 completion tokens. Neither run used schema fallback. A controlled
 trivial structured-output probe used 3,761 prompt tokens through the embedded

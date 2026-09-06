@@ -17,7 +17,18 @@ found that a cached direct runtime did not prove its owned child was still live,
 and that reserving then releasing a loopback TCP port before child startup left
 a local interception window. The final cache admission reaps and rejects an
 exited child, and the child and client communicate only through a Unix socket in
-an owner-only runtime directory; there is no TCP port handoff.
+an owner-only runtime directory; there is no TCP port handoff. A later
+exact-head review found two more handoff defects: an ambiguous Ollama `/api/ps`
+transport failure was treated as empty residence, and a spawning thread's
+blocked `SIGIO` mask could survive into the lease-owning child. Final admission
+permits only an exact loopback connection refusal without a residence response,
+and the child explicitly unblocks its lease-break signal before `exec`.
+
+The first final-head NARA attempt correctly stopped before inference with
+`MODEL_RUNTIME_BUSY`: the qualified 30B runner was resident, followed by a
+qualified 9B runner used by another local workload. No unload request was sent.
+After `/api/ps` reported an empty catalog, the same exact head passed both corpus
+fixtures below.
 
 The exact Jack GGUF
 `e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041`
@@ -28,10 +39,10 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 43.405 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 282.114 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 42.570 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 283.141 s | 0 |
 
-NARA used 20 analysis requests and one verification request, with 438 and 215
+NARA used 20 analysis requests and one verification request, with 452 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
 verification requests, with 5,198 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported
