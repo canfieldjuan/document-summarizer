@@ -36,8 +36,8 @@ The three loadable model descriptors all report a 262,144-token maximum, but
 qualification intentionally retains an 8,192-token effective context. Every
 native request carries that `num_ctx`, its stage `num_predict`, `think: false`,
 temperature zero and the run-derived seed. Exact serialized request admission
-uses the pinned tokenizer versions `qwen3-qwen2-pre-f2ec4434-v1` and
-`qwen35-pre-cc5fb918-v1`; it does not infer compatibility from a model name.
+uses the pinned tokenizer versions `qwen3-qwen2-pre-f2ec4434-v2` and
+`qwen35-pre-cc5fb918-v2`; it does not infer compatibility from a model name.
 
 | Model / fixture | Analysis requests / completion tokens | Verification requests / completion tokens | Schema fallback attempts |
 | --- | ---: | ---: | ---: |
@@ -164,7 +164,17 @@ new PDF selection only; history recovery remains actionable and lets the
 backend snapshot preflight accept or reject without prior mutation. Contract
 commit `8e03e79` precedes implementation commit `298c436`.
 
-The local all-target gate passes with 306 library
+The next exact-head review found that the pinned token counter normalized its
+input to NFC even though native chat transmitted the original serialized
+Unicode. Decomposed combining sequences could therefore cost more model tokens
+than admission counted. The counter no longer installs a Unicode normalizer,
+and both tokenizer profile versions advance to v2 rather than changing a
+persisted v1 meaning. A byte-complete regression fixture uses the production
+Qwen regex and byte-level pre-tokenizer: composed `é` counts as two byte tokens
+and decomposed `e` plus combining acute counts as three. Contract commit
+`7a64cd7` precedes implementation commit `4228031`.
+
+The local all-target gate passes with 307 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
