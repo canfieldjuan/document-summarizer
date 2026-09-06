@@ -928,6 +928,20 @@ slot, reasoning disabled, web UI disabled, offline mode, no warmup and GPU
 layers enabled. Proxies and redirects remain disabled. Startup has one bounded
 deadline and verifies health, digest alias, active context and trained context
 before inference; it also rechecks the retained model descriptor after load.
+
+The private runtime directory must not be created through ambient `TMPDIR` or
+the process-global temporary-directory resolver. Runtime construction receives
+the explicit model-settings directory, canonicalizes it, and rejects any
+ancestor that is not a directory or is group/other writable without the sticky
+bit. Beneath that admitted location the application creates one dedicated
+runtime root with mode `0700`; an existing root is accepted only when it is a
+real directory owned by the effective user with exactly mode `0700`. A symlink,
+foreign owner, broader mode, missing/untrusted ancestor or metadata failure is
+a typed pre-spawn runtime failure. Per-child runtime directories are created
+only inside that verified root. This makes another account unable to rename or
+replace the leaf between admission and socket bind; checking only the leaf mode
+under an ambient attacker-writable parent is not sufficient.
+
 Because the qualified server has one inference slot, the application admits at
 most one direct-model request at a time for a shared child. Callers wait on an
 application-owned mutex before tokenization or completion begins. Slot
@@ -1308,8 +1322,9 @@ durable-supervisor versus transient-caller parent-death handling,
 descriptor-backed library names,
 lease-broken/dead-child detection and eviction,
 idle-versus-active cache replacement, Ollama-only snapshot recovery with
-malformed GGUF settings, shell-free loopback launch, private
-Unix-socket authentication without TCP handoff, exact alias/context checks,
+malformed GGUF settings, shell-free loopback launch, runtime-root
+owner/mode/ancestor admission, ambient-temp isolation, private Unix-socket
+authentication without TCP handoff, exact alias/context checks,
 prompt-token admission on both
 sides, control-token injection isolation, truncation, explicit output-limit and
 unknown-stop rejection, mismatched accounting and malformed response rejection,
