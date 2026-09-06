@@ -2,6 +2,7 @@ use crate::pipeline::contracts::{
     ModelOutputFormat, ModelRequest, ModelRequestAttemptDiagnostic, ModelResponse, ModelRuntime,
     ModelRuntimeFailure, ModelTokenUsage, ModelTransportAttempt,
 };
+use crate::pipeline::qwen_tokenizer::{request_fits_context, QwenPromptTokenizer};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{StatusCode, Url};
 use serde::de::DeserializeOwned;
@@ -10,33 +11,73 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1/";
+const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/";
 const DEFAULT_MODEL: &str = "qwen3-30b-a3b:latest";
+const LEGACY_DEFAULT_CONTEXT_TOKENS: u32 = 8_192;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const HEALTH_TIMEOUT_SECONDS: u64 = 5;
 const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_MODEL_METADATA_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_SCHEMA_NAME_BYTES: usize = 64;
+const MIN_SUPPORTED_CONTEXT_TOKENS: u32 = 4_096;
+const MAX_SUPPORTED_CONTEXT_TOKENS: u32 = 1_048_576;
 pub(super) const MAX_DECODER_STRING_LENGTH: u64 = 1_536;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QwenTokenizerFamily {
+    Qwen3,
+    Qwen35,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledModelDescriptor {
+    pub name: String,
+    pub digest: String,
+    pub size_bytes: u64,
+    pub architecture: Option<String>,
+    pub tokenizer_family: Option<QwenTokenizerFamily>,
+    pub parameter_size: Option<String>,
+    pub quantization_level: Option<String>,
+    pub maximum_context_tokens: Option<u32>,
+    pub disabled_reason: Option<String>,
+}
 
 pub struct OllamaRuntime {
     client: Client,
     base_url: Url,
     model_id: String,
+    expected_digest: Option<String>,
+    expected_tokenizer_family: Option<QwenTokenizerFamily>,
+    context_tokens: u32,
     api_token: Option<String>,
     format_vocabulary_unavailable: AtomicBool,
+    require_token_admission: bool,
+    tokenizer: Mutex<Option<Arc<QwenPromptTokenizer>>>,
 }
 
 impl OllamaRuntime {
     pub fn from_environment() -> Result<Self, ModelRuntimeFailure> {
-        let base_url = std::env::var("DOC_SUM_MODEL_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let model_id =
             std::env::var("DOC_SUM_MODEL_NAME").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        Self::from_environment_profile(&model_id, None, None, LEGACY_DEFAULT_CONTEXT_TOKENS)
+    }
+
+    pub fn from_environment_profile(
+        model_id: &str,
+        expected_digest: Option<&str>,
+        expected_tokenizer_family: Option<QwenTokenizerFamily>,
+        context_tokens: u32,
+    ) -> Result<Self, ModelRuntimeFailure> {
+        let base_url = std::env::var("DOC_SUM_MODEL_BASE_URL")
+            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let timeout = model_timeout_seconds(
             std::env::var("DOC_SUM_MODEL_TIMEOUT_SECONDS")
                 .ok()
@@ -45,7 +86,30 @@ impl OllamaRuntime {
         let token = std::env::var_os("DOC_SUM_MODEL_API_TOKEN_FILE")
             .map(|value| read_token(Path::new(&value)))
             .transpose()?;
-        Self::new(&base_url, &model_id, Duration::from_secs(timeout), token)
+        Self::new_with_profile(
+            &base_url,
+            model_id,
+            expected_digest,
+            expected_tokenizer_family,
+            context_tokens,
+            Duration::from_secs(timeout),
+            token,
+        )
+    }
+
+    pub fn discovery_from_environment() -> Result<Self, ModelRuntimeFailure> {
+        let base_url = std::env::var("DOC_SUM_MODEL_BASE_URL")
+            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        Self::new_internal(
+            &base_url,
+            DEFAULT_MODEL,
+            None,
+            None,
+            LEGACY_DEFAULT_CONTEXT_TOKENS,
+            Duration::from_secs(HEALTH_TIMEOUT_SECONDS),
+            None,
+            false,
+        )
     }
 
     pub fn new(
@@ -53,6 +117,66 @@ impl OllamaRuntime {
         model_id: &str,
         timeout: Duration,
         api_token: Option<String>,
+    ) -> Result<Self, ModelRuntimeFailure> {
+        Self::new_with_context(
+            base_url,
+            model_id,
+            LEGACY_DEFAULT_CONTEXT_TOKENS,
+            timeout,
+            api_token,
+        )
+    }
+
+    pub fn new_with_context(
+        base_url: &str,
+        model_id: &str,
+        context_tokens: u32,
+        timeout: Duration,
+        api_token: Option<String>,
+    ) -> Result<Self, ModelRuntimeFailure> {
+        Self::new_internal(
+            base_url,
+            model_id,
+            None,
+            None,
+            context_tokens,
+            timeout,
+            api_token,
+            false,
+        )
+    }
+
+    pub fn new_with_profile(
+        base_url: &str,
+        model_id: &str,
+        expected_digest: Option<&str>,
+        expected_tokenizer_family: Option<QwenTokenizerFamily>,
+        context_tokens: u32,
+        timeout: Duration,
+        api_token: Option<String>,
+    ) -> Result<Self, ModelRuntimeFailure> {
+        Self::new_internal(
+            base_url,
+            model_id,
+            expected_digest,
+            expected_tokenizer_family,
+            context_tokens,
+            timeout,
+            api_token,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_internal(
+        base_url: &str,
+        model_id: &str,
+        expected_digest: Option<&str>,
+        expected_tokenizer_family: Option<QwenTokenizerFamily>,
+        context_tokens: u32,
+        timeout: Duration,
+        api_token: Option<String>,
+        require_token_admission: bool,
     ) -> Result<Self, ModelRuntimeFailure> {
         let mut url = Url::parse(base_url).map_err(|_| {
             runtime_failure(
@@ -77,7 +201,10 @@ impl OllamaRuntime {
         if !url.path().ends_with('/') {
             url.set_path(&format!("{}/", url.path()));
         }
-        if model_id.trim().is_empty() || timeout.is_zero() {
+        if url.path() == "/v1/" {
+            url.set_path("/");
+        }
+        if model_id.trim().is_empty() || context_tokens == 0 || timeout.is_zero() {
             return Err(runtime_failure(
                 "MODEL_CONFIG_INVALID",
                 "Model name and timeout must be present",
@@ -101,8 +228,16 @@ impl OllamaRuntime {
             client,
             base_url: url,
             model_id: model_id.trim().to_string(),
+            expected_digest: expected_digest
+                .map(str::trim)
+                .filter(|digest| !digest.is_empty())
+                .map(str::to_string),
+            expected_tokenizer_family,
+            context_tokens,
             api_token: api_token.filter(|token| !token.trim().is_empty()),
             format_vocabulary_unavailable: AtomicBool::new(false),
+            require_token_admission,
+            tokenizer: Mutex::new(None),
         })
     }
 
@@ -123,12 +258,174 @@ impl OllamaRuntime {
         }
     }
 
-    fn send_chat(
+    fn installed_model_records(&self) -> Result<Vec<ModelRecord>, ModelRuntimeFailure> {
+        let response = self
+            .authorize(
+                self.client
+                    .get(self.endpoint("api/tags")?)
+                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
+            )
+            .send()
+            .map_err(|_| {
+                runtime_failure(
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "Local model service is unavailable",
+                    true,
+                )
+            })?;
+        if !response.status().is_success() {
+            return Err(rejected_response(response.status()));
+        }
+        Ok(decode_bounded_json::<ModelsResponse>(response)?.models)
+    }
+
+    pub fn installed_models(&self) -> Result<Vec<InstalledModelDescriptor>, ModelRuntimeFailure> {
+        self.installed_model_records()?
+            .into_iter()
+            .map(|model| self.describe_model(model))
+            .collect()
+    }
+
+    fn describe_model(
+        &self,
+        model: ModelRecord,
+    ) -> Result<InstalledModelDescriptor, ModelRuntimeFailure> {
+        let response = self
+            .authorize(
+                self.client
+                    .post(self.endpoint("api/show")?)
+                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS))
+                    .json(&ShowRequest {
+                        model: &model.name,
+                        verbose: false,
+                    }),
+            )
+            .send()
+            .map_err(|_| {
+                runtime_failure(
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "Installed model metadata could not be read",
+                    true,
+                )
+            })?;
+        if !response.status().is_success() {
+            return Err(rejected_response(response.status()));
+        }
+        let shown: ShowResponse = decode_bounded_json(response)?;
+        Ok(model_descriptor(model, shown))
+    }
+
+    fn pinned_tokenizer(&self) -> Result<Arc<QwenPromptTokenizer>, ModelRuntimeFailure> {
+        let mut cached = self.tokenizer.lock().map_err(|_| {
+            runtime_failure(
+                "MODEL_TOKENIZER_UNAVAILABLE",
+                "Pinned tokenizer cache is unavailable",
+                false,
+            )
+        })?;
+        if let Some(tokenizer) = cached.as_ref() {
+            return Ok(Arc::clone(tokenizer));
+        }
+        let response = self
+            .authorize(
+                self.client
+                    .post(self.endpoint("api/show")?)
+                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS))
+                    .json(&ShowRequest {
+                        model: &self.model_id,
+                        verbose: true,
+                    }),
+            )
+            .send()
+            .map_err(|_| {
+                runtime_failure(
+                    "MODEL_TOKENIZER_UNAVAILABLE",
+                    "Pinned tokenizer metadata could not be read",
+                    true,
+                )
+            })?;
+        if !response.status().is_success() {
+            return Err(rejected_response(response.status()));
+        }
+        let shown: ShowResponse = decode_bounded_json_with_limit(
+            response,
+            MAX_MODEL_METADATA_RESPONSE_BYTES,
+            "Local model metadata exceeds the supported size limit",
+        )?;
+        let architecture = shown
+            .model_info
+            .get("general.architecture")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                runtime_failure(
+                    "MODEL_TOKENIZER_INVALID",
+                    "Tokenizer architecture metadata is missing",
+                    false,
+                )
+            })?;
+        let family = qwen_tokenizer_family_for_architecture(architecture).ok_or_else(|| {
+            runtime_failure(
+                "MODEL_TOKENIZER_INVALID",
+                "Tokenizer architecture is not an admitted Qwen family",
+                false,
+            )
+        })?;
+        if self
+            .expected_tokenizer_family
+            .is_some_and(|expected| expected != family)
+        {
+            return Err(runtime_failure(
+                "MODEL_TOKENIZER_INVALID",
+                "Tokenizer family no longer matches the qualified profile",
+                false,
+            ));
+        }
+        let tokenizer = Arc::new(
+            QwenPromptTokenizer::from_model_info(family, &shown.model_info)
+                .map_err(|message| runtime_failure("MODEL_TOKENIZER_INVALID", message, false))?,
+        );
+        *cached = Some(Arc::clone(&tokenizer));
+        Ok(tokenizer)
+    }
+
+    fn admit_request(
         &self,
         request: &ModelRequest,
-        response_format: Option<serde_json::Value>,
-    ) -> Result<Response, ModelRuntimeFailure> {
-        let payload = ChatRequest {
+        format: Option<serde_json::Value>,
+    ) -> Result<(), ModelRuntimeFailure> {
+        if !self.require_token_admission {
+            return Ok(());
+        }
+        let payload = serde_json::to_string(&self.chat_payload(request, format)).map_err(|_| {
+            runtime_failure(
+                "MODEL_REQUEST_INVALID",
+                "Native model request could not be serialized for token admission",
+                false,
+            )
+        })?;
+        let tokenizer = self.pinned_tokenizer()?;
+        let input_tokens = tokenizer
+            .count(&payload)
+            .map_err(|message| runtime_failure("MODEL_TOKENIZER_INVALID", message, false))?;
+        if !request_fits_context(input_tokens, request.max_output_tokens, self.context_tokens) {
+            return Err(runtime_failure(
+                "MODEL_CONTEXT_EXCEEDED",
+                format!(
+                    "Native request needs {input_tokens} input tokens plus {} output tokens and framing reserve, exceeding the qualified {}-token context",
+                    request.max_output_tokens, self.context_tokens
+                ),
+                false,
+            ));
+        }
+        Ok(())
+    }
+
+    fn chat_payload<'a>(
+        &'a self,
+        request: &'a ModelRequest,
+        format: Option<serde_json::Value>,
+    ) -> ChatRequest<'a> {
+        ChatRequest {
             model: &self.model_id,
             messages: [
                 ChatMessage {
@@ -140,40 +437,45 @@ impl OllamaRuntime {
                     content: &request.user_prompt,
                 },
             ],
-            temperature: 0.0,
-            seed: request.seed,
-            max_tokens: request.max_output_tokens,
             stream: false,
-            reasoning_effort: "none",
-            response_format,
-        };
-        self.authorize(
-            self.client
-                .post(self.endpoint("chat/completions")?)
-                .json(&payload),
-        )
-        .send()
-        .map_err(|_| {
-            runtime_failure(
-                "MODEL_RUNTIME_UNAVAILABLE",
-                "Local model request failed",
-                true,
-            )
-        })
+            think: false,
+            format,
+            options: ChatOptions {
+                num_ctx: self.context_tokens,
+                num_predict: request.max_output_tokens,
+                temperature: 0.0,
+                seed: request.seed,
+            },
+        }
+    }
+
+    fn send_chat(
+        &self,
+        request: &ModelRequest,
+        format: Option<serde_json::Value>,
+    ) -> Result<Response, ModelRuntimeFailure> {
+        let payload = self.chat_payload(request, format);
+        self.authorize(self.client.post(self.endpoint("api/chat")?).json(&payload))
+            .send()
+            .map_err(|_| {
+                runtime_failure(
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "Local model request failed",
+                    true,
+                )
+            })
     }
 
     fn send_chat_attempt(
         &self,
         request: &ModelRequest,
-        response_format: Option<serde_json::Value>,
+        format: Option<serde_json::Value>,
     ) -> Result<(StatusCode, Vec<u8>, Duration), (ModelRuntimeFailure, Duration)> {
         let started = Instant::now();
-        let result = self
-            .send_chat(request, response_format)
-            .and_then(|response| {
-                let status = response.status();
-                read_bounded_body(response).map(|body| (status, body))
-            });
+        let result = self.send_chat(request, format).and_then(|response| {
+            let status = response.status();
+            read_bounded_body(response).map(|body| (status, body))
+        });
         let elapsed = started.elapsed();
         result
             .map(|(status, body)| (status, body, elapsed))
@@ -242,6 +544,20 @@ impl ModelRuntime for OllamaRuntime {
         } else {
             schema_format
         };
+        self.admit_request(request, output_format.clone())
+            .map_err(|failure| {
+                with_request_attempts(
+                    failure,
+                    vec![request_attempt_diagnostic(
+                        request,
+                        0,
+                        ModelTransportAttempt::Primary,
+                        request_started.elapsed(),
+                        ModelTokenUsage::default(),
+                        false,
+                    )],
+                )
+            })?;
         let mut attempts = Vec::with_capacity(if attempted_schema { 2 } else { 1 });
         let initial_transport_attempt = if schema_unavailable && output_format.is_some() {
             ModelTransportAttempt::CachedSchemaFallback
@@ -341,11 +657,7 @@ impl ModelRuntime for OllamaRuntime {
                 attempts.clone(),
             )
         })?;
-        let text = output
-            .choices
-            .into_iter()
-            .next()
-            .map(|choice| choice.message.content.trim().to_string())
+        let text = Some(output.message.content.trim().to_string())
             .filter(|text| !text.is_empty())
             .ok_or_else(|| {
                 attempts.push(request_attempt_diagnostic(
@@ -382,47 +694,59 @@ impl ModelRuntime for OllamaRuntime {
     }
 
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
-        let response = self
-            .authorize(
-                self.client
-                    .get(self.endpoint("models")?)
-                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
-            )
-            .send()
-            .map_err(|_| {
+        let descriptor = self
+            .installed_model_records()?
+            .into_iter()
+            .find(|model| model.name == self.model_id)
+            .ok_or_else(|| {
                 runtime_failure(
-                    "MODEL_RUNTIME_UNAVAILABLE",
-                    "Local model service is unavailable",
+                    "MODEL_NOT_AVAILABLE",
+                    "Configured local model is not currently available",
                     true,
                 )
             })?;
-        if !response.status().is_success() {
+        let descriptor = self.describe_model(descriptor)?;
+        if self
+            .expected_digest
+            .as_ref()
+            .is_some_and(|expected| expected != &descriptor.digest)
+        {
             return Err(runtime_failure(
-                "MODEL_RUNTIME_UNAVAILABLE",
-                format!(
-                    "Local model health returned HTTP {}",
-                    response.status().as_u16()
-                ),
-                true,
+                "MODEL_PROFILE_STALE",
+                "Configured local model digest no longer matches its qualified profile",
+                false,
             ));
         }
-        let models: ModelsResponse = decode_bounded_json(response)?;
-        if !models.data.iter().any(|model| model.id == self.model_id) {
+        let maximum_context = descriptor.maximum_context_tokens.ok_or_else(|| {
+            runtime_failure(
+                "MODEL_CONTEXT_UNAVAILABLE",
+                "Configured local model does not report a supported context",
+                false,
+            )
+        })?;
+        if descriptor.tokenizer_family.is_none() || self.context_tokens > maximum_context {
             return Err(runtime_failure(
-                "MODEL_NOT_AVAILABLE",
-                "Configured local model is not currently available",
-                true,
+                "MODEL_CONTEXT_INVALID",
+                "Configured context exceeds this supported Qwen model profile",
+                false,
             ));
+        }
+        if self.require_token_admission {
+            self.pinned_tokenizer()?;
         }
         Ok(())
     }
 
     fn runtime_id(&self) -> &str {
-        "ollama-openai-loopback"
+        "ollama-native-loopback"
     }
 
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    fn context_tokens(&self, _stage: crate::pipeline::contracts::PipelineStage) -> u32 {
+        self.context_tokens
     }
 }
 
@@ -466,7 +790,19 @@ fn read_token(path: &Path) -> Result<String, ModelRuntimeFailure> {
 }
 
 fn decode_bounded_json<T: DeserializeOwned>(reader: impl Read) -> Result<T, ModelRuntimeFailure> {
-    let body = read_bounded_body(reader)?;
+    decode_bounded_json_with_limit(
+        reader,
+        MAX_MODEL_RESPONSE_BYTES,
+        "Local model response exceeds the supported size limit",
+    )
+}
+
+fn decode_bounded_json_with_limit<T: DeserializeOwned>(
+    reader: impl Read,
+    limit: u64,
+    too_large_message: &'static str,
+) -> Result<T, ModelRuntimeFailure> {
+    let body = read_bounded_body_with_limit(reader, limit, too_large_message)?;
     serde_json::from_slice(&body).map_err(|_| {
         runtime_failure(
             "MODEL_RESPONSE_INVALID",
@@ -477,21 +813,30 @@ fn decode_bounded_json<T: DeserializeOwned>(reader: impl Read) -> Result<T, Mode
 }
 
 fn read_bounded_body(reader: impl Read) -> Result<Vec<u8>, ModelRuntimeFailure> {
+    read_bounded_body_with_limit(
+        reader,
+        MAX_MODEL_RESPONSE_BYTES,
+        "Local model response exceeds the supported size limit",
+    )
+}
+
+fn read_bounded_body_with_limit(
+    reader: impl Read,
+    limit: u64,
+    too_large_message: &'static str,
+) -> Result<Vec<u8>, ModelRuntimeFailure> {
     let mut body = Vec::new();
-    reader
-        .take(MAX_MODEL_RESPONSE_BYTES + 1)
-        .read_to_end(&mut body)
-        .map_err(|_| {
-            runtime_failure(
-                "MODEL_RESPONSE_INVALID",
-                "Local model response could not be read",
-                true,
-            )
-        })?;
-    if body.len() as u64 > MAX_MODEL_RESPONSE_BYTES {
+    reader.take(limit + 1).read_to_end(&mut body).map_err(|_| {
+        runtime_failure(
+            "MODEL_RESPONSE_INVALID",
+            "Local model response could not be read",
+            true,
+        )
+    })?;
+    if body.len() as u64 > limit {
         return Err(runtime_failure(
             "MODEL_RESPONSE_TOO_LARGE",
-            "Local model response exceeds the supported size limit",
+            too_large_message,
             true,
         ));
     }
@@ -502,7 +847,12 @@ fn is_format_vocabulary_failure(status: StatusCode, body: &[u8]) -> bool {
     status == StatusCode::INTERNAL_SERVER_ERROR
         && serde_json::from_slice::<serde_json::Value>(body)
             .ok()
-            .and_then(|value| value["error"]["message"].as_str().map(str::to_string))
+            .and_then(|value| {
+                value["error"]
+                    .as_str()
+                    .or_else(|| value["error"]["message"].as_str())
+                    .map(str::to_string)
+            })
             .is_some_and(|message| message == "failed to load model vocabulary required for format")
 }
 
@@ -556,22 +906,21 @@ fn request_attempt_diagnostic(
 }
 
 fn provider_usage(body: &[u8]) -> ModelTokenUsage {
-    let usage = serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("usage").cloned());
+    let response = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let prompt_tokens = response
+        .as_ref()
+        .and_then(|value| value.get("prompt_eval_count"))
+        .and_then(serde_json::Value::as_u64);
+    let completion_tokens = response
+        .as_ref()
+        .and_then(|value| value.get("eval_count"))
+        .and_then(serde_json::Value::as_u64);
     ModelTokenUsage {
-        prompt_tokens: usage
-            .as_ref()
-            .and_then(|usage| usage.get("prompt_tokens"))
-            .and_then(serde_json::Value::as_u64),
-        completion_tokens: usage
-            .as_ref()
-            .and_then(|usage| usage.get("completion_tokens"))
-            .and_then(serde_json::Value::as_u64),
-        total_tokens: usage
-            .as_ref()
-            .and_then(|usage| usage.get("total_tokens"))
-            .and_then(serde_json::Value::as_u64),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens
+            .zip(completion_tokens)
+            .map(|(prompt, completion)| prompt.saturating_add(completion)),
     }
 }
 
@@ -604,15 +953,7 @@ fn response_format(
             false,
         ));
     }
-    let decoder_schema = decoder_compatible_schema(schema);
-    Ok(Some(serde_json::json!({
-        "type": "json_schema",
-        "json_schema": {
-            "name": name,
-            "strict": true,
-            "schema": decoder_schema,
-        }
-    })))
+    Ok(Some(decoder_compatible_schema(schema)))
 }
 
 fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_json::Value {
@@ -677,20 +1018,26 @@ fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_json::Value {
 }
 
 fn json_object_response_format() -> serde_json::Value {
-    serde_json::json!({"type": "json_object"})
+    serde_json::json!("json")
 }
 
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
     messages: [ChatMessage<'a>; 2],
+    stream: bool,
+    think: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<serde_json::Value>,
+    options: ChatOptions,
+}
+
+#[derive(Serialize)]
+struct ChatOptions {
+    num_ctx: u32,
+    num_predict: u32,
     temperature: f32,
     seed: u64,
-    max_tokens: u32,
-    stream: bool,
-    reasoning_effort: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -701,11 +1048,6 @@ struct ChatMessage<'a> {
 
 #[derive(Deserialize)]
 struct ChatResponse {
-    choices: Vec<ChatChoice>,
-}
-
-#[derive(Deserialize)]
-struct ChatChoice {
     message: ChatOutputMessage,
 }
 
@@ -716,12 +1058,90 @@ struct ChatOutputMessage {
 
 #[derive(Deserialize)]
 struct ModelsResponse {
-    data: Vec<ModelRecord>,
+    models: Vec<ModelRecord>,
 }
 
 #[derive(Deserialize)]
 struct ModelRecord {
-    id: String,
+    name: String,
+    #[serde(default)]
+    digest: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    details: ModelDetails,
+}
+
+#[derive(Default, Deserialize)]
+struct ModelDetails {
+    #[serde(default)]
+    family: String,
+    parameter_size: Option<String>,
+    quantization_level: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ShowRequest<'a> {
+    model: &'a str,
+    verbose: bool,
+}
+
+#[derive(Deserialize)]
+struct ShowResponse {
+    #[serde(default)]
+    model_info: serde_json::Map<String, serde_json::Value>,
+}
+
+fn model_descriptor(model: ModelRecord, shown: ShowResponse) -> InstalledModelDescriptor {
+    let architecture = shown
+        .model_info
+        .get("general.architecture")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| (!model.details.family.is_empty()).then(|| model.details.family.clone()));
+    let tokenizer_family = architecture
+        .as_deref()
+        .and_then(qwen_tokenizer_family_for_architecture);
+    let maximum_context_tokens = architecture
+        .as_deref()
+        .and_then(|architecture| {
+            shown
+                .model_info
+                .get(&format!("{architecture}.context_length"))
+        })
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|context| u32::try_from(context).ok())
+        .filter(|context| {
+            (MIN_SUPPORTED_CONTEXT_TOKENS..=MAX_SUPPORTED_CONTEXT_TOKENS).contains(context)
+        });
+    let disabled_reason = if tokenizer_family.is_none() {
+        Some("Installed model is not a supported Qwen architecture".to_string())
+    } else if maximum_context_tokens.is_none() {
+        Some("Installed model does not report a valid maximum context".to_string())
+    } else if model.digest.is_empty() {
+        Some("Installed model does not report an immutable digest".to_string())
+    } else {
+        None
+    };
+    InstalledModelDescriptor {
+        name: model.name,
+        digest: model.digest,
+        size_bytes: model.size,
+        architecture,
+        tokenizer_family,
+        parameter_size: model.details.parameter_size,
+        quantization_level: model.details.quantization_level,
+        maximum_context_tokens,
+        disabled_reason,
+    }
+}
+
+fn qwen_tokenizer_family_for_architecture(architecture: &str) -> Option<QwenTokenizerFamily> {
+    match architecture {
+        "qwen3" | "qwen3moe" => Some(QwenTokenizerFamily::Qwen3),
+        "qwen35" | "qwen35moe" => Some(QwenTokenizerFamily::Qwen35),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -795,25 +1215,23 @@ mod tests {
                         &mut stream,
                         "500 Internal Server Error",
                         &serde_json::json!({
-                            "error": {
-                                "message": "failed to load model vocabulary required for format"
-                            }
+                            "error": "failed to load model vocabulary required for format"
                         }),
                     );
                 } else {
                     let usage = (index == 1).then(|| {
                         serde_json::json!({
-                            "prompt_tokens": 11,
-                            "completion_tokens": 3,
-                            "total_tokens": 14
+                            "prompt_eval_count": 11,
+                            "eval_count": 3
                         })
                     });
                     write_json_response(
                         &mut stream,
                         "200 OK",
                         &serde_json::json!({
-                            "choices": [{"message": {"content": "{\"status\":\"ok\"}"}}],
-                            "usage": usage
+                            "message": {"role": "assistant", "content": "{\"status\":\"ok\"}"},
+                            "prompt_eval_count": usage.as_ref().and_then(|value| value["prompt_eval_count"].as_u64()),
+                            "eval_count": usage.as_ref().and_then(|value| value["eval_count"].as_u64())
                         }),
                     );
                 }
@@ -835,17 +1253,34 @@ mod tests {
                 &mut stream,
                 "503 Service Unavailable",
                 &serde_json::json!({
-                    "error": {"message": "fixture rejection"},
-                    "usage": {
-                        "prompt_tokens": 5,
-                        "completion_tokens": 0,
-                        "total_tokens": 5
-                    }
+                    "error": "fixture rejection",
+                    "prompt_eval_count": 5,
+                    "eval_count": 0
                 }),
             );
             request
         });
         (format!("http://{address}/v1/"), handle)
+    }
+
+    fn runtime_with_fixture_tokenizer(base_url: &str) -> OllamaRuntime {
+        let runtime = OllamaRuntime::new_internal(
+            base_url,
+            "fixture-model",
+            None,
+            Some(QwenTokenizerFamily::Qwen3),
+            8_192,
+            Duration::from_secs(5),
+            None,
+            true,
+        )
+        .expect("fixture runtime should configure");
+        *runtime
+            .tokenizer
+            .lock()
+            .expect("fixture tokenizer cache should lock") =
+            Some(Arc::new(QwenPromptTokenizer::fixture_single_token()));
+        runtime
     }
 
     #[test]
@@ -897,7 +1332,7 @@ mod tests {
 
     #[test]
     fn runtime_defaults_to_the_selected_ollama_deployment() {
-        assert_eq!(DEFAULT_BASE_URL, "http://127.0.0.1:11434/v1/");
+        assert_eq!(DEFAULT_BASE_URL, "http://127.0.0.1:11434/");
         assert_eq!(DEFAULT_MODEL, "qwen3-30b-a3b:latest");
         assert_eq!(
             model_timeout_seconds(None).expect("default timeout should configure"),
@@ -931,9 +1366,9 @@ mod tests {
     #[test]
     fn response_decoder_accepts_valid_json_and_rejects_oversized_input() {
         let decoded: ModelsResponse =
-            decode_bounded_json(Cursor::new(br#"{"data":[{"id":"fixture-model"}]}"#))
+            decode_bounded_json(Cursor::new(br#"{"models":[{"name":"fixture-model"}]}"#))
                 .expect("bounded valid JSON should decode");
-        assert_eq!(decoded.data[0].id, "fixture-model");
+        assert_eq!(decoded.models[0].name, "fixture-model");
 
         let oversized = vec![b' '; (MAX_MODEL_RESPONSE_BYTES + 1) as usize];
         let error = match decode_bounded_json::<ModelsResponse>(Cursor::new(oversized)) {
@@ -941,6 +1376,140 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.code, "MODEL_RESPONSE_TOO_LARGE");
+    }
+
+    #[test]
+    fn discovery_requires_qwen_architecture_digest_and_valid_architecture_context() {
+        let qwen = ModelRecord {
+            name: "qualified:latest".to_string(),
+            digest: "immutable-digest".to_string(),
+            size: 12_345,
+            details: ModelDetails {
+                family: "qwen3moe".to_string(),
+                parameter_size: Some("30B-A3B".to_string()),
+                quantization_level: Some("Q4_K_S".to_string()),
+            },
+        };
+        let shown = ShowResponse {
+            model_info: serde_json::json!({
+                "general.architecture": "qwen3moe",
+                "qwen3moe.context_length": 262_144
+            })
+            .as_object()
+            .expect("fixture metadata should be an object")
+            .clone(),
+        };
+        let descriptor = model_descriptor(qwen, shown);
+        assert_eq!(
+            descriptor.tokenizer_family,
+            Some(QwenTokenizerFamily::Qwen3)
+        );
+        assert_eq!(descriptor.maximum_context_tokens, Some(262_144));
+        assert!(descriptor.disabled_reason.is_none());
+
+        for (architecture, context, digest) in [
+            ("llama", 32_768_u64, "digest"),
+            ("qwen35", 0, "digest"),
+            ("qwen35", 3_999, "digest"),
+            ("qwen35", 1_048_577, "digest"),
+            ("qwen35", 32_768, ""),
+        ] {
+            let descriptor = model_descriptor(
+                ModelRecord {
+                    name: "invalid:latest".to_string(),
+                    digest: digest.to_string(),
+                    size: 1,
+                    details: ModelDetails::default(),
+                },
+                ShowResponse {
+                    model_info: serde_json::json!({
+                        "general.architecture": architecture,
+                        format!("{architecture}.context_length"): context
+                    })
+                    .as_object()
+                    .expect("fixture metadata should be an object")
+                    .clone(),
+                },
+            );
+            assert!(descriptor.disabled_reason.is_some());
+        }
+    }
+
+    #[test]
+    fn exact_token_admission_rejects_before_transport_and_uses_the_admitted_limits() {
+        let blocked_listener =
+            TcpListener::bind("127.0.0.1:0").expect("blocked listener should bind");
+        blocked_listener
+            .set_nonblocking(true)
+            .expect("blocked listener should become nonblocking");
+        let blocked_url = format!(
+            "http://{}/",
+            blocked_listener
+                .local_addr()
+                .expect("blocked address should resolve")
+        );
+        let blocked = runtime_with_fixture_tokenizer(&blocked_url);
+        let mut oversized = ModelRequest {
+            stage: crate::pipeline::contracts::PipelineStage::Analyze,
+            ordinal: 0,
+            system_prompt: "system".to_string(),
+            user_prompt: "user".to_string(),
+            seed: 42,
+            max_output_tokens: 7_000,
+            output_format: ModelOutputFormat::Text,
+        };
+        let counted_payload = serde_json::to_string(&blocked.chat_payload(&oversized, None))
+            .expect("counted payload should serialize");
+        let input_tokens = blocked
+            .tokenizer
+            .lock()
+            .expect("fixture tokenizer cache should lock")
+            .as_ref()
+            .expect("fixture tokenizer should be cached")
+            .count(&counted_payload)
+            .expect("fixture payload should tokenize");
+        let maximum_output = 8_192
+            - crate::pipeline::qwen_tokenizer::TOKENIZER_FRAMING_RESERVE_TOKENS
+            - input_tokens;
+        oversized.max_output_tokens = maximum_output + 1;
+        let failure = blocked
+            .generate(&oversized)
+            .expect_err("one token above context must fail before transport");
+        assert_eq!(failure.code, "MODEL_CONTEXT_EXCEEDED");
+        assert!(matches!(
+            blocked_listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+
+        let admitted_listener =
+            TcpListener::bind("127.0.0.1:0").expect("admitted listener should bind");
+        let admitted_url = format!(
+            "http://{}/",
+            admitted_listener
+                .local_addr()
+                .expect("admitted address should resolve")
+        );
+        let server = thread::spawn(move || {
+            let (mut stream, _) = admitted_listener
+                .accept()
+                .expect("admitted request should arrive");
+            let request = read_json_request(&mut stream);
+            write_json_response(
+                &mut stream,
+                "200 OK",
+                &serde_json::json!({"message":{"role":"assistant","content":"ok"}}),
+            );
+            request
+        });
+        let admitted = runtime_with_fixture_tokenizer(&admitted_url);
+        let mut fitting = oversized;
+        fitting.max_output_tokens = maximum_output;
+        admitted
+            .generate(&fitting)
+            .expect("adjacent fitting request should reach transport");
+        let sent = server.join().expect("admitted server should finish");
+        assert_eq!(sent["options"]["num_ctx"], 8_192);
+        assert_eq!(sent["options"]["num_predict"], maximum_output);
     }
 
     #[test]
@@ -961,10 +1530,7 @@ mod tests {
         })
         .expect("bounded schema should be accepted")
         .expect("structured format should be present");
-        assert_eq!(actual["type"], "json_schema");
-        assert_eq!(actual["json_schema"]["name"], "readiness_v1");
-        assert_eq!(actual["json_schema"]["strict"], true);
-        assert_eq!(actual["json_schema"]["schema"], schema);
+        assert_eq!(actual, schema);
 
         for (name, schema) in [
             (
@@ -1033,7 +1599,7 @@ mod tests {
         })
         .expect("canonical schema should be accepted")
         .expect("structured format should be present");
-        let projected = &actual["json_schema"]["schema"];
+        let projected = &actual;
 
         assert_eq!(
             projected["description"],
@@ -1100,7 +1666,7 @@ mod tests {
             })
             .expect("bounded schema should project")
             .expect("schema transport should remain enabled");
-            let projected = &format["json_schema"]["schema"];
+            let projected = &format;
             let actual = &projected["properties"]["evidence"]["items"]["properties"]["claim_text"];
             if maximum <= MAX_DECODER_STRING_LENGTH {
                 assert_eq!(actual["maxLength"], maximum, "small bound must survive");
@@ -1119,11 +1685,8 @@ mod tests {
     }
 
     #[test]
-    fn chat_request_disables_reasoning_and_json_fallback_remains_structured() {
-        assert_eq!(
-            json_object_response_format(),
-            serde_json::json!({"type": "json_object"})
-        );
+    fn chat_request_disables_thinking_and_sets_native_context_and_output_options() {
+        assert_eq!(json_object_response_format(), serde_json::json!("json"));
         let payload = ChatRequest {
             model: "fixture-model",
             messages: [
@@ -1136,18 +1699,22 @@ mod tests {
                     content: "user",
                 },
             ],
-            temperature: 0.0,
-            seed: 7_654_321,
-            max_tokens: 8,
             stream: false,
-            reasoning_effort: "none",
-            response_format: Some(json_object_response_format()),
+            think: false,
+            format: Some(json_object_response_format()),
+            options: ChatOptions {
+                num_ctx: 16_384,
+                num_predict: 8,
+                temperature: 0.0,
+                seed: 7_654_321,
+            },
         };
         let serialized = serde_json::to_value(payload).expect("chat payload should serialize");
-        assert_eq!(serialized["reasoning_effort"], "none");
-        assert_eq!(serialized["response_format"]["type"], "json_object");
-        assert_eq!(serialized["seed"], 7_654_321);
-        assert_eq!(serialized["max_tokens"], 8);
+        assert_eq!(serialized["think"], false);
+        assert_eq!(serialized["format"], "json");
+        assert_eq!(serialized["options"]["num_ctx"], 16_384);
+        assert_eq!(serialized["options"]["seed"], 7_654_321);
+        assert_eq!(serialized["options"]["num_predict"], 8);
     }
 
     #[test]
@@ -1257,13 +1824,16 @@ mod tests {
         assert!(cached_diagnostic["provider_usage"]["total_tokens"].is_null());
         let requests = server.join().expect("loopback server should finish");
         assert_eq!(requests.len(), 3);
-        assert_eq!(requests[0]["response_format"]["type"], "json_schema");
-        assert_eq!(requests[1]["response_format"]["type"], "json_object");
-        assert_eq!(requests[2]["response_format"]["type"], "json_object");
+        assert!(requests[0]["format"].is_object());
+        assert_eq!(requests[1]["format"], "json");
+        assert_eq!(requests[2]["format"], "json");
+        assert!(requests.iter().all(|request| request["think"] == false));
         assert!(requests
             .iter()
-            .all(|request| request["reasoning_effort"] == "none"));
-        assert!(requests.iter().all(|request| request["seed"] == 8_675_309));
+            .all(|request| request["options"]["seed"] == 8_675_309));
+        assert!(requests
+            .iter()
+            .all(|request| request["options"]["num_ctx"] == 8_192));
     }
 
     #[test]
@@ -1329,8 +1899,9 @@ mod tests {
         }
 
         let sent_request = server.join().expect("loopback server should finish");
-        assert_eq!(sent_request["max_tokens"], 321);
-        assert_eq!(sent_request["seed"], i64::MAX);
+        assert_eq!(sent_request["options"]["num_predict"], 321);
+        assert_eq!(sent_request["options"]["num_ctx"], 8_192);
+        assert_eq!(sent_request["options"]["seed"], i64::MAX);
     }
 
     #[test]

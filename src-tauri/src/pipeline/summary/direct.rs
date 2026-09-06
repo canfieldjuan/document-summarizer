@@ -59,6 +59,15 @@ pub(super) fn validate_claim_set(
             false,
         ));
     }
+    Ok(())
+}
+
+pub(super) fn validate_claim_set_for_runtime(
+    synthesized: &SynthesizedDocument,
+    analyzed: &AnalyzedDocument,
+    runtime: &dyn ModelRuntime,
+) -> Result<(), PipelineFailure> {
+    validate_claim_set(synthesized, analyzed)?;
     let evidence = analyzed
         .chunks
         .iter()
@@ -69,7 +78,12 @@ pub(super) fn validate_claim_set(
             exact_quote: e.exact_quote.clone(),
         })
         .collect::<Vec<_>>();
-    ensure_claim_catalog_is_verifiable(&synthesized.claims, &evidence, MAX_CLAIMS)
+    ensure_claim_catalog_is_verifiable_for_context(
+        &synthesized.claims,
+        &evidence,
+        MAX_CLAIMS,
+        runtime.context_tokens(PipelineStage::Verify),
+    )
 }
 
 pub(super) fn synthesize(
@@ -85,8 +99,8 @@ pub(super) fn synthesize(
     let result = SynthesizedDocument {
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.into(),
-        runtime_id: runtime.runtime_id().into(),
-        model_id: runtime.model_id().into(),
+        runtime_id: runtime.runtime_id_for_stage(PipelineStage::Analyze).into(),
+        model_id: runtime.model_id_for_stage(PipelineStage::Analyze).into(),
         summary_text: render_cited_summary(&claims, analyzed)?,
         source_chunk_ids: analyzed.chunks.iter().map(|c| c.chunk_id.clone()).collect(),
         claims,

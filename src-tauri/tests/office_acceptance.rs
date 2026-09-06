@@ -1,7 +1,8 @@
 use document_summarizer_lib::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
 use document_summarizer_lib::pipeline::contracts::{
-    AnalysisOmissionReason, ModelOutputFormat, ModelRequest, ModelResponse, ModelRuntime,
-    ModelRuntimeFailure, NormalizedDocument, PipelineState, SourceType, StructureNode,
+    AnalysisOmissionReason, ModelOutputFormat, ModelProfileSnapshot, ModelRequest, ModelResponse,
+    ModelRuntime, ModelRuntimeFailure, NormalizedDocument, PipelineStage, PipelineState,
+    SourceType, StructureNode,
 };
 use document_summarizer_lib::pipeline::db::{
     get_analyzed_document, get_chunked_document, get_citation_artifact, get_normalized_document,
@@ -10,6 +11,7 @@ use document_summarizer_lib::pipeline::db::{
 };
 use document_summarizer_lib::pipeline::ingest::ingest_pdf;
 use document_summarizer_lib::pipeline::model::OllamaRuntime;
+use document_summarizer_lib::pipeline::model_settings::QwenProfileRuntime;
 use document_summarizer_lib::pipeline::normalize::{normalize_document, CanonicalNormalizer};
 use document_summarizer_lib::pipeline::parser::{parse_document, PdfExtractParser};
 use document_summarizer_lib::pipeline::service::{process_pdf_to_summary, SummaryComponents};
@@ -28,6 +30,27 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 struct TestDatabase(PathBuf);
+
+fn configured_live_runtime() -> Box<dyn ModelRuntime> {
+    if let Ok(analysis_model) = env::var("DOC_SUM_QUALIFICATION_ANALYSIS_MODEL") {
+        let verification_model = env::var("DOC_SUM_QUALIFICATION_VERIFICATION_MODEL")
+            .unwrap_or_else(|_| "qwen3-30b-a3b:latest".to_string());
+        let context_tokens = env::var("DOC_SUM_QUALIFICATION_CONTEXT_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(8_192);
+        return Box::new(
+            QwenProfileRuntime::qualification_candidate(
+                &analysis_model,
+                &verification_model,
+                context_tokens,
+            )
+            .expect("qualification stage models should configure"),
+        );
+    }
+    Box::new(OllamaRuntime::from_environment().expect("Ollama should configure"))
+}
 
 fn coverage_at_least_sixty_percent(cited: usize, total: usize) -> bool {
     total > 0 && cited <= total && (cited as u128) * 5 >= (total as u128) * 3
@@ -200,6 +223,22 @@ impl ModelRuntime for RecordingRuntime<'_> {
     fn model_id(&self) -> &str {
         self.inner.model_id()
     }
+
+    fn runtime_id_for_stage(&self, stage: PipelineStage) -> &str {
+        self.inner.runtime_id_for_stage(stage)
+    }
+
+    fn model_id_for_stage(&self, stage: PipelineStage) -> &str {
+        self.inner.model_id_for_stage(stage)
+    }
+
+    fn context_tokens(&self, stage: PipelineStage) -> u32 {
+        self.inner.context_tokens(stage)
+    }
+
+    fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+        self.inner.profile_snapshot()
+    }
 }
 
 fn reveal_model_text() -> bool {
@@ -235,6 +274,31 @@ fn recorded_attempt_totals(runtime: &RecordingRuntime<'_>) -> (usize, u64, u64) 
             .filter_map(|attempt| attempt.provider_usage.completion_tokens)
             .sum(),
     )
+}
+
+fn recorded_stage_totals(
+    runtime: &RecordingRuntime<'_>,
+    stage: PipelineStage,
+) -> serde_json::Value {
+    let responses = runtime.responses();
+    let failures = runtime.failures();
+    let attempts = responses
+        .iter()
+        .flat_map(|response| response.request_attempts.iter())
+        .chain(
+            failures
+                .iter()
+                .flat_map(|failure| failure.request_attempts.iter()),
+        )
+        .filter(|attempt| attempt.stage == stage)
+        .collect::<Vec<_>>();
+    json!({
+        "requests": runtime.requests().iter().filter(|request| request.stage == stage).count(),
+        "attempts": attempts.len(),
+        "model_elapsed_milliseconds": attempts.iter().map(|attempt| attempt.elapsed_milliseconds).sum::<u64>(),
+        "completion_tokens": attempts.iter().filter_map(|attempt| attempt.provider_usage.completion_tokens).sum::<u64>(),
+        "schema_fallback_attempts": attempts.iter().filter(|attempt| attempt.transport_attempt != document_summarizer_lib::pipeline::contracts::ModelTransportAttempt::Primary).count(),
+    })
 }
 
 fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
@@ -274,6 +338,14 @@ fn print_recorded_responses(runtime: &RecordingRuntime<'_>) {
             "attempt_count": attempt_count,
             "model_elapsed_milliseconds": model_elapsed_milliseconds,
             "completion_tokens": completion_tokens,
+        })
+    );
+    eprintln!(
+        "OFFICE_LIVE_STAGE_TOTALS {}",
+        json!({
+            "analyze": recorded_stage_totals(runtime, PipelineStage::Analyze),
+            "synthesize": recorded_stage_totals(runtime, PipelineStage::Synthesize),
+            "verify": recorded_stage_totals(runtime, PipelineStage::Verify),
         })
     );
     let paraphrase_requests = requests.iter().filter(|r| matches!(&r.output_format,
@@ -653,11 +725,11 @@ fn office_pdf_live_ollama_analysis_satisfies_evidence_contract() {
     assert_eq!(paths.len(), 1, "DOC_SUM_OFFICE_PDF must contain one path");
     let source = &paths[0];
     let database = TestDatabase::new("analysis");
-    let ollama = OllamaRuntime::from_environment().expect("Ollama should configure");
+    let ollama = configured_live_runtime();
     ollama
         .health()
         .expect("selected Ollama model should be available");
-    let runtime = RecordingRuntime::new(&ollama);
+    let runtime = RecordingRuntime::new(ollama.as_ref());
     let mut conn = init_db(&database.0).expect("analysis database should initialize");
     let (_, run) = ingest_pdf(
         &mut conn,
@@ -714,11 +786,11 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let source = &paths[0];
     let database = TestDatabase::new("live");
     let (source_bytes, source_hash, source_size) = file_identity(source);
-    let ollama = OllamaRuntime::from_environment().expect("Ollama should configure");
+    let ollama = configured_live_runtime();
     ollama
         .health()
         .expect("selected Ollama model should be available");
-    let runtime = RecordingRuntime::new(&ollama);
+    let runtime = RecordingRuntime::new(ollama.as_ref());
     let parser = PdfExtractParser::new();
     let normalizer = CanonicalNormalizer::new();
     let interpreter = DeterministicStructureInterpreter::new();

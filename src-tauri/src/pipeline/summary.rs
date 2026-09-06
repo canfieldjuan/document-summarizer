@@ -63,7 +63,7 @@ const VERIFICATION_OUTPUT_TOKENS: u32 = 4_096;
 const PREVIOUS_ANALYSIS_OUTPUT_TOKENS: u32 = 1_024;
 const ANALYSIS_RESPONSE_ENVELOPE_TOKENS: u32 = 192;
 const ANALYSIS_EVIDENCE_ITEM_TOKENS: u32 = 92;
-const MODEL_CONTEXT_TOKENS: u32 = 8_192;
+const LEGACY_MODEL_CONTEXT_TOKENS: u32 = 8_192;
 const VERIFICATION_CONTEXT_RESERVE_TOKENS: u32 = 512;
 const MAX_CHUNK_INPUT_CHARACTERS: usize = 100_000;
 const MAX_SYNTHESIS_REQUEST_CHARACTERS: usize = 16_000;
@@ -780,23 +780,42 @@ fn synthesis_claim_floor(
     Ok(claim_budget.min(evidence_count).min(half_budget.max(3)))
 }
 
+#[cfg(test)]
 fn synthesis_verification_request_character_limit() -> Result<usize, PipelineFailure> {
-    verification_request_character_limit(MODEL_CONTEXT_TOKENS, VERIFICATION_OUTPUT_TOKENS).map_err(
-        |_| {
-            stage_failure(
-                PipelineStage::Synthesize,
-                "INVALID_SYNTHESIS_BUDGET",
-                "The configured model context cannot hold downstream claim verification",
-                false,
-            )
-        },
-    )
+    synthesis_verification_request_character_limit_for_context(LEGACY_MODEL_CONTEXT_TOKENS)
+}
+
+fn synthesis_verification_request_character_limit_for_context(
+    context_tokens: u32,
+) -> Result<usize, PipelineFailure> {
+    verification_request_character_limit(context_tokens, VERIFICATION_OUTPUT_TOKENS).map_err(|_| {
+        stage_failure(
+            PipelineStage::Synthesize,
+            "INVALID_SYNTHESIS_BUDGET",
+            "The configured model context cannot hold downstream claim verification",
+            false,
+        )
+    })
 }
 
 fn ensure_claim_catalog_is_verifiable(
     claims: &[CitedClaim],
     evidence: &[PromptEvidenceItem],
     claim_budget: usize,
+) -> Result<(), PipelineFailure> {
+    ensure_claim_catalog_is_verifiable_for_context(
+        claims,
+        evidence,
+        claim_budget,
+        LEGACY_MODEL_CONTEXT_TOKENS,
+    )
+}
+
+fn ensure_claim_catalog_is_verifiable_for_context(
+    claims: &[CitedClaim],
+    evidence: &[PromptEvidenceItem],
+    claim_budget: usize,
+    context_tokens: u32,
 ) -> Result<(), PipelineFailure> {
     let evidence_by_id = evidence
         .iter()
@@ -834,7 +853,7 @@ fn ensure_claim_catalog_is_verifiable(
             })
             .collect::<Result<Vec<_>, PipelineFailure>>()?,
     };
-    let request_limit = synthesis_verification_request_character_limit()?;
+    let request_limit = synthesis_verification_request_character_limit_for_context(context_tokens)?;
     plan_verification_batches(&prompt, claims, claim_budget, request_limit)
         .map(|_| ())
         .map_err(|failure| {
@@ -850,8 +869,16 @@ fn ensure_claim_catalog_is_verifiable(
         })
 }
 
+#[cfg(test)]
 fn generation_input_character_limit(output_tokens: u32) -> Option<usize> {
-    MODEL_CONTEXT_TOKENS
+    generation_input_character_limit_for_context(LEGACY_MODEL_CONTEXT_TOKENS, output_tokens)
+}
+
+fn generation_input_character_limit_for_context(
+    context_tokens: u32,
+    output_tokens: u32,
+) -> Option<usize> {
+    context_tokens
         .checked_sub(output_tokens)
         .and_then(|remaining| remaining.checked_sub(VERIFICATION_CONTEXT_RESERVE_TOKENS))
         .filter(|remaining| *remaining > 0)
@@ -957,8 +984,12 @@ fn verify(
             HIERARCHICAL_VERIFICATION_VERSION.to_string()
         },
         synthesis_attempt_ordinal,
-        runtime_id: runtime.runtime_id().to_string(),
-        model_id: runtime.model_id().to_string(),
+        runtime_id: runtime
+            .runtime_id_for_stage(PipelineStage::Verify)
+            .to_string(),
+        model_id: runtime
+            .model_id_for_stage(PipelineStage::Verify)
+            .to_string(),
         summary_text,
         source_chunk_ids: synthesized.source_chunk_ids.clone(),
         claims,
@@ -978,8 +1009,10 @@ fn classify_claim_support(
     control: &dyn ExecutionControl,
 ) -> Result<Vec<ClaimVerification>, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Verify)?;
-    let request_character_limit =
-        verification_request_character_limit(MODEL_CONTEXT_TOKENS, VERIFICATION_OUTPUT_TOKENS)?;
+    let request_character_limit = verification_request_character_limit(
+        runtime.context_tokens(PipelineStage::Verify),
+        VERIFICATION_OUTPUT_TOKENS,
+    )?;
     let batches = plan_verification_batches(prompt, claims, claim_budget, request_character_limit)?;
     runtime.health().map_err(|failure| {
         runtime_pipeline_failure(PipelineStage::Verify, "MODEL_HEALTH", failure)
@@ -2354,7 +2387,9 @@ fn validate_analyzed_document(
     normalized: &NormalizedDocument,
     runtime: &dyn ModelRuntime,
 ) -> Result<(), PipelineFailure> {
-    if analyzed.runtime_id != runtime.runtime_id() || analyzed.model_id != runtime.model_id() {
+    if analyzed.runtime_id != runtime.runtime_id_for_stage(PipelineStage::Analyze)
+        || analyzed.model_id != runtime.model_id_for_stage(PipelineStage::Analyze)
+    {
         return Err(stage_failure(
             PipelineStage::Analyze,
             "INVALID_ANALYZED_DOCUMENT",
@@ -2647,7 +2682,8 @@ fn validate_synthesized_document(
     normalized: &NormalizedDocument,
     runtime: &dyn ModelRuntime,
 ) -> Result<(), PipelineFailure> {
-    if synthesized.runtime_id != runtime.runtime_id() || synthesized.model_id != runtime.model_id()
+    if synthesized.runtime_id != runtime.runtime_id_for_stage(PipelineStage::Analyze)
+        || synthesized.model_id != runtime.model_id_for_stage(PipelineStage::Analyze)
     {
         return Err(stage_failure(
             PipelineStage::Synthesize,
@@ -2655,6 +2691,9 @@ fn validate_synthesized_document(
             "Synthesis runtime metadata must match the active runtime",
             false,
         ));
+    }
+    if synthesized.synthesis_version == SYNTHESIS_VERSION {
+        direct::validate_claim_set_for_runtime(synthesized, analyzed, runtime)?;
     }
     validate_synthesized_document_without_runtime(synthesized, analyzed, chunked, normalized)
 }
@@ -3279,8 +3318,8 @@ fn validate_runtime_response(
     stage: PipelineStage,
 ) -> Result<(), PipelineFailure> {
     if response.text.trim().is_empty()
-        || response.runtime_id != runtime.runtime_id()
-        || response.model_id != runtime.model_id()
+        || response.runtime_id != runtime.runtime_id_for_stage(stage.clone())
+        || response.model_id != runtime.model_id_for_stage(stage.clone())
     {
         return Err(stage_failure(
             stage,
@@ -5430,10 +5469,13 @@ mod tests {
             generation_input_character_limit(SYNTHESIS_OUTPUT_TOKENS),
             Some(10_752)
         );
-        assert_eq!(generation_input_character_limit(MODEL_CONTEXT_TOKENS), None);
+        assert_eq!(
+            generation_input_character_limit(LEGACY_MODEL_CONTEXT_TOKENS),
+            None
+        );
         assert_eq!(
             generation_input_character_limit(
-                MODEL_CONTEXT_TOKENS - VERIFICATION_CONTEXT_RESERVE_TOKENS
+                LEGACY_MODEL_CONTEXT_TOKENS - VERIFICATION_CONTEXT_RESERVE_TOKENS
             ),
             None
         );
@@ -6773,7 +6815,7 @@ mod tests {
             assert!(requests.iter().all(|r| r.system_prompt.chars().count()
                 + r.user_prompt.chars().count()
                 <= verification_request_character_limit(
-                    MODEL_CONTEXT_TOKENS,
+                    LEGACY_MODEL_CONTEXT_TOKENS,
                     VERIFICATION_OUTPUT_TOKENS
                 )
                 .unwrap()));
@@ -6782,9 +6824,11 @@ mod tests {
 
     #[test]
     fn verification_context_budget_covers_count_character_and_batch_boundaries() {
-        let request_limit =
-            verification_request_character_limit(MODEL_CONTEXT_TOKENS, VERIFICATION_OUTPUT_TOKENS)
-                .expect("current verification request limit should derive");
+        let request_limit = verification_request_character_limit(
+            LEGACY_MODEL_CONTEXT_TOKENS,
+            VERIFICATION_OUTPUT_TOKENS,
+        )
+        .expect("current verification request limit should derive");
         assert_eq!(request_limit, 10_752);
         assert!(verification_request_within_bounds(
             16,
@@ -6848,9 +6892,11 @@ mod tests {
             };
             (claims, prompt)
         };
-        let request_limit =
-            verification_request_character_limit(MODEL_CONTEXT_TOKENS, VERIFICATION_OUTPUT_TOKENS)
-                .expect("current verification request limit should derive");
+        let request_limit = verification_request_character_limit(
+            LEGACY_MODEL_CONTEXT_TOKENS,
+            VERIFICATION_OUTPUT_TOKENS,
+        )
+        .expect("current verification request limit should derive");
         let (claims, prompt) = fixture(600);
         let batches = plan_verification_batches(&prompt, &claims, 17, request_limit)
             .expect("mixed count and character partitioning should fit its actual batches");

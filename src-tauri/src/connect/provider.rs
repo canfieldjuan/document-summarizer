@@ -12,7 +12,7 @@ use crate::pipeline::contracts::{
 };
 use crate::pipeline::db;
 use crate::pipeline::ingest::prepare_pdf_ingestion;
-use crate::pipeline::model::OllamaRuntime;
+use crate::pipeline::model_settings::{runtime_from_settings, settings_path};
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
 use crate::pipeline::service::{
@@ -164,8 +164,9 @@ impl ConnectProvider {
                 .ok_or(ProviderStartError::InvalidMaxInputBytes)?,
             Err(_) => DEFAULT_MAX_INPUT_BYTES,
         };
-        let runtime_factory: RuntimeFactory = Arc::new(|| {
-            OllamaRuntime::from_environment()
+        let model_settings_path = settings_path(&app_data_dir);
+        let runtime_factory: RuntimeFactory = Arc::new(move || {
+            runtime_from_settings(&model_settings_path)
                 .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
         });
         let entitlement = EntitlementGate::from_installation()?;

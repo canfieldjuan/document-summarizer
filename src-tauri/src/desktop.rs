@@ -5,7 +5,7 @@ use crate::pipeline::contracts::{
 };
 use crate::pipeline::control::CancellationToken;
 use crate::pipeline::db::{self, StoreError};
-use crate::pipeline::model::OllamaRuntime;
+use crate::pipeline::model_settings::runtime_from_settings;
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
 use crate::pipeline::service::{
@@ -89,11 +89,11 @@ pub struct DesktopJobManager {
 }
 
 impl DesktopJobManager {
-    pub fn new(db_path: PathBuf) -> Self {
+    pub fn new(db_path: PathBuf, settings_path: PathBuf) -> Self {
         Self::with_runtime_factory(
             db_path,
-            Arc::new(|| {
-                OllamaRuntime::from_environment()
+            Arc::new(move || {
+                runtime_from_settings(&settings_path)
                     .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
             }),
         )

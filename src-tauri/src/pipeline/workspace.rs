@@ -3,7 +3,7 @@ use crate::pipeline::contracts::{
     PipelineRun, PipelineState, PipelineWarning, SummaryArtifact,
 };
 use crate::pipeline::db::{self, StoreError};
-use crate::pipeline::model::OllamaRuntime;
+use crate::pipeline::model_settings::runtime_from_settings;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -127,8 +127,8 @@ impl WorkspaceError {
     }
 }
 
-pub fn ollama_runtime_status() -> RuntimeStatus {
-    match OllamaRuntime::from_environment() {
+pub fn ollama_runtime_status(settings_path: &std::path::Path) -> RuntimeStatus {
+    match runtime_from_settings(settings_path) {
         Ok(runtime) => assess_runtime(&runtime),
         Err(failure) => unavailable_runtime_status(None, None, failure),
     }
