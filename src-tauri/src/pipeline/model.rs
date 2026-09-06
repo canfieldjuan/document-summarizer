@@ -1485,11 +1485,17 @@ mod tests {
     }
 
     fn write_chat_stream_frame(stream: &mut TcpStream, frame: &serde_json::Value) {
-        serde_json::to_writer(&mut *stream, frame).expect("loopback stream frame should serialize");
-        stream
-            .write_all(b"\n")
-            .expect("loopback stream delimiter should write");
-        stream.flush().expect("loopback stream frame should flush");
+        try_write_chat_stream_frame(stream, frame).expect("loopback stream frame should write");
+    }
+
+    fn try_write_chat_stream_frame(
+        stream: &mut TcpStream,
+        frame: &serde_json::Value,
+    ) -> std::io::Result<()> {
+        let body = serde_json::to_vec(frame).expect("loopback stream frame should serialize");
+        stream.write_all(&body)?;
+        stream.write_all(b"\n")?;
+        stream.flush()
     }
 
     fn write_successful_chat_stream(
@@ -1598,7 +1604,7 @@ mod tests {
                 "200 OK",
                 &serde_json::json!({"models": models}),
             );
-            write_chat_stream_frame(
+            let _ = try_write_chat_stream_frame(
                 &mut chat,
                 &serde_json::json!({
                     "model": "fixture-model",
