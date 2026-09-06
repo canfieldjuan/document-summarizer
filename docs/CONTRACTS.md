@@ -843,6 +843,9 @@ Execution-provenance rejection is recoverable: the unproven response is
 discarded, the immutable run snapshot remains authoritative, and retry admission
 must recheck that exact profile before creating work. A permanently unsupported
 or unqualified profile remains a terminal configuration error.
+The same temporary exact-digest drift detected by a stage-boundary health check
+is recoverable; restoring the snapshotted digest may admit a retry, while the
+current stage remains rejected.
 
 Discovery admits only Qwen-family architectures that the application explicitly
 supports. An installed descriptor records the exact Ollama name and digest,
@@ -933,6 +936,13 @@ identical request that committed concurrently returns the stored idempotent job;
 a conflicting request returns the existing job-ID conflict. Cleanup removes only
 the losing request's separately allocated import and never the accepted job's
 owned source.
+
+Desktop new-run admission likewise requires a runtime profile snapshot and
+inserts it in the same SQLite transaction that first persists the document and
+run. Starting parsing may follow in its existing transition, but a crash at any
+point after admission cannot leave the new run without the selected immutable
+profile. Test-only legacy setup may explicitly construct snapshotless historical
+checkpoints; the product start path may not.
 
 #### Qualification and acceptance evidence
 
