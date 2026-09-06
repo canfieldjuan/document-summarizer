@@ -885,19 +885,24 @@ duplicated into RAM or app storage. Before fork, the app must acquire a Linux
 read lease on the retained read-only descriptor; acquisition fails if a writer
 already has the file open. Before taking parent ownership of that lease, the
 acquiring thread installs the lease-break handler and explicitly unblocks
-`SIGIO`; a mask inherited from its caller cannot defer a parent-directed break
-notification until after ownership transfer. Complete registered file identity
-is checked only after that lease is held and before any child is spawned. A
-modify-and-close between an unprotected identity check and lease acquisition
-therefore cannot reach the loader. The child becomes the lease-break signal owner with
+`SIGIO`. Parent ownership is targeted to that exact Linux thread rather than to
+an arbitrary thread in the process, so another thread cannot defer the handoff
+notification. Complete registered file identity is checked only after that
+lease is held. Runtime-bundle preparation may then take time, so immediately
+before spawn the same parent thread requires a clear break flag, an intact
+kernel read lease, and the unchanged complete GGUF identity again. A signaled,
+expired or drifted lease fails without executing the loader. A modify-and-close
+between an unprotected identity check and lease acquisition therefore cannot
+reach the loader. The child becomes the lease-break signal owner with
 the default terminating disposition before `exec`, and explicitly unblocks the
 lease-break signal in the child so a signal mask inherited from the spawning
 thread cannot defer termination. A later write-open therefore blocks in the
 kernel and terminates the loader before the writer can reach the live inode. The
-parent checks the delivered break flag again after spawning and kills/reaps the
-child instead of accepting a lease whose parent notification raced with the
-handoff. The parent releases the lease only after the child is terminated or
-ownership ends.
+acquiring thread checks the delivered break flag again after spawning and
+kills/reaps the child instead of accepting a lease whose thread-directed parent
+notification raced with the handoff. Once ownership reaches the child, a break
+terminates it; cache reuse also rejects and reaps a child that has exited. The
+parent releases the lease only after the child is terminated or ownership ends.
 A filesystem without working read-lease enforcement is not admitted for direct
 GGUF execution. Post-load metadata checks remain defense in depth, not the
 mechanism that prevents mutable bytes from reaching the loader.
@@ -916,10 +921,15 @@ deadline and verifies health, digest alias, active context and trained context
 before inference; it also rechecks the retained model descriptor after load.
 Because the qualified server has one inference slot, the application admits at
 most one direct-model request at a time for a shared child. Callers wait on an
-application-owned mutex before tokenization or completion begins; request
-duration and HTTP timeout begin only after that caller owns the slot. A queued
-caller therefore cannot spend its network timeout behind another generation or
-kill the shared child when only the queue wait was long.
+application-owned mutex before tokenization or completion begins. Slot
+acquisition observes the run's cancellation control and has one absolute wait
+deadline no longer than the existing model-request timeout; it does not wait a
+fresh timeout for each caller ahead of it. Cancellation leaves the queue without
+sending a model request, and queue-timeout returns recoverable busy without
+invalidating the shared child. Request duration and HTTP timeout begin only
+after that caller owns the slot. A queued caller therefore cannot spend its
+network timeout behind another generation or kill the shared child when only
+the queue wait was long.
 Before spawning, the parent PID is captured. Immediately after installing the
 parent-death signal, the child compares its actual parent with that captured
 PID and aborts before `exec` if the parent died during the fork-to-handoff
@@ -1280,6 +1290,7 @@ registration, regular/symlink/replaced files, cached registration deletion and
 replacement, nonblocking special-file rejection, exact and drifted runtime
 manifest members, sealed immutable runtime bytes, GGUF post-lease identity plus
 read-lease admission and release boundaries, parent/child lease-signal masks and
+thread-directed lease ownership, pre-spawn lease/identity revalidation,
 parent-death handoff handling, descriptor-backed library names,
 lease-broken/dead-child detection and eviction,
 idle-versus-active cache replacement, Ollama-only snapshot recovery with
@@ -1293,7 +1304,8 @@ lifecycle, concurrent profile leases,
 unavailable-source catalog behavior, and non-mutating admitted Ollama residence
 checks, including definitive absent-listener admission and ambiguous transport
 failure rejection, missing/malformed resident-digest rejection, active-cache
-retention across selection changes, and serialized shared-child generation.
+retention across selection changes, and serialized cancellation-aware
+shared-child generation.
 The unchanged exactness, provenance, fail-closed, NARA, DOL, clippy and
 formatting gates remain required.
 
