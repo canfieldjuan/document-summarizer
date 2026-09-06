@@ -839,6 +839,10 @@ the requested model name to identify exactly the digest admitted for that run.
 A missing, ambiguous or mismatched execution record rejects the output. A
 post-response `/api/tags` lookup is insufficient because a mutable tag may be
 repointed during generation and restored before the lookup.
+Execution-provenance rejection is recoverable: the unproven response is
+discarded, the immutable run snapshot remains authoritative, and retry admission
+must recheck that exact profile before creating work. A permanently unsupported
+or unqualified profile remains a terminal configuration error.
 
 Discovery admits only Qwen-family architectures that the application explicitly
 supports. An installed descriptor records the exact Ollama name and digest,
