@@ -2,12 +2,17 @@
 
 ## Direct Jack Qwen 3.8 27B qualification
 
-**Failure first.** The first NARA start was refused because another local
-application loaded the qualified Qwen Ollama runner after the direct adapter's
-release check. The app did not terminate that foreign workload or start a
-second large runner. After that workload completed, the unchanged direct run
-passed both corpus documents. This remains a recoverable handoff race rather
-than proof that unrelated local model work can be preempted safely.
+**Failure first.** The first read-lease-enabled NARA start exited before the
+server became ready after 28.42 seconds. That revision suppressed child stderr
+and did not retain its exit status, so the exact cause cannot be determined;
+subsequent starts passed after exit-status diagnostics were added. Exact-head
+review later found two additional latent failures: a syntactically complete
+response stopped at `n_predict` could be accepted because `stop_type` was not
+read, and qualified Ollama runners were unloaded through a mutable name after a
+digest observation. The final implementation admits only `eos` or configured
+stopping-word completions and never unloads through an Ollama alias. Final DOL
+validation waited for a resident qualified Ollama runner's reported keep-alive
+to expire without sending an unload request.
 
 The exact Jack GGUF
 `e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041`
@@ -18,12 +23,12 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 44.372 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,960 | 292.573 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 50.749 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 295.608 s | 0 |
 
-NARA used 20 analysis requests and one verification request, with 452 and 215
+NARA used 20 analysis requests and one verification request, with 438 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
-verification requests, with 5,204 and 1,756 completion tokens respectively.
+verification requests, with 5,198 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported
 prompt and completion token accounting that matched the direct adapter's
 preflight.
