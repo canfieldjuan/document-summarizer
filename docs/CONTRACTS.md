@@ -848,6 +848,12 @@ qualification state. Names, filenames and display metadata are not capability
 proof. Missing, malformed, zero or implausible context metadata leaves a model
 visible but unqualified; it never silently falls back to 8,192. Non-Qwen models
 remain visible only as unsupported installed entries and cannot be selected.
+The bounded `/api/tags` body may contain at most 256 model records. Discovery
+rejects a larger catalog before any `/api/show` request, and all metadata probes
+share one five-second aggregate deadline that begins before the tags request.
+Per-request timeouts remain defense in depth; they do not multiply into an
+unbounded startup delay. Reaching either discovery bound fails the catalog as a
+whole rather than returning a silently truncated model list.
 
 #### Qualified profiles, context and token planning
 
