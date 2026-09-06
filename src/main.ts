@@ -208,7 +208,8 @@ const retryHint = element<HTMLParagraphElement>("#retry-hint");
 
 let runtimeReady = false;
 let selectedModelLabel: string | null = null;
-let modelCatalogReady = false;
+let modelSelectionAvailable = false;
+let modelSelectionInFlight = false;
 let connectInstalling = false;
 let connectStatusRefreshInFlight = false;
 let processing = false;
@@ -236,7 +237,7 @@ function showStage(view: "empty" | "processing" | "summary" | "failure"): void {
 
 function syncPrimaryAction(): void {
   selectButton.disabled = !runtimeReady || processing;
-  modelPreset.disabled = !modelCatalogReady || processing;
+  modelPreset.disabled = !modelSelectionAvailable || modelSelectionInFlight || processing;
   const label = selectButton.querySelector<HTMLSpanElement>("span");
   if (!label) return;
 
@@ -317,7 +318,7 @@ async function refreshRuntimeStatus(): Promise<void> {
 }
 
 async function refreshModelCatalog(): Promise<void> {
-  modelCatalogReady = false;
+  modelSelectionAvailable = false;
   modelPreset.disabled = true;
   try {
     const catalog = await invoke<ModelCatalog>("get_model_catalog");
@@ -375,20 +376,20 @@ async function refreshModelCatalog(): Promise<void> {
           `${selectedPreset.analysisContextTokens.toLocaleString()} ctx`,
         ].filter(Boolean).join(" · ")
       : null;
-    modelCatalogReady = catalog.selectedPresetAvailable;
-    modelPreset.disabled = !modelCatalogReady || processing;
+    modelSelectionAvailable = catalog.presets.length > 0;
+    modelPreset.disabled = !modelSelectionAvailable || modelSelectionInFlight || processing;
     if (!catalog.selectedPresetAvailable && catalog.presets.length > 0) {
       const recovery = document.createElement("option");
       recovery.value = "";
       recovery.textContent = "Select an available qualified model";
       recovery.selected = true;
       modelPreset.prepend(recovery);
-      modelPreset.disabled = processing;
+      modelPreset.disabled = modelSelectionInFlight || processing;
     }
   } catch (error) {
     const commandError = normalizeCommandError(error);
     selectedModelLabel = null;
-    modelCatalogReady = false;
+    modelSelectionAvailable = false;
     modelPreset.replaceChildren();
     const option = document.createElement("option");
     option.textContent = commandError.message;
@@ -403,7 +404,7 @@ function formatModelSize(bytes: number): string {
 async function selectModelPreset(): Promise<void> {
   const presetId = modelPreset.value;
   if (!presetId || processing) return;
-  modelPreset.disabled = true;
+  modelSelectionInFlight = true;
   runtimeReady = false;
   syncPrimaryAction();
   try {
@@ -413,7 +414,8 @@ async function selectModelPreset(): Promise<void> {
     runtimeDetail.textContent = normalizeCommandError(error).message;
   } finally {
     await refreshRuntimeStatus();
-    modelPreset.disabled = !modelCatalogReady || processing;
+    modelSelectionInFlight = false;
+    syncPrimaryAction();
   }
 }
 

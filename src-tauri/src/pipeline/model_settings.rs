@@ -5,9 +5,11 @@ use crate::pipeline::contracts::{
 use crate::pipeline::model::{InstalledModelDescriptor, OllamaRuntime, QwenTokenizerFamily};
 use crate::pipeline::qwen_tokenizer::{tokenizer_version, QWEN3_TOKENIZER_VERSION};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use tempfile::Builder;
+#[cfg(test)]
 use uuid::Uuid;
 
 const SETTINGS_VERSION: u32 = 1;
@@ -141,31 +143,30 @@ pub fn save_selected_preset(
         .ok_or_else(|| config_failure("Model settings path is invalid"))?;
     fs::create_dir_all(parent)
         .map_err(|_| config_failure("Model settings directory could not be created"))?;
-    let temporary = parent.join(format!(".model-settings-{}.tmp", Uuid::new_v4()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    let mut temporary = Builder::new()
+        .prefix(".model-settings-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|_| config_failure("Temporary model settings could not be created"))?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = (|| {
-        let mut file = options
-            .open(&temporary)
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|_| config_failure("Temporary model settings could not be created"))?;
-        serde_json::to_writer(&mut file, &settings)
-            .map_err(|_| config_failure("Model settings could not be serialized"))?;
-        file.write_all(b"\n")
-            .and_then(|_| file.sync_all())
-            .map_err(|_| config_failure("Model settings could not be persisted"))?;
-        fs::rename(&temporary, path)
-            .map_err(|_| config_failure("Model settings could not be committed"))?;
-        Ok(settings.clone())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
     }
-    result
+    serde_json::to_writer(temporary.as_file_mut(), &settings)
+        .map_err(|_| config_failure("Model settings could not be serialized"))?;
+    temporary
+        .as_file_mut()
+        .write_all(b"\n")
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|_| config_failure("Model settings could not be persisted"))?;
+    temporary
+        .persist(path)
+        .map_err(|_| config_failure("Model settings could not be committed"))?;
+    Ok(settings)
 }
 
 pub fn catalog(path: &Path) -> Result<ModelCatalog, ModelRuntimeFailure> {
@@ -649,6 +650,16 @@ mod tests {
         assert_eq!(load_settings(&path).unwrap(), ModelSettings::default());
         let saved = save_selected_preset(&path, DEFAULT_PRESET_ID).unwrap();
         assert_eq!(load_settings(&path).unwrap(), saved);
+        let replaced = save_selected_preset(&path, "replacement-qualified-preset").unwrap();
+        assert_eq!(load_settings(&path).unwrap(), replaced);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         fs::write(&path, b"{\"version\":1,\"selectedPresetId\":false}").unwrap();
         assert_eq!(
             load_settings(&path).unwrap_err().code,
