@@ -80,14 +80,17 @@ model profile, yet history still advertised continuation and desktop admission
 could construct the current preset before later failing. Those model-artifact
 checkpoints are now non-continuable without a snapshot and are rejected before
 worker admission; pre-model checkpoints may still select the current qualified
-runtime. Separately, an Ollama tag can be repointed after stage health succeeds.
+runtime. A reconstructed snapshot runtime is also health-checked before a
+continuation worker is spawned or a retry child is created, so an unavailable or
+repointed model leaves the durable checkpoint, events and retry lineage
+unchanged. Separately, an Ollama tag can be repointed after stage health succeeds.
 The native adapter therefore re-reads authenticated `/api/tags` after each
 successful `/api/chat` and rejects the generated output before parsing when the
 tag no longer resolves to the admitted digest. This adds one metadata request
 per successful model call; request counts in the corpus tables remain model-call
 counts, not discovery or digest-check calls.
 
-The local all-target gate passes with 295 library
+The local all-target gate passes with 296 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
