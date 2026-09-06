@@ -1139,6 +1139,20 @@ and exit explicitly terminate/reap the owned child. A port collision, early
 exit, startup timeout, changed alias or failed reap never admits generated
 output.
 
+The qualified 30B Ollama profile and the direct Jack profile cannot coexist in
+the development machine's GPU memory. Before starting a direct profile, the app
+uses the bounded local Ollama API to identify resident models and requests
+immediate unload only for an exact digest admitted by this application's Ollama
+profile registry. It confirms the matching digest is no longer resident before
+spawning llama.cpp. It never unloads an unrecognized digest or broadens the
+operation by model-name resemblance. An unavailable Ollama service is not a
+direct-runtime dependency; a reachable service that refuses or fails to release
+an admitted resident profile blocks direct startup rather than falling back to
+CPU or another model. Conversely, selecting an Ollama profile clears the owned
+llama.cpp runtime cache; a live run retains its own runtime reference until it
+finishes. The model picker describes that switching runtimes releases the
+previous local runner.
+
 Direct requests use llama.cpp `POST /completion`, not the GGUF's embedded chat
 template and not its OpenAI-compatible chat route. The app renders one pinned,
 minimal Qwen ChatML sequence containing only the existing system and user
@@ -1205,10 +1219,13 @@ arguments, shell-free execution,
 random authentication, loopback/redirect/proxy rejection, startup timeout and
 early exit, exact prompt rendering and token admission on both sides, schema and
 usage parsing, truncation rejection, child sharing and cleanup, runtime-kind
-snapshot reload and unavailable-source catalog behavior. Guard-shaped tests
+snapshot reload, exact-digest Ollama release and unavailable-source catalog
+behavior. Guard-shaped tests
 exercise a good regular GGUF versus a replaced file, an admitted executable
 versus one-byte drift, a fitting prompt versus one token over, and a matching
-alias versus a forged response. Existing exactness, provenance, fail-closed,
+alias versus a forged response. The release guard exercises an exact admitted
+digest, a same-name/different-digest resident model and an unrelated resident
+model; only the first is addressed. Existing exactness, provenance, fail-closed,
 NARA, DOL, clippy and formatting gates remain unchanged.
 
 #### Explicit non-scope and deployment boundary
