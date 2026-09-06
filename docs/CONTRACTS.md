@@ -935,8 +935,10 @@ the explicit model-settings directory. Product startup creates or tightens its
 app-data/model-settings directory to effective-user-owned mode `0700` before
 database, settings or runtime use; a foreign owner or non-directory fails
 startup. Runtime construction canonicalizes that directory and rejects any
-ancestor that is not a directory or is group/other writable without the sticky
-bit. Beneath that admitted location the application creates one dedicated
+ancestor that is not a directory. A group/other-writable ancestor is accepted
+only when it has the sticky bit and is owned by root or the effective user;
+sticky storage controlled by another unprivileged account is not trusted.
+Beneath that admitted location the application creates one dedicated
 runtime root with mode `0700`; an existing root is accepted only when it is a
 real directory owned by the effective user with exactly mode `0700`. A symlink,
 foreign owner, broader mode, missing/untrusted ancestor or metadata failure is
