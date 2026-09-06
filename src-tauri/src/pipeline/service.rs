@@ -42,6 +42,8 @@ pub enum DocumentServiceError {
     Retry(#[from] RetryPipelineError),
     #[error(transparent)]
     Continuation(#[from] ContinuationPipelineError),
+    #[error(transparent)]
+    ModelProfile(#[from] StoreError),
     #[error("Pipeline cancellation was observed at a safe work boundary")]
     CancellationObserved,
     #[error("Pipeline run {0} requires the local model runtime for background processing")]
@@ -59,6 +61,8 @@ impl DocumentServiceError {
             Self::Summary(error) => error.code(),
             Self::Retry(error) => error.code(),
             Self::Continuation(error) => error.code(),
+            Self::ModelProfile(StoreError::ModelProfileMismatch { .. }) => "MODEL_PROFILE_MISMATCH",
+            Self::ModelProfile(_) => "PIPELINE_STORE_ERROR",
             Self::CancellationObserved => "PIPELINE_CANCELLATION_OBSERVED",
             Self::RuntimeRequiredForBackground(_) => "BACKGROUND_RUNTIME_REQUIRED",
         }
@@ -106,6 +110,7 @@ impl DocumentServiceError {
             | Self::Continuation(ContinuationPipelineError::Store(error)) => {
                 is_stale_store_error(error)
             }
+            Self::ModelProfile(error) => is_stale_store_error(error),
             Self::Continuation(ContinuationPipelineError::StaleState { .. }) => true,
             _ => false,
         }
@@ -455,6 +460,7 @@ pub fn process_ingested_to_summary_with_delivery_policy(
     normalize_document(conn, components.normalizer, run_id)?;
     structure_document(conn, components.interpreter, run_id)?;
     chunk_document(conn, components.chunker, run_id)?;
+    ensure_runtime_profile(conn, run_id, components.runtime)?;
     analyze_chunked_document_controlled_with_delivery(
         conn,
         components.runtime,
@@ -532,6 +538,7 @@ fn process_chunked_to_summary_controlled(
     control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     cancellation_checkpoint(control)?;
+    ensure_runtime_profile(conn, run_id, runtime)?;
     analyze_chunked_document_controlled(conn, runtime, run_id, control)?;
     process_analyzed_to_summary_controlled(conn, run_id, runtime, control)
 }
@@ -543,6 +550,7 @@ fn process_analyzed_to_summary_controlled(
     control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     cancellation_checkpoint(control)?;
+    ensure_runtime_profile(conn, run_id, runtime)?;
     synthesize_analyzed_document_controlled(conn, runtime, run_id, control)?;
     process_synthesized_to_summary_controlled(conn, run_id, runtime, control)
 }
@@ -554,9 +562,20 @@ fn process_synthesized_to_summary_controlled(
     control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     cancellation_checkpoint(control)?;
+    ensure_runtime_profile(conn, run_id, runtime)?;
     verify_synthesized_document_controlled(conn, runtime, run_id, control)?;
     cancellation_checkpoint(control)?;
     Ok(complete_verified_document(conn, run_id)?)
+}
+
+fn ensure_runtime_profile(
+    conn: &Connection,
+    run_id: &str,
+    runtime: &dyn ModelRuntime,
+) -> Result<(), DocumentServiceError> {
+    let snapshot = runtime.profile_snapshot();
+    db::ensure_run_model_profile(conn, run_id, snapshot.as_ref())?;
+    Ok(())
 }
 
 fn cancellation_checkpoint(control: &dyn ExecutionControl) -> Result<(), DocumentServiceError> {
@@ -571,8 +590,8 @@ mod tests {
     use super::*;
     use crate::pipeline::chunk::DeterministicDocumentChunker;
     use crate::pipeline::contracts::{
-        ModelRequest, ModelResponse, ModelRuntimeFailure, PipelineStage, PipelineState,
-        PipelineWarning, RetryCheckpoint,
+        ModelProfileSnapshot, ModelRequest, ModelResponse, ModelRuntimeFailure,
+        ModelStageProfileSnapshot, PipelineStage, PipelineState, PipelineWarning, RetryCheckpoint,
     };
     use crate::pipeline::db::{
         get_analyzed_document, get_chunked_document, get_citation_artifact, get_document,
@@ -632,6 +651,27 @@ mod tests {
 
     struct FixtureRuntime;
 
+    fn fixture_model_profile() -> ModelProfileSnapshot {
+        ModelProfileSnapshot {
+            version: 1,
+            preset_id: "fixture-full-v1".to_string(),
+            analysis: ModelStageProfileSnapshot {
+                profile_id: "fixture-analysis-v1".to_string(),
+                model_name: "fixture-model".to_string(),
+                model_digest: "fixture-analysis-digest".to_string(),
+                context_tokens: 8_192,
+                tokenizer_version: "fixture-tokenizer-v1".to_string(),
+            },
+            verification: ModelStageProfileSnapshot {
+                profile_id: "fixture-verification-v1".to_string(),
+                model_name: "fixture-model".to_string(),
+                model_digest: "fixture-verification-digest".to_string(),
+                context_tokens: 8_192,
+                tokenizer_version: "fixture-tokenizer-v1".to_string(),
+            },
+        }
+    }
+
     impl ModelRuntime for FixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             Ok(ModelResponse {
@@ -652,6 +692,10 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_model_profile())
         }
     }
 
@@ -691,6 +735,10 @@ mod tests {
         fn model_id(&self) -> &str {
             "fixture-model"
         }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_model_profile())
+        }
     }
 
     struct RecoverableFailureRuntime;
@@ -715,6 +763,10 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_model_profile())
         }
     }
 
@@ -1526,6 +1578,16 @@ mod tests {
                     .expect("child lineage should load")
                     .expect("child lineage should exist"),
                 lineage
+            );
+            assert_eq!(
+                db::get_run_model_profile(&conn, &parent.run_id)
+                    .expect("parent profile should load"),
+                Some(fixture_model_profile())
+            );
+            assert_eq!(
+                db::get_run_model_profile(&conn, &completed.run_id)
+                    .expect("retry profile should load"),
+                Some(fixture_model_profile())
             );
 
             let completed_events =
