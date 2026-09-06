@@ -892,7 +892,10 @@ admitted for direct GGUF execution. Post-load metadata checks remain defense in
 depth, not the mechanism that prevents mutable bytes from reaching the loader.
 
 The child binds a fresh exact-loopback port with an unpredictable per-process
-bearer token and exact digest alias. It uses the qualified context, one parallel
+bearer token and exact digest alias. The token is written to an owner-private
+file inside the private runtime directory and supplied through the qualified
+server's API-key-file option; neither the token nor source text appears in child
+argv. It uses the qualified context, one parallel
 slot, reasoning disabled, web UI disabled, offline mode, no warmup and GPU
 layers enabled. Proxies and redirects remain disabled. Startup has one bounded
 deadline and verifies health, digest alias, active context and trained context
