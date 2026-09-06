@@ -867,9 +867,12 @@ Studio, Ollama import or a user-entered endpoint. The runtime executable is
 resolved from the deployment override or `PATH`. Because it is dynamically
 linked, the qualified runtime identity includes the executable and every
 profile-named application-local llama.cpp/ggml dependency. The app opens and
-hashes each resolved regular file, exposes required library names through a
-private directory of inherited `/proc/self/fd` descriptors, and launches the
-descriptor-bound executable without a shell. The parent keeps `CLOEXEC` set;
+hashes each resolved regular file, copies every verified executable and library
+into an anonymous sealed file that cannot be written, grown or shrunk, exposes
+required library names through a private directory of inherited
+`/proc/self/fd` descriptors, and launches the sealed descriptor-bound
+executable without a shell. Qualification never executes or loads bytes from a
+mutable source descriptor after its digest check. The parent keeps `CLOEXEC` set;
 only the forked llama child clears it immediately before `exec`, so another
 concurrent child cannot inherit the model or runtime bundle. Path replacement
 after admission cannot select different model, executable or application-local
@@ -883,13 +886,18 @@ slot, reasoning disabled, web UI disabled, offline mode, no warmup and GPU
 layers enabled. Proxies and redirects remain disabled. Startup has one bounded
 deadline and verifies health, digest alias, active context and trained context
 before inference; it also rechecks the retained model descriptor after load.
-Stage-boundary health repeats both the file identity and loaded alias/context
-checks. Child output is discarded without persisting prompts or source text. One
-child is shared for the exact model/context/runtime-bundle
-identity; a different direct identity cannot coexist. Selection change and app
-exit clear the owned cache, while an active run retains its reference until it
-finishes. Every child is terminated and reaped on ownership loss, startup
-failure or identity failure.
+Stage-boundary health repeats the registered model path identity, retained
+descriptor identity and loaded alias/context checks. Cache reuse first repeats
+the registered-path and retained-descriptor checks; deleting, unlinking or
+replacing a registered path can therefore never revive a cached ghost runtime.
+Child output is discarded without persisting prompts or source text. One child
+is shared for the exact model/context/runtime-bundle identity; a different
+direct identity cannot coexist. Selection change and app exit clear the owned
+cache, while an active run retains its reference until it finishes. Any model
+identity failure atomically makes the cache entry unavailable and terminates
+and reaps the owned child even if another reference still exists. Every child
+is terminated and reaped on ownership loss, startup failure or identity
+failure.
 
 Direct generation uses llama.cpp `POST /completion` with a pinned minimal Qwen
 ChatML token sequence containing only the existing system and user messages plus
@@ -1190,8 +1198,10 @@ and `libggml-cuda.so.0`
 Qualification applies only to these exact model and runtime bytes.
 
 Direct-runtime tests cover settings migration and bounds, duplicate digest
-registration, regular/symlink/replaced files, exact and drifted runtime manifest
-members, descriptor-backed library names, shell-free loopback launch, private
+registration, regular/symlink/replaced files, cached registration deletion and
+replacement, exact and drifted runtime manifest members, sealed immutable
+runtime bytes, descriptor-backed library names, stale-child termination and
+eviction, shell-free loopback launch, private
 authentication, exact alias/context checks, prompt-token admission on both
 sides, control-token injection isolation, truncation, mismatched accounting and
 malformed response rejection, stage snapshot reload, cache identity and
