@@ -335,7 +335,7 @@ impl OllamaRuntime {
                 )
             })?;
         if !response.status().is_success() {
-            return Err(rejected_response(response.status()));
+            return Err(rejected_model_metadata(response.status()));
         }
         let shown: ShowResponse = decode_bounded_json(response)?;
         Ok(model_descriptor(model, shown))
@@ -371,7 +371,7 @@ impl OllamaRuntime {
                 )
             })?;
         if !response.status().is_success() {
-            return Err(rejected_response(response.status()));
+            return Err(rejected_model_metadata(response.status()));
         }
         let shown: ShowResponse = decode_bounded_json_with_limit(
             response,
@@ -970,6 +970,18 @@ fn rejected_response(status: StatusCode) -> ModelRuntimeFailure {
     )
 }
 
+fn rejected_model_metadata(status: StatusCode) -> ModelRuntimeFailure {
+    if status == StatusCode::NOT_FOUND {
+        runtime_failure(
+            "MODEL_NOT_AVAILABLE",
+            "Configured local model is not currently available",
+            true,
+        )
+    } else {
+        rejected_response(status)
+    }
+}
+
 fn runtime_failure(
     code: impl Into<String>,
     message: impl Into<String>,
@@ -1477,6 +1489,40 @@ mod tests {
         (format!("http://{address}/"), handle)
     }
 
+    fn health_missing_show_server() -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let handle = thread::spawn(move || {
+            let (mut tags, _) = listener.accept().expect("tags request should arrive");
+            let headers = read_headers(&mut tags);
+            assert!(headers.starts_with("GET /api/tags HTTP/1.1"));
+            write_json_response(
+                &mut tags,
+                "200 OK",
+                &serde_json::json!({
+                    "models": [{
+                        "name": "fixture-model",
+                        "digest": "qualified-digest",
+                        "size": 12345,
+                        "details": {"family": "qwen3"}
+                    }]
+                }),
+            );
+
+            let (mut show, _) = listener.accept().expect("show request should arrive");
+            let request = read_json_request(&mut show);
+            assert_eq!(request["model"], "fixture-model");
+            write_json_response(
+                &mut show,
+                "404 Not Found",
+                &serde_json::json!({"error": "model no longer exists"}),
+            );
+        });
+        (format!("http://{address}/"), handle)
+    }
+
     fn read_headers(stream: &mut TcpStream) -> String {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 1024];
@@ -1627,6 +1673,20 @@ mod tests {
         assert_eq!(changed.code, "MODEL_PROFILE_STALE");
         assert!(changed.recoverable);
         assert!(changed.request_attempts.is_empty());
+    }
+
+    #[test]
+    fn stage_health_treats_model_removal_during_metadata_lookup_as_retryable() {
+        let (base_url, server) = health_missing_show_server();
+        let missing = digest_guard_runtime(&base_url)
+            .health()
+            .expect_err("a model removed after tags must reject the stage boundary");
+        server.join().expect("missing-model server should finish");
+
+        assert_eq!(missing.code, "MODEL_NOT_AVAILABLE");
+        assert!(missing.recoverable);
+        assert!(missing.request_attempts.is_empty());
+        assert!(!rejected_model_metadata(StatusCode::UNAUTHORIZED).recoverable);
     }
 
     #[test]

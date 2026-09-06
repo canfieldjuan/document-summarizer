@@ -253,22 +253,21 @@ function syncPrimaryAction(): void {
   }
 
   if (retrySourceRun) {
-    retryButton.disabled = !runtimeReady || processing;
+    retryButton.disabled = processing;
     retryHint.textContent = processing
       ? "Creating a separate retry attempt…"
       : runtimeReady
         ? "A new attempt will reuse the durable document identity. This failed record stays unchanged."
-        : "Start Ollama before retrying this document.";
+        : "Retry will check this run's saved model profile independently of the current selection.";
   }
 
   if (continuationRun) {
-    const runtimeAvailable = !continuationRun.continuationRequiresRuntime || runtimeReady;
-    continueButton.disabled = !runtimeAvailable || processing;
+    continueButton.disabled = processing;
     continueHint.textContent = processing
       ? "Continuing from the durable checkpoint…"
-      : runtimeAvailable
-        ? `Continue this run from ${stateLabel(continuationRun.state).toLowerCase()} without repeating completed stages.`
-        : "Start Ollama before continuing this checkpoint.";
+      : continuationRun.continuationRequiresRuntime && !runtimeReady
+        ? "Continue will check this run's saved model profile before changing the checkpoint."
+        : `Continue this run from ${stateLabel(continuationRun.state).toLowerCase()} without repeating completed stages.`;
   }
 
   cancelButton.hidden = !processing;
@@ -870,7 +869,7 @@ async function selectAndSummarize(): Promise<void> {
 
 async function retrySelectedRun(): Promise<void> {
   const source = retrySourceRun;
-  if (!source || !source.canRetry || !runtimeReady || processing) {
+  if (!source || !source.canRetry || processing) {
     return;
   }
 
@@ -908,9 +907,7 @@ async function retrySelectedRun(): Promise<void> {
 
 async function continueSelectedRun(): Promise<void> {
   const source = continuationRun;
-  const runtimeAvailable = source
-    && (!source.continuationRequiresRuntime || runtimeReady);
-  if (!source || !source.canContinue || !runtimeAvailable || processing) {
+  if (!source || !source.canContinue || processing) {
     return;
   }
 
