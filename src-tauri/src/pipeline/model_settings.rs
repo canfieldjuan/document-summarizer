@@ -3,8 +3,8 @@ use crate::pipeline::contracts::{
     ModelRuntimeKind, ModelStageProfileSnapshot, PipelineStage,
 };
 use crate::pipeline::llama_cpp::{
-    current_regular_file_identity, inspect_regular_file, qualified_runtime_available,
-    shutdown_managed_runtimes, FileIdentity, GgufRuntimeConfig, LlamaCppRuntime,
+    current_regular_file_identity, inspect_regular_file, prepare_for_ollama_runtime,
+    qualified_runtime_available, FileIdentity, GgufRuntimeConfig, LlamaCppRuntime,
     QualifiedRuntimeFile,
 };
 use crate::pipeline::model::{InstalledModelDescriptor, OllamaRuntime, QwenTokenizerFamily};
@@ -974,7 +974,7 @@ fn stage_runtime(
 ) -> Result<StageRuntime, ModelRuntimeFailure> {
     match profile.runtime_kind {
         ModelRuntimeKind::OllamaNative => {
-            shutdown_managed_runtimes();
+            prepare_for_ollama_runtime()?;
             Ok(StageRuntime::Ollama(
                 OllamaRuntime::from_environment_profile(
                     &snapshot.model_name,

@@ -67,6 +67,7 @@ pub struct LlamaCppRuntime {
     model_id: String,
     context_tokens: u32,
     prompt_framing: PromptFraming,
+    inference_slot: Mutex<()>,
     model_identity_guard: Option<ModelIdentityGuard>,
     cache_key: String,
     owner: Option<ServerOwner>,
@@ -394,6 +395,7 @@ impl LlamaCppRuntime {
             model_id: config.model_digest,
             context_tokens: config.context_tokens,
             prompt_framing,
+            inference_slot: Mutex::new(()),
             model_identity_guard: Some(model_identity_guard),
             cache_key,
             owner: Some(ServerOwner {
@@ -422,6 +424,7 @@ impl LlamaCppRuntime {
                 system_close_user_open: Vec::new(),
                 user_close_assistant_open: Vec::new(),
             },
+            inference_slot: Mutex::new(()),
             model_identity_guard: None,
             cache_key: String::new(),
             owner: None,
@@ -556,10 +559,8 @@ impl LlamaCppRuntime {
 fn evict_idle_runtimes(
     runtimes: &mut HashMap<String, Arc<LlamaCppRuntime>>,
 ) -> Result<(), ModelRuntimeFailure> {
-    if runtimes
-        .values()
-        .any(|runtime| Arc::strong_count(runtime) > 1)
-    {
+    prune_idle_runtimes(runtimes);
+    if !runtimes.is_empty() {
         return Err(failure(
             "MODEL_RUNTIME_BUSY",
             "A different direct GGUF runtime is still active",
@@ -570,8 +571,19 @@ fn evict_idle_runtimes(
     Ok(())
 }
 
+fn prune_idle_runtimes(runtimes: &mut HashMap<String, Arc<LlamaCppRuntime>>) {
+    runtimes.retain(|_, runtime| Arc::strong_count(runtime) > 1);
+}
+
 impl ModelRuntime for LlamaCppRuntime {
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+        let _inference_slot = self.inference_slot.lock().map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Qualified llama-server inference slot is unavailable",
+                true,
+            )
+        })?;
         let started = Instant::now();
         let mut observed_usage = ModelTokenUsage::default();
         let result = (|| {
@@ -797,6 +809,35 @@ pub fn shutdown_managed_runtimes() {
             runtimes.clear();
         }
     }
+}
+
+pub fn prune_idle_managed_runtimes() -> Result<(), ModelRuntimeFailure> {
+    let Some(runtimes) = RUNTIMES.get() else {
+        return Ok(());
+    };
+    let mut runtimes = runtimes.lock().map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Runtime registry is unavailable",
+            true,
+        )
+    })?;
+    prune_idle_runtimes(&mut runtimes);
+    Ok(())
+}
+
+pub fn prepare_for_ollama_runtime() -> Result<(), ModelRuntimeFailure> {
+    let Some(runtimes) = RUNTIMES.get() else {
+        return Ok(());
+    };
+    let mut runtimes = runtimes.lock().map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Runtime registry is unavailable",
+            true,
+        )
+    })?;
+    evict_idle_runtimes(&mut runtimes)
 }
 
 pub fn qualified_runtime_available(
@@ -1828,6 +1869,58 @@ mod tests {
     }
 
     #[test]
+    fn shared_child_serializes_before_any_model_request() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let runtime = Arc::new(LlamaCppRuntime::for_test(
+            format!("http://{address}"),
+            "secret".to_string(),
+        ));
+        let worker_runtime = Arc::clone(&runtime);
+        let slot = runtime.inference_slot.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            worker_runtime.generate(&ModelRequest {
+                stage: PipelineStage::Analyze,
+                ordinal: 0,
+                system_prompt: "system".to_string(),
+                user_prompt: "user".to_string(),
+                seed: 42,
+                max_output_tokens: 1,
+                output_format: Default::default(),
+            })
+        });
+        started_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        drop(slot);
+        listener.set_nonblocking(false).unwrap();
+        for body in [
+            r#"{"tokens":[1]}"#,
+            r#"{"tokens":[2]}"#,
+            r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"word"}"#,
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 16 * 1024];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        }
+        assert_eq!(worker.join().unwrap().unwrap().text, "ok");
+    }
+
+    #[test]
     fn regular_file_hashing_rejects_final_symlinks_and_detects_drift() {
         let directory = tempfile::tempdir().unwrap();
         let model = directory.path().join("model.gguf");
@@ -2142,8 +2235,12 @@ mod tests {
         );
         assert_eq!(runtimes.len(), 1);
 
+        prune_idle_runtimes(&mut runtimes);
+        assert_eq!(runtimes.len(), 1);
+        assert!(Arc::ptr_eq(runtimes.get("old").unwrap(), &cached));
+
         drop(cached);
-        evict_idle_runtimes(&mut runtimes).unwrap();
+        prune_idle_runtimes(&mut runtimes);
         assert!(runtimes.is_empty());
     }
 

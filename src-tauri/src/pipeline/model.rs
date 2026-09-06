@@ -321,6 +321,16 @@ impl OllamaRuntime {
         }
         let models = decode_bounded_json::<ModelsResponse>(initial)?.models;
         validate_running_model_record_count(models.len())?;
+        if models
+            .iter()
+            .any(|model| !is_canonical_ollama_digest(&model.digest))
+        {
+            return Err(runtime_failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Ollama runner residence included an unverifiable model digest",
+                true,
+            ));
+        }
         if models.iter().any(|model| {
             admitted_digests
                 .iter()
@@ -821,6 +831,13 @@ fn validate_running_model_record_count(count: usize) -> Result<(), ModelRuntimeF
         ));
     }
     Ok(())
+}
+
+fn is_canonical_ollama_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn invalid_stream_response() -> ModelRuntimeFailure {
@@ -3205,6 +3222,33 @@ mod tests {
             "MODEL_RUNTIME_BUSY"
         );
         assert!(!server.join().expect("residence server should finish"));
+    }
+
+    #[test]
+    fn runner_residence_check_rejects_missing_and_malformed_digests() {
+        assert!(!is_canonical_ollama_digest(&"a".repeat(63)));
+        assert!(is_canonical_ollama_digest(&"a".repeat(64)));
+        assert!(!is_canonical_ollama_digest(&"A".repeat(64)));
+        assert!(!is_canonical_ollama_digest(&"g".repeat(64)));
+        assert!(!is_canonical_ollama_digest(&"a".repeat(65)));
+
+        for records in [
+            serde_json::json!([{"name": "unverifiable"}]),
+            serde_json::json!([{"name": "unverifiable", "digest": "A".repeat(64)}]),
+        ] {
+            let (base_url, server) = resident_models_server(records);
+            let runtime =
+                OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+                    .expect("loopback runtime should configure");
+            assert_eq!(
+                runtime
+                    .ensure_models_not_resident_by_digest(&[])
+                    .unwrap_err()
+                    .code,
+                "MODEL_RUNTIME_UNAVAILABLE"
+            );
+            assert!(!server.join().expect("residence server should finish"));
+        }
     }
 
     #[test]

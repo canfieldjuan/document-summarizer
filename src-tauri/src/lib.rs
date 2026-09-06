@@ -16,7 +16,7 @@ use pipeline::contracts::{
 };
 use pipeline::db::{init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, IngestError};
-use pipeline::llama_cpp::shutdown_managed_runtimes;
+use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
 use pipeline::model_settings::{
     catalog as load_model_catalog, register_gguf, save_selected_preset,
     settings_path as model_settings_path, ModelCatalog,
@@ -278,8 +278,8 @@ async fn select_model_preset(
         if current.selected_preset_id == preset_id {
             return Ok(current);
         }
+        prune_idle_managed_runtimes().map_err(CommandError::from)?;
         save_selected_preset(&settings_path, &preset_id).map_err(CommandError::from)?;
-        shutdown_managed_runtimes();
         load_model_catalog(&settings_path).map_err(CommandError::from)
     })
     .await
