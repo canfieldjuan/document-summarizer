@@ -145,11 +145,7 @@ impl LlamaCppRuntime {
             return Ok(runtime);
         }
         if !runtimes.is_empty() {
-            return Err(failure(
-                "MODEL_RUNTIME_BUSY",
-                "A different direct GGUF runtime is still active",
-                true,
-            ));
+            evict_idle_runtimes(&mut runtimes)?;
         }
         let runtime = Arc::new(Self::start(config, cache_key.clone())?);
         runtimes.insert(cache_key, Arc::clone(&runtime));
@@ -466,6 +462,23 @@ impl LlamaCppRuntime {
             .map_err(|_| failure("MODEL_RUNTIME_UNAVAILABLE", "GGUF generation failed", true))?;
         decode_bounded(response, MAX_RESPONSE_BYTES)
     }
+}
+
+fn evict_idle_runtimes(
+    runtimes: &mut HashMap<String, Arc<LlamaCppRuntime>>,
+) -> Result<(), ModelRuntimeFailure> {
+    if runtimes
+        .values()
+        .any(|runtime| Arc::strong_count(runtime) > 1)
+    {
+        return Err(failure(
+            "MODEL_RUNTIME_BUSY",
+            "A different direct GGUF runtime is still active",
+            true,
+        ));
+    }
+    runtimes.clear();
+    Ok(())
 }
 
 impl ModelRuntime for LlamaCppRuntime {
@@ -1574,6 +1587,24 @@ mod tests {
         let mut changed_identity = config;
         changed_identity.expected_file_identity.inode += 1;
         assert_ne!(runtime_cache_key(&changed_identity).unwrap(), exact);
+    }
+
+    #[test]
+    fn mismatched_cache_evicts_only_idle_runtime_owners() {
+        let cached = Arc::new(LlamaCppRuntime::for_test(
+            "http://127.0.0.1:1".to_string(),
+            "secret".to_string(),
+        ));
+        let mut runtimes = HashMap::from([("old".to_string(), Arc::clone(&cached))]);
+        assert_eq!(
+            evict_idle_runtimes(&mut runtimes).unwrap_err().code,
+            "MODEL_RUNTIME_BUSY"
+        );
+        assert_eq!(runtimes.len(), 1);
+
+        drop(cached);
+        evict_idle_runtimes(&mut runtimes).unwrap();
+        assert!(runtimes.is_empty());
     }
 
     #[test]

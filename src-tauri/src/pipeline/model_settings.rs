@@ -859,7 +859,17 @@ impl QwenProfileRuntime {
         }
         let analysis_profile = admitted_snapshot_profile(&snapshot.analysis, false)?;
         let verification_profile = admitted_snapshot_profile(&snapshot.verification, true)?;
-        let settings = load_settings(settings_path)?;
+        let requires_gguf_registration = [
+            snapshot.analysis.runtime_kind,
+            snapshot.verification.runtime_kind,
+        ]
+        .into_iter()
+        .any(|runtime_kind| runtime_kind == ModelRuntimeKind::LlamaCppGguf);
+        let settings = if requires_gguf_registration {
+            load_settings(settings_path)?
+        } else {
+            ModelSettings::default()
+        };
         let profile_lease = RuntimeProfileLease::acquire(snapshot)?;
         Self::build_product(
             snapshot.clone(),
@@ -1622,6 +1632,18 @@ mod tests {
                 .expect("profile drift must fail before inference");
             assert_eq!(error.code, "MODEL_CONFIG_INVALID");
         }
+    }
+
+    #[test]
+    fn ollama_snapshot_reconstruction_ignores_malformed_gguf_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = settings_path(directory.path());
+        fs::write(&settings, b"not-json").unwrap();
+        let snapshot = qualified_snapshot();
+
+        let runtime = runtime_from_snapshot(&snapshot, &settings)
+            .expect("Ollama-only snapshots must not read GGUF settings");
+        assert_eq!(runtime.profile_snapshot(), Some(snapshot));
     }
 
     #[test]
