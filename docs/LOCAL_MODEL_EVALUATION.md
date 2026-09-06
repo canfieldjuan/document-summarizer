@@ -152,7 +152,19 @@ snapshotless product runtime persists nothing, while the legacy snapshotless
 ingestion path remains available only to non-product tests and pre-model
 checkpoints. Contract commit `75c7990` precedes implementation commit `93853d2`.
 
-The local all-target gate passes with 305 library
+The following exact-head review found two more recovery classification and UI
+gaps. If a snapshotted tag disappeared after `/api/tags` but before
+`/api/show`, the generic HTTP 404 mapping made the otherwise temporary outage
+terminal. Both profile and tokenizer metadata lookups now return recoverable
+`MODEL_NOT_AVAILABLE` for not-found while preserving authentication and other
+HTTP classifications. The selected global runtime status also disabled retry
+and runtime-required continuation even though those commands reconstruct and
+preflight the historical run's own snapshot. Current-preset readiness now gates
+new PDF selection only; history recovery remains actionable and lets the
+backend snapshot preflight accept or reject without prior mutation. Contract
+commit `8e03e79` precedes implementation commit `298c436`.
+
+The local all-target gate passes with 306 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
