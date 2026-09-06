@@ -17,7 +17,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -156,6 +156,8 @@ impl Drop for ServerOwner {
 }
 
 static RUNTIMES: OnceLock<Mutex<HashMap<String, Arc<LlamaCppRuntime>>>> = OnceLock::new();
+type RuntimeSupervisorTask = Box<dyn FnOnce() + Send + 'static>;
+static RUNTIME_SUPERVISOR: OnceLock<mpsc::Sender<RuntimeSupervisorTask>> = OnceLock::new();
 static MODEL_LEASE_BREAK_REQUESTED: AtomicBool = AtomicBool::new(false);
 static MODEL_LEASE_HANDLER_INSTALLED: OnceLock<bool> = OnceLock::new();
 
@@ -191,6 +193,13 @@ impl LlamaCppRuntime {
     }
 
     fn start(config: GgufRuntimeConfig, cache_key: String) -> Result<Self, ModelRuntimeFailure> {
+        run_on_runtime_supervisor(move || Self::start_on_supervisor(config, cache_key))?
+    }
+
+    fn start_on_supervisor(
+        config: GgufRuntimeConfig,
+        cache_key: String,
+    ) -> Result<Self, ModelRuntimeFailure> {
         validate_digest(&config.model_digest)?;
         validate_digest(&config.expected_server_digest)?;
         if config.context_tokens == 0 {
@@ -560,6 +569,42 @@ impl LlamaCppRuntime {
             .map_err(|_| failure("MODEL_RUNTIME_UNAVAILABLE", "GGUF generation failed", true))?;
         decode_bounded(response, MAX_RESPONSE_BYTES)
     }
+}
+
+fn run_on_runtime_supervisor<T: Send + 'static>(
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ModelRuntimeFailure> {
+    let supervisor = RUNTIME_SUPERVISOR.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<RuntimeSupervisorTask>();
+        let _ = thread::Builder::new()
+            .name("doc-sum-llama-supervisor".to_string())
+            .spawn(move || {
+                for task in receiver {
+                    task();
+                }
+            });
+        sender
+    });
+    let (result_sender, result_receiver) = mpsc::sync_channel(1);
+    supervisor
+        .send(Box::new(move || {
+            let result = task();
+            let _ = result_sender.send(result);
+        }))
+        .map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Qualified llama-server supervisor is unavailable",
+                true,
+            )
+        })?;
+    result_receiver.recv().map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Qualified llama-server supervisor stopped during startup",
+            true,
+        )
+    })
 }
 
 fn evict_idle_runtimes(
@@ -2303,6 +2348,44 @@ mod tests {
             open_regular_nofollow(&fifo).unwrap_err().code,
             "MODEL_CONFIG_INVALID"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn durable_supervisor_outlives_the_transient_runtime_requester() {
+        use std::os::unix::process::CommandExt;
+
+        let requester = thread::spawn(|| {
+            let requester_tid = current_thread_id();
+            let (supervisor_tid, child) = run_on_runtime_supervisor(|| {
+                let supervisor_tid = current_thread_id();
+                let expected_parent = unsafe { libc::getpid() };
+                let mut command = Command::new("/bin/sleep");
+                command.arg("30");
+                unsafe {
+                    command.pre_exec(move || {
+                        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        verify_expected_parent(expected_parent)
+                    });
+                }
+                (supervisor_tid, command.spawn())
+            })
+            .unwrap();
+            (requester_tid, supervisor_tid, child.unwrap())
+        });
+        let (requester_tid, supervisor_tid, mut child) = requester.join().unwrap();
+
+        assert_ne!(requester_tid, supervisor_tid);
+        assert_eq!(
+            run_on_runtime_supervisor(current_thread_id).unwrap(),
+            supervisor_tid
+        );
+        thread::sleep(Duration::from_millis(100));
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[cfg(unix)]
