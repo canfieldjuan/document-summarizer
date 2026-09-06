@@ -891,11 +891,14 @@ ownership ends. A filesystem without working read-lease enforcement is not
 admitted for direct GGUF execution. Post-load metadata checks remain defense in
 depth, not the mechanism that prevents mutable bytes from reaching the loader.
 
-The child binds a fresh exact-loopback port with an unpredictable per-process
-bearer token and exact digest alias. The token is written to an owner-private
-file inside the private runtime directory and supplied through the qualified
-server's API-key-file option; neither the token nor source text appears in child
-argv. It uses the qualified context, one parallel
+The child binds a Unix-domain socket inside its owner-private runtime directory
+with an unpredictable per-process bearer token and exact digest alias. The
+application retains that directory for the child's lifetime, and its HTTP
+client connects only through the socket; there is no released TCP port for a
+different local process to claim before the first credential-bearing request.
+The token is written to an owner-private file inside the same directory and
+supplied through the qualified server's API-key-file option; neither the token
+nor source text appears in child argv. It uses the qualified context, one parallel
 slot, reasoning disabled, web UI disabled, offline mode, no warmup and GPU
 layers enabled. Proxies and redirects remain disabled. Startup has one bounded
 deadline and verifies health, digest alias, active context and trained context
@@ -909,12 +912,14 @@ is shared for the exact model/context/runtime-bundle identity; a different
 direct identity cannot coexist while the cached child is actively referenced.
 When a new direct identity is admitted, map-only idle children are terminated,
 reaped and evicted before startup; actively referenced children instead produce
-the recoverable busy result. Selection change and app exit clear the owned
-cache, while an active run retains its reference until it finishes. Any model
-identity failure atomically makes the cache entry unavailable and terminates
-and reaps the owned child even if another reference still exists. Every child
-is terminated and reaped on ownership loss, startup failure or identity
-failure.
+the recoverable busy result. Cached reuse requires both unchanged registered
+identity and a live owned child. A child terminated by a lease-break signal or
+any other exit is reaped and the dead entry is evicted rather than returned as
+a usable runtime. Selection change and app exit clear the owned cache, while an
+active run retains its reference until it finishes. Any model identity failure
+atomically makes the cache entry unavailable and terminates and reaps the owned
+child even if another reference still exists. Every child is terminated and
+reaped on ownership loss, startup failure or identity failure.
 
 Direct generation uses llama.cpp `POST /completion` with a pinned minimal Qwen
 ChatML token sequence containing only the existing system and user messages plus
@@ -1230,10 +1235,11 @@ Direct-runtime tests cover settings migration and bounds, duplicate digest
 registration, regular/symlink/replaced files, cached registration deletion and
 replacement, exact and drifted runtime manifest members, sealed immutable
 runtime bytes, GGUF read-lease admission and release boundaries,
-descriptor-backed library names, stale-child termination and eviction,
+descriptor-backed library names, lease-broken/dead-child detection and eviction,
 idle-versus-active cache replacement, Ollama-only snapshot recovery with
 malformed GGUF settings, shell-free loopback launch, private
-authentication, exact alias/context checks, prompt-token admission on both
+Unix-socket authentication without TCP handoff, exact alias/context checks,
+prompt-token admission on both
 sides, control-token injection isolation, truncation, explicit output-limit and
 unknown-stop rejection, mismatched accounting and malformed response rejection,
 stage snapshot reload, cache identity and lifecycle, concurrent profile leases,
