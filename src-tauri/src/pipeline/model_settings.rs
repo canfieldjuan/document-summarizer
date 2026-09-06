@@ -5,6 +5,7 @@ use crate::pipeline::contracts::{
 use crate::pipeline::model::{InstalledModelDescriptor, OllamaRuntime, QwenTokenizerFamily};
 use crate::pipeline::qwen_tokenizer::{tokenizer_version, QWEN3_TOKENIZER_VERSION};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -206,9 +207,10 @@ fn catalog_from_descriptors(
             descriptor,
         });
     }
-    let verifier = strongest_verifier(&installed_models, profiles);
+    let preset_options = canonical_preset_options(&installed_models, profiles);
+    let verifier = strongest_verifier(&preset_options, profiles);
     let mut presets = Vec::new();
-    for option in &installed_models {
+    for option in preset_options {
         let Some(profile) = profile_for_option(option, profiles) else {
             continue;
         };
@@ -266,16 +268,28 @@ fn profile_for_option(
         .and_then(|id| profiles.iter().find(|profile| profile.profile_id == id))
 }
 
-fn strongest_verifier<'a>(
+fn canonical_preset_options<'a>(
     options: &'a [ModelOption],
+    profiles: &'static [QualifiedProfile],
+) -> Vec<&'a ModelOption> {
+    let mut seen_digests = HashSet::new();
+    options
+        .iter()
+        .filter(|option| option.descriptor.disabled_reason.is_none())
+        .filter(|option| profile_for_option(option, profiles).is_some())
+        .filter(|option| seen_digests.insert(option.descriptor.digest.clone()))
+        .collect()
+}
+
+fn strongest_verifier<'a>(
+    options: &[&'a ModelOption],
     profiles: &'static [QualifiedProfile],
 ) -> Option<&'a ModelOption> {
     options
         .iter()
-        .filter(|option| option.descriptor.disabled_reason.is_none())
         .filter_map(|option| {
             profile_for_option(option, profiles)
-                .and_then(|profile| profile.verifier_rank.map(|rank| (rank, option)))
+                .and_then(|profile| profile.verifier_rank.map(|rank| (rank, *option)))
         })
         .max_by_key(|(rank, _)| *rank)
         .map(|(_, option)| option)
@@ -621,6 +635,35 @@ mod tests {
             assert!(!catalog.selected_preset_available);
             assert!(catalog.presets.is_empty());
         }
+    }
+
+    #[test]
+    fn qualified_digest_aliases_share_one_canonical_preset_identity() {
+        let later_alias = descriptor(
+            "z-baseline:latest",
+            QUALIFIED_PROFILES[0].digest,
+            Some(QwenTokenizerFamily::Qwen3),
+            Some(262_144),
+        );
+        let canonical_alias = descriptor(
+            "a-baseline:latest",
+            QUALIFIED_PROFILES[0].digest,
+            Some(QwenTokenizerFamily::Qwen3),
+            Some(262_144),
+        );
+        let catalog = catalog_from_descriptors(
+            ModelSettings::default(),
+            vec![later_alias, canonical_alias],
+            QUALIFIED_PROFILES,
+        )
+        .expect("qualified aliases should build a catalog");
+
+        assert_eq!(catalog.installed_models.len(), 2);
+        assert_eq!(catalog.presets.len(), 1);
+        assert_eq!(catalog.presets[0].preset_id, DEFAULT_PRESET_ID);
+        assert_eq!(catalog.presets[0].analysis_model, "a-baseline:latest");
+        assert_eq!(catalog.presets[0].verification_model, "a-baseline:latest");
+        assert!(catalog.selected_preset_available);
     }
 
     #[test]
