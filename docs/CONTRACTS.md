@@ -925,18 +925,25 @@ new role. The GGUF embedded template and OpenAI-compatible chat route are not
 admitted. The projected schema is sent as `json_schema`; there is no schema
 fallback. The same server's `/tokenize` endpoint counts the exact prompt before
 inference. The counted input, output allowance and framing reserve must fit the
-qualified context. Prompt or output truncation, an empty response, malformed or
-oversized JSON, absent token accounting, or token accounting that differs from
-the admitted prompt and output ceiling fails closed. The private child, bearer
-token and startup-verified digest alias establish runtime identity; a mutable
-per-completion path string does not.
+qualified context. Prompt or output truncation, an output-limit stop, an absent
+or unknown stop reason, an empty response, malformed or oversized JSON, absent
+token accounting, or token accounting that differs from the admitted prompt
+and output ceiling fails closed. A completed response is admitted only when the
+qualified server reports an end-of-sequence or configured stopping-word stop;
+syntactically valid JSON produced exactly at `n_predict` is not evidence that
+generation completed. The private child, bearer token and startup-verified
+digest alias establish runtime identity; a mutable per-completion path string
+does not.
 
 Before direct startup, the bounded loopback Ollama API is checked for resident
 models whose digest exactly matches an Ollama profile admitted by this
-application. Only those exact digests are requested to unload, and absence is
-confirmed before llama.cpp starts. Same-name/different-digest and unrelated
-models are never targeted. An unreachable Ollama service is not a direct-runtime
-dependency; a reachable service that refuses release blocks direct startup.
+application. A matching resident digest returns a recoverable busy result; the
+operator can retry after the application's bounded Ollama keep-alive expires.
+The application does not request unload through a mutable model alias because
+the local Ollama API cannot atomically bind that name-addressed operation to the
+digest observed by `/api/ps`. Same-name/different-digest and unrelated models
+are never targeted or treated as an admitted Ollama dependency. An unreachable
+Ollama service is not a direct-runtime dependency.
 
 Discovery admits only Qwen-family architectures that the application explicitly
 supports. An installed descriptor records the exact Ollama name and digest,
@@ -1225,10 +1232,11 @@ descriptor-backed library names, stale-child termination and eviction,
 idle-versus-active cache replacement, Ollama-only snapshot recovery with
 malformed GGUF settings, shell-free loopback launch, private
 authentication, exact alias/context checks, prompt-token admission on both
-sides, control-token injection isolation, truncation, mismatched accounting and
-malformed response rejection, stage snapshot reload, cache identity and
-lifecycle, concurrent profile leases, unavailable-source catalog behavior, and
-exact-digest-only Ollama runner release. The unchanged exactness, provenance,
+sides, control-token injection isolation, truncation, explicit output-limit and
+unknown-stop rejection, mismatched accounting and malformed response rejection,
+stage snapshot reload, cache identity and lifecycle, concurrent profile leases,
+unavailable-source catalog behavior, and non-mutating admitted Ollama residence
+checks. The unchanged exactness, provenance,
 fail-closed, NARA, DOL, clippy and formatting gates remain required.
 
 #### Explicit non-scope and deployment boundary
