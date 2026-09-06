@@ -3,6 +3,7 @@ pub mod contracts;
 pub mod control;
 pub mod db;
 pub mod ingest;
+pub mod llama_cpp;
 pub mod model;
 pub mod model_settings;
 pub mod normalize;

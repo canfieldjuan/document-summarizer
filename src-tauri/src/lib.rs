@@ -16,9 +16,10 @@ use pipeline::contracts::{
 };
 use pipeline::db::{init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, IngestError};
+use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
 use pipeline::model_settings::{
-    catalog as load_model_catalog, save_selected_preset, settings_path as model_settings_path,
-    ModelCatalog,
+    catalog as load_model_catalog, register_gguf, save_selected_preset,
+    settings_path as model_settings_path, ModelCatalog,
 };
 use pipeline::normalize::{
     normalize_document as normalize_pipeline_document, CanonicalNormalizer, NormalizePipelineError,
@@ -42,6 +43,38 @@ use serde::Serialize;
 use std::error::Error;
 use std::path::Path;
 use tauri::{Manager, State};
+
+#[cfg(unix)]
+fn ensure_private_app_data_directory(path: &Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let before = std::fs::symlink_metadata(path)?;
+    if !before.file_type().is_dir() || before.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "application data directory is not owned by the effective user",
+        ));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    let after = std::fs::symlink_metadata(path)?;
+    if !after.file_type().is_dir()
+        || after.uid() != before.uid()
+        || after.dev() != before.dev()
+        || after.ino() != before.ino()
+        || after.mode() & 0o7777 != 0o700
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "application data directory identity or permissions are unsafe",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_app_data_directory(_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
+}
 
 struct AppState {
     jobs: DesktopJobManager,
@@ -239,33 +272,64 @@ fn cancel_document(
 }
 
 #[tauri::command]
-fn get_runtime_status(state: State<'_, AppState>) -> RuntimeStatus {
-    ollama_runtime_status(&state.model_settings_path)
+async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, CommandError> {
+    let settings_path = state.model_settings_path.clone();
+    tauri::async_runtime::spawn_blocking(move || ollama_runtime_status(&settings_path))
+        .await
+        .map_err(|_| CommandError::new("MODEL_RUNTIME_STATUS_FAILED", "Runtime check stopped"))
 }
 
 #[tauri::command]
-fn get_model_catalog(state: State<'_, AppState>) -> Result<ModelCatalog, CommandError> {
-    load_model_catalog(&state.model_settings_path).map_err(CommandError::from)
+async fn get_model_catalog(state: State<'_, AppState>) -> Result<ModelCatalog, CommandError> {
+    let settings_path = state.model_settings_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        load_model_catalog(&settings_path).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| CommandError::new("MODEL_CATALOG_FAILED", "Model discovery stopped"))?
 }
 
 #[tauri::command]
-fn select_model_preset(
+async fn select_model_preset(
     state: State<'_, AppState>,
     preset_id: String,
 ) -> Result<ModelCatalog, CommandError> {
-    let current = load_model_catalog(&state.model_settings_path).map_err(CommandError::from)?;
-    if !current
-        .presets
-        .iter()
-        .any(|preset| preset.preset_id == preset_id)
-    {
-        return Err(CommandError::new(
-            "MODEL_PRESET_UNAVAILABLE",
-            "Selected model preset is not installed and qualified",
-        ));
-    }
-    save_selected_preset(&state.model_settings_path, &preset_id).map_err(CommandError::from)?;
-    load_model_catalog(&state.model_settings_path).map_err(CommandError::from)
+    let settings_path = state.model_settings_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = load_model_catalog(&settings_path).map_err(CommandError::from)?;
+        if !current
+            .presets
+            .iter()
+            .any(|preset| preset.preset_id == preset_id)
+        {
+            return Err(CommandError::new(
+                "MODEL_PRESET_UNAVAILABLE",
+                "Selected model preset is not installed and qualified",
+            ));
+        }
+        if current.selected_preset_id == preset_id {
+            return Ok(current);
+        }
+        prune_idle_managed_runtimes().map_err(CommandError::from)?;
+        save_selected_preset(&settings_path, &preset_id).map_err(CommandError::from)?;
+        load_model_catalog(&settings_path).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| CommandError::new("MODEL_SELECTION_FAILED", "Model selection stopped"))?
+}
+
+#[tauri::command]
+async fn register_gguf_model(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<ModelCatalog, CommandError> {
+    let settings_path = state.model_settings_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        register_gguf(&settings_path, Path::new(&file_path)).map_err(CommandError::from)?;
+        load_model_catalog(&settings_path).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| CommandError::new("MODEL_REGISTRATION_FAILED", "GGUF registration stopped"))?
 }
 
 #[tauri::command]
@@ -342,6 +406,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
+            ensure_private_app_data_directory(&app_data_dir)?;
             let db_path = app_data_dir.join("summarizer.db");
             let settings_path = model_settings_path(&app_data_dir);
             let mut conn = init_db(&db_path)?;
@@ -391,6 +456,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             get_runtime_status,
             get_model_catalog,
             select_model_preset,
+            register_gguf_model,
             get_connect_entitlement_status,
             install_connect_entitlement,
             list_recent_runs,
@@ -400,6 +466,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .build(tauri::generate_context!())?;
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            shutdown_managed_runtimes();
             if let Some(provider) = app_handle.try_state::<ConnectProvider>() {
                 provider.unregister();
             }
@@ -411,6 +478,44 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod capability_tests {
     use serde_json::Value;
+
+    #[cfg(unix)]
+    #[test]
+    fn app_data_privacy_accepts_owned_directory_and_rejects_symlink_or_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        super::ensure_private_app_data_directory(directory.path()).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(directory.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let symlink = parent.path().join("app-data-link");
+        std::os::unix::fs::symlink(&target, &symlink).unwrap();
+        assert_eq!(
+            super::ensure_private_app_data_directory(&symlink)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        let file = parent.path().join("app-data-file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert_eq!(
+            super::ensure_private_app_data_directory(&file)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
 
     #[test]
     fn main_window_can_open_files_without_broader_dialog_permissions() {

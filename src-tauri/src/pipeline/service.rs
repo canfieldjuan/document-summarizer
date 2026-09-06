@@ -671,6 +671,7 @@ mod tests {
             version: 1,
             preset_id: "fixture-full-v1".to_string(),
             analysis: ModelStageProfileSnapshot {
+                runtime_kind: Default::default(),
                 profile_id: "fixture-analysis-v1".to_string(),
                 model_name: "fixture-model".to_string(),
                 model_digest: "fixture-analysis-digest".to_string(),
@@ -678,6 +679,7 @@ mod tests {
                 tokenizer_version: "fixture-tokenizer-v1".to_string(),
             },
             verification: ModelStageProfileSnapshot {
+                runtime_kind: Default::default(),
                 profile_id: "fixture-verification-v1".to_string(),
                 model_name: "fixture-model".to_string(),
                 model_digest: "fixture-verification-digest".to_string(),

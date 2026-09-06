@@ -372,12 +372,12 @@ fn source_label(page_start: u32, page_end: u32) -> String {
 fn assess_runtime(runtime: &dyn ModelRuntime) -> RuntimeStatus {
     match runtime.health() {
         Ok(()) => RuntimeStatus {
-            provider_name: "Ollama".to_string(),
+            provider_name: "Local Qwen".to_string(),
             ready: true,
             runtime_id: Some(runtime.runtime_id().to_string()),
             model_id: Some(runtime.model_id().to_string()),
             code: None,
-            message: "Ollama is ready for local summarization.".to_string(),
+            message: "The selected local Qwen runtime is ready.".to_string(),
             recoverable: false,
         },
         Err(failure) => unavailable_runtime_status(
@@ -394,7 +394,7 @@ fn unavailable_runtime_status(
     failure: ModelRuntimeFailure,
 ) -> RuntimeStatus {
     RuntimeStatus {
-        provider_name: "Ollama".to_string(),
+        provider_name: "Local Qwen".to_string(),
         ready: false,
         runtime_id,
         model_id,
@@ -540,7 +540,7 @@ mod tests {
     fn runtime_status_distinguishes_ready_and_unavailable_without_generating() {
         let ready = assess_runtime(&FixtureRuntime);
         assert!(ready.ready);
-        assert_eq!(ready.provider_name, "Ollama");
+        assert_eq!(ready.provider_name, "Local Qwen");
         assert_eq!(ready.model_id.as_deref(), Some("workspace-fixture-model"));
         assert!(ready.code.is_none());
 

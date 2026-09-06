@@ -1916,6 +1916,7 @@ mod tests {
 
     fn fixture_profile_snapshot() -> ModelProfileSnapshot {
         let stage = ModelStageProfileSnapshot {
+            runtime_kind: Default::default(),
             profile_id: "connect-fixture-profile".to_string(),
             model_name: "connect-fixture-model".to_string(),
             model_digest: "connect-fixture-digest".to_string(),

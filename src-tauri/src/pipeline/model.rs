@@ -7,6 +7,7 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -291,6 +292,57 @@ impl OllamaRuntime {
 
     pub fn installed_models(&self) -> Result<Vec<InstalledModelDescriptor>, ModelRuntimeFailure> {
         self.installed_models_with_deadline(Duration::from_secs(HEALTH_TIMEOUT_SECONDS))
+    }
+
+    pub fn ensure_models_not_resident_by_digest(
+        &self,
+        admitted_digests: &[&str],
+    ) -> Result<(), ModelRuntimeFailure> {
+        let initial = match self
+            .authorize(
+                self.client
+                    .get(self.endpoint("api/ps")?)
+                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
+            )
+            .send()
+        {
+            Ok(response) => response,
+            Err(error) if request_was_connection_refused(&error) => return Ok(()),
+            Err(_) => {
+                return Err(runtime_failure(
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "Ollama runner residence could not be verified",
+                    true,
+                ));
+            }
+        };
+        if !initial.status().is_success() {
+            return Err(rejected_response(initial.status()));
+        }
+        let models = decode_bounded_json::<ModelsResponse>(initial)?.models;
+        validate_running_model_record_count(models.len())?;
+        if models
+            .iter()
+            .any(|model| !is_canonical_ollama_digest(&model.digest))
+        {
+            return Err(runtime_failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Ollama runner residence included an unverifiable model digest",
+                true,
+            ));
+        }
+        if models.iter().any(|model| {
+            admitted_digests
+                .iter()
+                .any(|digest| *digest == model.digest)
+        }) {
+            return Err(runtime_failure(
+                "MODEL_RUNTIME_BUSY",
+                "A qualified Ollama model is still resident; retry after its keep-alive expires",
+                true,
+            ));
+        }
+        Ok(())
     }
 
     fn installed_models_with_deadline(
@@ -669,6 +721,20 @@ impl OllamaRuntime {
     }
 }
 
+fn request_was_connection_refused(error: &reqwest::Error) -> bool {
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::ConnectionRefused)
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
 fn discovery_remaining(deadline: Instant) -> Result<Duration, ModelRuntimeFailure> {
     deadline
         .checked_duration_since(Instant::now())
@@ -765,6 +831,13 @@ fn validate_running_model_record_count(count: usize) -> Result<(), ModelRuntimeF
         ));
     }
     Ok(())
+}
+
+fn is_canonical_ollama_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn invalid_stream_response() -> ModelRuntimeFailure {
@@ -1229,7 +1302,7 @@ fn provider_usage(body: &[u8]) -> ModelTokenUsage {
     }
 }
 
-fn response_format(
+pub(crate) fn response_format(
     output_format: &ModelOutputFormat,
 ) -> Result<Option<serde_json::Value>, ModelRuntimeFailure> {
     let ModelOutputFormat::JsonSchema { name, schema } = output_format else {
@@ -1740,6 +1813,40 @@ mod tests {
             })
             .collect();
         execution_model_server(models)
+    }
+
+    fn resident_models_server(models: serde_json::Value) -> (String, thread::JoinHandle<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let handle = thread::spawn(move || {
+            let (mut running, _) = listener.accept().expect("resident query should arrive");
+            let headers = read_headers(&mut running);
+            assert!(headers.starts_with("GET /api/ps HTTP/1.1"));
+            write_json_response(
+                &mut running,
+                "200 OK",
+                &serde_json::json!({"models": models}),
+            );
+            listener
+                .set_nonblocking(true)
+                .expect("loopback listener should become nonblocking");
+            let deadline = Instant::now() + Duration::from_millis(200);
+            loop {
+                match listener.accept() {
+                    Ok(_) => return true,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return false;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("loopback accept failed: {error}"),
+                }
+            }
+        });
+        (format!("http://{address}/"), handle)
     }
 
     fn raw_chat_stream_server(lines: Vec<String>) -> (String, thread::JoinHandle<()>) {
@@ -3095,6 +3202,128 @@ mod tests {
         assert_eq!(sent_request["options"]["num_predict"], 321);
         assert_eq!(sent_request["options"]["num_ctx"], 8_192);
         assert_eq!(sent_request["options"]["seed"], i64::MAX);
+    }
+
+    #[test]
+    fn runner_residence_check_blocks_an_exact_admitted_digest_without_mutation() {
+        let admitted = "a".repeat(64);
+        let unrelated = "b".repeat(64);
+        let (base_url, server) = resident_models_server(serde_json::json!([
+            {"name": "qualified-alias", "digest": admitted},
+            {"name": "other-model", "digest": unrelated}
+        ]));
+        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+            .expect("loopback runtime should configure");
+        assert_eq!(
+            runtime
+                .ensure_models_not_resident_by_digest(&[admitted.as_str()])
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_BUSY"
+        );
+        assert!(!server.join().expect("residence server should finish"));
+    }
+
+    #[test]
+    fn runner_residence_check_rejects_missing_and_malformed_digests() {
+        assert!(!is_canonical_ollama_digest(&"a".repeat(63)));
+        assert!(is_canonical_ollama_digest(&"a".repeat(64)));
+        assert!(!is_canonical_ollama_digest(&"A".repeat(64)));
+        assert!(!is_canonical_ollama_digest(&"g".repeat(64)));
+        assert!(!is_canonical_ollama_digest(&"a".repeat(65)));
+
+        for records in [
+            serde_json::json!([{"name": "unverifiable"}]),
+            serde_json::json!([{"name": "unverifiable", "digest": "A".repeat(64)}]),
+        ] {
+            let (base_url, server) = resident_models_server(records);
+            let runtime =
+                OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+                    .expect("loopback runtime should configure");
+            assert_eq!(
+                runtime
+                    .ensure_models_not_resident_by_digest(&[])
+                    .unwrap_err()
+                    .code,
+                "MODEL_RUNTIME_UNAVAILABLE"
+            );
+            assert!(!server.join().expect("residence server should finish"));
+        }
+    }
+
+    #[test]
+    fn runner_residence_check_distinguishes_absent_listener_from_ambiguous_transport() {
+        let absent = TcpListener::bind("127.0.0.1:0").expect("loopback port should bind");
+        let absent_address = absent
+            .local_addr()
+            .expect("loopback address should resolve");
+        drop(absent);
+        let runtime = OllamaRuntime::new(
+            &format!("http://{absent_address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("loopback runtime should configure");
+        runtime
+            .ensure_models_not_resident_by_digest(&[])
+            .expect("connection refusal proves there is no listener");
+
+        let ambiguous = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let ambiguous_address = ambiguous
+            .local_addr()
+            .expect("loopback address should resolve");
+        let server = thread::spawn(move || {
+            let (stream, _) = ambiguous.accept().expect("residence query should arrive");
+            drop(stream);
+        });
+        let runtime = OllamaRuntime::new(
+            &format!("http://{ambiguous_address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("loopback runtime should configure");
+        assert_eq!(
+            runtime
+                .ensure_models_not_resident_by_digest(&[])
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+        server.join().expect("ambiguous server should finish");
+    }
+
+    #[test]
+    fn runner_residence_check_ignores_foreign_digest_and_fails_safe_on_name_collision() {
+        let admitted = "a".repeat(64);
+        let foreign = "b".repeat(64);
+        let (base_url, foreign_server) = resident_models_server(serde_json::json!([
+            {"name": "qualified-alias", "digest": foreign}
+        ]));
+        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+            .expect("loopback runtime should configure");
+        runtime
+            .ensure_models_not_resident_by_digest(&[admitted.as_str()])
+            .expect("foreign digest must be left alone");
+        assert!(!foreign_server.join().expect("foreign server should finish"));
+
+        let (base_url, collision_server) = resident_models_server(serde_json::json!([
+            {"name": "shared-alias", "digest": admitted},
+            {"name": "shared-alias", "digest": foreign}
+        ]));
+        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+            .expect("loopback runtime should configure");
+        assert_eq!(
+            runtime
+                .ensure_models_not_resident_by_digest(&[admitted.as_str()])
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_BUSY"
+        );
+        assert!(!collision_server
+            .join()
+            .expect("collision server should finish"));
     }
 
     #[test]

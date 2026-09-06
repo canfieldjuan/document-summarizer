@@ -862,6 +862,193 @@ The same temporary exact-digest drift detected by a stage-boundary health check
 is recoverable; restoring the snapshotted digest may admit a retry, while the
 current stage remains rejected.
 
+Qualified direct GGUF generation uses an app-managed llama.cpp runtime, not LM
+Studio, Ollama import or a user-entered endpoint. The runtime executable is
+resolved from the deployment override or `PATH`. Because it is dynamically
+linked, the qualified runtime identity includes the executable and every
+profile-named application-local llama.cpp/ggml dependency. The app opens and
+hashes each resolved regular file, copies every verified executable and library
+into an anonymous sealed file that cannot be written, grown or shrunk, exposes
+required library names through a private directory of inherited
+`/proc/self/fd` descriptors, and launches the sealed descriptor-bound
+executable without a shell. Qualification never executes or loads bytes from a
+mutable source descriptor after its digest check. The parent keeps `CLOEXEC` set;
+only the forked llama child clears it immediately before `exec`, so another
+concurrent child cannot inherit the model or runtime bundle. Path replacement
+after admission cannot select different model, executable or application-local
+library bytes; host C/C++, CUDA driver and system runtime libraries remain the
+operating-system trust boundary. Direct GGUF execution is Linux-only in this
+release.
+
+The registered GGUF itself remains on its source filesystem rather than being
+duplicated into RAM or app storage. A dedicated supervisor thread, created once
+and retained for the application process lifetime, is the sole executor of the
+complete direct-runtime startup critical section: model open, read-lease
+acquisition, registered-identity checks, runtime-bundle preparation and child
+spawn. Callers from Tauri blocking pools or other transient threads submit that
+work and wait for its typed result; they never become the kernel parent task of
+the child. An unavailable or terminated supervisor fails closed before a child
+can be admitted.
+
+Before fork, the supervisor must acquire a Linux read lease on the retained
+read-only descriptor; acquisition fails if a writer already has the file open.
+Before taking parent ownership of that lease, the supervisor installs the
+lease-break handler and explicitly unblocks `SIGIO`. Parent ownership is
+targeted to that exact Linux supervisor thread rather than to an arbitrary
+thread in the process, so another thread cannot defer the handoff notification.
+Complete registered file identity is checked only after that lease is held.
+Runtime-bundle preparation may then take time, so immediately before spawn the
+same supervisor thread requires a clear break flag, an intact kernel read lease,
+and the unchanged complete GGUF identity again. A signaled, expired or drifted
+lease fails without executing the loader. A modify-and-close between an
+unprotected identity check and lease acquisition therefore cannot reach the
+loader. The child becomes the lease-break signal owner with
+the default terminating disposition before `exec`, and explicitly unblocks the
+lease-break signal in the child so a signal mask inherited from the spawning
+thread cannot defer termination. Separately, before installing
+`PR_SET_PDEATHSIG`, the child resets `SIGTERM` to its default disposition and
+removes `SIGTERM` from its inherited signal mask. An ignored, handled or blocked
+`SIGTERM` in the supervisor process therefore cannot make the one-shot
+parent-death notification inert. Only after that normalization may the child
+install `SIGTERM` as its parent-death signal and verify the captured parent PID;
+any normalization, installation or parent check failure aborts before `exec`.
+A later write-open therefore blocks in the kernel and terminates the loader
+before the writer can reach the live inode. The
+supervisor checks the delivered break flag again after spawning and
+kills/reaps the child instead of accepting a lease whose thread-directed parent
+notification raced with the handoff. Once ownership reaches the child, a break
+terminates it; cache reuse also rejects and reaps a child that has exited. The
+parent releases the lease only after the child is terminated or ownership ends.
+A filesystem without working read-lease enforcement is not admitted for direct
+GGUF execution. Post-load metadata checks remain defense in depth, not the
+mechanism that prevents mutable bytes from reaching the loader.
+
+The child binds a Unix-domain socket inside its owner-private runtime directory
+with an unpredictable per-process bearer token and exact digest alias. The
+application retains that directory for the child's lifetime, and its HTTP
+client connects only through the socket; there is no released TCP port for a
+different local process to claim before the first credential-bearing request.
+The token is written to an owner-private file inside the same directory and
+supplied through the qualified server's API-key-file option; neither the token
+nor source text appears in child argv. It uses the qualified context, one parallel
+slot, reasoning disabled, web UI disabled, offline mode, no warmup and GPU
+layers enabled. Proxies and redirects remain disabled. Startup has one bounded
+deadline and verifies health, digest alias, active context and trained context
+before inference; it also rechecks the retained model descriptor after load.
+
+The private runtime directory must not be created through ambient `TMPDIR` or
+the process-global temporary-directory resolver. Runtime construction receives
+the explicit model-settings directory. Product startup creates or tightens its
+app-data/model-settings directory to effective-user-owned mode `0700` before
+database, settings or runtime use; a foreign owner or non-directory fails
+startup. Runtime construction canonicalizes that directory and rejects any
+ancestor that is not a directory. Every canonical ancestor must be owned by
+root or the effective user regardless of its current write bits: an unrelated
+owner can add owner-write permission later and rename or replace the admitted
+subtree. For root/effective-user-owned ancestors, group/other write permission
+is accepted only when the sticky bit is set. Sticky storage controlled by
+another unprivileged account is not trusted.
+Beneath that admitted location the application creates one dedicated
+runtime root with mode `0700`; an existing root is accepted only when it is a
+real directory owned by the effective user with exactly mode `0700`. A symlink,
+foreign owner, broader mode, missing/untrusted ancestor or metadata failure is
+a typed pre-spawn runtime failure. Per-child runtime directories are created
+only inside that verified root. This makes another account unable to rename or
+replace the leaf between admission and socket bind; checking only the leaf mode
+under an ambient attacker-writable parent is not sufficient. Boundary proof
+must accept root-owned and effective-user-owned private/sticky ancestry, reject
+a foreign-owned ancestor even when it is currently mode `0555`, reject
+non-sticky writable ancestry on both sides, and prove the staged child remains
+beneath the admitted root.
+
+Because the qualified server has one inference slot, the application admits at
+most one direct-model request at a time for a shared child. Callers wait on an
+application-owned mutex before tokenization or completion begins. Slot
+acquisition observes the run's cancellation control and has one absolute wait
+deadline no longer than the existing model-request timeout; it does not wait a
+fresh timeout for each caller ahead of it. Cancellation leaves the queue without
+sending a model request, and queue-timeout returns recoverable busy without
+invalidating the shared child. Request duration and HTTP timeout begin only
+after that caller owns the slot. A queued caller therefore cannot spend its
+network timeout behind another generation or kill the shared child when only
+the queue wait was long.
+Before spawning, the process PID is captured. Immediately after installing the
+parent-death signal, the child compares its actual parent with that captured PID
+and aborts before `exec` if the process died during the fork-to-handoff window;
+setting a parent-death signal after reparenting is not accepted as cleanup
+protection. Linux ties `PR_SET_PDEATHSIG` to the task that called `fork`, so the
+durable supervisor must perform the spawn itself and must not retire while the
+application process remains alive. A transient caller returning or its blocking
+pool thread retiring therefore cannot terminate a healthy cached child; process
+exit still terminates the supervisor and delivers the configured child signal.
+Boundary proof must cover inherited blocked and non-default `SIGTERM` states in
+addition to the ordinary state: the pre-exec normalization restores the default
+disposition and unblocks the signal before parent-death installation, while an
+unchanged unrelated blocked signal remains blocked. A probe whose parent exits
+after handoff must not leave the child alive under any admitted inherited
+`SIGTERM` state.
+Stage-boundary health repeats the registered model path identity, retained
+descriptor identity and loaded alias/context checks. Cache reuse first repeats
+the registered-path and retained-descriptor checks; deleting, unlinking or
+replacing a registered path can therefore never revive a cached ghost runtime.
+Child output is discarded without persisting prompts or source text. One child
+is shared for the exact model/context/runtime-bundle identity; a different
+direct identity cannot coexist while the cached child is actively referenced.
+When a new direct identity is admitted, map-only idle children are terminated,
+reaped and evicted before startup; actively referenced children instead produce
+the recoverable busy result. Cached reuse requires both unchanged registered
+identity and a live owned child. A child terminated by a lease-break signal or
+any other exit is reaped and the dead entry is evicted rather than returned as
+a usable runtime. Selection change prunes only map-owned idle entries; an
+externally referenced runtime remains discoverable under its exact cache key,
+so selecting that profile again shares the existing child rather than starting
+a second process. Ollama construction removes idle direct entries but returns
+recoverable busy while any direct entry is externally referenced. App exit is
+the only selection-independent path that deliberately clears every cache entry.
+Any model identity failure atomically makes the cache entry unavailable and
+terminates and reaps the owned child even if another reference still exists.
+Every child is terminated and reaped on ownership loss, startup failure or
+identity failure.
+
+Direct generation uses llama.cpp `POST /completion` with a pinned minimal Qwen
+ChatML token sequence containing only the existing system and user messages plus
+the assistant prefix. Framing is tokenized as Qwen control syntax, while system
+and user content are tokenized with special-token parsing disabled; delimiter-
+shaped source text therefore remains untrusted message data and cannot create a
+new role. The GGUF embedded template and OpenAI-compatible chat route are not
+admitted. The projected schema is sent as `json_schema`; there is no schema
+fallback. The same server's `/tokenize` endpoint counts the exact prompt before
+inference. The counted input, output allowance and framing reserve must fit the
+qualified context. Prompt or output truncation, an output-limit stop, an absent
+or unknown stop reason, an empty response, malformed or oversized JSON, absent
+token accounting, or token accounting that differs from the admitted prompt
+and output ceiling fails closed. A completed response is admitted only when the
+qualified server reports an end-of-sequence or configured stopping-word stop;
+syntactically valid JSON produced exactly at `n_predict` is not evidence that
+generation completed. The private child, bearer token and startup-verified
+digest alias establish runtime identity; a mutable per-completion path string
+does not.
+
+Before direct startup, the bounded loopback Ollama API is checked for resident
+models whose digest exactly matches an Ollama profile admitted by this
+application. A matching resident digest returns a recoverable busy result; the
+operator can retry after the application's bounded Ollama keep-alive expires.
+Only an exact loopback connection refusal proves that no Ollama listener is
+present and permits direct startup without a residence response. A timeout,
+connection reset, malformed response, rejected status, or any other ambiguous
+probe failure is recoverable and fails closed before the direct child starts.
+Every record in a successful non-empty residence response must carry a canonical
+64-character lowercase hexadecimal digest. A missing or malformed digest is an
+unverifiable resident and fails recoverably before direct startup, even when its
+name or other fields appear unrelated. A valid foreign digest remains untouched
+and does not become an admitted model. None of these ambiguous states is treated
+as evidence that GPU residency is empty.
+The application does not request unload through a mutable model alias because
+the local Ollama API cannot atomically bind that name-addressed operation to the
+digest observed by `/api/ps`. Same-name/different-digest and unrelated models
+are never targeted or treated as an admitted Ollama dependency. An unreachable
+Ollama service with no loopback listener is not a direct-runtime dependency.
+
 Discovery admits only Qwen-family architectures that the application explicitly
 supports. An installed descriptor records the exact Ollama name and digest,
 byte size, architecture, parameter-size and quantization metadata when reported,
@@ -927,6 +1114,16 @@ exposed as product presets in this slice. A weak candidate must not reduce the
 baseline build's limits, prompts, validators, coverage targets or verifier
 standard.
 
+The current product registry contains the exact Qwen 3 30B-A3B Ollama digest as
+the default and strongest verifier, plus the exact Jack Qwen 3.8 27B Coder GGUF
+`e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041`
+as an opt-in full profile at 8,192 tokens. Jack is admitted only with the exact
+qualified llama.cpp runtime manifest recorded in the qualification evidence.
+It does not create a cross-runtime hybrid because both runners exceed the
+qualified GPU-memory envelope. The 4B and 9B candidates remain visible but
+unqualified; base Qwen 3.8 remains unqualified because the installed GGUF did
+not load through the tested Ollama path.
+
 #### User settings and stage routing
 
 The desktop exposes installed Qwen descriptors and qualified presets, including
@@ -937,6 +1134,16 @@ application-data directory; malformed, unknown, unsupported or stale-digest
 values fail closed to an explicit unavailable state, never to an arbitrary
 installed model. A settings change affects new runs only.
 
+Runtime-profile leases cover desktop and Connect work. Multiple jobs may share
+one exact analysis/verification profile, but a differently keyed runtime cannot
+start or release a resident runner while the old profile has a live owner. Such
+an attempted handoff returns a recoverable busy status; it never unloads the
+runtime beneath an active job. Same-preset selection is a no-op rather than a
+cache eviction. Constructing an Ollama runtime clears an idle app-managed direct
+child; an active direct owner prevents construction at the preceding lease
+boundary. Cache retention independently preserves the discoverable child for
+same-profile work while a selection changes away and back.
+
 Multiple installed Ollama names for the same qualified immutable digest are
 aliases, not distinct product presets. The installed-model catalog keeps every
 name visible, while preset construction deduplicates by qualified digest before
@@ -945,6 +1152,34 @@ the deterministic name for a new run. Therefore every rendered preset ID is
 unique and still identifies one immutable capability profile; persisted preset
 selection cannot resolve to a different duplicate row. Historical runs remain
 bound to the exact model name and digest already stored in their snapshot.
+Snapshot recovery validates `preset_id`, analysis stage and verification stage
+as one product-admitted preset before loading settings, taking a profile lease,
+or constructing either runtime. Individually qualified stages cannot be mixed
+into a cross-runtime combination the preset registry never offered.
+
+The user may register one explicit existing `.gguf` through the desktop picker.
+The app never scans model directories, copies the file or mutates the model
+store. Registration opens the final component without following symlinks and
+with nonblocking semantics before requiring a regular file, so FIFO, device or
+socket substitution cannot stall registration, catalog admission or cache
+reuse. It hashes the open descriptor, and stores canonical location, basename,
+byte size, SHA-256 and Linux device/inode/size/nanosecond-mtime/nanosecond-ctime
+identity in private atomic settings. Identity is checked before and after the
+one registration hash. Later catalog and runtime admission require the complete
+tuple; replacement or mutation requires explicit re-registration. The selected
+open model descriptor is inherited by the child, closing path replacement
+between check and load. Registration count, path and label sizes are bounded;
+duplicate content digests collapse to one canonical registration.
+
+Settings version two stores GGUF registrations and runtime kind. Version-one
+settings load with the same selected Ollama preset and an empty registration
+list, then upgrade atomically on the next write. The catalog combines Ollama and
+registered-GGUF descriptors; one unavailable discovery source does not hide the
+other. Routine presentation exposes runtime kind, basename, size, family,
+trained maximum, qualified context and disabled reason, never the absolute
+private path. Switching to Ollama clears an idle app-managed direct child;
+switching to direct GGUF does not mutate an Ollama runner and remains busy while
+an admitted Ollama digest is resident.
 
 A full preset routes analysis and verification to the same model and is offered
 only after that exact digest passes the full qualification contract. A hybrid
@@ -967,6 +1202,17 @@ the source run's snapshot unless an explicitly user-started new run selects the
 current preset. Historical runs without a snapshot remain readable under their
 stored legacy runtime/model identifiers and compiled historical budgeting rules;
 they are not relabeled as native or qualified.
+
+Version-two stage snapshots add a typed runtime kind. A direct snapshot carries
+profile ID, immutable GGUF digest, qualified context and tokenizer/runtime
+versions, but no mutable path. Reconstruction resolves the current registration
+by exact digest and repeats file-identity and complete runtime-manifest admission
+before state changes. Version-one snapshots remain Ollama-only and reload under
+their historical semantics. An Ollama-only snapshot has no dependency on the
+mutable GGUF settings file: missing, malformed or future-version GGUF settings
+cannot block its reconstruction. Settings are loaded only when at least one
+direct stage needs a registration. A missing direct registration or changed
+file never falls back to Ollama or another GGUF.
 
 Connect runtime selection happens before admission, and the selected profile
 snapshot is inserted in the same SQLite transaction as ingestion and the
@@ -1061,28 +1307,78 @@ Jack and base Qwen 3.8 are reported separately. Qualification is evidence for an
 exact digest and profile, not a blanket claim about every quantization or model
 carrying the same family name.
 
-The current product registry contains only the exact qualified Qwen 3 30B-A3B
-digest. The tested Qwen 3.5 4B and 9B digests remain installed but unqualified
-because both corpus documents failed without prompt or threshold changes. The
-base and Jack Qwen 3.8 27B digests remain installed but unqualified because the
-current Ollama loader cannot initialize either GGUF. They remain visible with an
-unavailable reason and cannot become a full or hybrid preset.
+Direct Jack qualification used the unchanged prompts, validators, 900-second
+timeout, 8,192-token context and corpus gates. With the pinned minimal template,
+NARA delivered 8 supported claims from 8 evidence items across 8 of 11
+native-text pages in 21 requests and 667 completion tokens; DOL delivered 83
+supported claims from 83 evidence items across 83 of 111 pages in 180 requests
+and 6,948 completion tokens. Neither run used schema fallback. A controlled
+trivial structured-output probe used 3,761 prompt tokens through the embedded
+template and 22 through the pinned minimal sequence, so the embedded template
+is not qualified.
+
+The qualified runtime manifest is `llama-server`
+`0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099`;
+`libllama-server-impl.so`
+`bd3e91a31fb3c61152043083f1e5008f9b7aef7bf5c168d6b3eca0019f634008`;
+`libllama-common.so.0`
+`9cf26696816c83fb6e148b3142c1a59bb374de9dc6a92a2966d9abe99939d2a1`;
+`libmtmd.so.0`
+`ec117a22c9acd24e9eeea4418c93d3d13512bcb607fee97a9674f82b93cb35c7`;
+`libllama.so.0`
+`c600923b1e548798b80d58b029505dbea4ccd4d2844de38416936e184906f645`;
+`libggml.so.0`
+`b80a4252c981712564828488b1962e80feb49675ca23da4a8479b2ed7361f86f`;
+`libggml-base.so.0`
+`c08e63a459d5d0ae4e982d1181fac3c4a0fcb40fcc49d7489ad9e16e4d39ca63`;
+`libggml-cpu.so.0`
+`d0b746ea2d7e8188236023d4c3a1ba8900a88600e8fdd0f1e6b5043ddf76fcdd`;
+and `libggml-cuda.so.0`
+`4095bde67d003066a6a622573d165595ad8648470d55317cc94ed4d47acf353f`.
+Qualification applies only to these exact model and runtime bytes.
+
+Direct-runtime tests cover settings migration and bounds, duplicate digest
+registration, regular/symlink/replaced files, cached registration deletion and
+replacement, nonblocking special-file rejection, exact and drifted runtime
+manifest members, sealed immutable runtime bytes, GGUF post-lease identity plus
+read-lease admission and release boundaries, parent/child lease-signal masks and
+thread-directed lease ownership, pre-spawn lease/identity revalidation,
+durable-supervisor versus transient-caller parent-death handling,
+descriptor-backed library names,
+lease-broken/dead-child detection and eviction,
+idle-versus-active cache replacement, Ollama-only snapshot recovery with
+malformed GGUF settings, shell-free loopback launch, runtime-root
+owner/mode/ancestor admission, ambient-temp isolation, private Unix-socket
+authentication without TCP handoff, exact alias/context checks,
+prompt-token admission on both
+sides, control-token injection isolation, truncation, explicit output-limit and
+unknown-stop rejection, mismatched accounting and malformed response rejection,
+stage snapshot reload, whole-preset snapshot admission, cache identity and
+lifecycle, concurrent profile leases,
+unavailable-source catalog behavior, and non-mutating admitted Ollama residence
+checks, including definitive absent-listener admission and ambiguous transport
+failure rejection, missing/malformed resident-digest rejection, active-cache
+retention across selection changes, and serialized cancellation-aware
+shared-child generation.
+The unchanged exactness, provenance, fail-closed, NARA, DOL, clippy and
+formatting gates remain required.
 
 #### Explicit non-scope and deployment boundary
 
 This slice does not add non-Qwen providers, cloud inference, arbitrary endpoint
-entry, model downloading/importing from the UI, a context slider, automatic
+entry, model downloading/copying from the UI, a context slider, automatic
 quantization choice, OCR/vision, parser changes, prompt loosening, timeout
-increases, coverage reductions or verifier bypass. Ollama model-store relocation
-and GGUF import are operator deployment steps, documented and performed
-copy-first on the development machine; application code never scans arbitrary
-filesystem paths or mutates the Ollama store. Existing models are not deleted as
-part of migration or qualification.
+increases, coverage reductions or verifier bypass. Ollama model-store relocation,
+Ollama GGUF import and installation of the exact qualified llama.cpp runtime
+bundle are operator deployment steps. Direct GGUF registration records only an
+explicitly selected existing file, never scans arbitrary filesystem paths,
+copies model bytes or mutates the Ollama store. Existing models are not deleted
+as part of migration or qualification.
 
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
-Thin Tauri commands select concrete adapters, invoke that service, report
-Ollama readiness, and expose UI-neutral read models for recent runs and
+Thin Tauri commands select concrete adapters, invoke that service, report local
+model-runtime readiness, and expose UI-neutral read models for recent runs and
 persisted summaries. The frontend owns selection and display only; it cannot
 query SQLite, mutate pipeline state, or construct a summary artifact. Command
 responses expose only presentation fields. For current summaries this includes

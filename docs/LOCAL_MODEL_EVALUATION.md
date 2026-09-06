@@ -1,6 +1,162 @@
-# Corpus and native Ollama evaluation — updated 2026-09-05
+# Corpus and local Qwen runtime evaluation — updated 2026-09-06
 
-## Qwen-family qualification: four candidates fail; baseline passes
+## Direct Jack Qwen 3.8 27B qualification
+
+**Failure first.** The first read-lease-enabled NARA start exited before the
+server became ready after 28.42 seconds. That revision suppressed child stderr
+and did not retain its exit status, so the exact cause cannot be determined;
+subsequent starts passed after exit-status diagnostics were added. Exact-head
+review later found two additional latent failures: a syntactically complete
+response stopped at `n_predict` could be accepted because `stop_type` was not
+read, and qualified Ollama runners were unloaded through a mutable name after a
+digest observation. The final implementation admits only `eos` or configured
+stopping-word completions and never unloads through an Ollama alias. Final DOL
+validation waited for a resident qualified Ollama runner's reported keep-alive
+to expire without sending an unload request. Review of that exact head then
+found that a cached direct runtime did not prove its owned child was still live,
+and that reserving then releasing a loopback TCP port before child startup left
+a local interception window. The final cache admission reaps and rejects an
+exited child, and the child and client communicate only through a Unix socket in
+an owner-only runtime directory; there is no TCP port handoff. A later
+exact-head review found two more handoff defects: an ambiguous Ollama `/api/ps`
+transport failure was treated as empty residence, and a spawning thread's
+blocked `SIGIO` mask could survive into the lease-owning child. Final admission
+permits only an exact loopback connection refusal without a residence response,
+and the child explicitly unblocks its lease-break signal before `exec`.
+Review of the next evidence head found that this was still incomplete: the
+parent thread could inherit a blocked `SIGIO` mask, take ownership of the model
+lease, and defer a break notification before ownership reached the child. The
+final implementation installs the handler and unblocks `SIGIO` in the acquiring
+thread before parent lease ownership, then retains the post-spawn break-flag
+check that kills and reaps a child when notification races with handoff.
+The next exact-head review found three additional concurrency/admission gaps:
+selection could detach an actively referenced direct runtime from the cache,
+concurrent jobs could enter the single-slot server without application-side
+serialization, and a successful Ollama residence response with an absent or
+malformed digest could be mistaken for harmless foreign residency. The final
+implementation retains active cache entries across selection changes, queues a
+shared child's complete tokenization/completion sequence behind one mutex, and
+requires every resident record to carry a canonical digest before direct
+startup.
+
+Review of that evidence head found three remaining races. A parent read lease
+could be broken while slow runtime-bundle preparation ran, because startup did
+not revalidate the kernel lease immediately before spawn. Its process-directed
+`SIGIO` could also be handled late by a different thread, after the final parent
+check. Finally, a canceled run could wait indefinitely on the shared inference
+mutex and later issue a request. The corrected implementation targets lease
+breaks to the exact acquiring Linux thread, revalidates the break flag, kernel
+lease and complete GGUF identity immediately before spawn, and makes inference
+slot acquisition cancellation-aware with one absolute wait deadline. Boundary
+probes accept an intact lease and normal serialized request while rejecting
+signaled and released leases and a canceled queued request before transport.
+
+Exact-head review then found one more process-lifetime defect: Linux
+`PR_SET_PDEATHSIG` follows the exact thread that forks, while desktop status
+discovery can enter runtime construction from a transient blocking-pool thread.
+Retirement of that requester could therefore terminate an otherwise healthy
+cached server while the application remained alive. The entire startup
+critical section now runs on one dedicated process-lifetime supervisor: model
+open, lease ownership, identity and bundle checks, and child spawn all occur on
+that same durable thread. A boundary probe submits startup from a transient
+requester, lets that requester exit, proves repeated work reaches the same
+supervisor thread, and observes the supervised child remain live.
+
+The standalone exact-head thread poll then caught a separate local-boundary
+defect before merge: the mode-`0700` leaf still came from ambient `tempdir()`,
+so a non-sticky attacker-writable `TMPDIR` parent could permit leaf replacement
+and socket interception. The corrected runtime derives staging from the
+explicit model-settings directory, rejects unsafe canonical ancestry, and
+creates each child directory beneath an effective-user-owned mode-`0700` root.
+Product startup also verifies and tightens app-data ownership and mode before
+database or settings use. Boundary probes accept owner-private and trusted
+sticky ancestry while rejecting non-sticky writable ancestry, a broad-mode or
+symlink runtime root, and symlink/file app-data targets. A live probe observed
+`/tmp/llama-runtime` as mode `0700` and owned by the effective user.
+
+Review of that evidence head found two additional local-process boundary gaps.
+A foreign-owned mode-`0755` ancestor passed because admission checked only the
+group/other write bits, even though its owner could later make it writable and
+rename the admitted subtree. The child also installed `PR_SET_PDEATHSIG` without
+first resetting and unblocking `SIGTERM`, so an ignored or blocked disposition
+inherited from the supervisor could make the one-shot death notification inert.
+The corrected implementation accepts canonical ancestors only when root or the
+effective user owns them, with the existing sticky/write rules applied after
+that ownership check. Before parent-death installation the child now restores
+the default `SIGTERM` disposition and unblocks only that signal. Boundary probes
+reject foreign ownership even at mode `0555` and launch an isolated child from
+an ignored/blocked `SIGTERM` state, then prove it does not survive its parent.
+The corpus results below were rerun after both corrections.
+
+The first validation attempts on this revision correctly stopped before
+inference with `MODEL_RUNTIME_BUSY`: a Website Generator Connect provider kept
+reloading the qualified 30B Ollama runner after the first targeted unload. The
+provider child was stopped under operator authorization, the exact runner was
+unloaded, and `/api/ps` was empty before the passing direct runs. An earlier
+final-head NARA attempt also correctly stopped before inference with
+`MODEL_RUNTIME_BUSY`: the qualified 30B runner was resident, followed by a
+qualified 9B runner used by another local workload. No unload request was sent.
+After `/api/ps` reported an empty catalog, the same exact head passed both corpus
+fixtures below.
+
+During the final supervisor-path proof, that Website Generator workload became
+active again after NARA and held an Ollama connection. The first DOL attempt
+therefore stopped before inference with `MODEL_RUNTIME_BUSY`. Under renewed
+operator authorization, its exact Python and shell processes were terminated,
+the now-idle qualified runner was unloaded, and `/api/ps` was empty before DOL
+was rerun successfully.
+
+Review of that evidence head found four further admission races: special-file
+substitution could block an open, registered identity was checked before rather
+than after acquiring its read lease, individually valid snapshot stages were
+not validated as one admitted preset, and the parent-death signal lacked the
+post-install parent-PID check. The final implementation opens nonblockingly and
+rejects non-regular files, verifies identity while holding the lease, validates
+the complete preset before runtime construction, and aborts the child before
+`exec` if it was reparented during handoff. Its first NARA start immediately
+after an Ollama runner expired reached the 30-second startup deadline; no runner
+or GPU process remained. The unchanged retry and final DOL run passed.
+
+The exact Jack GGUF
+`e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041`
+is now qualified as an opt-in full preset through the app-managed llama.cpp
+runtime. The file was used directly: no LM Studio runtime, Ollama import,
+prompt change, validator relaxation, timeout increase or acceptance-threshold
+change was used for these results.
+
+| Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
+| --- | --- | --- | ---: | ---: | ---: |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 41.68 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,948 | 261.77 s | 0 |
+
+NARA used 20 analysis requests and one verification request, with 438 and 215
+completion tokens respectively. DOL used 174 analysis requests and six
+verification requests, with 5,192 and 1,756 completion tokens respectively.
+Neither used synthesis or schema fallback, and every admitted request reported
+prompt and completion token accounting that matched the direct adapter's
+preflight. A live process-boundary probe during the NARA run found the socket in
+a mode-0700 directory, no `--port` argument, and the bearer only in the
+mode-0600 key file rather than the process argument vector.
+
+The isolated live-test binary does not execute the Tauri app-exit hook, so its
+current owner-private child directory remains after process exit even though no
+`llama-server` survives. The desktop app calls managed-runtime shutdown on
+normal exit. Crash/test-process scavenging is not part of this runtime-boundary
+fix; the retained directory is protected by the verified mode-`0700` root.
+
+The qualified runtime is the exact `llama-server` and llama/ggml library bundle
+recorded in `docs/CONTRACTS.md`, at an 8,192-token effective context. A
+controlled structured-output probe counted 3,761 prompt tokens through the
+GGUF's embedded OpenAI-compatible template and 22 through the pinned minimal
+Qwen ChatML sequence. The embedded template is therefore not qualified for
+this application.
+
+The earlier native-Ollama findings below remain useful historical evidence.
+They do not describe the new direct Jack path: the 4B and 9B candidates remain
+unqualified, base Qwen 3.8 remains unqualified, and the Qwen 3 30B-A3B Ollama
+preset remains the default and strongest verifier.
+
+## Previous native-Ollama qualification: four candidates fail; baseline passes
 
 **Failures first. Neither smaller model qualifies, and neither Qwen 3.8 27B
 GGUF can initialize in the current Ollama runtime.** No prompt, validator,

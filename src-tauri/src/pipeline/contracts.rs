@@ -1,3 +1,4 @@
+use crate::pipeline::control::ExecutionControl;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -410,11 +411,21 @@ pub struct ModelResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelStageProfileSnapshot {
+    #[serde(default)]
+    pub runtime_kind: ModelRuntimeKind,
     pub profile_id: String,
     pub model_name: String,
     pub model_digest: String,
     pub context_tokens: u32,
     pub tokenizer_version: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRuntimeKind {
+    #[default]
+    OllamaNative,
+    LlamaCppGguf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,6 +673,21 @@ pub trait DocumentChunker {
 /// not depend on a concrete server, model family, or SDK.
 pub trait ModelRuntime: Send + Sync {
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure>;
+    fn generate_with_control(
+        &self,
+        request: &ModelRequest,
+        control: &dyn ExecutionControl,
+    ) -> Result<ModelResponse, ModelRuntimeFailure> {
+        if control.cancellation_requested() {
+            return Err(ModelRuntimeFailure {
+                code: "MODEL_REQUEST_CANCELLED".to_string(),
+                message: "Model request was cancelled before inference".to_string(),
+                recoverable: true,
+                request_attempts: Vec::new(),
+            });
+        }
+        self.generate(request)
+    }
     fn health(&self) -> Result<(), ModelRuntimeFailure>;
     fn runtime_id(&self) -> &str;
     fn model_id(&self) -> &str;

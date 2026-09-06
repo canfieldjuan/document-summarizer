@@ -101,7 +101,7 @@ impl DesktopJobManager {
             db_path,
             Arc::new(move |snapshot| {
                 let runtime = match snapshot {
-                    Some(snapshot) => runtime_from_snapshot(snapshot),
+                    Some(snapshot) => runtime_from_snapshot(snapshot, &settings_path),
                     None => runtime_from_settings(&settings_path),
                 }?;
                 Ok(Box::new(runtime) as Box<dyn ModelRuntime>)
@@ -703,6 +703,7 @@ mod tests {
 
     fn fixture_snapshot() -> ModelProfileSnapshot {
         let stage = ModelStageProfileSnapshot {
+            runtime_kind: Default::default(),
             profile_id: "fixture-profile-v1".to_string(),
             model_name: "fixture-model:latest".to_string(),
             model_digest: "fixture-digest".to_string(),

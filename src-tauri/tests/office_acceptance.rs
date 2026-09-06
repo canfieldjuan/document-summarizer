@@ -11,7 +11,9 @@ use document_summarizer_lib::pipeline::db::{
 };
 use document_summarizer_lib::pipeline::ingest::ingest_pdf;
 use document_summarizer_lib::pipeline::model::OllamaRuntime;
-use document_summarizer_lib::pipeline::model_settings::QwenProfileRuntime;
+use document_summarizer_lib::pipeline::model_settings::{
+    runtime_from_settings, QwenProfileRuntime,
+};
 use document_summarizer_lib::pipeline::normalize::{normalize_document, CanonicalNormalizer};
 use document_summarizer_lib::pipeline::parser::{parse_document, PdfExtractParser};
 use document_summarizer_lib::pipeline::service::{process_pdf_to_summary, SummaryComponents};
@@ -32,6 +34,12 @@ use uuid::Uuid;
 struct TestDatabase(PathBuf);
 
 fn configured_live_runtime() -> Box<dyn ModelRuntime> {
+    if let Some(settings_path) = env::var_os("DOC_SUM_MODEL_SETTINGS_PATH") {
+        return Box::new(
+            runtime_from_settings(Path::new(&settings_path))
+                .expect("selected product model settings should configure"),
+        );
+    }
     if let Ok(analysis_model) = env::var("DOC_SUM_QUALIFICATION_ANALYSIS_MODEL") {
         let verification_model = env::var("DOC_SUM_QUALIFICATION_VERIFICATION_MODEL")
             .unwrap_or_else(|_| "qwen3-30b-a3b:latest".to_string());

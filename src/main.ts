@@ -53,12 +53,14 @@ interface ModelPreset {
   presetId: string;
   label: string;
   mode: "full" | "hybrid";
+  analysisRuntimeKind: "ollama_native" | "llama_cpp_gguf";
   analysisModel: string;
   analysisDigest: string;
   analysisContextTokens: number;
   verificationModel: string;
   verificationDigest: string;
   verificationContextTokens: number;
+  verificationRuntimeKind: "ollama_native" | "llama_cpp_gguf";
 }
 
 interface ModelCatalog {
@@ -66,6 +68,7 @@ interface ModelCatalog {
   selectedPresetAvailable: boolean;
   installedModels: ModelOption[];
   presets: ModelPreset[];
+  discoveryWarnings: string[];
 }
 
 interface ModelOption {
@@ -83,6 +86,7 @@ interface ModelOption {
   supportsAnalysis: boolean;
   supportsVerification: boolean;
   supportsFull: boolean;
+  runtimeKind: "ollama_native" | "llama_cpp_gguf";
 }
 
 type ConnectEntitlementState =
@@ -170,6 +174,7 @@ const runtimeTitle = element<HTMLParagraphElement>("#runtime-title");
 const runtimeDetail = element<HTMLParagraphElement>("#runtime-detail");
 const runtimeRetry = element<HTMLButtonElement>("#runtime-retry");
 const modelPreset = element<HTMLSelectElement>("#model-preset");
+const registerGguf = element<HTMLButtonElement>("#register-gguf");
 const connectMark = element<HTMLSpanElement>("#connect-mark");
 const connectTitle = element<HTMLParagraphElement>("#connect-title");
 const connectDetail = element<HTMLParagraphElement>("#connect-detail");
@@ -238,6 +243,7 @@ function showStage(view: "empty" | "processing" | "summary" | "failure"): void {
 function syncPrimaryAction(): void {
   selectButton.disabled = !runtimeReady || processing;
   modelPreset.disabled = !modelSelectionAvailable || modelSelectionInFlight || processing;
+  registerGguf.disabled = modelSelectionInFlight || processing;
   const label = selectButton.querySelector<HTMLSpanElement>("span");
   if (!label) return;
 
@@ -248,8 +254,8 @@ function syncPrimaryAction(): void {
     label.textContent = "Choose a PDF";
     actionHint.textContent = "Native-text PDFs are supported in this release.";
   } else {
-    label.textContent = "Ollama unavailable";
-    actionHint.textContent = "Start Ollama and check the selected model, then try again.";
+    label.textContent = "Local model unavailable";
+    actionHint.textContent = "Check the selected local model runtime, then try again.";
   }
 
   if (retrySourceRun) {
@@ -285,7 +291,7 @@ function syncPrimaryAction(): void {
 async function refreshRuntimeStatus(): Promise<void> {
   runtimeReady = false;
   runtimeDot.className = "runtime-dot is-checking";
-  runtimeTitle.textContent = "Checking Ollama";
+  runtimeTitle.textContent = "Checking local Qwen";
   runtimeDetail.textContent = "Looking for the local model…";
   runtimeRetry.hidden = true;
   syncPrimaryAction();
@@ -326,7 +332,9 @@ async function refreshModelCatalog(): Promise<void> {
     qualified.label = "Qualified presets";
     for (const preset of catalog.presets) {
       const installed = catalog.installedModels.find(
-        (model) => model.digest === preset.analysisDigest,
+        (model) =>
+          model.digest === preset.analysisDigest &&
+          model.runtimeKind === preset.analysisRuntimeKind,
       );
       const option = document.createElement("option");
       option.value = preset.presetId;
@@ -336,6 +344,7 @@ async function refreshModelCatalog(): Promise<void> {
       const maximumContext = installed?.maximumContextTokens;
       option.textContent = [
         preset.label,
+        preset.analysisRuntimeKind === "llama_cpp_gguf" ? "llama.cpp" : "Ollama",
         installed ? formatModelSize(installed.sizeBytes) : null,
         `${safeContext.toLocaleString()} safe ctx`,
         maximumContext ? `${maximumContext.toLocaleString()} max` : null,
@@ -352,6 +361,7 @@ async function refreshModelCatalog(): Promise<void> {
       option.disabled = true;
       option.textContent = [
         installed.name,
+        installed.runtimeKind === "llama_cpp_gguf" ? "llama.cpp" : "Ollama",
         formatModelSize(installed.sizeBytes),
         installed.maximumContextTokens
           ? `${installed.maximumContextTokens.toLocaleString()} max ctx`
@@ -366,7 +376,11 @@ async function refreshModelCatalog(): Promise<void> {
       (preset) => preset.presetId === catalog.selectedPresetId,
     );
     const selectedInstalled = selectedPreset
-      ? catalog.installedModels.find((model) => model.digest === selectedPreset.analysisDigest)
+      ? catalog.installedModels.find(
+          (model) =>
+            model.digest === selectedPreset.analysisDigest &&
+            model.runtimeKind === selectedPreset.analysisRuntimeKind,
+        )
       : null;
     selectedModelLabel = selectedPreset
       ? [
@@ -393,6 +407,27 @@ async function refreshModelCatalog(): Promise<void> {
     const option = document.createElement("option");
     option.textContent = commandError.message;
     modelPreset.append(option);
+  }
+}
+
+async function selectAndRegisterGguf(): Promise<void> {
+  if (processing || modelSelectionInFlight) return;
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "GGUF model", extensions: ["gguf"] }],
+  });
+  if (!selected) return;
+  modelSelectionInFlight = true;
+  syncPrimaryAction();
+  try {
+    await invoke<ModelCatalog>("register_gguf_model", { filePath: selected });
+    await refreshModelCatalog();
+  } catch (error) {
+    runtimeDetail.textContent = normalizeCommandError(error).message;
+  } finally {
+    modelSelectionInFlight = false;
+    syncPrimaryAction();
   }
 }
 
@@ -1139,6 +1174,7 @@ async function initialize(): Promise<void> {
     void refreshModelCatalog().then(refreshRuntimeStatus);
   });
   modelPreset.addEventListener("change", () => void selectModelPreset());
+  registerGguf.addEventListener("click", () => void selectAndRegisterGguf());
   connectActivate.addEventListener("click", () => void selectAndInstallConnectEntitlement());
   continueButton.addEventListener("click", () => void continueSelectedRun());
   retryButton.addEventListener("click", () => void retrySelectedRun());

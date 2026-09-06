@@ -204,6 +204,10 @@ h1 {
   font-size: 0.72rem;
 }
 
+.model-register-button {
+  margin-top: 7px;
+}
+
 .connect-mark {
   position: relative;
   width: 22px;

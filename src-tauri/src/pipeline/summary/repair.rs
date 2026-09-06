@@ -72,7 +72,9 @@ pub(super) fn generate(
         if attempt == 1 {
             request.seed = generation_seed_for_attempt(seed, request.ordinal.saturating_add(1));
         }
-        let response = runtime.generate(&request).map_err(|f| {
+        let response = runtime.generate_with_control(&request, control);
+        cancellation_checkpoint(control, PipelineStage::Synthesize)?;
+        let response = response.map_err(|f| {
             runtime_pipeline_failure(PipelineStage::Synthesize, "MODEL_SYNTHESIS", f)
         })?;
         validate_runtime_response(runtime, &response, PipelineStage::Synthesize)?;
