@@ -123,6 +123,13 @@ shares one five-second deadline across tags and all show requests. Boundary
 tests admit 256, reject 257 without a show request, and prove a stalled metadata
 listener cannot multiply the aggregate deadline.
 
+A late prior-head review found that execution-provenance rejection discarded
+the response correctly but marked the run terminal. Both a mismatched digest
+and a missing or ambiguous running record are now recoverable failures: the
+current output remains rejected, while restoring the immutable snapshotted
+profile permits the normal retry preflight. Permanent unsupported-profile and
+configuration failures remain terminal.
+
 The local all-target gate passes with 302 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
