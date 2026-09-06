@@ -30,6 +30,17 @@ qualified 9B runner used by another local workload. No unload request was sent.
 After `/api/ps` reported an empty catalog, the same exact head passed both corpus
 fixtures below.
 
+Review of that evidence head found four further admission races: special-file
+substitution could block an open, registered identity was checked before rather
+than after acquiring its read lease, individually valid snapshot stages were
+not validated as one admitted preset, and the parent-death signal lacked the
+post-install parent-PID check. The final implementation opens nonblockingly and
+rejects non-regular files, verifies identity while holding the lease, validates
+the complete preset before runtime construction, and aborts the child before
+`exec` if it was reparented during handoff. Its first NARA start immediately
+after an Ollama runner expired reached the 30-second startup deadline; no runner
+or GPU process remained. The unchanged retry and final DOL run passed.
+
 The exact Jack GGUF
 `e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041`
 is now qualified as an opt-in full preset through the app-managed llama.cpp
@@ -39,12 +50,12 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 42.570 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 283.141 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 57.045 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,948 | 287.289 s | 0 |
 
 NARA used 20 analysis requests and one verification request, with 452 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
-verification requests, with 5,198 and 1,756 completion tokens respectively.
+verification requests, with 5,192 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported
 prompt and completion token accounting that matched the direct adapter's
 preflight. A live process-boundary probe during the NARA run found the socket in
