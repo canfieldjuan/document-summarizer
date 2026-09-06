@@ -969,6 +969,15 @@ point after admission cannot leave the new run without the selected immutable
 profile. Test-only legacy setup may explicitly construct snapshotless historical
 checkpoints; the product start path may not.
 
+A failed historical run without an immutable model profile is not retryable.
+History does not advertise Retry for that run, desktop retry admission rejects
+it before runtime construction or health, and the immediate retry-lineage
+transaction repeats the profile-presence check before creating a child. A retry
+may never substitute the current global preset for an absent inherited profile;
+the user must explicitly start a new run to select the current preset. Current
+product runs already persist their profile at admission, so this restriction is
+limited to snapshotless historical or test-created state.
+
 The selected global runtime status gates new-document admission only. A history
 item that advertises retry or runtime-required continuation remains actionable
 when the current global preset is unavailable, because the recovery command
@@ -998,6 +1007,9 @@ profile and counted payload rather than raw settings or character proxies.
 Recovery tests also cover a healthy immutable run snapshot while the selected
 global preset is unavailable, plus model removal between tags and metadata
 lookup; both paths must preserve the checkpoint and remain retryable.
+They also prove that a snapshotless failed historical run is not advertised as
+retryable, invokes no runtime factory when retry is attempted, and cannot create
+retry lineage through the transactional store boundary.
 Streaming tests hold the final chat frame until the provenance request is
 observed, prove that output is assembled only after a matching in-flight runner
 record, and cover missing, duplicate, mismatched, exactly-256 and 257-record
