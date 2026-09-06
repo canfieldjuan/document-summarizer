@@ -11,7 +11,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
+#[cfg(test)]
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +28,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(900);
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOKENIZE_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_MODEL_RECORDS: usize = 8;
+#[cfg(unix)]
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 
 #[derive(Debug, Clone)]
 pub struct GgufRuntimeConfig {
@@ -112,6 +115,26 @@ struct ServerOwner {
 }
 
 impl ServerOwner {
+    fn is_alive(&self) -> Result<bool, ModelRuntimeFailure> {
+        let mut child = self.child.lock().map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Qualified llama-server state is unavailable",
+                true,
+            )
+        })?;
+        child
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|_| {
+                failure(
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "Qualified llama-server state could not be read",
+                    true,
+                )
+            })
+    }
+
     fn terminate(&self) {
         let Ok(mut child) = self.child.lock() else {
             return;
@@ -202,7 +225,14 @@ impl LlamaCppRuntime {
         )?;
         let runtime_library_directory = build_descriptor_library_directory(&runtime_libraries)?;
 
-        let port = reserve_loopback_port()?;
+        let socket_path = runtime_socket_path(runtime_library_directory.path())?;
+        let socket_argument = socket_path.to_str().ok_or_else(|| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Private runtime socket path is invalid",
+                false,
+            )
+        })?;
         let api_token = Uuid::new_v4().simple().to_string();
         let api_key_file =
             create_private_api_key_file(runtime_library_directory.path(), &api_token)?;
@@ -215,18 +245,21 @@ impl LlamaCppRuntime {
         })?;
         let model_argument = inherited_fd_path(&model_file)?;
         let executable_argument = inherited_fd_path(&server_file)?;
-        let client = Client::builder()
+        let client_builder = Client::builder()
             .no_proxy()
             .redirect(Policy::none())
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|_| {
-                failure(
-                    "MODEL_CONFIG_INVALID",
-                    "Model client could not be built",
-                    false,
-                )
-            })?;
+            .timeout(REQUEST_TIMEOUT);
+        #[cfg(unix)]
+        let client_builder = client_builder.unix_socket(socket_path.clone());
+        #[cfg(not(unix))]
+        let _ = socket_path;
+        let client = client_builder.build().map_err(|_| {
+            failure(
+                "MODEL_CONFIG_INVALID",
+                "Model client could not be built",
+                false,
+            )
+        })?;
         #[cfg(unix)]
         let inherited_fds = {
             use std::os::fd::AsRawFd;
@@ -282,9 +315,7 @@ impl LlamaCppRuntime {
             .env("LD_LIBRARY_PATH", runtime_library_directory.path())
             .args([
                 "--host",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
+                socket_argument,
                 "--model",
                 &model_argument,
                 "--alias",
@@ -325,7 +356,7 @@ impl LlamaCppRuntime {
         }
         runtime_libraries.clear();
 
-        let base_url = format!("http://127.0.0.1:{port}");
+        let base_url = "http://localhost".to_string();
         if let Err(error) = wait_for_startup(&client, &base_url, &api_token, &mut child) {
             let _ = child.kill();
             let _ = child.wait();
@@ -410,7 +441,22 @@ impl LlamaCppRuntime {
         if !guard.matches(config) {
             return Err(stale_model_failure());
         }
-        guard.verify()
+        guard.verify()?;
+        let owner = self.owner.as_ref().ok_or_else(|| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Cached direct GGUF runtime has no owned child",
+                true,
+            )
+        })?;
+        if !owner.is_alive()? {
+            return Err(failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Cached direct GGUF runtime child has exited",
+                true,
+            ));
+        }
+        Ok(())
     }
 
     fn terminate_owner(&self) {
@@ -952,6 +998,35 @@ fn build_descriptor_library_directory(
                 true,
             )
         })?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Private runtime directory permissions could not be fixed",
+            true,
+        )
+    })?;
+    if directory
+        .path()
+        .metadata()
+        .map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Private runtime directory metadata is unavailable",
+                true,
+            )
+        })?
+        .permissions()
+        .mode()
+        & 0o777
+        != 0o700
+    {
+        return Err(failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Private runtime directory permissions are unsafe",
+            false,
+        ));
+    }
     for (file_name, library) in libraries {
         std::os::unix::fs::symlink(
             inherited_fd_path(library)?,
@@ -972,6 +1047,30 @@ fn build_descriptor_library_directory(
 fn build_descriptor_library_directory(
     _libraries: &[(String, File)],
 ) -> Result<tempfile::TempDir, ModelRuntimeFailure> {
+    Err(failure(
+        "MODEL_RUNTIME_UNAVAILABLE",
+        "Direct GGUF execution is supported only on Linux",
+        false,
+    ))
+}
+
+#[cfg(unix)]
+fn runtime_socket_path(directory: &Path) -> Result<PathBuf, ModelRuntimeFailure> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = directory.join("llama.sock");
+    if path.as_os_str().as_bytes().len() > MAX_UNIX_SOCKET_PATH_BYTES {
+        return Err(failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Private runtime socket path exceeds the platform limit",
+            true,
+        ));
+    }
+    Ok(path)
+}
+
+#[cfg(not(unix))]
+fn runtime_socket_path(_directory: &Path) -> Result<PathBuf, ModelRuntimeFailure> {
     Err(failure(
         "MODEL_RUNTIME_UNAVAILABLE",
         "Direct GGUF execution is supported only on Linux",
@@ -1343,26 +1442,6 @@ fn resolve_server_path() -> Result<PathBuf, ModelRuntimeFailure> {
     ))
 }
 
-fn reserve_loopback_port() -> Result<u16, ModelRuntimeFailure> {
-    let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).map_err(|_| {
-        failure(
-            "MODEL_RUNTIME_UNAVAILABLE",
-            "A loopback port could not be reserved",
-            true,
-        )
-    })?;
-    listener
-        .local_addr()
-        .map(|address| address.port())
-        .map_err(|_| {
-            failure(
-                "MODEL_RUNTIME_UNAVAILABLE",
-                "The reserved loopback port could not be read",
-                true,
-            )
-        })
-}
-
 #[cfg(unix)]
 fn inherited_fd_path(file: &File) -> Result<String, ModelRuntimeFailure> {
     use std::os::fd::AsRawFd;
@@ -1630,6 +1709,16 @@ mod tests {
         generation_result_for_completion(response_body).unwrap_err()
     }
 
+    fn fixture_server_owner(child: Child) -> ServerOwner {
+        let runtime_directory = tempfile::tempdir().unwrap();
+        let api_key_file = create_private_api_key_file(runtime_directory.path(), "secret").unwrap();
+        ServerOwner {
+            child: Mutex::new(child),
+            _runtime_library_directory: runtime_directory,
+            _api_key_file: api_key_file,
+        }
+    }
+
     #[test]
     fn prompt_content_cannot_inject_chatml_control_tokens() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -1781,6 +1870,34 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_socket_directory_and_path_boundaries_are_private_and_exact() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = build_descriptor_library_directory(&[]).unwrap();
+        assert_eq!(
+            directory.path().metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let socket = runtime_socket_path(directory.path()).unwrap();
+        assert_eq!(socket.parent(), Some(directory.path()));
+        assert!(socket.ends_with("llama.sock"));
+
+        let maximum_directory = PathBuf::from(format!("/{}", "a".repeat(95)));
+        let maximum = runtime_socket_path(&maximum_directory).unwrap();
+        assert_eq!(
+            maximum.as_os_str().as_bytes().len(),
+            MAX_UNIX_SOCKET_PATH_BYTES
+        );
+        let oversized_directory = PathBuf::from(format!("/{}", "a".repeat(96)));
+        assert_eq!(
+            runtime_socket_path(&oversized_directory).unwrap_err().code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
     }
 
     #[test]
@@ -1948,6 +2065,9 @@ mod tests {
             file: open_regular_nofollow(&model).unwrap(),
             expected: identity,
         });
+        runtime.owner = Some(fixture_server_owner(
+            Command::new("sleep").arg("60").spawn().unwrap(),
+        ));
         runtime.validate_cache_reuse(&config).unwrap();
 
         let replacement = directory.path().join("replacement.gguf");
@@ -1957,6 +2077,49 @@ mod tests {
             runtime.validate_cache_reuse(&config).unwrap_err().code,
             "MODEL_PROFILE_STALE"
         );
+    }
+
+    #[test]
+    fn cached_runtime_rejects_and_reaps_an_exited_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("model.gguf");
+        fs::write(&model, b"model").unwrap();
+        let (_, size, digest, identity) = inspect_regular_file(&model).unwrap();
+        let config = GgufRuntimeConfig {
+            model_path: model.clone(),
+            model_digest: digest,
+            expected_size_bytes: size,
+            expected_file_identity: identity.clone(),
+            expected_server_digest: "b".repeat(64),
+            expected_runtime_libraries: &[],
+            context_tokens: 8_192,
+        };
+        let mut child = Command::new("true").spawn().unwrap();
+        child.wait().unwrap();
+        let mut runtime =
+            LlamaCppRuntime::for_test("http://127.0.0.1:1".to_string(), "secret".to_string());
+        runtime.model_identity_guard = Some(ModelIdentityGuard {
+            path: model.clone(),
+            file: open_regular_nofollow(&model).unwrap(),
+            expected: identity,
+        });
+        runtime.owner = Some(fixture_server_owner(child));
+
+        assert_eq!(
+            runtime.validate_cache_reuse(&config).unwrap_err().code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+        runtime.terminate_owner();
+        assert!(runtime
+            .owner
+            .as_ref()
+            .unwrap()
+            .child
+            .lock()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_some());
     }
 
     #[test]
