@@ -881,24 +881,33 @@ operating-system trust boundary. Direct GGUF execution is Linux-only in this
 release.
 
 The registered GGUF itself remains on its source filesystem rather than being
-duplicated into RAM or app storage. Before fork, the app must acquire a Linux
-read lease on the retained read-only descriptor; acquisition fails if a writer
-already has the file open. Before taking parent ownership of that lease, the
-acquiring thread installs the lease-break handler and explicitly unblocks
-`SIGIO`. Parent ownership is targeted to that exact Linux thread rather than to
-an arbitrary thread in the process, so another thread cannot defer the handoff
-notification. Complete registered file identity is checked only after that
-lease is held. Runtime-bundle preparation may then take time, so immediately
-before spawn the same parent thread requires a clear break flag, an intact
-kernel read lease, and the unchanged complete GGUF identity again. A signaled,
-expired or drifted lease fails without executing the loader. A modify-and-close
-between an unprotected identity check and lease acquisition therefore cannot
-reach the loader. The child becomes the lease-break signal owner with
+duplicated into RAM or app storage. A dedicated supervisor thread, created once
+and retained for the application process lifetime, is the sole executor of the
+complete direct-runtime startup critical section: model open, read-lease
+acquisition, registered-identity checks, runtime-bundle preparation and child
+spawn. Callers from Tauri blocking pools or other transient threads submit that
+work and wait for its typed result; they never become the kernel parent task of
+the child. An unavailable or terminated supervisor fails closed before a child
+can be admitted.
+
+Before fork, the supervisor must acquire a Linux read lease on the retained
+read-only descriptor; acquisition fails if a writer already has the file open.
+Before taking parent ownership of that lease, the supervisor installs the
+lease-break handler and explicitly unblocks `SIGIO`. Parent ownership is
+targeted to that exact Linux supervisor thread rather than to an arbitrary
+thread in the process, so another thread cannot defer the handoff notification.
+Complete registered file identity is checked only after that lease is held.
+Runtime-bundle preparation may then take time, so immediately before spawn the
+same supervisor thread requires a clear break flag, an intact kernel read lease,
+and the unchanged complete GGUF identity again. A signaled, expired or drifted
+lease fails without executing the loader. A modify-and-close between an
+unprotected identity check and lease acquisition therefore cannot reach the
+loader. The child becomes the lease-break signal owner with
 the default terminating disposition before `exec`, and explicitly unblocks the
 lease-break signal in the child so a signal mask inherited from the spawning
 thread cannot defer termination. A later write-open therefore blocks in the
 kernel and terminates the loader before the writer can reach the live inode. The
-acquiring thread checks the delivered break flag again after spawning and
+supervisor checks the delivered break flag again after spawning and
 kills/reaps the child instead of accepting a lease whose thread-directed parent
 notification raced with the handoff. Once ownership reaches the child, a break
 terminates it; cache reuse also rejects and reaps a child that has exited. The
@@ -930,11 +939,15 @@ invalidating the shared child. Request duration and HTTP timeout begin only
 after that caller owns the slot. A queued caller therefore cannot spend its
 network timeout behind another generation or kill the shared child when only
 the queue wait was long.
-Before spawning, the parent PID is captured. Immediately after installing the
-parent-death signal, the child compares its actual parent with that captured
-PID and aborts before `exec` if the parent died during the fork-to-handoff
-window; setting a parent-death signal after reparenting is not accepted as
-cleanup protection.
+Before spawning, the process PID is captured. Immediately after installing the
+parent-death signal, the child compares its actual parent with that captured PID
+and aborts before `exec` if the process died during the fork-to-handoff window;
+setting a parent-death signal after reparenting is not accepted as cleanup
+protection. Linux ties `PR_SET_PDEATHSIG` to the task that called `fork`, so the
+durable supervisor must perform the spawn itself and must not retire while the
+application process remains alive. A transient caller returning or its blocking
+pool thread retiring therefore cannot terminate a healthy cached child; process
+exit still terminates the supervisor and delivers the configured child signal.
 Stage-boundary health repeats the registered model path identity, retained
 descriptor identity and loaded alias/context checks. Cache reuse first repeats
 the registered-path and retained-descriptor checks; deleting, unlinking or
@@ -1291,7 +1304,8 @@ replacement, nonblocking special-file rejection, exact and drifted runtime
 manifest members, sealed immutable runtime bytes, GGUF post-lease identity plus
 read-lease admission and release boundaries, parent/child lease-signal masks and
 thread-directed lease ownership, pre-spawn lease/identity revalidation,
-parent-death handoff handling, descriptor-backed library names,
+durable-supervisor versus transient-caller parent-death handling,
+descriptor-backed library names,
 lease-broken/dead-child detection and eviction,
 idle-versus-active cache replacement, Ollama-only snapshot recovery with
 malformed GGUF settings, shell-free loopback launch, private
