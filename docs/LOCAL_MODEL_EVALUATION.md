@@ -174,23 +174,36 @@ Qwen regex and byte-level pre-tokenizer: composed `é` counts as two byte tokens
 and decomposed `e` plus combining acute counts as three. Contract commit
 `7a64cd7` precedes implementation commit `4228031`.
 
-The local all-target gate passes with 307 library
+Final exact-head review found that execution provenance was still observed too
+late and that the running-model catalog had no record-count ceiling. Reading
+`/api/ps` only after a non-streaming chat completed allowed another local client
+to replace or evict the runner before the observation, while a byte-bounded
+response could still deserialize an excessive number of model records. Native
+chat now uses bounded NDJSON streaming: after the first non-final frame and
+before accepting the final frame, the adapter reads authenticated `/api/ps` and
+requires exactly one same-name runner at the snapshotted digest. The 256-record
+ceiling is applied before name filtering. Final-only, malformed, mid-stream
+error, missing-final and post-final streams fail without returning partial
+text. Contract commit `993b33a` precedes implementation commits `ccc8bf4` and
+`1d2b83a`.
+
+The local all-target gate passes with 309 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
 claimed; the operator requires local checks because private-repository Actions
 minutes are exhausted.
 
-Both corpus acceptances were rerun after the execution-provenance change. NARA
-passed with seven supported claims from seven retained evidence items, seven of
-11 raw pages and all seven adjusted pages cited, 21 model requests, 432
-completion tokens, and 28.74 seconds wall time. DOL passed with 82 supported
-claims from 83 retained evidence items, 82 of 111 raw and adjusted pages cited,
-176 model requests, 5,614 completion tokens, and 188.70 seconds wall time. Both
-used primary structured transport with no schema fallback, and neither produced
-an unverified execution record. DOL's higher wall time than the prior baseline
-was concentrated in two analysis calls; request count and delivered coverage
-were unchanged.
+Both corpus acceptances were rerun through the qualified streamed profile after
+the final execution-provenance change. NARA passed with six supported claims
+from seven retained evidence items, six of 11 raw pages and six of seven
+adjusted pages cited, 21 model requests, 425 completion tokens, and 23.07
+seconds wall time. DOL passed with 82 supported claims from 83 retained evidence
+items, 82 of 111 raw and adjusted pages cited, 176 model requests, 5,615
+completion tokens, and 102.77 seconds wall time. Every model attempt used
+primary structured transport, every in-flight digest proof succeeded, and no
+schema fallback ran. NARA remains robustness-only because its OCR-flattened
+table relationships are absent from the extracted text layer.
 
 ## Latest slice: both corpus acceptances pass; NARA remains robustness-only
 
