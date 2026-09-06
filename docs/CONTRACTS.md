@@ -905,8 +905,15 @@ unprotected identity check and lease acquisition therefore cannot reach the
 loader. The child becomes the lease-break signal owner with
 the default terminating disposition before `exec`, and explicitly unblocks the
 lease-break signal in the child so a signal mask inherited from the spawning
-thread cannot defer termination. A later write-open therefore blocks in the
-kernel and terminates the loader before the writer can reach the live inode. The
+thread cannot defer termination. Separately, before installing
+`PR_SET_PDEATHSIG`, the child resets `SIGTERM` to its default disposition and
+removes `SIGTERM` from its inherited signal mask. An ignored, handled or blocked
+`SIGTERM` in the supervisor process therefore cannot make the one-shot
+parent-death notification inert. Only after that normalization may the child
+install `SIGTERM` as its parent-death signal and verify the captured parent PID;
+any normalization, installation or parent check failure aborts before `exec`.
+A later write-open therefore blocks in the kernel and terminates the loader
+before the writer can reach the live inode. The
 supervisor checks the delivered break flag again after spawning and
 kills/reaps the child instead of accepting a lease whose thread-directed parent
 notification raced with the handoff. Once ownership reaches the child, a break
@@ -935,9 +942,12 @@ the explicit model-settings directory. Product startup creates or tightens its
 app-data/model-settings directory to effective-user-owned mode `0700` before
 database, settings or runtime use; a foreign owner or non-directory fails
 startup. Runtime construction canonicalizes that directory and rejects any
-ancestor that is not a directory. A group/other-writable ancestor is accepted
-only when it has the sticky bit and is owned by root or the effective user;
-sticky storage controlled by another unprivileged account is not trusted.
+ancestor that is not a directory. Every canonical ancestor must be owned by
+root or the effective user regardless of its current write bits: an unrelated
+owner can add owner-write permission later and rename or replace the admitted
+subtree. For root/effective-user-owned ancestors, group/other write permission
+is accepted only when the sticky bit is set. Sticky storage controlled by
+another unprivileged account is not trusted.
 Beneath that admitted location the application creates one dedicated
 runtime root with mode `0700`; an existing root is accepted only when it is a
 real directory owned by the effective user with exactly mode `0700`. A symlink,
@@ -945,7 +955,11 @@ foreign owner, broader mode, missing/untrusted ancestor or metadata failure is
 a typed pre-spawn runtime failure. Per-child runtime directories are created
 only inside that verified root. This makes another account unable to rename or
 replace the leaf between admission and socket bind; checking only the leaf mode
-under an ambient attacker-writable parent is not sufficient.
+under an ambient attacker-writable parent is not sufficient. Boundary proof
+must accept root-owned and effective-user-owned private/sticky ancestry, reject
+a foreign-owned ancestor even when it is currently mode `0555`, reject
+non-sticky writable ancestry on both sides, and prove the staged child remains
+beneath the admitted root.
 
 Because the qualified server has one inference slot, the application admits at
 most one direct-model request at a time for a shared child. Callers wait on an
@@ -967,6 +981,12 @@ durable supervisor must perform the spawn itself and must not retire while the
 application process remains alive. A transient caller returning or its blocking
 pool thread retiring therefore cannot terminate a healthy cached child; process
 exit still terminates the supervisor and delivers the configured child signal.
+Boundary proof must cover inherited blocked and non-default `SIGTERM` states in
+addition to the ordinary state: the pre-exec normalization restores the default
+disposition and unblocks the signal before parent-death installation, while an
+unchanged unrelated blocked signal remains blocked. A probe whose parent exits
+after handoff must not leave the child alive under any admitted inherited
+`SIGTERM` state.
 Stage-boundary health repeats the registered model path identity, retained
 descriptor identity and loaded alias/context checks. Cache reuse first repeats
 the registered-path and retained-descriptor checks; deleting, unlinking or
