@@ -51,6 +51,17 @@ slot acquisition cancellation-aware with one absolute wait deadline. Boundary
 probes accept an intact lease and normal serialized request while rejecting
 signaled and released leases and a canceled queued request before transport.
 
+Exact-head review then found one more process-lifetime defect: Linux
+`PR_SET_PDEATHSIG` follows the exact thread that forks, while desktop status
+discovery can enter runtime construction from a transient blocking-pool thread.
+Retirement of that requester could therefore terminate an otherwise healthy
+cached server while the application remained alive. The entire startup
+critical section now runs on one dedicated process-lifetime supervisor: model
+open, lease ownership, identity and bundle checks, and child spawn all occur on
+that same durable thread. A boundary probe submits startup from a transient
+requester, lets that requester exit, proves repeated work reaches the same
+supervisor thread, and observes the supervised child remain live.
+
 The first validation attempts on this revision correctly stopped before
 inference with `MODEL_RUNTIME_BUSY`: a Website Generator Connect provider kept
 reloading the qualified 30B Ollama runner after the first targeted unload. The
@@ -61,6 +72,13 @@ final-head NARA attempt also correctly stopped before inference with
 qualified 9B runner used by another local workload. No unload request was sent.
 After `/api/ps` reported an empty catalog, the same exact head passed both corpus
 fixtures below.
+
+During the final supervisor-path proof, that Website Generator workload became
+active again after NARA and held an Ollama connection. The first DOL attempt
+therefore stopped before inference with `MODEL_RUNTIME_BUSY`. Under renewed
+operator authorization, its exact Python and shell processes were terminated,
+the now-idle qualified runner was unloaded, and `/api/ps` was empty before DOL
+was rerun successfully.
 
 Review of that evidence head found four further admission races: special-file
 substitution could block an open, registered identity was checked before rather
@@ -82,12 +100,12 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 43.42 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,966 | 280.40 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 44.31 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,942 | 278.94 s | 0 |
 
 NARA used 20 analysis requests and one verification request, with 452 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
-verification requests, with 5,210 and 1,756 completion tokens respectively.
+verification requests, with 5,186 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported
 prompt and completion token accounting that matched the direct adapter's
 preflight. A live process-boundary probe during the NARA run found the socket in

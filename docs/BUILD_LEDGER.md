@@ -24,10 +24,13 @@ This document tracks the vertical slices and architectural decisions for the Doc
   health, and rejected responses retain any token usage the provider supplied.
   Parent lease breaks target the acquiring thread, lease and identity are
   revalidated immediately before spawn, and the shared inference queue observes
-  cancellation before transport.
+  cancellation before transport. A dedicated process-lifetime supervisor owns
+  the entire direct-runtime startup critical section, so Linux parent-death
+  signaling is anchored to a durable application thread rather than a
+  transient blocking-pool requester.
 - NARA delivered 8 supported claims from 8 evidence items across 8/11 raw pages
   in 21 requests and 667 completion tokens. DOL delivered 83/83 supported
-  claims across 83/111 raw pages in 180 requests and 6,966 completion tokens.
+  claims across 83/111 raw pages in 180 requests and 6,942 completion tokens.
   Both completed with warnings and zero schema-fallback attempts.
 - The first read-lease-enabled direct start exited before readiness with an
   undetermined cause because that revision retained neither child stderr nor
