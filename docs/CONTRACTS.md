@@ -884,12 +884,14 @@ The registered GGUF itself remains on its source filesystem rather than being
 duplicated into RAM or app storage. Before fork, the app must acquire a Linux
 read lease on the retained read-only descriptor; acquisition fails if a writer
 already has the file open. The child becomes the lease-break signal owner with
-the default terminating disposition before `exec`. A later write-open therefore
-blocks in the kernel and terminates the loader before the writer can reach the
-live inode. The parent releases the lease only after the child is terminated or
-ownership ends. A filesystem without working read-lease enforcement is not
-admitted for direct GGUF execution. Post-load metadata checks remain defense in
-depth, not the mechanism that prevents mutable bytes from reaching the loader.
+the default terminating disposition before `exec`, and explicitly unblocks the
+lease-break signal in the child so a signal mask inherited from the spawning
+thread cannot defer termination. A later write-open therefore blocks in the
+kernel and terminates the loader before the writer can reach the live inode. The
+parent releases the lease only after the child is terminated or ownership ends.
+A filesystem without working read-lease enforcement is not admitted for direct
+GGUF execution. Post-load metadata checks remain defense in depth, not the
+mechanism that prevents mutable bytes from reaching the loader.
 
 The child binds a Unix-domain socket inside its owner-private runtime directory
 with an unpredictable per-process bearer token and exact digest alias. The
@@ -944,11 +946,16 @@ Before direct startup, the bounded loopback Ollama API is checked for resident
 models whose digest exactly matches an Ollama profile admitted by this
 application. A matching resident digest returns a recoverable busy result; the
 operator can retry after the application's bounded Ollama keep-alive expires.
+Only an exact loopback connection refusal proves that no Ollama listener is
+present and permits direct startup without a residence response. A timeout,
+connection reset, malformed response, rejected status, or any other ambiguous
+probe failure is recoverable and fails closed before the direct child starts;
+it is not treated as evidence that GPU residency is empty.
 The application does not request unload through a mutable model alias because
 the local Ollama API cannot atomically bind that name-addressed operation to the
 digest observed by `/api/ps`. Same-name/different-digest and unrelated models
 are never targeted or treated as an admitted Ollama dependency. An unreachable
-Ollama service is not a direct-runtime dependency.
+Ollama service with no loopback listener is not a direct-runtime dependency.
 
 Discovery admits only Qwen-family architectures that the application explicitly
 supports. An installed descriptor records the exact Ollama name and digest,
@@ -1234,8 +1241,9 @@ Qualification applies only to these exact model and runtime bytes.
 Direct-runtime tests cover settings migration and bounds, duplicate digest
 registration, regular/symlink/replaced files, cached registration deletion and
 replacement, exact and drifted runtime manifest members, sealed immutable
-runtime bytes, GGUF read-lease admission and release boundaries,
-descriptor-backed library names, lease-broken/dead-child detection and eviction,
+runtime bytes, GGUF read-lease admission and release boundaries, inherited
+lease-signal mask handling, descriptor-backed library names,
+lease-broken/dead-child detection and eviction,
 idle-versus-active cache replacement, Ollama-only snapshot recovery with
 malformed GGUF settings, shell-free loopback launch, private
 Unix-socket authentication without TCP handoff, exact alias/context checks,
@@ -1244,7 +1252,8 @@ sides, control-token injection isolation, truncation, explicit output-limit and
 unknown-stop rejection, mismatched accounting and malformed response rejection,
 stage snapshot reload, cache identity and lifecycle, concurrent profile leases,
 unavailable-source catalog behavior, and non-mutating admitted Ollama residence
-checks. The unchanged exactness, provenance,
+checks, including definitive absent-listener admission and ambiguous transport
+failure rejection. The unchanged exactness, provenance,
 fail-closed, NARA, DOL, clippy and formatting gates remain required.
 
 #### Explicit non-scope and deployment boundary
