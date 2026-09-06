@@ -372,6 +372,16 @@ pub(crate) fn admit_retry_for_background(
     create_retry_processing_run(conn, source_run_id, expected_source_version)
 }
 
+pub(crate) fn validate_retry_for_background(
+    conn: &Connection,
+    source_run_id: &str,
+    expected_source_version: u32,
+) -> Result<(), DocumentServiceError> {
+    db::validate_retry_source(conn, source_run_id, expected_source_version)
+        .map_err(RetryPipelineError::from)?;
+    Ok(())
+}
+
 pub fn retry_failed_run_to_summary(
     conn: &mut Connection,
     source_run_id: &str,

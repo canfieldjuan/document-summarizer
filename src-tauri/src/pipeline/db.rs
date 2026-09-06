@@ -1198,14 +1198,12 @@ fn persist_received_run_to_ingested(
     Ok(ingested)
 }
 
-pub(super) fn create_retry_run(
-    conn: &mut Connection,
+pub(crate) fn validate_retry_source(
+    conn: &Connection,
     source_run_id: &str,
     expected_source_version: u32,
-    retry_run: &PipelineRun,
-) -> Result<(PipelineRun, IngestedDocument, RetryLineage), StoreError> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let source_run = get_pipeline_run(&tx, source_run_id)?
+) -> Result<(PipelineRun, RetryCheckpoint), StoreError> {
+    let source_run = get_pipeline_run(conn, source_run_id)?
         .ok_or_else(|| StoreError::RunNotFound(source_run_id.to_string()))?;
     if source_run.state != PipelineState::Failed {
         return Err(StoreError::InvalidRetrySource {
@@ -1228,12 +1226,24 @@ pub(super) fn create_retry_run(
                 run_id: source_run_id.to_string(),
                 reason: "the failure has no reusable checkpoint".to_string(),
             })?;
-    if let Some(existing) = get_retry_lineage_for_source(&tx, source_run_id)? {
+    if let Some(existing) = get_retry_lineage_for_source(conn, source_run_id)? {
         return Err(StoreError::RetryAlreadyExists {
             source_run_id: source_run_id.to_string(),
             retry_run_id: existing.retry_run_id,
         });
     }
+    Ok((source_run, checkpoint))
+}
+
+pub(super) fn create_retry_run(
+    conn: &mut Connection,
+    source_run_id: &str,
+    expected_source_version: u32,
+    retry_run: &PipelineRun,
+) -> Result<(PipelineRun, IngestedDocument, RetryLineage), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (source_run, checkpoint) =
+        validate_retry_source(&tx, source_run_id, expected_source_version)?;
     if retry_run.document_id != source_run.document_id
         || retry_run.state != PipelineState::Received
         || retry_run.state_version != 1

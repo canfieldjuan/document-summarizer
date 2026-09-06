@@ -11,7 +11,7 @@ use crate::pipeline::parser::PdfExtractParser;
 use crate::pipeline::service::{
     admit_pdf_for_background, admit_retry_for_background, continuation_plan,
     continue_run_to_summary_controlled, process_started_parsing_to_summary_controlled,
-    ContinuationComponents, DocumentServiceError, SummaryComponents,
+    validate_retry_for_background, ContinuationComponents, DocumentServiceError, SummaryComponents,
 };
 use crate::pipeline::structure::DeterministicStructureInterpreter;
 use serde::Serialize;
@@ -136,6 +136,7 @@ impl DesktopJobManager {
         expected_source_version: u32,
     ) -> Result<BackgroundRunAccepted, DesktopJobError> {
         let mut conn = db::init_db(&self.db_path)?;
+        validate_retry_for_background(&conn, source_run_id, expected_source_version)?;
         let snapshot = db::get_run_model_profile(&conn, source_run_id)?;
         let runtime = (self.runtime_factory)(snapshot.as_ref())?;
         runtime.health()?;
@@ -456,7 +457,7 @@ mod tests {
     use crate::pipeline::service::ContinuationPipelineError;
     use crate::pipeline::state::TransitionError;
     use std::fs;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex as StdMutex};
     use std::time::{Duration, Instant};
     use uuid::Uuid;
@@ -844,6 +845,21 @@ mod tests {
             continuation_events
         );
 
+        let invalid_factory_calls = Arc::new(AtomicUsize::new(0));
+        let observed_factory_calls = Arc::clone(&invalid_factory_calls);
+        let invalid_retry_manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |_| {
+                observed_factory_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FixtureRuntime))
+            }),
+        );
+        let invalid_retry = invalid_retry_manager
+            .start_retry(&ingested.run_id, ingested.state_version)
+            .expect_err("a nonfailed source must be rejected before runtime discovery");
+        assert_eq!(invalid_retry.code(), "RETRY_NOT_ALLOWED");
+        assert_eq!(invalid_factory_calls.load(Ordering::SeqCst), 0);
+
         manager
             .finalize(
                 &ingested.run_id,
@@ -857,6 +873,12 @@ mod tests {
             .expect("failed source should exist");
         let retry_events =
             list_pipeline_events(&conn, &ingested.run_id).expect("failed events should load");
+
+        let stale_retry = invalid_retry_manager
+            .start_retry(&failed.run_id, failed.state_version - 1)
+            .expect_err("a stale retry must be rejected before runtime discovery");
+        assert_eq!(stale_retry.code(), "RETRY_STALE_STATE");
+        assert_eq!(invalid_factory_calls.load(Ordering::SeqCst), 0);
 
         let retry_error = manager
             .start_retry(&failed.run_id, failed.state_version)
