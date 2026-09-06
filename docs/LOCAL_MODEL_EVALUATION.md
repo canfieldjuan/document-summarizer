@@ -114,7 +114,16 @@ post-acceptance model failures were projected through a stale retryable-code
 allowlist. Connect job errors now preserve the typed summary-stage failure's
 `recoverable` value directly.
 
-The local all-target gate passes with 300 library
+A delayed security review found that the byte-bounded `/api/tags` response had
+no model-record cap and each sequential `/api/show` probe received a fresh
+five-second timeout. A hostile same-user loopback listener could therefore
+multiply startup delay by the number of records in one accepted response.
+Discovery now admits at most 256 records before issuing any metadata probe and
+shares one five-second deadline across tags and all show requests. Boundary
+tests admit 256, reject 257 without a show request, and prove a stalled metadata
+listener cannot multiply the aggregate deadline.
+
+The local all-target gate passes with 302 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
