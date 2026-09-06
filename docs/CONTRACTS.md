@@ -927,6 +927,12 @@ accepted job-to-run mapping. Therefore an accepted Connect job cannot expose a
 stable ingested checkpoint without its immutable runtime identity, including if
 the process exits before worker scheduling. A production Connect runtime without
 a profile snapshot is rejected before the acceptance transaction.
+If runtime construction or snapshot admission fails after artifact preparation,
+the provider rechecks the job identifier before returning that error. An
+identical request that committed concurrently returns the stored idempotent job;
+a conflicting request returns the existing job-ID conflict. Cleanup removes only
+the losing request's separately allocated import and never the accepted job's
+owned source.
 
 #### Qualification and acceptance evidence
 
