@@ -734,6 +734,16 @@ async fn create_job_for(
     let runtime = match (state.runtime_factory)() {
         Ok(runtime) => runtime,
         Err(error) => {
+            if let Some(response) = idempotent_response_after_admission_race(
+                store::get_job(&conn, &request.job_id),
+                &request_hash,
+                version,
+                &import_path,
+            )
+            .await?
+            {
+                return Ok(response);
+            }
             remove_file_quietly(&import_path).await;
             return Err(ProviderHttpError::runtime(error));
         }
@@ -741,6 +751,16 @@ async fn create_job_for(
     let profile_snapshot = match runtime.profile_snapshot() {
         Some(snapshot) => snapshot,
         None => {
+            if let Some(response) = idempotent_response_after_admission_race(
+                store::get_job(&conn, &request.job_id),
+                &request_hash,
+                version,
+                &import_path,
+            )
+            .await?
+            {
+                return Ok(response);
+            }
             remove_file_quietly(&import_path).await;
             return Err(ProviderHttpError::runtime(ModelRuntimeFailure {
                 code: "MODEL_CONFIG_INVALID".to_string(),
@@ -772,13 +792,15 @@ async fn create_job_for(
             return Err(entitlement_required_error());
         }
         Err(error) => {
-            if let Some(existing) =
-                store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
+            if let Some(response) = idempotent_response_after_admission_race(
+                store::get_job(&conn, &request.job_id),
+                &request_hash,
+                version,
+                &import_path,
+            )
+            .await?
             {
-                if !existing_job_owns_import_path(&existing.import_path, &import_path) {
-                    remove_file_quietly(&import_path).await;
-                }
-                return idempotent_response(existing, &request_hash, version);
+                return Ok(response);
             }
             remove_file_quietly(&import_path).await;
             if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
@@ -1122,6 +1144,28 @@ fn existing_request_matches(
 
 fn existing_job_owns_import_path(existing_import_path: &str, candidate: &Path) -> bool {
     Path::new(existing_import_path) == candidate
+}
+
+async fn idempotent_response_after_admission_race(
+    existing: Result<Option<StoredConnectJob>, ConnectStoreError>,
+    request_hash: &str,
+    version: WireVersion,
+    candidate_import_path: &Path,
+) -> Result<Option<Response>, ProviderHttpError> {
+    let existing = match existing {
+        Ok(existing) => existing,
+        Err(error) => {
+            remove_file_quietly(candidate_import_path).await;
+            return Err(ProviderHttpError::store(error));
+        }
+    };
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    if !existing_job_owns_import_path(&existing.import_path, candidate_import_path) {
+        remove_file_quietly(candidate_import_path).await;
+    }
+    idempotent_response(existing, request_hash, version).map(Some)
 }
 
 fn authorize(state: &ProviderState, headers: &HeaderMap) -> Result<(), ProviderHttpError> {
@@ -3059,6 +3103,84 @@ mod tests {
             .unwrap()
             .next()
             .is_none());
+    }
+
+    #[test]
+    fn concurrent_identical_acceptance_wins_over_a_late_runtime_failure() {
+        let root = TestDirectory::new("doc-sum-connect-runtime-idempotency-race");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(fixture).expect("fixture should read");
+        let request = fixture_request(&bytes);
+        let existing_import = root.0.join("accepted-source.pdf");
+        fs::write(&existing_import, &bytes).expect("accepted source should write");
+        let factory_db_path = db_path.clone();
+        let factory_request = request.clone();
+        let factory_import = existing_import.clone();
+        let runtime_factory: RuntimeFactory = Arc::new(move || {
+            let mut conn = db::init_db(&factory_db_path).expect("provider database should open");
+            let (document, run) = prepare_pdf_ingestion(
+                factory_import
+                    .to_str()
+                    .expect("accepted path should be UTF-8"),
+                Some(&factory_request.inputs[0].display_name),
+            )
+            .expect("concurrent ingestion should prepare");
+            store::accept_job_with_ingestion_guarded(
+                &mut conn,
+                &factory_request,
+                &factory_request.canonical_hash().unwrap(),
+                factory_import.to_str().unwrap(),
+                "concurrent-provider",
+                &document,
+                &run,
+                Some(&fixture_profile_snapshot()),
+                || true,
+            )
+            .expect("concurrent acceptance should persist")
+            .expect("concurrent acceptance should be admitted");
+            Err(ModelRuntimeFailure {
+                code: "MODEL_NOT_AVAILABLE".to_string(),
+                message: "late fixture model failure".to_string(),
+                recoverable: true,
+                request_attempts: Vec::new(),
+            })
+        });
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory,
+        )
+        .expect("provider should start");
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+
+        let response = client()
+            .post(format!("{}v1/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form(&request, bytes))
+            .send()
+            .expect("duplicate submission should return its stored job");
+        assert_eq!(response.status(), StatusCode::OK);
+        let status = response
+            .json::<JobStatus>()
+            .expect("job status should decode");
+        assert_eq!(status.job_id, request.job_id);
+        assert_eq!(status.status, JobState::Accepted);
+        assert!(existing_import.exists());
+        assert!(fs::read_dir(app_data.join("connect-imports"))
+            .unwrap()
+            .next()
+            .is_none());
+        let conn = db::init_db(&db_path).expect("provider database should reopen");
+        assert!(store::get_job(&conn, &request.job_id).unwrap().is_some());
     }
 
     #[test]
