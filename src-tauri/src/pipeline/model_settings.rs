@@ -984,14 +984,13 @@ fn stage_runtime(
             ))
         }
         ModelRuntimeKind::LlamaCppGguf => {
-            if let Ok(ollama) = OllamaRuntime::discovery_from_environment() {
-                let admitted_ollama_digests = QUALIFIED_PROFILES
-                    .iter()
-                    .filter(|profile| profile.runtime_kind == ModelRuntimeKind::OllamaNative)
-                    .map(|profile| profile.digest)
-                    .collect::<Vec<_>>();
-                ollama.ensure_models_not_resident_by_digest(&admitted_ollama_digests)?;
-            }
+            let ollama = OllamaRuntime::discovery_from_environment()?;
+            let admitted_ollama_digests = QUALIFIED_PROFILES
+                .iter()
+                .filter(|profile| profile.runtime_kind == ModelRuntimeKind::OllamaNative)
+                .map(|profile| profile.digest)
+                .collect::<Vec<_>>();
+            ollama.ensure_models_not_resident_by_digest(&admitted_ollama_digests)?;
             let registration = settings
                 .registered_ggufs
                 .iter()

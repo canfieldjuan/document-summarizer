@@ -294,8 +294,11 @@ impl LlamaCppRuntime {
                     default_action.sa_sigaction = libc::SIG_DFL;
                     if libc::sigemptyset(&mut default_action.sa_mask) != 0
                         || libc::sigaction(libc::SIGIO, &default_action, std::ptr::null_mut()) != 0
-                        || libc::fcntl(model_descriptor, libc::F_SETOWN, libc::getpid()) < 0
                     {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    unblock_child_lease_signal()?;
+                    if libc::fcntl(model_descriptor, libc::F_SETOWN, libc::getpid()) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                     for descriptor in &inherited_fds {
@@ -1261,6 +1264,18 @@ fn stale_model_failure() -> ModelRuntimeFailure {
 }
 
 #[cfg(unix)]
+fn unblock_child_lease_signal() -> std::io::Result<()> {
+    let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigemptyset(&mut signals) } != 0
+        || unsafe { libc::sigaddset(&mut signals, libc::SIGIO) } != 0
+        || unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &signals, std::ptr::null_mut()) } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn acquire_model_read_lease(file: &File) -> Result<(), ModelRuntimeFailure> {
     use std::os::fd::AsRawFd;
 
@@ -1850,6 +1865,36 @@ mod tests {
                 libc::F_UNLCK
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_handoff_unblocks_only_the_lease_break_signal() {
+        let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+        let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::sigemptyset(&mut blocked) }, 0);
+        assert_eq!(unsafe { libc::sigaddset(&mut blocked, libc::SIGIO) }, 0);
+        assert_eq!(unsafe { libc::sigaddset(&mut blocked, libc::SIGUSR1) }, 0);
+        assert_eq!(
+            unsafe { libc::sigprocmask(libc::SIG_BLOCK, &blocked, &mut previous) },
+            0
+        );
+
+        unblock_child_lease_signal().unwrap();
+        let mut observed: libc::sigset_t = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut observed) },
+            0
+        );
+        let sigio_blocked = unsafe { libc::sigismember(&observed, libc::SIGIO) };
+        let sigusr1_blocked = unsafe { libc::sigismember(&observed, libc::SIGUSR1) };
+        assert_eq!(
+            unsafe { libc::sigprocmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) },
+            0
+        );
+
+        assert_eq!(sigio_blocked, 0);
+        assert_eq!(sigusr1_blocked, 1);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -306,7 +307,14 @@ impl OllamaRuntime {
             .send()
         {
             Ok(response) => response,
-            Err(_) => return Ok(()),
+            Err(error) if request_was_connection_refused(&error) => return Ok(()),
+            Err(_) => {
+                return Err(runtime_failure(
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "Ollama runner residence could not be verified",
+                    true,
+                ));
+            }
         };
         if !initial.status().is_success() {
             return Err(rejected_response(initial.status()));
@@ -701,6 +709,20 @@ impl OllamaRuntime {
         }
         Ok(())
     }
+}
+
+fn request_was_connection_refused(error: &reqwest::Error) -> bool {
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::ConnectionRefused)
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 fn discovery_remaining(deadline: Instant) -> Result<Duration, ModelRuntimeFailure> {
@@ -3183,6 +3205,49 @@ mod tests {
             "MODEL_RUNTIME_BUSY"
         );
         assert!(!server.join().expect("residence server should finish"));
+    }
+
+    #[test]
+    fn runner_residence_check_distinguishes_absent_listener_from_ambiguous_transport() {
+        let absent = TcpListener::bind("127.0.0.1:0").expect("loopback port should bind");
+        let absent_address = absent
+            .local_addr()
+            .expect("loopback address should resolve");
+        drop(absent);
+        let runtime = OllamaRuntime::new(
+            &format!("http://{absent_address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("loopback runtime should configure");
+        runtime
+            .ensure_models_not_resident_by_digest(&[])
+            .expect("connection refusal proves there is no listener");
+
+        let ambiguous = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let ambiguous_address = ambiguous
+            .local_addr()
+            .expect("loopback address should resolve");
+        let server = thread::spawn(move || {
+            let (stream, _) = ambiguous.accept().expect("residence query should arrive");
+            drop(stream);
+        });
+        let runtime = OllamaRuntime::new(
+            &format!("http://{ambiguous_address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("loopback runtime should configure");
+        assert_eq!(
+            runtime
+                .ensure_models_not_resident_by_digest(&[])
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+        server.join().expect("ambiguous server should finish");
     }
 
     #[test]
