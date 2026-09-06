@@ -883,15 +883,22 @@ release.
 The registered GGUF itself remains on its source filesystem rather than being
 duplicated into RAM or app storage. Before fork, the app must acquire a Linux
 read lease on the retained read-only descriptor; acquisition fails if a writer
-already has the file open. Complete registered file identity is checked only
-after that lease is held and before any child is spawned, so a modify-and-close
+already has the file open. Before taking parent ownership of that lease, the
+acquiring thread installs the lease-break handler and explicitly unblocks
+`SIGIO`; a mask inherited from its caller cannot defer a parent-directed break
+notification until after ownership transfer. Complete registered file identity
+is checked only after that lease is held and before any child is spawned, so a
+modify-and-close
 between an unprotected identity check and lease acquisition cannot reach the
 loader. The child becomes the lease-break signal owner with
 the default terminating disposition before `exec`, and explicitly unblocks the
 lease-break signal in the child so a signal mask inherited from the spawning
 thread cannot defer termination. A later write-open therefore blocks in the
 kernel and terminates the loader before the writer can reach the live inode. The
-parent releases the lease only after the child is terminated or ownership ends.
+parent checks the delivered break flag again after spawning and kills/reaps the
+child instead of accepting a lease whose parent notification raced with the
+handoff. The parent releases the lease only after the child is terminated or
+ownership ends.
 A filesystem without working read-lease enforcement is not admitted for direct
 GGUF execution. Post-load metadata checks remain defense in depth, not the
 mechanism that prevents mutable bytes from reaching the loader.
@@ -1256,7 +1263,7 @@ Direct-runtime tests cover settings migration and bounds, duplicate digest
 registration, regular/symlink/replaced files, cached registration deletion and
 replacement, nonblocking special-file rejection, exact and drifted runtime
 manifest members, sealed immutable runtime bytes, GGUF post-lease identity plus
-read-lease admission and release boundaries, inherited lease-signal mask and
+read-lease admission and release boundaries, parent/child lease-signal masks and
 parent-death handoff handling, descriptor-backed library names,
 lease-broken/dead-child detection and eviction,
 idle-versus-active cache replacement, Ollama-only snapshot recovery with
