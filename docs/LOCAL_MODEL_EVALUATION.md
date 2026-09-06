@@ -66,6 +66,14 @@ metadata failures while keeping transport/authentication fatal, and reconstructs
 continuation/retry runtimes from the immutable admitted snapshot; new runs alone
 use the current setting.
 
+Review reconstruction found two further recovery defects before merge. The
+frontend treated "stored preset is valid" as "there is a selectable recovery
+preset," so a later runtime-status refresh disabled the recovery option. The
+settings writer also used plain `fs::rename`, which cannot replace an existing
+destination on Windows. Selection availability and selection-in-flight state are
+now distinct, and same-directory atomic persistence uses replacement semantics
+on Windows while retaining the exact private mode on Unix.
+
 The local all-target gate passes with 292 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
