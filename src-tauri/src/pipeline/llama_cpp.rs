@@ -289,7 +289,7 @@ impl LlamaCppRuntime {
                     {
                         return Err(std::io::Error::last_os_error());
                     }
-                    unblock_child_lease_signal()?;
+                    unblock_model_lease_signal()?;
                     if libc::fcntl(model_descriptor, libc::F_SETOWN, libc::getpid()) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -1274,7 +1274,7 @@ fn verify_registered_model_identity(
 }
 
 #[cfg(unix)]
-fn unblock_child_lease_signal() -> std::io::Result<()> {
+fn unblock_model_lease_signal() -> std::io::Result<()> {
     let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
     if unsafe { libc::sigemptyset(&mut signals) } != 0
         || unsafe { libc::sigaddset(&mut signals, libc::SIGIO) } != 0
@@ -1312,6 +1312,13 @@ fn acquire_model_read_lease(file: &File) -> Result<(), ModelRuntimeFailure> {
             true,
         ));
     }
+    unblock_model_lease_signal().map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "GGUF write-exclusion signal could not be unblocked",
+            true,
+        )
+    })?;
     MODEL_LEASE_BREAK_REQUESTED.store(false, Ordering::SeqCst);
     let descriptor = file.as_raw_fd();
     if unsafe { libc::fcntl(descriptor, libc::F_SETOWN, libc::getpid()) } < 0
@@ -1705,6 +1712,8 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    static LEASE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     fn generation_result_for_completion(
         response_body: &str,
     ) -> Result<ModelResponse, ModelRuntimeFailure> {
@@ -1859,6 +1868,7 @@ mod tests {
 
     #[test]
     fn model_read_lease_accepts_idle_file_rejects_open_writer_and_releases() {
+        let _lease_test = LEASE_TEST_LOCK.lock().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let model = directory.path().join("model.gguf");
         fs::write(&model, b"model").unwrap();
@@ -1892,7 +1902,45 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn parent_lease_ownership_unblocks_and_delivers_sigio() {
+        let _lease_test = LEASE_TEST_LOCK.lock().unwrap();
+        let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+        let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::sigemptyset(&mut blocked) }, 0);
+        assert_eq!(unsafe { libc::sigaddset(&mut blocked, libc::SIGIO) }, 0);
+        assert_eq!(
+            unsafe { libc::sigprocmask(libc::SIG_BLOCK, &blocked, &mut previous) },
+            0
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("model.gguf");
+        fs::write(&model, b"model").unwrap();
+        let reader = open_regular_nofollow(&model).unwrap();
+        acquire_model_read_lease(&reader).unwrap();
+        let mut observed: libc::sigset_t = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut observed) },
+            0
+        );
+        let sigio_blocked = unsafe { libc::sigismember(&observed, libc::SIGIO) };
+        assert_eq!(unsafe { libc::raise(libc::SIGIO) }, 0);
+        let break_delivered = MODEL_LEASE_BREAK_REQUESTED.load(Ordering::SeqCst);
+        release_model_read_lease(&reader);
+        assert_eq!(
+            unsafe { libc::sigprocmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) },
+            0
+        );
+        MODEL_LEASE_BREAK_REQUESTED.store(false, Ordering::SeqCst);
+
+        assert_eq!(sigio_blocked, 0);
+        assert!(break_delivered);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn registered_identity_is_verified_while_the_read_lease_is_held() {
+        let _lease_test = LEASE_TEST_LOCK.lock().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let model = directory.path().join("model.gguf");
         fs::write(&model, b"model").unwrap();
@@ -1964,7 +2012,7 @@ mod tests {
             0
         );
 
-        unblock_child_lease_signal().unwrap();
+        unblock_model_lease_signal().unwrap();
         let mut observed: libc::sigset_t = unsafe { std::mem::zeroed() };
         assert_eq!(
             unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut observed) },
