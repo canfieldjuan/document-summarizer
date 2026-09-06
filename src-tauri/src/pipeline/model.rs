@@ -24,6 +24,8 @@ const MAX_INSTALLED_MODEL_RECORDS: usize = 256;
 const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MODEL_METADATA_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_RETAINED_MODEL_METADATA_FIELD_BYTES: usize = 512;
+const MAX_RETAINED_MODEL_METADATA_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_SCHEMA_NAME_BYTES: usize = 64;
 const MIN_SUPPORTED_CONTEXT_TOKENS: u32 = 4_096;
@@ -299,13 +301,20 @@ impl OllamaRuntime {
         let records = self.installed_model_records_with_timeout(discovery_remaining(deadline)?)?;
         validate_model_record_count(records.len())?;
         let mut descriptors = Vec::with_capacity(records.len());
+        let mut retained_metadata_bytes = 0;
         for model in records {
+            validate_model_record_metadata(&model)?;
             let unavailable = unavailable_model_descriptor(model.clone());
-            match self.describe_model(model, discovery_remaining(deadline)?) {
-                Ok(descriptor) => descriptors.push(descriptor),
+            let descriptor = match self.describe_model(model, discovery_remaining(deadline)?) {
+                Ok(descriptor) => descriptor,
                 Err(error) if metadata_failure_is_catalog_wide(&error) => return Err(error),
-                Err(_) => descriptors.push(unavailable),
-            }
+                Err(_) => unavailable,
+            };
+            push_installed_model_descriptor(
+                &mut descriptors,
+                &mut retained_metadata_bytes,
+                descriptor,
+            )?;
         }
         discovery_remaining(deadline)?;
         Ok(descriptors)
@@ -316,6 +325,7 @@ impl OllamaRuntime {
         model: ModelRecord,
         timeout: Duration,
     ) -> Result<InstalledModelDescriptor, ModelRuntimeFailure> {
+        validate_model_record_metadata(&model)?;
         let response = self
             .authorize(
                 self.client
@@ -338,7 +348,7 @@ impl OllamaRuntime {
             return Err(rejected_model_metadata(response.status()));
         }
         let shown: ShowResponse = decode_bounded_json(response)?;
-        Ok(model_descriptor(model, shown))
+        model_descriptor(model, shown)
     }
 
     fn pinned_tokenizer(&self) -> Result<Arc<QwenPromptTokenizer>, ModelRuntimeFailure> {
@@ -680,6 +690,69 @@ fn validate_model_record_count(count: usize) -> Result<(), ModelRuntimeFailure> 
             false,
         ));
     }
+    Ok(())
+}
+
+fn catalog_metadata_too_large() -> ModelRuntimeFailure {
+    runtime_failure(
+        "MODEL_CATALOG_TOO_LARGE",
+        "Installed model catalog exceeds the retained metadata limit",
+        false,
+    )
+}
+
+fn validate_retained_metadata_field(value: &str) -> Result<usize, ModelRuntimeFailure> {
+    let bytes = value.len();
+    if bytes > MAX_RETAINED_MODEL_METADATA_FIELD_BYTES {
+        return Err(catalog_metadata_too_large());
+    }
+    Ok(bytes)
+}
+
+fn validate_model_record_metadata(model: &ModelRecord) -> Result<(), ModelRuntimeFailure> {
+    validate_retained_metadata_field(&model.name)?;
+    validate_retained_metadata_field(&model.digest)?;
+    validate_retained_metadata_field(&model.details.family)?;
+    if let Some(value) = model.details.parameter_size.as_deref() {
+        validate_retained_metadata_field(value)?;
+    }
+    if let Some(value) = model.details.quantization_level.as_deref() {
+        validate_retained_metadata_field(value)?;
+    }
+    Ok(())
+}
+
+fn retained_descriptor_metadata_bytes(
+    descriptor: &InstalledModelDescriptor,
+) -> Result<usize, ModelRuntimeFailure> {
+    [
+        Some(descriptor.name.as_str()),
+        Some(descriptor.digest.as_str()),
+        descriptor.architecture.as_deref(),
+        descriptor.parameter_size.as_deref(),
+        descriptor.quantization_level.as_deref(),
+        descriptor.disabled_reason.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .try_fold(0_usize, |total, value| {
+        total
+            .checked_add(validate_retained_metadata_field(value)?)
+            .ok_or_else(catalog_metadata_too_large)
+    })
+}
+
+fn push_installed_model_descriptor(
+    descriptors: &mut Vec<InstalledModelDescriptor>,
+    retained_metadata_bytes: &mut usize,
+    descriptor: InstalledModelDescriptor,
+) -> Result<(), ModelRuntimeFailure> {
+    let descriptor_bytes = retained_descriptor_metadata_bytes(&descriptor)?;
+    *retained_metadata_bytes = (*retained_metadata_bytes)
+        .checked_add(descriptor_bytes)
+        .filter(|total| *total <= MAX_RETAINED_MODEL_METADATA_BYTES)
+        .ok_or_else(catalog_metadata_too_large)?;
+    descriptors.push(descriptor);
     Ok(())
 }
 
@@ -1341,13 +1414,19 @@ struct ShowResponse {
     model_info: serde_json::Map<String, serde_json::Value>,
 }
 
-fn model_descriptor(model: ModelRecord, shown: ShowResponse) -> InstalledModelDescriptor {
+fn model_descriptor(
+    model: ModelRecord,
+    shown: ShowResponse,
+) -> Result<InstalledModelDescriptor, ModelRuntimeFailure> {
     let architecture = shown
         .model_info
         .get("general.architecture")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .or_else(|| (!model.details.family.is_empty()).then(|| model.details.family.clone()));
+    if let Some(value) = architecture.as_deref() {
+        validate_retained_metadata_field(value)?;
+    }
     let tokenizer_family = architecture
         .as_deref()
         .and_then(qwen_tokenizer_family_for_architecture);
@@ -1372,7 +1451,7 @@ fn model_descriptor(model: ModelRecord, shown: ShowResponse) -> InstalledModelDe
     } else {
         None
     };
-    InstalledModelDescriptor {
+    Ok(InstalledModelDescriptor {
         name: model.name,
         digest: model.digest,
         size_bytes: model.size,
@@ -1382,7 +1461,7 @@ fn model_descriptor(model: ModelRecord, shown: ShowResponse) -> InstalledModelDe
         quantization_level: model.details.quantization_level,
         maximum_context_tokens,
         disabled_reason,
-    }
+    })
 }
 
 fn unavailable_model_descriptor(model: ModelRecord) -> InstalledModelDescriptor {
@@ -1405,6 +1484,7 @@ fn unavailable_model_descriptor(model: ModelRecord) -> InstalledModelDescriptor 
 
 fn metadata_failure_is_catalog_wide(error: &ModelRuntimeFailure) -> bool {
     error.code == "MODEL_RUNTIME_UNAVAILABLE"
+        || error.code == "MODEL_CATALOG_TOO_LARGE"
         || (error.code == "MODEL_RUNTIME_REJECTED"
             && (error.message.ends_with("HTTP 401") || error.message.ends_with("HTTP 403")))
 }
@@ -1423,6 +1503,35 @@ mod tests {
     use std::io::{Cursor, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
+
+    fn empty_installed_descriptor() -> InstalledModelDescriptor {
+        InstalledModelDescriptor {
+            name: String::new(),
+            digest: String::new(),
+            size_bytes: 0,
+            architecture: None,
+            tokenizer_family: None,
+            parameter_size: None,
+            quantization_level: None,
+            maximum_context_tokens: None,
+            disabled_reason: None,
+        }
+    }
+
+    fn set_external_descriptor_field(
+        descriptor: &mut InstalledModelDescriptor,
+        field: usize,
+        value: String,
+    ) {
+        match field {
+            0 => descriptor.name = value,
+            1 => descriptor.digest = value,
+            2 => descriptor.architecture = Some(value),
+            3 => descriptor.parameter_size = Some(value),
+            4 => descriptor.quantization_level = Some(value),
+            _ => panic!("fixture field must be external descriptor metadata"),
+        }
+    }
 
     fn read_json_request(stream: &mut TcpStream) -> serde_json::Value {
         let mut request = Vec::new();
@@ -2210,6 +2319,170 @@ mod tests {
     }
 
     #[test]
+    fn retained_discovery_metadata_enforces_field_and_aggregate_byte_boundaries() {
+        let exact_field = "é".repeat(MAX_RETAINED_MODEL_METADATA_FIELD_BYTES / 2);
+        assert_eq!(exact_field.len(), MAX_RETAINED_MODEL_METADATA_FIELD_BYTES);
+        let oversized_field = format!("{exact_field}x");
+        assert_eq!(
+            oversized_field.len(),
+            MAX_RETAINED_MODEL_METADATA_FIELD_BYTES + 1
+        );
+
+        for field in 0..5 {
+            let mut exact = empty_installed_descriptor();
+            set_external_descriptor_field(&mut exact, field, exact_field.clone());
+            assert!(retained_descriptor_metadata_bytes(&exact).is_ok());
+
+            let mut oversized = empty_installed_descriptor();
+            set_external_descriptor_field(&mut oversized, field, oversized_field.clone());
+            assert_eq!(
+                retained_descriptor_metadata_bytes(&oversized)
+                    .expect_err("field maximum plus one must fail")
+                    .code,
+                "MODEL_CATALOG_TOO_LARGE"
+            );
+        }
+
+        let exact_piece = InstalledModelDescriptor {
+            name: "n".repeat(MAX_RETAINED_MODEL_METADATA_FIELD_BYTES),
+            digest: "d".repeat(MAX_RETAINED_MODEL_METADATA_FIELD_BYTES),
+            ..empty_installed_descriptor()
+        };
+        let mut exact_descriptors = Vec::new();
+        let mut exact_total = 0;
+        for _ in 0..MAX_INSTALLED_MODEL_RECORDS {
+            push_installed_model_descriptor(
+                &mut exact_descriptors,
+                &mut exact_total,
+                exact_piece.clone(),
+            )
+            .expect("exact aggregate maximum must remain valid");
+        }
+        assert_eq!(exact_total, MAX_RETAINED_MODEL_METADATA_BYTES);
+        assert_eq!(exact_descriptors.len(), MAX_INSTALLED_MODEL_RECORDS);
+
+        let mut over_descriptors = Vec::new();
+        let mut over_total = 0;
+        for _ in 0..MAX_INSTALLED_MODEL_RECORDS - 1 {
+            push_installed_model_descriptor(
+                &mut over_descriptors,
+                &mut over_total,
+                exact_piece.clone(),
+            )
+            .expect("aggregate below the maximum must remain valid");
+        }
+        let mut maximum_plus_one = exact_piece;
+        maximum_plus_one.architecture = Some("x".to_string());
+        assert_eq!(
+            push_installed_model_descriptor(
+                &mut over_descriptors,
+                &mut over_total,
+                maximum_plus_one,
+            )
+            .expect_err("aggregate maximum plus one must fail")
+            .code,
+            "MODEL_CATALOG_TOO_LARGE"
+        );
+        assert_eq!(over_descriptors.len(), MAX_INSTALLED_MODEL_RECORDS - 1);
+        assert_eq!(
+            over_total,
+            MAX_RETAINED_MODEL_METADATA_BYTES - (MAX_RETAINED_MODEL_METADATA_FIELD_BYTES * 2)
+        );
+    }
+
+    #[test]
+    fn discovery_rejects_oversized_tag_metadata_before_show_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let server = thread::spawn(move || {
+            let (mut tags, _) = listener.accept().expect("tags request should arrive");
+            let _ = read_headers(&mut tags);
+            write_json_response(
+                &mut tags,
+                "200 OK",
+                &serde_json::json!({
+                    "models": [{
+                        "name": "n".repeat(MAX_RETAINED_MODEL_METADATA_FIELD_BYTES + 1),
+                        "digest": "immutable-digest",
+                        "size": 1,
+                        "details": {"family": "qwen3"}
+                    }]
+                }),
+            );
+            listener
+                .set_nonblocking(true)
+                .expect("listener should become nonblocking");
+            thread::sleep(Duration::from_millis(50));
+            let error = listener
+                .accept()
+                .expect_err("oversized tag field must fail before any show request");
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        });
+        let runtime = OllamaRuntime::new(
+            &format!("http://{address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("discovery runtime should configure");
+        let error = runtime
+            .installed_models()
+            .expect_err("oversized tag metadata must fail discovery");
+        server.join().expect("tag metadata server should finish");
+        assert_eq!(error.code, "MODEL_CATALOG_TOO_LARGE");
+    }
+
+    #[test]
+    fn discovery_rejects_oversized_show_metadata_for_the_whole_catalog() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let server = thread::spawn(move || {
+            let (mut tags, _) = listener.accept().expect("tags request should arrive");
+            let _ = read_headers(&mut tags);
+            write_json_response(
+                &mut tags,
+                "200 OK",
+                &serde_json::json!({
+                    "models": [{
+                        "name": "fixture-qwen:latest",
+                        "digest": "immutable-digest",
+                        "size": 1,
+                        "details": {"family": "qwen3"}
+                    }]
+                }),
+            );
+            let (mut show, _) = listener.accept().expect("show request should arrive");
+            let _ = read_json_request(&mut show);
+            write_json_response(
+                &mut show,
+                "200 OK",
+                &serde_json::json!({
+                    "model_info": {
+                        "general.architecture":
+                            "a".repeat(MAX_RETAINED_MODEL_METADATA_FIELD_BYTES + 1)
+                    }
+                }),
+            );
+        });
+        let runtime = OllamaRuntime::new(
+            &format!("http://{address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("discovery runtime should configure");
+        let error = runtime
+            .installed_models()
+            .expect_err("oversized show metadata must fail discovery");
+        server.join().expect("show metadata server should finish");
+        assert_eq!(error.code, "MODEL_CATALOG_TOO_LARGE");
+    }
+
+    #[test]
     fn discovery_metadata_probes_share_one_aggregate_deadline() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
         let address = listener
@@ -2319,7 +2592,7 @@ mod tests {
             .expect("fixture metadata should be an object")
             .clone(),
         };
-        let descriptor = model_descriptor(qwen, shown);
+        let descriptor = model_descriptor(qwen, shown).expect("valid metadata should build");
         assert_eq!(
             descriptor.tokenizer_family,
             Some(QwenTokenizerFamily::Qwen3)
@@ -2350,7 +2623,8 @@ mod tests {
                     .expect("fixture metadata should be an object")
                     .clone(),
                 },
-            );
+            )
+            .expect("bounded invalid capability metadata should stay visible");
             assert!(descriptor.disabled_reason.is_some());
         }
     }
