@@ -20,6 +20,7 @@ const LEGACY_DEFAULT_CONTEXT_TOKENS: u32 = 8_192;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const HEALTH_TIMEOUT_SECONDS: u64 = 5;
+const MAX_INSTALLED_MODEL_RECORDS: usize = 256;
 const MAX_TOKEN_FILE_BYTES: u64 = 16_384;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MODEL_METADATA_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
@@ -263,12 +264,15 @@ impl OllamaRuntime {
     }
 
     fn installed_model_records(&self) -> Result<Vec<ModelRecord>, ModelRuntimeFailure> {
+        self.installed_model_records_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS))
+    }
+
+    fn installed_model_records_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Vec<ModelRecord>, ModelRuntimeFailure> {
         let response = self
-            .authorize(
-                self.client
-                    .get(self.endpoint("api/tags")?)
-                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
-            )
+            .authorize(self.client.get(self.endpoint("api/tags")?).timeout(timeout))
             .send()
             .map_err(|_| {
                 runtime_failure(
@@ -284,28 +288,39 @@ impl OllamaRuntime {
     }
 
     pub fn installed_models(&self) -> Result<Vec<InstalledModelDescriptor>, ModelRuntimeFailure> {
-        self.installed_model_records()?
-            .into_iter()
-            .map(|model| {
-                let unavailable = unavailable_model_descriptor(model.clone());
-                match self.describe_model(model) {
-                    Ok(descriptor) => Ok(descriptor),
-                    Err(error) if metadata_failure_is_catalog_wide(&error) => Err(error),
-                    Err(_) => Ok(unavailable),
-                }
-            })
-            .collect()
+        self.installed_models_with_deadline(Duration::from_secs(HEALTH_TIMEOUT_SECONDS))
+    }
+
+    fn installed_models_with_deadline(
+        &self,
+        timeout: Duration,
+    ) -> Result<Vec<InstalledModelDescriptor>, ModelRuntimeFailure> {
+        let deadline = Instant::now() + timeout;
+        let records = self.installed_model_records_with_timeout(discovery_remaining(deadline)?)?;
+        validate_model_record_count(records.len())?;
+        let mut descriptors = Vec::with_capacity(records.len());
+        for model in records {
+            let unavailable = unavailable_model_descriptor(model.clone());
+            match self.describe_model(model, discovery_remaining(deadline)?) {
+                Ok(descriptor) => descriptors.push(descriptor),
+                Err(error) if metadata_failure_is_catalog_wide(&error) => return Err(error),
+                Err(_) => descriptors.push(unavailable),
+            }
+        }
+        discovery_remaining(deadline)?;
+        Ok(descriptors)
     }
 
     fn describe_model(
         &self,
         model: ModelRecord,
+        timeout: Duration,
     ) -> Result<InstalledModelDescriptor, ModelRuntimeFailure> {
         let response = self
             .authorize(
                 self.client
                     .post(self.endpoint("api/show")?)
-                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS))
+                    .timeout(timeout)
                     .json(&ShowRequest {
                         model: &model.name,
                         verbose: false,
@@ -536,6 +551,30 @@ impl OllamaRuntime {
         }
         Ok(())
     }
+}
+
+fn discovery_remaining(deadline: Instant) -> Result<Duration, ModelRuntimeFailure> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            runtime_failure(
+                "MODEL_DISCOVERY_TIMEOUT",
+                "Installed model discovery exceeded its aggregate deadline",
+                true,
+            )
+        })
+}
+
+fn validate_model_record_count(count: usize) -> Result<(), ModelRuntimeFailure> {
+    if count > MAX_INSTALLED_MODEL_RECORDS {
+        return Err(runtime_failure(
+            "MODEL_CATALOG_TOO_LARGE",
+            "Installed model catalog exceeds the supported record limit",
+            false,
+        ));
+    }
+    Ok(())
 }
 
 fn model_timeout_seconds(value: Option<&str>) -> Result<u64, ModelRuntimeFailure> {
@@ -771,7 +810,8 @@ impl ModelRuntime for OllamaRuntime {
                     true,
                 )
             })?;
-        let descriptor = self.describe_model(descriptor)?;
+        let descriptor =
+            self.describe_model(descriptor, Duration::from_secs(HEALTH_TIMEOUT_SECONDS))?;
         if self
             .expected_digest
             .as_ref()
@@ -1674,6 +1714,98 @@ mod tests {
             .expect_err("authentication failures must remain fatal");
         server.join().expect("discovery server should finish");
         assert_eq!(error.code, "MODEL_RUNTIME_REJECTED");
+    }
+
+    #[test]
+    fn discovery_record_limit_rejects_max_plus_one_before_metadata_probes() {
+        assert!(validate_model_record_count(MAX_INSTALLED_MODEL_RECORDS).is_ok());
+        assert_eq!(
+            validate_model_record_count(MAX_INSTALLED_MODEL_RECORDS + 1)
+                .expect_err("max plus one records must fail")
+                .code,
+            "MODEL_CATALOG_TOO_LARGE"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let server = thread::spawn(move || {
+            let (mut tags, _) = listener.accept().expect("tags request should arrive");
+            let _ = read_headers(&mut tags);
+            let models: Vec<_> = (0..=MAX_INSTALLED_MODEL_RECORDS)
+                .map(|ordinal| {
+                    serde_json::json!({
+                        "name": format!("fixture-{ordinal}"),
+                        "digest": format!("digest-{ordinal}"),
+                        "size": 1,
+                        "details": {"family": "qwen3"}
+                    })
+                })
+                .collect();
+            write_json_response(&mut tags, "200 OK", &serde_json::json!({"models": models}));
+            listener
+                .set_nonblocking(true)
+                .expect("listener should become nonblocking");
+            thread::sleep(Duration::from_millis(50));
+            let error = listener
+                .accept()
+                .expect_err("record overflow must fail before any show request");
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        });
+        let runtime = OllamaRuntime::new(
+            &format!("http://{address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("discovery runtime should configure");
+        let error = runtime
+            .installed_models()
+            .expect_err("oversized record catalog must fail");
+        server.join().expect("record limit server should finish");
+        assert_eq!(error.code, "MODEL_CATALOG_TOO_LARGE");
+    }
+
+    #[test]
+    fn discovery_metadata_probes_share_one_aggregate_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let server = thread::spawn(move || {
+            let (mut tags, _) = listener.accept().expect("tags request should arrive");
+            let _ = read_headers(&mut tags);
+            write_json_response(
+                &mut tags,
+                "200 OK",
+                &serde_json::json!({
+                    "models": [{
+                        "name": "slow-qwen:latest",
+                        "digest": "immutable-digest",
+                        "size": 12345,
+                        "details": {"family": "qwen3"}
+                    }]
+                }),
+            );
+            let (_show, _) = listener.accept().expect("show request should arrive");
+            thread::sleep(Duration::from_millis(100));
+        });
+        let runtime = OllamaRuntime::new(
+            &format!("http://{address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("discovery runtime should configure");
+        let started = Instant::now();
+        let error = runtime
+            .installed_models_with_deadline(Duration::from_millis(20))
+            .expect_err("one slow probe must exhaust the aggregate deadline");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        server.join().expect("deadline server should finish");
+        assert_eq!(error.code, "MODEL_RUNTIME_UNAVAILABLE");
+        assert!(error.recoverable);
     }
 
     #[test]
