@@ -2,7 +2,7 @@
 
 A local-first Tauri desktop application that ingests native-text PDFs, preserves
 page provenance through a durable processing pipeline, and produces summaries
-with page-linked exact source excerpts using an Ollama-hosted model. The
+with page-linked exact source excerpts using a qualified local Qwen model. The
 application also provides the optional local Connect `document.summarize`
 capability to installations with an active Connect entitlement while remaining
 usable on its own.
@@ -17,21 +17,34 @@ Qualified preset: Qwen 3 30B-A3B
 Effective context: 8192 tokens per native /api/chat request
 ```
 
-Ollama and the model are managed outside the application. The desktop app checks
-readiness, discovers installed models through Ollama, and shows exact-digest
-qualified presets with model size and context. Installed but unqualified models
-remain visible with an unavailable reason and cannot be selected. The app does
-not start Ollama or download model weights. Model-generation requests default
-to a 900-second deadline so the selected model can complete bounded multi-stage
-document work without requiring a hidden deployment override. Connection and
-health checks retain their shorter fail-fast deadlines.
+An opt-in full preset is also qualified for the exact Jack Qwen 3.8 27B Coder
+GGUF used by this project. Choose **Add GGUF file** in the desktop model card and
+select that existing file. The app records its exact bytes and file identity; it
+does not scan model folders, copy weights, use LM Studio, or import the file into
+Ollama. On Linux it starts a private, authenticated llama.cpp child and sends
+the existing pipeline prompts through direct `/completion` requests with a
+pinned minimal Qwen template. The qualified `llama-server` and its llama/ggml
+libraries must be the exact tested bundle in one directory, available on
+`PATH` or through `DOC_SUM_LLAMA_SERVER_PATH`. Other GGUF or runtime hashes stay
+visible but disabled until separately qualified.
+
+Ollama remains managed outside the application. The desktop app checks
+readiness, discovers Ollama models, combines them with explicit GGUF
+registrations, and shows exact-digest qualified presets with runtime kind, size
+and context. Installed but unqualified models remain visible with an unavailable
+reason and cannot be selected. The app does not start Ollama or download model
+weights. Switching between Ollama and direct GGUF releases the previous
+qualified local runner because both large models do not fit in GPU memory at
+once. Model-generation requests retain the 900-second deadline; connection,
+health and direct-child startup keep shorter fail-fast deadlines.
 
 Deployment overrides remain available through `DOC_SUM_MODEL_BASE_URL`,
 `DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional `DOC_SUM_MODEL_API_TOKEN_FILE`.
 The desktop model choice is a persisted application setting, not
 `DOC_SUM_MODEL_NAME`. The endpoint admission rule remains exact loopback HTTP
-only. Each run durably snapshots its exact model digest, qualified context and
-tokenizer version; continuation and retry never silently switch profiles.
+only. Each run durably snapshots its runtime kind, exact model digest, qualified
+context and tokenizer version; continuation and retry never silently switch
+profiles.
 
 ## Connect entitlement
 
@@ -73,8 +86,8 @@ package.
 
 ## Development
 
-Install JavaScript dependencies, make sure Ollama is running, and launch through
-the Tauri command:
+Install JavaScript dependencies, make sure the runtime for the preset you want
+to use is available, and launch through the Tauri command:
 
 ```bash
 npm install

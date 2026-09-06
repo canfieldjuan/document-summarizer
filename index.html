@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Summarize native-text PDF documents with a local Ollama model."
+      content="Summarize native-text PDF documents with a local Qwen model."
     />
     <title>Document Summarizer</title>
     <script type="module" src="/src/main.ts" defer></script>
@@ -27,12 +27,18 @@
           <section class="runtime-card" aria-labelledby="runtime-title" aria-live="polite">
             <span id="runtime-dot" class="runtime-dot is-checking" aria-hidden="true"></span>
             <div class="runtime-copy">
-              <p id="runtime-title" class="runtime-title">Checking Ollama</p>
+              <p id="runtime-title" class="runtime-title">Checking local Qwen</p>
               <p id="runtime-detail" class="runtime-detail">Looking for the local model…</p>
               <label class="model-preset-label" for="model-preset">Model preset</label>
               <select id="model-preset" class="model-preset-select" disabled>
                 <option>Discovering qualified models…</option>
               </select>
+              <button id="register-gguf" class="quiet-button model-register-button" type="button">
+                Add GGUF file
+              </button>
+              <p class="runtime-detail">
+                Switching runtimes releases the previous local model runner.
+              </p>
             </div>
             <button id="runtime-retry" class="quiet-button" type="button" hidden>
               Check again
@@ -69,7 +75,7 @@
                 <span>Choose a PDF</span>
                 <span aria-hidden="true">＋</span>
               </button>
-              <p id="action-hint" class="action-hint">Waiting for Ollama readiness.</p>
+              <p id="action-hint" class="action-hint">Waiting for local model readiness.</p>
             </div>
           </div>
 

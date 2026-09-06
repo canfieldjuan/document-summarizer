@@ -410,11 +410,21 @@ pub struct ModelResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelStageProfileSnapshot {
+    #[serde(default)]
+    pub runtime_kind: ModelRuntimeKind,
     pub profile_id: String,
     pub model_name: String,
     pub model_digest: String,
     pub context_tokens: u32,
     pub tokenizer_version: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRuntimeKind {
+    #[default]
+    OllamaNative,
+    LlamaCppGguf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

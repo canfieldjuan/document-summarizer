@@ -2659,6 +2659,7 @@ mod tests {
             version: 1,
             preset_id: "full-test-v1".to_string(),
             analysis: crate::pipeline::contracts::ModelStageProfileSnapshot {
+                runtime_kind: Default::default(),
                 profile_id: "analysis-v1".to_string(),
                 model_name: "analysis:latest".to_string(),
                 model_digest: "analysis-digest".to_string(),
@@ -2666,6 +2667,7 @@ mod tests {
                 tokenizer_version: "qwen-test-v1".to_string(),
             },
             verification: crate::pipeline::contracts::ModelStageProfileSnapshot {
+                runtime_kind: Default::default(),
                 profile_id: "verification-v1".to_string(),
                 model_name: "verification:latest".to_string(),
                 model_digest: "verification-digest".to_string(),

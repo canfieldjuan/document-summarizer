@@ -16,9 +16,10 @@ use pipeline::contracts::{
 };
 use pipeline::db::{init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, IngestError};
+use pipeline::llama_cpp::shutdown_managed_runtimes;
 use pipeline::model_settings::{
-    catalog as load_model_catalog, save_selected_preset, settings_path as model_settings_path,
-    ModelCatalog,
+    catalog as load_model_catalog, register_gguf, save_selected_preset,
+    settings_path as model_settings_path, ModelCatalog,
 };
 use pipeline::normalize::{
     normalize_document as normalize_pipeline_document, CanonicalNormalizer, NormalizePipelineError,
@@ -239,33 +240,64 @@ fn cancel_document(
 }
 
 #[tauri::command]
-fn get_runtime_status(state: State<'_, AppState>) -> RuntimeStatus {
-    ollama_runtime_status(&state.model_settings_path)
+async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, CommandError> {
+    let settings_path = state.model_settings_path.clone();
+    tauri::async_runtime::spawn_blocking(move || ollama_runtime_status(&settings_path))
+        .await
+        .map_err(|_| CommandError::new("MODEL_RUNTIME_STATUS_FAILED", "Runtime check stopped"))
 }
 
 #[tauri::command]
-fn get_model_catalog(state: State<'_, AppState>) -> Result<ModelCatalog, CommandError> {
-    load_model_catalog(&state.model_settings_path).map_err(CommandError::from)
+async fn get_model_catalog(state: State<'_, AppState>) -> Result<ModelCatalog, CommandError> {
+    let settings_path = state.model_settings_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        load_model_catalog(&settings_path).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| CommandError::new("MODEL_CATALOG_FAILED", "Model discovery stopped"))?
 }
 
 #[tauri::command]
-fn select_model_preset(
+async fn select_model_preset(
     state: State<'_, AppState>,
     preset_id: String,
 ) -> Result<ModelCatalog, CommandError> {
-    let current = load_model_catalog(&state.model_settings_path).map_err(CommandError::from)?;
-    if !current
-        .presets
-        .iter()
-        .any(|preset| preset.preset_id == preset_id)
-    {
-        return Err(CommandError::new(
-            "MODEL_PRESET_UNAVAILABLE",
-            "Selected model preset is not installed and qualified",
-        ));
-    }
-    save_selected_preset(&state.model_settings_path, &preset_id).map_err(CommandError::from)?;
-    load_model_catalog(&state.model_settings_path).map_err(CommandError::from)
+    let settings_path = state.model_settings_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = load_model_catalog(&settings_path).map_err(CommandError::from)?;
+        if !current
+            .presets
+            .iter()
+            .any(|preset| preset.preset_id == preset_id)
+        {
+            return Err(CommandError::new(
+                "MODEL_PRESET_UNAVAILABLE",
+                "Selected model preset is not installed and qualified",
+            ));
+        }
+        if current.selected_preset_id == preset_id {
+            return Ok(current);
+        }
+        save_selected_preset(&settings_path, &preset_id).map_err(CommandError::from)?;
+        shutdown_managed_runtimes();
+        load_model_catalog(&settings_path).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| CommandError::new("MODEL_SELECTION_FAILED", "Model selection stopped"))?
+}
+
+#[tauri::command]
+async fn register_gguf_model(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<ModelCatalog, CommandError> {
+    let settings_path = state.model_settings_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        register_gguf(&settings_path, Path::new(&file_path)).map_err(CommandError::from)?;
+        load_model_catalog(&settings_path).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| CommandError::new("MODEL_REGISTRATION_FAILED", "GGUF registration stopped"))?
 }
 
 #[tauri::command]
@@ -391,6 +423,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             get_runtime_status,
             get_model_catalog,
             select_model_preset,
+            register_gguf_model,
             get_connect_entitlement_status,
             install_connect_entitlement,
             list_recent_runs,
@@ -400,6 +433,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .build(tauri::generate_context!())?;
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            shutdown_managed_runtimes();
             if let Some(provider) = app_handle.try_state::<ConnectProvider>() {
                 provider.unregister();
             }

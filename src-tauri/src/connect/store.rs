@@ -450,6 +450,7 @@ mod tests {
 
     fn profile_snapshot() -> ModelProfileSnapshot {
         let stage = ModelStageProfileSnapshot {
+            runtime_kind: Default::default(),
             profile_id: "connect-store-profile".to_string(),
             model_name: "connect-store-model".to_string(),
             model_digest: "connect-store-digest".to_string(),
