@@ -84,11 +84,14 @@ runtime. A reconstructed snapshot runtime is also health-checked before a
 continuation worker is spawned or a retry child is created, so an unavailable or
 repointed model leaves the durable checkpoint, events and retry lineage
 unchanged. Separately, an Ollama tag can be repointed after stage health succeeds.
-The native adapter therefore re-reads authenticated `/api/tags` after each
-successful `/api/chat` and rejects the generated output before parsing when the
-tag no longer resolves to the admitted digest. This adds one metadata request
-per successful model call; request counts in the corpus tables remain model-call
-counts, not discovery or digest-check calls.
+The first repair re-read authenticated `/api/tags` after each successful
+`/api/chat`, but exact-head review found that a tag could be repointed during
+generation and restored before that lookup. Qualified chat requests now retain
+their runner for 30 seconds, and the adapter reads authenticated `/api/ps`
+before parsing the response. It accepts output only when exactly one running
+record for the requested name reports the qualified digest; a missing,
+ambiguous or mismatched record fails closed. Request counts in the corpus tables
+remain model-call counts, not discovery or execution-provenance calls.
 
 The next exact-head review found two remaining admission-order gaps. Connect
 constructed its runtime only after committing the job, so worker scheduling
@@ -101,12 +104,33 @@ discovery and health preflight. The transaction repeats those checks, preserving
 race safety while stale or ineligible requests return retry errors rather than
 model errors.
 
-The local all-target gate passes with 298 library
+Final exact-head review found two related identity/error boundaries. Connect
+had selected and moved the exact runtime into its worker but did not persist the
+runtime profile until worker processing began, leaving a crash window in which
+an accepted ingested run had no immutable profile. The profile snapshot now
+commits in the same transaction as ingestion and Connect acceptance, and a
+snapshotless production runtime is rejected before acceptance. Separately,
+post-acceptance model failures were projected through a stale retryable-code
+allowlist. Connect job errors now preserve the typed summary-stage failure's
+`recoverable` value directly.
+
+The local all-target gate passes with 300 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
 claimed; the operator requires local checks because private-repository Actions
 minutes are exhausted.
+
+Both corpus acceptances were rerun after the execution-provenance change. NARA
+passed with seven supported claims from seven retained evidence items, seven of
+11 raw pages and all seven adjusted pages cited, 21 model requests, 432
+completion tokens, and 28.74 seconds wall time. DOL passed with 82 supported
+claims from 83 retained evidence items, 82 of 111 raw and adjusted pages cited,
+176 model requests, 5,614 completion tokens, and 188.70 seconds wall time. Both
+used primary structured transport with no schema fallback, and neither produced
+an unverified execution record. DOL's higher wall time than the prior baseline
+was concentrated in two analysis calls; request count and delivered coverage
+were unchanged.
 
 ## Latest slice: both corpus acceptances pass; NARA remains robustness-only
 
