@@ -220,8 +220,7 @@ pub(super) fn ensure_run_model_profile(
     }
 }
 
-#[cfg(test)]
-pub(super) fn get_run_model_profile(
+pub(crate) fn get_run_model_profile(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Option<ModelProfileSnapshot>, StoreError> {

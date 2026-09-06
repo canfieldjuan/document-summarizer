@@ -285,7 +285,14 @@ impl OllamaRuntime {
     pub fn installed_models(&self) -> Result<Vec<InstalledModelDescriptor>, ModelRuntimeFailure> {
         self.installed_model_records()?
             .into_iter()
-            .map(|model| self.describe_model(model))
+            .map(|model| {
+                let unavailable = unavailable_model_descriptor(model.clone());
+                match self.describe_model(model) {
+                    Ok(descriptor) => Ok(descriptor),
+                    Err(error) if metadata_failure_is_catalog_wide(&error) => Err(error),
+                    Err(_) => Ok(unavailable),
+                }
+            })
             .collect()
     }
 
@@ -1064,7 +1071,7 @@ struct ModelsResponse {
     models: Vec<ModelRecord>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ModelRecord {
     name: String,
     #[serde(default)]
@@ -1075,7 +1082,7 @@ struct ModelRecord {
     details: ModelDetails,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 struct ModelDetails {
     #[serde(default)]
     family: String,
@@ -1137,6 +1144,30 @@ fn model_descriptor(model: ModelRecord, shown: ShowResponse) -> InstalledModelDe
         maximum_context_tokens,
         disabled_reason,
     }
+}
+
+fn unavailable_model_descriptor(model: ModelRecord) -> InstalledModelDescriptor {
+    let architecture = (!model.details.family.is_empty()).then(|| model.details.family.clone());
+    let tokenizer_family = architecture
+        .as_deref()
+        .and_then(qwen_tokenizer_family_for_architecture);
+    InstalledModelDescriptor {
+        name: model.name,
+        digest: model.digest,
+        size_bytes: model.size,
+        architecture,
+        tokenizer_family,
+        parameter_size: model.details.parameter_size,
+        quantization_level: model.details.quantization_level,
+        maximum_context_tokens: None,
+        disabled_reason: Some("Installed model metadata could not be read".to_string()),
+    }
+}
+
+fn metadata_failure_is_catalog_wide(error: &ModelRuntimeFailure) -> bool {
+    error.code == "MODEL_RUNTIME_UNAVAILABLE"
+        || (error.code == "MODEL_RUNTIME_REJECTED"
+            && (error.message.ends_with("HTTP 401") || error.message.ends_with("HTTP 403")))
 }
 
 fn qwen_tokenizer_family_for_architecture(architecture: &str) -> Option<QwenTokenizerFamily> {
@@ -1380,6 +1411,107 @@ mod tests {
                 .any(|line| line
                     .eq_ignore_ascii_case("authorization: Bearer private-discovery-token"))
         );
+    }
+
+    #[test]
+    fn unreadable_model_metadata_stays_visible_but_unqualified() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let server = thread::spawn(move || {
+            let (mut tags, _) = listener.accept().expect("tags request should arrive");
+            let _ = read_headers(&mut tags);
+            write_json_response(
+                &mut tags,
+                "200 OK",
+                &serde_json::json!({
+                    "models": [{
+                        "name": "broken-qwen:latest",
+                        "digest": "immutable-digest",
+                        "size": 12345,
+                        "details": {
+                            "family": "qwen35",
+                            "parameter_size": "9B",
+                            "quantization_level": "Q4_K_M"
+                        }
+                    }]
+                }),
+            );
+            let (mut show, _) = listener.accept().expect("show request should arrive");
+            let _ = read_json_request(&mut show);
+            write_json_response(
+                &mut show,
+                "500 Internal Server Error",
+                &serde_json::json!({"error": "fixture metadata failure"}),
+            );
+        });
+        let runtime = OllamaRuntime::new(
+            &format!("http://{address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("discovery runtime should configure");
+        let models = runtime
+            .installed_models()
+            .expect("one bad model must not hide the catalog");
+        server.join().expect("discovery server should finish");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "broken-qwen:latest");
+        assert_eq!(
+            models[0].tokenizer_family,
+            Some(QwenTokenizerFamily::Qwen35)
+        );
+        assert_eq!(models[0].maximum_context_tokens, None);
+        assert_eq!(
+            models[0].disabled_reason.as_deref(),
+            Some("Installed model metadata could not be read")
+        );
+    }
+
+    #[test]
+    fn discovery_authentication_failure_is_not_downgraded_to_disabled_metadata() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let server = thread::spawn(move || {
+            let (mut tags, _) = listener.accept().expect("tags request should arrive");
+            let _ = read_headers(&mut tags);
+            write_json_response(
+                &mut tags,
+                "200 OK",
+                &serde_json::json!({
+                    "models": [{
+                        "name": "protected-qwen:latest",
+                        "digest": "immutable-digest",
+                        "size": 12345,
+                        "details": {"family": "qwen35"}
+                    }]
+                }),
+            );
+            let (mut show, _) = listener.accept().expect("show request should arrive");
+            let _ = read_json_request(&mut show);
+            write_json_response(
+                &mut show,
+                "401 Unauthorized",
+                &serde_json::json!({"error": "fixture authentication failure"}),
+            );
+        });
+        let runtime = OllamaRuntime::new(
+            &format!("http://{address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("discovery runtime should configure");
+        let error = runtime
+            .installed_models()
+            .expect_err("authentication failures must remain fatal");
+        server.join().expect("discovery server should finish");
+        assert_eq!(error.code, "MODEL_RUNTIME_REJECTED");
     }
 
     #[test]

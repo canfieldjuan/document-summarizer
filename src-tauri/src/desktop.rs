@@ -1,11 +1,11 @@
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
-    CompletedSummary, ModelRuntime, ModelRuntimeFailure, PipelineFailure, PipelineRun,
-    PipelineStage, PipelineState,
+    CompletedSummary, ModelProfileSnapshot, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
+    PipelineRun, PipelineStage, PipelineState,
 };
 use crate::pipeline::control::CancellationToken;
 use crate::pipeline::db::{self, StoreError};
-use crate::pipeline::model_settings::runtime_from_settings;
+use crate::pipeline::model_settings::{runtime_from_settings, runtime_from_snapshot};
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
 use crate::pipeline::service::{
@@ -23,8 +23,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use thiserror::Error;
 
-type RuntimeFactory =
-    Arc<dyn Fn() -> Result<Box<dyn ModelRuntime>, ModelRuntimeFailure> + Send + Sync + 'static>;
+type RuntimeFactory = Arc<
+    dyn Fn(Option<&ModelProfileSnapshot>) -> Result<Box<dyn ModelRuntime>, ModelRuntimeFailure>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,9 +96,12 @@ impl DesktopJobManager {
     pub fn new(db_path: PathBuf, settings_path: PathBuf) -> Self {
         Self::with_runtime_factory(
             db_path,
-            Arc::new(move || {
-                runtime_from_settings(&settings_path)
-                    .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
+            Arc::new(move |snapshot| {
+                let runtime = match snapshot {
+                    Some(snapshot) => runtime_from_snapshot(snapshot),
+                    None => runtime_from_settings(&settings_path),
+                }?;
+                Ok(Box::new(runtime) as Box<dyn ModelRuntime>)
             }),
         )
     }
@@ -112,7 +119,7 @@ impl DesktopJobManager {
     }
 
     pub fn start_pdf(&self, file_path: &str) -> Result<BackgroundRunAccepted, DesktopJobError> {
-        let runtime = (self.runtime_factory)()?;
+        let runtime = (self.runtime_factory)(None)?;
         let mut conn = db::init_db(&self.db_path)?;
         let (document, run) = admit_pdf_for_background(&mut conn, file_path)?;
         let accepted = accepted_view(&document, &run);
@@ -125,8 +132,9 @@ impl DesktopJobManager {
         source_run_id: &str,
         expected_source_version: u32,
     ) -> Result<BackgroundRunAccepted, DesktopJobError> {
-        let runtime = (self.runtime_factory)()?;
         let mut conn = db::init_db(&self.db_path)?;
+        let snapshot = db::get_run_model_profile(&conn, source_run_id)?;
+        let runtime = (self.runtime_factory)(snapshot.as_ref())?;
         let (document, run) =
             admit_retry_for_background(&mut conn, source_run_id, expected_source_version)?;
         let accepted = accepted_view(&document, &run);
@@ -146,10 +154,12 @@ impl DesktopJobManager {
             .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
         let document = db::get_document(&conn, &run.document_id)?
             .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
-        let runtime = plan
-            .requires_runtime
-            .then(|| (self.runtime_factory)())
-            .transpose()?;
+        let runtime = if plan.requires_runtime {
+            let snapshot = db::get_run_model_profile(&conn, run_id)?;
+            Some((self.runtime_factory)(snapshot.as_ref())?)
+        } else {
+            None
+        };
         let accepted = accepted_view(&document, &run);
         self.spawn(
             run.run_id,
@@ -416,7 +426,7 @@ impl TerminalState for PipelineState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::contracts::{ModelRequest, ModelResponse};
+    use crate::pipeline::contracts::{ModelRequest, ModelResponse, ModelStageProfileSnapshot};
     use crate::pipeline::db::{
         get_analyzed_document, get_pipeline_run, get_summary_artifact, list_pipeline_events,
     };
@@ -464,6 +474,30 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "background-fixture-model"
+        }
+    }
+
+    struct SnapshotFixtureRuntime(ModelProfileSnapshot);
+
+    impl ModelRuntime for SnapshotFixtureRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "snapshot-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "snapshot-fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(self.0.clone())
         }
     }
 
@@ -543,8 +577,24 @@ mod tests {
     fn fixture_manager(database: &TestDatabase) -> DesktopJobManager {
         DesktopJobManager::with_runtime_factory(
             database.0.clone(),
-            Arc::new(|| Ok(Box::new(FixtureRuntime))),
+            Arc::new(|_| Ok(Box::new(FixtureRuntime))),
         )
+    }
+
+    fn fixture_snapshot() -> ModelProfileSnapshot {
+        let stage = ModelStageProfileSnapshot {
+            profile_id: "fixture-profile-v1".to_string(),
+            model_name: "fixture-model:latest".to_string(),
+            model_digest: "fixture-digest".to_string(),
+            context_tokens: 8_192,
+            tokenizer_version: "fixture-tokenizer-v1".to_string(),
+        };
+        ModelProfileSnapshot {
+            version: 1,
+            preset_id: "fixture-preset-v1".to_string(),
+            analysis: stage.clone(),
+            verification: stage,
+        }
     }
 
     fn wait_until(mut condition: impl FnMut() -> bool) {
@@ -607,13 +657,67 @@ mod tests {
     }
 
     #[test]
+    fn continuation_runtime_factory_receives_the_persisted_run_snapshot() {
+        let database = TestDatabase::new();
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let (_, ingested) = crate::pipeline::ingest::ingest_pdf(
+            &mut conn,
+            fixture_path()
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+        )
+        .expect("fixture should ingest");
+        let snapshot = fixture_snapshot();
+        conn.execute(
+            "INSERT INTO pipeline_run_model_profiles (run_id, profile_snapshot, created_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                ingested.run_id,
+                serde_json::to_string(&snapshot).expect("snapshot should serialize"),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .expect("snapshot should persist");
+        drop(conn);
+
+        let observed = Arc::new(StdMutex::new(None));
+        let factory_observed = Arc::clone(&observed);
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |received| {
+                let received = received
+                    .cloned()
+                    .expect("continuation must supply its persisted snapshot");
+                *factory_observed
+                    .lock()
+                    .expect("observation lock should remain available") = Some(received.clone());
+                Ok(Box::new(SnapshotFixtureRuntime(received)))
+            }),
+        );
+        let accepted = manager
+            .start_continuation(&ingested.run_id, ingested.state_version)
+            .expect("continuation should be accepted");
+        assert_eq!(
+            *observed
+                .lock()
+                .expect("observation lock should remain available"),
+            Some(snapshot)
+        );
+        wait_until(|| {
+            !manager
+                .is_active(&accepted.run_id)
+                .expect("registry should remain readable")
+        });
+    }
+
+    #[test]
     fn cancellation_wins_atomically_during_model_work_and_survives_reopen() {
         let database = TestDatabase::new();
         let gate = Arc::new(BlockingGate::new());
         let factory_gate = gate.clone();
         let manager = DesktopJobManager::with_runtime_factory(
             database.0.clone(),
-            Arc::new(move || {
+            Arc::new(move |_| {
                 Ok(Box::new(BlockingRuntime {
                     gate: factory_gate.clone(),
                 }))

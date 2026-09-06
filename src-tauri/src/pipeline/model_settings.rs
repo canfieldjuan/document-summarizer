@@ -323,6 +323,12 @@ pub fn runtime_from_settings(path: &Path) -> Result<QwenProfileRuntime, ModelRun
     QwenProfileRuntime::new(preset)
 }
 
+pub fn runtime_from_snapshot(
+    snapshot: &ModelProfileSnapshot,
+) -> Result<QwenProfileRuntime, ModelRuntimeFailure> {
+    QwenProfileRuntime::from_snapshot(snapshot)
+}
+
 pub struct QwenProfileRuntime {
     preset_id: String,
     snapshot: ModelProfileSnapshot,
@@ -332,38 +338,59 @@ pub struct QwenProfileRuntime {
 
 impl QwenProfileRuntime {
     fn new(preset: &ModelPreset) -> Result<Self, ModelRuntimeFailure> {
-        Ok(Self {
+        Self::from_snapshot(&ModelProfileSnapshot {
+            version: 1,
             preset_id: preset.preset_id.clone(),
-            snapshot: ModelProfileSnapshot {
-                version: 1,
-                preset_id: preset.preset_id.clone(),
-                analysis: ModelStageProfileSnapshot {
-                    profile_id: preset.analysis_profile_id.clone(),
-                    model_name: preset.analysis_model.clone(),
-                    model_digest: preset.analysis_digest.clone(),
-                    context_tokens: preset.analysis_context_tokens,
-                    tokenizer_version: preset.analysis_tokenizer_version.clone(),
-                },
-                verification: ModelStageProfileSnapshot {
-                    profile_id: preset.verification_profile_id.clone(),
-                    model_name: preset.verification_model.clone(),
-                    model_digest: preset.verification_digest.clone(),
-                    context_tokens: preset.verification_context_tokens,
-                    tokenizer_version: preset.verification_tokenizer_version.clone(),
-                },
+            analysis: ModelStageProfileSnapshot {
+                profile_id: preset.analysis_profile_id.clone(),
+                model_name: preset.analysis_model.clone(),
+                model_digest: preset.analysis_digest.clone(),
+                context_tokens: preset.analysis_context_tokens,
+                tokenizer_version: preset.analysis_tokenizer_version.clone(),
             },
+            verification: ModelStageProfileSnapshot {
+                profile_id: preset.verification_profile_id.clone(),
+                model_name: preset.verification_model.clone(),
+                model_digest: preset.verification_digest.clone(),
+                context_tokens: preset.verification_context_tokens,
+                tokenizer_version: preset.verification_tokenizer_version.clone(),
+            },
+        })
+    }
+
+    fn from_snapshot(snapshot: &ModelProfileSnapshot) -> Result<Self, ModelRuntimeFailure> {
+        if snapshot.version != 1 || snapshot.preset_id.trim().is_empty() {
+            return Err(config_failure("Run model profile snapshot is invalid"));
+        }
+        let analysis_profile = admitted_snapshot_profile(&snapshot.analysis, false)?;
+        let verification_profile = admitted_snapshot_profile(&snapshot.verification, true)?;
+        Self::build(
+            snapshot.clone(),
+            analysis_profile.tokenizer_family,
+            verification_profile.tokenizer_family,
+        )
+    }
+
+    fn build(
+        snapshot: ModelProfileSnapshot,
+        analysis_family: QwenTokenizerFamily,
+        verification_family: QwenTokenizerFamily,
+    ) -> Result<Self, ModelRuntimeFailure> {
+        Ok(Self {
+            preset_id: snapshot.preset_id.clone(),
             analysis: OllamaRuntime::from_environment_profile(
-                &preset.analysis_model,
-                Some(&preset.analysis_digest),
-                profile_tokenizer_family(&preset.analysis_digest),
-                preset.analysis_context_tokens,
+                &snapshot.analysis.model_name,
+                Some(&snapshot.analysis.model_digest),
+                Some(analysis_family),
+                snapshot.analysis.context_tokens,
             )?,
             verification: OllamaRuntime::from_environment_profile(
-                &preset.verification_model,
-                Some(&preset.verification_digest),
-                profile_tokenizer_family(&preset.verification_digest),
-                preset.verification_context_tokens,
+                &snapshot.verification.model_name,
+                Some(&snapshot.verification.model_digest),
+                Some(verification_family),
+                snapshot.verification.context_tokens,
             )?,
+            snapshot,
         })
     }
 
@@ -374,27 +401,23 @@ impl QwenProfileRuntime {
         context_tokens: u32,
     ) -> Result<Self, ModelRuntimeFailure> {
         let descriptors = OllamaRuntime::discovery_from_environment()?.installed_models()?;
-        let analysis = qualification_stage_profile(&descriptors, analysis_model, context_tokens)?;
-        let verification =
+        let (analysis, analysis_family) =
+            qualification_stage_profile(&descriptors, analysis_model, context_tokens)?;
+        let (verification, verification_family) =
             qualification_stage_profile(&descriptors, verification_model, context_tokens)?;
-        Self::new(&ModelPreset {
-            preset_id: format!(
-                "qualification-{}-{}",
-                analysis.model_digest, verification.model_digest
-            ),
-            label: "Qualification candidate".to_string(),
-            mode: ModelPresetMode::Hybrid,
-            analysis_profile_id: analysis.profile_id,
-            analysis_model: analysis.model_name,
-            analysis_digest: analysis.model_digest,
-            analysis_context_tokens: analysis.context_tokens,
-            analysis_tokenizer_version: analysis.tokenizer_version,
-            verification_profile_id: verification.profile_id,
-            verification_model: verification.model_name,
-            verification_digest: verification.model_digest,
-            verification_context_tokens: verification.context_tokens,
-            verification_tokenizer_version: verification.tokenizer_version,
-        })
+        Self::build(
+            ModelProfileSnapshot {
+                version: 1,
+                preset_id: format!(
+                    "qualification-{}-{}",
+                    analysis.model_digest, verification.model_digest
+                ),
+                analysis,
+                verification,
+            },
+            analysis_family,
+            verification_family,
+        )
     }
 
     fn runtime_for(&self, stage: &PipelineStage) -> &OllamaRuntime {
@@ -410,7 +433,7 @@ fn qualification_stage_profile(
     descriptors: &[InstalledModelDescriptor],
     model_name: &str,
     context_tokens: u32,
-) -> Result<ModelStageProfileSnapshot, ModelRuntimeFailure> {
+) -> Result<(ModelStageProfileSnapshot, QwenTokenizerFamily), ModelRuntimeFailure> {
     let descriptor = descriptors
         .iter()
         .find(|descriptor| descriptor.name == model_name)
@@ -431,20 +454,42 @@ fn qualification_stage_profile(
             "Qualification context exceeds the discovered model maximum",
         ));
     }
-    Ok(ModelStageProfileSnapshot {
-        profile_id: format!("qualification-{}", descriptor.digest),
-        model_name: descriptor.name.clone(),
-        model_digest: descriptor.digest.clone(),
-        context_tokens,
-        tokenizer_version: tokenizer_version(family).to_string(),
-    })
+    Ok((
+        ModelStageProfileSnapshot {
+            profile_id: format!("qualification-{}", descriptor.digest),
+            model_name: descriptor.name.clone(),
+            model_digest: descriptor.digest.clone(),
+            context_tokens,
+            tokenizer_version: tokenizer_version(family).to_string(),
+        },
+        family,
+    ))
 }
 
-fn profile_tokenizer_family(digest: &str) -> Option<QwenTokenizerFamily> {
-    QUALIFIED_PROFILES
+fn admitted_snapshot_profile(
+    snapshot: &ModelStageProfileSnapshot,
+    verification: bool,
+) -> Result<&'static QualifiedProfile, ModelRuntimeFailure> {
+    let profile = QUALIFIED_PROFILES
         .iter()
-        .find(|profile| profile.digest == digest)
-        .map(|profile| profile.tokenizer_family)
+        .find(|profile| profile.profile_id == snapshot.profile_id)
+        .ok_or_else(|| config_failure("Run model profile is no longer admitted"))?;
+    let stage_is_admitted = if verification {
+        profile.verifier_rank.is_some()
+    } else {
+        profile.analysis
+    };
+    if !stage_is_admitted
+        || snapshot.model_name.trim().is_empty()
+        || snapshot.model_digest != profile.digest
+        || snapshot.context_tokens != profile.safe_context_tokens
+        || snapshot.tokenizer_version != profile.tokenizer_version
+    {
+        return Err(config_failure(
+            "Run model profile snapshot does not match its qualified profile",
+        ));
+    }
+    Ok(profile)
 }
 
 impl ModelRuntime for QwenProfileRuntime {
@@ -497,6 +542,23 @@ fn config_failure(message: impl Into<String>) -> ModelRuntimeFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn qualified_snapshot() -> ModelProfileSnapshot {
+        let profile = QUALIFIED_PROFILES[0];
+        let stage = ModelStageProfileSnapshot {
+            profile_id: profile.profile_id.to_string(),
+            model_name: "renamed-baseline:latest".to_string(),
+            model_digest: profile.digest.to_string(),
+            context_tokens: profile.safe_context_tokens,
+            tokenizer_version: profile.tokenizer_version.to_string(),
+        };
+        ModelProfileSnapshot {
+            version: 1,
+            preset_id: DEFAULT_PRESET_ID.to_string(),
+            analysis: stage.clone(),
+            verification: stage,
+        }
+    }
 
     fn descriptor(
         name: &str,
@@ -635,6 +697,76 @@ mod tests {
             .presets
             .iter()
             .all(|preset| preset.verification_digest == QUALIFIED_PROFILES[0].digest));
+    }
+
+    #[test]
+    fn persisted_snapshot_rebuilds_its_exact_runtime_and_rejects_profile_drift() {
+        let snapshot = qualified_snapshot();
+        let runtime = runtime_from_snapshot(&snapshot)
+            .expect("an admitted immutable snapshot should rebuild its runtime");
+        assert_eq!(runtime.profile_snapshot(), Some(snapshot.clone()));
+        assert_eq!(
+            runtime.model_id_for_stage(PipelineStage::Analyze),
+            "renamed-baseline:latest"
+        );
+
+        for changed in [
+            ModelProfileSnapshot {
+                version: 2,
+                ..snapshot.clone()
+            },
+            ModelProfileSnapshot {
+                analysis: ModelStageProfileSnapshot {
+                    context_tokens: 4_096,
+                    ..snapshot.analysis.clone()
+                },
+                ..snapshot.clone()
+            },
+            ModelProfileSnapshot {
+                verification: ModelStageProfileSnapshot {
+                    model_digest: "changed-digest".to_string(),
+                    ..snapshot.verification.clone()
+                },
+                ..snapshot.clone()
+            },
+        ] {
+            let error = runtime_from_snapshot(&changed)
+                .err()
+                .expect("profile drift must fail before inference");
+            assert_eq!(error.code, "MODEL_CONFIG_INVALID");
+        }
+    }
+
+    #[test]
+    fn qualification_runtime_stays_separate_from_product_profile_admission() {
+        let snapshot = ModelProfileSnapshot {
+            version: 1,
+            preset_id: "qualification-candidate".to_string(),
+            analysis: ModelStageProfileSnapshot {
+                profile_id: "qualification-analysis".to_string(),
+                model_name: "candidate:latest".to_string(),
+                model_digest: "candidate-digest".to_string(),
+                context_tokens: 8_192,
+                tokenizer_version: crate::pipeline::qwen_tokenizer::QWEN35_TOKENIZER_VERSION
+                    .to_string(),
+            },
+            verification: qualified_snapshot().verification,
+        };
+        assert!(runtime_from_snapshot(&snapshot).is_err());
+        let runtime = QwenProfileRuntime::build(
+            snapshot,
+            QwenTokenizerFamily::Qwen35,
+            QwenTokenizerFamily::Qwen3,
+        )
+        .expect("the hidden qualification harness must accept an explicit candidate");
+        assert_eq!(
+            runtime.model_id_for_stage(PipelineStage::Analyze),
+            "candidate:latest"
+        );
+        assert_eq!(
+            runtime.model_id_for_stage(PipelineStage::Verify),
+            "renamed-baseline:latest"
+        );
     }
 
     #[test]
