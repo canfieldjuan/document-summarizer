@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -64,24 +64,22 @@ pub struct LlamaCppRuntime {
     context_tokens: u32,
     prompt_framing: PromptFraming,
     model_identity_guard: Option<ModelIdentityGuard>,
+    cache_key: String,
     owner: Option<ServerOwner>,
 }
 
 struct ModelIdentityGuard {
+    path: PathBuf,
     file: File,
     expected: FileIdentity,
 }
 
 impl ModelIdentityGuard {
     fn verify(&self) -> Result<(), ModelRuntimeFailure> {
-        let metadata = self.file.metadata().map_err(|_| {
-            failure(
-                "MODEL_NOT_AVAILABLE",
-                "Registered GGUF metadata could not be read",
-                true,
-            )
-        })?;
-        if file_identity(&metadata)? != self.expected {
+        let retained = self.file.metadata().map_err(|_| stale_model_failure())?;
+        let current = open_regular_nofollow(&self.path).map_err(|_| stale_model_failure())?;
+        let current = current.metadata().map_err(|_| stale_model_failure())?;
+        if file_identity(&retained)? != self.expected || file_identity(&current)? != self.expected {
             return Err(failure(
                 "MODEL_PROFILE_STALE",
                 "Registered GGUF bytes changed after runtime admission",
@@ -89,6 +87,10 @@ impl ModelIdentityGuard {
             ));
         }
         Ok(())
+    }
+
+    fn matches(&self, config: &GgufRuntimeConfig) -> bool {
+        self.path == config.model_path && self.expected == config.expected_file_identity
     }
 }
 
@@ -103,8 +105,8 @@ struct ServerOwner {
     _runtime_library_directory: tempfile::TempDir,
 }
 
-impl Drop for ServerOwner {
-    fn drop(&mut self) {
+impl ServerOwner {
+    fn terminate(&self) {
         let Ok(mut child) = self.child.lock() else {
             return;
         };
@@ -112,6 +114,12 @@ impl Drop for ServerOwner {
             let _ = child.kill();
         }
         let _ = child.wait();
+    }
+}
+
+impl Drop for ServerOwner {
+    fn drop(&mut self) {
+        self.terminate();
     }
 }
 
@@ -128,8 +136,13 @@ impl LlamaCppRuntime {
                 true,
             )
         })?;
-        if let Some(runtime) = runtimes.get(&cache_key) {
-            return Ok(Arc::clone(runtime));
+        if let Some(runtime) = runtimes.get(&cache_key).cloned() {
+            if let Err(error) = runtime.validate_cache_reuse(&config) {
+                runtime.terminate_owner();
+                runtimes.remove(&cache_key);
+                return Err(error);
+            }
+            return Ok(runtime);
         }
         if !runtimes.is_empty() {
             return Err(failure(
@@ -138,12 +151,12 @@ impl LlamaCppRuntime {
                 true,
             ));
         }
-        let runtime = Arc::new(Self::start(config)?);
+        let runtime = Arc::new(Self::start(config, cache_key.clone())?);
         runtimes.insert(cache_key, Arc::clone(&runtime));
         Ok(runtime)
     }
 
-    fn start(config: GgufRuntimeConfig) -> Result<Self, ModelRuntimeFailure> {
+    fn start(config: GgufRuntimeConfig, cache_key: String) -> Result<Self, ModelRuntimeFailure> {
         validate_digest(&config.model_digest)?;
         validate_digest(&config.expected_server_digest)?;
         if config.context_tokens == 0 {
@@ -298,6 +311,7 @@ impl LlamaCppRuntime {
             }
         };
         let model_identity_guard = ModelIdentityGuard {
+            path: config.model_path,
             file: model_file,
             expected: config.expected_file_identity,
         };
@@ -315,6 +329,7 @@ impl LlamaCppRuntime {
             context_tokens: config.context_tokens,
             prompt_framing,
             model_identity_guard: Some(model_identity_guard),
+            cache_key,
             owner: Some(ServerOwner {
                 child: Mutex::new(child),
                 _runtime_library_directory: runtime_library_directory,
@@ -341,8 +356,46 @@ impl LlamaCppRuntime {
                 user_close_assistant_open: Vec::new(),
             },
             model_identity_guard: None,
+            cache_key: String::new(),
             owner: None,
         }
+    }
+
+    fn validate_cache_reuse(&self, config: &GgufRuntimeConfig) -> Result<(), ModelRuntimeFailure> {
+        let guard = self
+            .model_identity_guard
+            .as_ref()
+            .ok_or_else(stale_model_failure)?;
+        if !guard.matches(config) {
+            return Err(stale_model_failure());
+        }
+        guard.verify()
+    }
+
+    fn terminate_owner(&self) {
+        if let Some(owner) = &self.owner {
+            owner.terminate();
+        }
+    }
+
+    fn invalidate_managed_runtime(&self) {
+        if self.cache_key.is_empty() {
+            self.terminate_owner();
+            return;
+        }
+        if let Some(runtimes) = RUNTIMES.get() {
+            if let Ok(mut runtimes) = runtimes.lock() {
+                self.terminate_owner();
+                if runtimes
+                    .get(&self.cache_key)
+                    .is_some_and(|runtime| std::ptr::eq(Arc::as_ptr(runtime), self))
+                {
+                    runtimes.remove(&self.cache_key);
+                }
+                return;
+            }
+        }
+        self.terminate_owner();
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -517,35 +570,41 @@ impl ModelRuntime for LlamaCppRuntime {
     }
 
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
-        if let Some(guard) = &self.model_identity_guard {
-            guard.verify()?;
-        }
-        let response = self
-            .authorize(self.client.get(self.endpoint("/health")))
-            .timeout(HEALTH_TIMEOUT)
-            .send()
-            .map_err(|_| {
-                failure(
-                    "MODEL_RUNTIME_UNAVAILABLE",
-                    "GGUF runtime is unavailable",
-                    true,
+        let result = (|| {
+            if let Some(guard) = &self.model_identity_guard {
+                guard.verify()?;
+            }
+            let response = self
+                .authorize(self.client.get(self.endpoint("/health")))
+                .timeout(HEALTH_TIMEOUT)
+                .send()
+                .map_err(|_| {
+                    failure(
+                        "MODEL_RUNTIME_UNAVAILABLE",
+                        "GGUF runtime is unavailable",
+                        true,
+                    )
+                })?;
+            if response.status().is_success() {
+                verify_started_model(
+                    &self.client,
+                    &self.base_url,
+                    &self.api_token,
+                    &self.model_id,
+                    self.context_tokens,
                 )
-            })?;
-        if response.status().is_success() {
-            verify_started_model(
-                &self.client,
-                &self.base_url,
-                &self.api_token,
-                &self.model_id,
-                self.context_tokens,
-            )
-        } else {
-            Err(failure(
-                "MODEL_RUNTIME_UNAVAILABLE",
-                "GGUF runtime is unhealthy",
-                true,
-            ))
+            } else {
+                Err(failure(
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "GGUF runtime is unhealthy",
+                    true,
+                ))
+            }
+        })();
+        if result.is_err() {
+            self.invalidate_managed_runtime();
         }
+        result
     }
 
     fn runtime_id(&self) -> &str {
@@ -639,14 +698,11 @@ fn open_qualified_runtime_bundle(
     expected_runtime_libraries: &[QualifiedRuntimeFile],
 ) -> Result<(File, Vec<(String, File)>), ModelRuntimeFailure> {
     validate_digest(expected_server_digest)?;
-    let mut server_file = open_regular_nofollow(server_path)?;
-    if sha256_open_file(&mut server_file)? != expected_server_digest {
-        return Err(failure(
-            "MODEL_RUNTIME_UNQUALIFIED",
-            "llama-server no longer matches the qualified runtime",
-            false,
-        ));
-    }
+    let server_file = sealed_verified_runtime_file(
+        open_regular_nofollow(server_path)?,
+        expected_server_digest,
+        true,
+    )?;
     let directory = server_path.parent().ok_or_else(|| {
         failure(
             "MODEL_RUNTIME_UNAVAILABLE",
@@ -665,17 +721,131 @@ fn open_qualified_runtime_bundle(
                 true,
             )
         })?;
-        let mut library = open_regular_nofollow(&resolved)?;
-        if sha256_open_file(&mut library)? != expected.digest {
-            return Err(failure(
-                "MODEL_RUNTIME_UNQUALIFIED",
-                "A llama.cpp runtime library no longer matches the qualified profile",
-                false,
-            ));
-        }
+        let library = sealed_verified_runtime_file(
+            open_regular_nofollow(&resolved)?,
+            expected.digest,
+            false,
+        )?;
         libraries.push((expected.file_name.to_string(), library));
     }
     Ok((server_file, libraries))
+}
+
+#[cfg(unix)]
+fn sealed_verified_runtime_file(
+    mut source: File,
+    expected_digest: &str,
+    executable: bool,
+) -> Result<File, ModelRuntimeFailure> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let name = CString::new("docsum-qualified-runtime").map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Qualified runtime storage could not be named",
+            false,
+        )
+    })?;
+    let descriptor =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_ALLOW_SEALING | libc::MFD_CLOEXEC) };
+    if descriptor < 0 {
+        return Err(failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Immutable qualified runtime storage is unavailable",
+            true,
+        ));
+    }
+    let mut sealed = unsafe { File::from_raw_fd(descriptor) };
+    source.seek(SeekFrom::Start(0)).map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Qualified runtime bytes could not be read",
+            true,
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let count = source.read(&mut buffer).map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Qualified runtime bytes could not be read",
+                true,
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        sealed.write_all(&buffer[..count]).map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Qualified runtime bytes could not be sealed",
+                true,
+            )
+        })?;
+    }
+    if format!("{:x}", hasher.finalize()) != expected_digest {
+        return Err(failure(
+            "MODEL_RUNTIME_UNQUALIFIED",
+            "A qualified llama.cpp runtime file no longer matches its manifest",
+            false,
+        ));
+    }
+    sealed.flush().map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Qualified runtime bytes could not be sealed",
+            true,
+        )
+    })?;
+    sealed.seek(SeekFrom::Start(0)).map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Qualified runtime bytes could not be rewound",
+            true,
+        )
+    })?;
+    let mode = if executable { 0o500 } else { 0o400 };
+    if unsafe { libc::fchmod(sealed.as_raw_fd(), mode) } != 0 {
+        return Err(failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Qualified runtime permissions could not be fixed",
+            true,
+        ));
+    }
+    let required_seals =
+        libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if unsafe { libc::fcntl(sealed.as_raw_fd(), libc::F_ADD_SEALS, required_seals) } != 0 {
+        return Err(failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Qualified runtime bytes could not be made immutable",
+            true,
+        ));
+    }
+    let observed_seals = unsafe { libc::fcntl(sealed.as_raw_fd(), libc::F_GET_SEALS) };
+    if observed_seals < 0 || observed_seals & required_seals != required_seals {
+        return Err(failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Qualified runtime immutability could not be verified",
+            true,
+        ));
+    }
+    Ok(sealed)
+}
+
+#[cfg(not(unix))]
+fn sealed_verified_runtime_file(
+    _source: File,
+    _expected_digest: &str,
+    _executable: bool,
+) -> Result<File, ModelRuntimeFailure> {
+    Err(failure(
+        "MODEL_RUNTIME_UNAVAILABLE",
+        "Direct GGUF execution is supported only on Linux",
+        false,
+    ))
 }
 
 fn validate_runtime_file_name(file_name: &str) -> Result<(), ModelRuntimeFailure> {
@@ -815,7 +985,27 @@ fn runtime_cache_key(config: &GgufRuntimeConfig) -> Result<String, ModelRuntimeF
     validate_digest(&config.model_digest)?;
     validate_digest(&config.expected_server_digest)?;
     let mut hasher = Sha256::new();
+    hasher.update(config.model_path.as_os_str().as_encoded_bytes());
+    hasher.update([0]);
     hasher.update(config.model_digest.as_bytes());
+    hasher.update(config.expected_size_bytes.to_be_bytes());
+    hasher.update(config.expected_file_identity.device.to_be_bytes());
+    hasher.update(config.expected_file_identity.inode.to_be_bytes());
+    hasher.update(config.expected_file_identity.size_bytes.to_be_bytes());
+    hasher.update(config.expected_file_identity.modified_seconds.to_be_bytes());
+    hasher.update(
+        config
+            .expected_file_identity
+            .modified_nanoseconds
+            .to_be_bytes(),
+    );
+    hasher.update(config.expected_file_identity.changed_seconds.to_be_bytes());
+    hasher.update(
+        config
+            .expected_file_identity
+            .changed_nanoseconds
+            .to_be_bytes(),
+    );
     hasher.update(config.context_tokens.to_be_bytes());
     hasher.update(config.expected_server_digest.as_bytes());
     for library in config.expected_runtime_libraries {
@@ -826,6 +1016,14 @@ fn runtime_cache_key(config: &GgufRuntimeConfig) -> Result<String, ModelRuntimeF
         hasher.update(library.digest.as_bytes());
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn stale_model_failure() -> ModelRuntimeFailure {
+    failure(
+        "MODEL_PROFILE_STALE",
+        "Registered GGUF bytes no longer match the qualified profile",
+        true,
+    )
 }
 
 fn open_regular_nofollow(path: &Path) -> Result<File, ModelRuntimeFailure> {
@@ -1294,6 +1492,7 @@ mod tests {
         fs::write(&model, b"first").unwrap();
         let (_, size, digest, identity) = inspect_regular_file(&model).unwrap();
         let guard = ModelIdentityGuard {
+            path: model.clone(),
             file: open_regular_nofollow(&model).unwrap(),
             expected: identity.clone(),
         };
@@ -1307,6 +1506,11 @@ mod tests {
         assert_eq!(changed_size, 6);
         assert_ne!(changed_digest, digest);
         assert_ne!(changed_identity, identity);
+
+        let replacement = directory.path().join("replacement.gguf");
+        fs::write(&replacement, b"first").unwrap();
+        fs::rename(&replacement, &model).unwrap();
+        assert_eq!(guard.verify().unwrap_err().code, "MODEL_PROFILE_STALE");
 
         #[cfg(unix)]
         {
@@ -1362,11 +1566,14 @@ mod tests {
         assert_ne!(
             runtime_cache_key(&GgufRuntimeConfig {
                 expected_server_digest: "c".repeat(64),
-                ..config
+                ..config.clone()
             })
             .unwrap(),
             exact
         );
+        let mut changed_identity = config;
+        changed_identity.expected_file_identity.inode += 1;
+        assert_ne!(runtime_cache_key(&changed_identity).unwrap(), exact);
     }
 
     #[test]
@@ -1396,6 +1603,28 @@ mod tests {
             let library_flags = unsafe { libc::fcntl(libraries[0].1.as_raw_fd(), libc::F_GETFD) };
             assert_ne!(server_flags & libc::FD_CLOEXEC, 0);
             assert_ne!(library_flags & libc::FD_CLOEXEC, 0);
+            let required_seals =
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+            assert_eq!(
+                unsafe { libc::fcntl(server_file.as_raw_fd(), libc::F_GET_SEALS) } & required_seals,
+                required_seals
+            );
+            assert_eq!(
+                unsafe { libc::fcntl(libraries[0].1.as_raw_fd(), libc::F_GET_SEALS) }
+                    & required_seals,
+                required_seals
+            );
+            assert!(server_file
+                .try_clone()
+                .unwrap()
+                .write_all(b"changed")
+                .is_err());
+            assert!(libraries[0]
+                .1
+                .try_clone()
+                .unwrap()
+                .write_all(b"changed")
+                .is_err());
         }
         let descriptor_directory = build_descriptor_library_directory(&libraries).unwrap();
         let linked = fs::read_link(descriptor_directory.path().join("libfixture.so.1")).unwrap();
@@ -1418,6 +1647,63 @@ mod tests {
                 .code,
             "MODEL_CONFIG_INVALID"
         );
+    }
+
+    #[test]
+    fn cached_runtime_revalidates_the_registered_path_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("model.gguf");
+        fs::write(&model, b"model").unwrap();
+        let (_, size, digest, identity) = inspect_regular_file(&model).unwrap();
+        let config = GgufRuntimeConfig {
+            model_path: model.clone(),
+            model_digest: digest,
+            expected_size_bytes: size,
+            expected_file_identity: identity.clone(),
+            expected_server_digest: "b".repeat(64),
+            expected_runtime_libraries: &[],
+            context_tokens: 8_192,
+        };
+        let mut runtime =
+            LlamaCppRuntime::for_test("http://127.0.0.1:1".to_string(), "secret".to_string());
+        runtime.model_identity_guard = Some(ModelIdentityGuard {
+            path: model.clone(),
+            file: open_regular_nofollow(&model).unwrap(),
+            expected: identity,
+        });
+        runtime.validate_cache_reuse(&config).unwrap();
+
+        let replacement = directory.path().join("replacement.gguf");
+        fs::write(&replacement, b"model").unwrap();
+        fs::rename(&replacement, &model).unwrap();
+        assert_eq!(
+            runtime.validate_cache_reuse(&config).unwrap_err().code,
+            "MODEL_PROFILE_STALE"
+        );
+    }
+
+    #[test]
+    fn stale_stage_health_terminates_the_owned_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("model.gguf");
+        fs::write(&model, b"model").unwrap();
+        let (_, _, _, identity) = inspect_regular_file(&model).unwrap();
+        let mut runtime =
+            LlamaCppRuntime::for_test("http://127.0.0.1:1".to_string(), "secret".to_string());
+        runtime.model_identity_guard = Some(ModelIdentityGuard {
+            path: model.clone(),
+            file: open_regular_nofollow(&model).unwrap(),
+            expected: identity,
+        });
+        runtime.owner = Some(ServerOwner {
+            child: Mutex::new(Command::new("sleep").arg("60").spawn().unwrap()),
+            _runtime_library_directory: tempfile::tempdir().unwrap(),
+        });
+        fs::write(&model, b"changed").unwrap();
+
+        assert_eq!(runtime.health().unwrap_err().code, "MODEL_PROFILE_STALE");
+        let mut child = runtime.owner.as_ref().unwrap().child.lock().unwrap();
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
