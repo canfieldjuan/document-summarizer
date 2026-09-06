@@ -187,7 +187,18 @@ error, missing-final and post-final streams fail without returning partial
 text. Contract commit `993b33a` precedes implementation commits `ccc8bf4` and
 `1d2b83a`.
 
-The local all-target gate passes with 309 library
+The next exact-head review found that a retryable pre-profile historical run
+could invoke the current-settings runtime path and create a child with no
+inherited profile. Such a retry silently changed model identity instead of
+preserving the source run. Snapshotless failed runs are now excluded from the
+history Retry affordance, rejected before desktop runtime construction, and
+rejected again inside the immediate retry-lineage transaction. The boundary
+test proves that a recoverable checkpoint alone is insufficient: no runtime
+factory call, child, lineage, source mutation or event mutation occurs when the
+profile is absent. Contract commit `2cc5e5f` precedes implementation commit
+`9fa1345`.
+
+The local all-target gate passes with 310 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
