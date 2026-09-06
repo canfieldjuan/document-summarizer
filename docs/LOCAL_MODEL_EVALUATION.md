@@ -90,7 +90,18 @@ tag no longer resolves to the admitted digest. This adds one metadata request
 per successful model call; request counts in the corpus tables remain model-call
 counts, not discovery or digest-check calls.
 
-The local all-target gate passes with 296 library
+The next exact-head review found two remaining admission-order gaps. Connect
+constructed its runtime only after committing the job, so worker scheduling
+could bind an accepted run to a preset selected later. It now constructs the
+runtime before the guarded acceptance transaction and moves that exact instance
+into the worker; construction failure removes the received import and persists
+no job. Desktop retry now performs the same read-only source-state, version,
+checkpoint and lineage checks used by the final transaction before model
+discovery and health preflight. The transaction repeats those checks, preserving
+race safety while stale or ineligible requests return retry errors rather than
+model errors.
+
+The local all-target gate passes with 298 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
