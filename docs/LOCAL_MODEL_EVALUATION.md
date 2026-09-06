@@ -29,6 +29,15 @@ lease, and defer a break notification before ownership reached the child. The
 final implementation installs the handler and unblocks `SIGIO` in the acquiring
 thread before parent lease ownership, then retains the post-spawn break-flag
 check that kills and reaps a child when notification races with handoff.
+The next exact-head review found three additional concurrency/admission gaps:
+selection could detach an actively referenced direct runtime from the cache,
+concurrent jobs could enter the single-slot server without application-side
+serialization, and a successful Ollama residence response with an absent or
+malformed digest could be mistaken for harmless foreign residency. The final
+implementation retains active cache entries across selection changes, queues a
+shared child's complete tokenization/completion sequence behind one mutex, and
+requires every resident record to carry a canonical digest before direct
+startup.
 
 The first final-head NARA attempt correctly stopped before inference with
 `MODEL_RUNTIME_BUSY`: the qualified 30B runner was resident, followed by a
@@ -56,12 +65,12 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 44.20 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,948 | 280.21 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 43.55 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 277.92 s | 0 |
 
 NARA used 20 analysis requests and one verification request, with 438 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
-verification requests, with 5,192 and 1,756 completion tokens respectively.
+verification requests, with 5,198 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported
 prompt and completion token accounting that matched the direct adapter's
 preflight. A live process-boundary probe during the NARA run found the socket in
