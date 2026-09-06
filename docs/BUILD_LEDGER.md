@@ -23,7 +23,7 @@ This document tracks the vertical slices and architectural decisions for the Doc
   remain close-on-exec, file identity is rechecked after load and at stage
   health, and rejected responses retain any token usage the provider supplied.
 - NARA delivered 8 supported claims from 8 evidence items across 8/11 raw pages
-  in 21 requests and 667 completion tokens. DOL delivered 83/83 supported
+  in 21 requests and 653 completion tokens. DOL delivered 83/83 supported
   claims across 83/111 raw pages in 180 requests and 6,948 completion tokens.
   Both completed with warnings and zero schema-fallback attempts.
 - The first read-lease-enabled direct start exited before readiness with an

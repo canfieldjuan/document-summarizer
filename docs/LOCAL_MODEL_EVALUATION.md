@@ -23,6 +23,12 @@ transport failure was treated as empty residence, and a spawning thread's
 blocked `SIGIO` mask could survive into the lease-owning child. Final admission
 permits only an exact loopback connection refusal without a residence response,
 and the child explicitly unblocks its lease-break signal before `exec`.
+Review of the next evidence head found that this was still incomplete: the
+parent thread could inherit a blocked `SIGIO` mask, take ownership of the model
+lease, and defer a break notification before ownership reached the child. The
+final implementation installs the handler and unblocks `SIGIO` in the acquiring
+thread before parent lease ownership, then retains the post-spawn break-flag
+check that kills and reaps a child when notification races with handoff.
 
 The first final-head NARA attempt correctly stopped before inference with
 `MODEL_RUNTIME_BUSY`: the qualified 30B runner was resident, followed by a
@@ -50,10 +56,10 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 57.045 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,948 | 287.289 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 44.20 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,948 | 280.21 s | 0 |
 
-NARA used 20 analysis requests and one verification request, with 452 and 215
+NARA used 20 analysis requests and one verification request, with 438 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
 verification requests, with 5,192 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported

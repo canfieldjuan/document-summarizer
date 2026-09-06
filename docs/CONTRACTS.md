@@ -887,10 +887,9 @@ already has the file open. Before taking parent ownership of that lease, the
 acquiring thread installs the lease-break handler and explicitly unblocks
 `SIGIO`; a mask inherited from its caller cannot defer a parent-directed break
 notification until after ownership transfer. Complete registered file identity
-is checked only after that lease is held and before any child is spawned, so a
-modify-and-close
-between an unprotected identity check and lease acquisition cannot reach the
-loader. The child becomes the lease-break signal owner with
+is checked only after that lease is held and before any child is spawned. A
+modify-and-close between an unprotected identity check and lease acquisition
+therefore cannot reach the loader. The child becomes the lease-break signal owner with
 the default terminating disposition before `exec`, and explicitly unblocks the
 lease-break signal in the child so a signal mask inherited from the spawning
 thread cannot defer termination. A later write-open therefore blocks in the
