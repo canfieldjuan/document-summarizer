@@ -990,7 +990,7 @@ fn stage_runtime(
                     .filter(|profile| profile.runtime_kind == ModelRuntimeKind::OllamaNative)
                     .map(|profile| profile.digest)
                     .collect::<Vec<_>>();
-                ollama.release_loaded_models_by_digest(&admitted_ollama_digests)?;
+                ollama.ensure_models_not_resident_by_digest(&admitted_ollama_digests)?;
             }
             let registration = settings
                 .registered_ggufs

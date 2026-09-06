@@ -30,7 +30,6 @@ const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_SCHEMA_NAME_BYTES: usize = 64;
 const MIN_SUPPORTED_CONTEXT_TOKENS: u32 = 4_096;
 const MAX_SUPPORTED_CONTEXT_TOKENS: u32 = 1_048_576;
-const RUNNER_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 const CHAT_RUNNER_KEEP_ALIVE: &str = "30s";
 pub(super) const MAX_DECODER_STRING_LENGTH: u64 = 1_536;
 
@@ -294,7 +293,7 @@ impl OllamaRuntime {
         self.installed_models_with_deadline(Duration::from_secs(HEALTH_TIMEOUT_SECONDS))
     }
 
-    pub fn release_loaded_models_by_digest(
+    pub fn ensure_models_not_resident_by_digest(
         &self,
         admitted_digests: &[&str],
     ) -> Result<(), ModelRuntimeFailure> {
@@ -314,94 +313,18 @@ impl OllamaRuntime {
         }
         let models = decode_bounded_json::<ModelsResponse>(initial)?.models;
         validate_running_model_record_count(models.len())?;
-        let targets = models
-            .iter()
-            .filter(|model| {
-                admitted_digests
-                    .iter()
-                    .any(|digest| *digest == model.digest)
-            })
-            .collect::<Vec<_>>();
-        for target in &targets {
-            if target.name.is_empty()
-                || target.name.len() > MAX_RETAINED_MODEL_METADATA_FIELD_BYTES
-                || models
-                    .iter()
-                    .any(|model| model.name == target.name && model.digest != target.digest)
-            {
-                return Err(runtime_failure(
-                    "MODEL_EXECUTION_UNVERIFIED",
-                    "A resident Ollama model could not be bound to one qualified identity",
-                    true,
-                ));
-            }
+        if models.iter().any(|model| {
+            admitted_digests
+                .iter()
+                .any(|digest| *digest == model.digest)
+        }) {
+            return Err(runtime_failure(
+                "MODEL_RUNTIME_BUSY",
+                "A qualified Ollama model is still resident; retry after its keep-alive expires",
+                true,
+            ));
         }
-        if targets.is_empty() {
-            return Ok(());
-        }
-        for target in targets {
-            let response = self
-                .authorize(
-                    self.client
-                        .post(self.endpoint("api/generate")?)
-                        .timeout(RUNNER_RELEASE_TIMEOUT)
-                        .json(&serde_json::json!({
-                            "model": target.name,
-                            "stream": false,
-                            "keep_alive": 0
-                        })),
-                )
-                .send()
-                .map_err(|_| {
-                    runtime_failure(
-                        "MODEL_RUNTIME_BUSY",
-                        "Qualified Ollama model could not be released",
-                        true,
-                    )
-                })?;
-            if !response.status().is_success() {
-                return Err(rejected_response(response.status()));
-            }
-            let _ = read_bounded_body(response)?;
-        }
-
-        let deadline = Instant::now() + RUNNER_RELEASE_TIMEOUT;
-        loop {
-            let response = self
-                .authorize(
-                    self.client
-                        .get(self.endpoint("api/ps")?)
-                        .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
-                )
-                .send()
-                .map_err(|_| {
-                    runtime_failure(
-                        "MODEL_RUNTIME_BUSY",
-                        "Qualified Ollama release could not be confirmed",
-                        true,
-                    )
-                })?;
-            if !response.status().is_success() {
-                return Err(rejected_response(response.status()));
-            }
-            let models = decode_bounded_json::<ModelsResponse>(response)?.models;
-            validate_running_model_record_count(models.len())?;
-            if !models.iter().any(|model| {
-                admitted_digests
-                    .iter()
-                    .any(|digest| *digest == model.digest)
-            }) {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(runtime_failure(
-                    "MODEL_RUNTIME_BUSY",
-                    "Qualified Ollama model remained resident after release",
-                    true,
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        Ok(())
     }
 
     fn installed_models_with_deadline(
@@ -1853,10 +1776,7 @@ mod tests {
         execution_model_server(models)
     }
 
-    fn release_server(
-        initial_models: serde_json::Value,
-        remaining_models: Option<serde_json::Value>,
-    ) -> (String, thread::JoinHandle<Option<serde_json::Value>>) {
+    fn resident_models_server(models: serde_json::Value) -> (String, thread::JoinHandle<bool>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
         let address = listener
             .local_addr()
@@ -1868,21 +1788,24 @@ mod tests {
             write_json_response(
                 &mut running,
                 "200 OK",
-                &serde_json::json!({"models": initial_models}),
+                &serde_json::json!({"models": models}),
             );
-            let remaining_models = remaining_models?;
-            let (mut release, _) = listener.accept().expect("release request should arrive");
-            let request = read_json_request(&mut release);
-            write_json_response(&mut release, "200 OK", &serde_json::json!({"done": true}));
-            let (mut confirmation, _) = listener.accept().expect("confirmation should arrive");
-            let headers = read_headers(&mut confirmation);
-            assert!(headers.starts_with("GET /api/ps HTTP/1.1"));
-            write_json_response(
-                &mut confirmation,
-                "200 OK",
-                &serde_json::json!({"models": remaining_models}),
-            );
-            Some(request)
+            listener
+                .set_nonblocking(true)
+                .expect("loopback listener should become nonblocking");
+            let deadline = Instant::now() + Duration::from_millis(200);
+            loop {
+                match listener.accept() {
+                    Ok(_) => return true,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return false;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("loopback accept failed: {error}"),
+                }
+            }
         });
         (format!("http://{address}/"), handle)
     }
@@ -3243,72 +3166,55 @@ mod tests {
     }
 
     #[test]
-    fn runner_release_targets_only_an_exact_admitted_digest() {
+    fn runner_residence_check_blocks_an_exact_admitted_digest_without_mutation() {
         let admitted = "a".repeat(64);
         let unrelated = "b".repeat(64);
-        let (base_url, server) = release_server(
-            serde_json::json!([
-                {"name": "qualified-alias", "digest": admitted},
-                {"name": "other-model", "digest": unrelated}
-            ]),
-            Some(serde_json::json!([
-                {"name": "other-model", "digest": unrelated}
-            ])),
-        );
-        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
-            .expect("loopback runtime should configure");
-        runtime
-            .release_loaded_models_by_digest(&[admitted.as_str()])
-            .expect("exact qualified model should release");
-        let release = server
-            .join()
-            .expect("release server should finish")
-            .expect("one exact release should be sent");
-        assert_eq!(release["model"], "qualified-alias");
-        assert_eq!(release["stream"], false);
-        assert_eq!(release["keep_alive"], 0);
-    }
-
-    #[test]
-    fn runner_release_ignores_foreign_digest_and_rejects_name_collision() {
-        let admitted = "a".repeat(64);
-        let foreign = "b".repeat(64);
-        let (base_url, foreign_server) = release_server(
-            serde_json::json!([
-                {"name": "qualified-alias", "digest": foreign}
-            ]),
-            None,
-        );
-        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
-            .expect("loopback runtime should configure");
-        runtime
-            .release_loaded_models_by_digest(&[admitted.as_str()])
-            .expect("foreign digest must be left alone");
-        assert!(foreign_server
-            .join()
-            .expect("foreign server should finish")
-            .is_none());
-
-        let (base_url, collision_server) = release_server(
-            serde_json::json!([
-                {"name": "shared-alias", "digest": admitted},
-                {"name": "shared-alias", "digest": foreign}
-            ]),
-            None,
-        );
+        let (base_url, server) = resident_models_server(serde_json::json!([
+            {"name": "qualified-alias", "digest": admitted},
+            {"name": "other-model", "digest": unrelated}
+        ]));
         let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
             .expect("loopback runtime should configure");
         assert_eq!(
             runtime
-                .release_loaded_models_by_digest(&[admitted.as_str()])
+                .ensure_models_not_resident_by_digest(&[admitted.as_str()])
                 .unwrap_err()
                 .code,
-            "MODEL_EXECUTION_UNVERIFIED"
+            "MODEL_RUNTIME_BUSY"
         );
-        assert!(collision_server
+        assert!(!server.join().expect("residence server should finish"));
+    }
+
+    #[test]
+    fn runner_residence_check_ignores_foreign_digest_and_fails_safe_on_name_collision() {
+        let admitted = "a".repeat(64);
+        let foreign = "b".repeat(64);
+        let (base_url, foreign_server) = resident_models_server(serde_json::json!([
+            {"name": "qualified-alias", "digest": foreign}
+        ]));
+        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+            .expect("loopback runtime should configure");
+        runtime
+            .ensure_models_not_resident_by_digest(&[admitted.as_str()])
+            .expect("foreign digest must be left alone");
+        assert!(!foreign_server.join().expect("foreign server should finish"));
+
+        let (base_url, collision_server) = resident_models_server(serde_json::json!([
+            {"name": "shared-alias", "digest": admitted},
+            {"name": "shared-alias", "digest": foreign}
+        ]));
+        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+            .expect("loopback runtime should configure");
+        assert_eq!(
+            runtime
+                .ensure_models_not_resident_by_digest(&[admitted.as_str()])
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_BUSY"
+        );
+        assert!(!collision_server
             .join()
-            .expect("collision server should finish")
-            .is_none());
+            .expect("collision server should finish"));
     }
 
     #[test]

@@ -582,6 +582,16 @@ impl ModelRuntime for LlamaCppRuntime {
                     true,
                 ));
             }
+            if !matches!(
+                completed.stop_type,
+                CompletionStopType::Eos | CompletionStopType::Word
+            ) {
+                return Err(failure(
+                    "MODEL_EXECUTION_UNVERIFIED",
+                    "Direct GGUF generation stopped before a qualified completion boundary",
+                    true,
+                ));
+            }
             let reported_prompt_tokens = completed.tokens_evaluated.ok_or_else(|| {
                 failure(
                     "MODEL_RESPONSE_INVALID",
@@ -1544,6 +1554,16 @@ struct CompletionResponse {
     tokens_evaluated: Option<u64>,
     #[serde(default)]
     truncated: bool,
+    stop_type: CompletionStopType,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CompletionStopType {
+    Eos,
+    Word,
+    Limit,
+    None,
 }
 
 #[derive(Deserialize)]
@@ -1568,7 +1588,9 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
-    fn generation_error_for_completion(response_body: &str) -> ModelRuntimeFailure {
+    fn generation_result_for_completion(
+        response_body: &str,
+    ) -> Result<ModelResponse, ModelRuntimeFailure> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let response_body = response_body.to_string();
@@ -1591,19 +1613,21 @@ mod tests {
             }
         });
         let runtime = LlamaCppRuntime::for_test(format!("http://{address}"), "secret".to_string());
-        let error = runtime
-            .generate(&ModelRequest {
-                stage: PipelineStage::Analyze,
-                ordinal: 0,
-                system_prompt: "system".to_string(),
-                user_prompt: "user".to_string(),
-                seed: 42,
-                max_output_tokens: 1,
-                output_format: Default::default(),
-            })
-            .unwrap_err();
+        let result = runtime.generate(&ModelRequest {
+            stage: PipelineStage::Analyze,
+            ordinal: 0,
+            system_prompt: "system".to_string(),
+            user_prompt: "user".to_string(),
+            seed: 42,
+            max_output_tokens: 1,
+            output_format: Default::default(),
+        });
         thread.join().unwrap();
-        error
+        result
+    }
+
+    fn generation_error_for_completion(response_body: &str) -> ModelRuntimeFailure {
+        generation_result_for_completion(response_body).unwrap_err()
     }
 
     #[test]
@@ -2049,7 +2073,7 @@ mod tests {
     #[test]
     fn direct_response_rejects_truncation() {
         let error = generation_error_for_completion(
-            r#"{"content":"partial","tokens_predicted":1,"tokens_evaluated":2,"truncated":true}"#,
+            r#"{"content":"partial","tokens_predicted":1,"tokens_evaluated":2,"truncated":true,"stop_type":"limit"}"#,
         );
         assert_eq!(error.code, "MODEL_EXECUTION_UNVERIFIED");
         assert_eq!(
@@ -2065,7 +2089,7 @@ mod tests {
     #[test]
     fn direct_response_requires_complete_matching_token_accounting() {
         let missing_completion = generation_error_for_completion(
-            r#"{"content":"ok","tokens_evaluated":2,"truncated":false}"#,
+            r#"{"content":"ok","tokens_evaluated":2,"truncated":false,"stop_type":"eos"}"#,
         );
         assert_eq!(missing_completion.code, "MODEL_RESPONSE_INVALID");
         assert_eq!(
@@ -2077,12 +2101,45 @@ mod tests {
             }
         );
         for body in [
-            r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":1,"truncated":false}"#,
-            r#"{"content":"ok","tokens_predicted":2,"tokens_evaluated":2,"truncated":false}"#,
+            r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":1,"truncated":false,"stop_type":"eos"}"#,
+            r#"{"content":"ok","tokens_predicted":2,"tokens_evaluated":2,"truncated":false,"stop_type":"eos"}"#,
         ] {
             assert_eq!(
                 generation_error_for_completion(body).code,
                 "MODEL_EXECUTION_UNVERIFIED"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_response_requires_a_qualified_completion_stop() {
+        for stop_type in ["eos", "word"] {
+            let body = format!(
+                r#"{{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"{stop_type}"}}"#
+            );
+            assert_eq!(
+                generation_result_for_completion(&body)
+                    .expect("qualified completion stop should pass")
+                    .text,
+                "ok"
+            );
+        }
+        for stop_type in ["limit", "none"] {
+            let body = format!(
+                r#"{{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"{stop_type}"}}"#
+            );
+            assert_eq!(
+                generation_error_for_completion(&body).code,
+                "MODEL_EXECUTION_UNVERIFIED"
+            );
+        }
+        for body in [
+            r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false}"#,
+            r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"future"}"#,
+        ] {
+            assert_eq!(
+                generation_error_for_completion(body).code,
+                "MODEL_RESPONSE_INVALID"
             );
         }
     }
