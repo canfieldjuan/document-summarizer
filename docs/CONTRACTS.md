@@ -1098,21 +1098,46 @@ load cannot change the bytes executed. Direct GGUF support is therefore Linux
 only in this slice, matching the supported desktop bundle.
 
 The runtime executable is the canonical `llama-server` resolved from the
-deployment override or `PATH`. It is itself a qualified executable: the app
-hashes the opened executable and requires the exact registered runtime profile
-before spawning it through its descriptor. A changed binary is visible as an
-unavailable runtime until separately qualified. No shell interprets its path or
-arguments. The child binds a fresh exact-loopback port, uses an unpredictable
-per-process bearer token and digest alias, and starts with the qualified context,
-one parallel slot, reasoning disabled, web UI disabled, offline mode, no warmup
-and GPU layers enabled. Proxies and redirects remain disabled. Startup has a
-short aggregate deadline; health, model identity and trained context are checked
-before the first request. The app drains bounded diagnostic output without
-persisting prompts or source text, shares one live child for the same direct
-profile inside the process, and keeps the selected child alive until model
-selection changes or the application exits. Selection and exit explicitly
-terminate/reap the owned child. A port collision, early exit, startup timeout,
-changed alias or failed reap never admits generated output.
+deployment override or `PATH`. The executable is dynamically linked, so the
+qualified runtime identity is the executable plus every application-local
+llama.cpp/ggml dependency named by the profile, not the executable hash alone.
+The Jack profile admits `llama-server` at
+`0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099`,
+`libllama-server-impl.so` at
+`bd3e91a31fb3c61152043083f1e5008f9b7aef7bf5c168d6b3eca0019f634008`,
+`libllama-common.so.0` at
+`9cf26696816c83fb6e148b3142c1a59bb374de9dc6a92a2966d9abe99939d2a1`,
+`libmtmd.so.0` at
+`ec117a22c9acd24e9eeea4418c93d3d13512bcb607fee97a9674f82b93cb35c7`,
+`libllama.so.0` at
+`c600923b1e548798b80d58b029505dbea4ccd4d2844de38416936e184906f645`,
+`libggml.so.0` at
+`b80a4252c981712564828488b1962e80feb49675ca23da4a8479b2ed7361f86f`,
+`libggml-base.so.0` at
+`c08e63a459d5d0ae4e982d1181fac3c4a0fcb40fcc49d7489ad9e16e4d39ca63`,
+`libggml-cpu.so.0` at
+`d0b746ea2d7e8188236023d4c3a1ba8900a88600e8fdd0f1e6b5043ddf76fcdd`
+and `libggml-cuda.so.0` at
+`4095bde67d003066a6a622573d165595ad8648470d55317cc94ed4d47acf353f`.
+The app opens and hashes each resolved regular dependency, creates a private
+runtime directory whose required library names point only to inherited open
+descriptors, and launches the descriptor-bound executable with that directory
+as its library search path. A changed or missing manifest member is visible as
+an unavailable runtime until the whole bundle is separately qualified; a path
+replacement after admission cannot select different bytes. Host C/C++, CUDA
+driver and system runtime libraries remain the operating-system trust boundary.
+No shell interprets a path or argument. The child binds a fresh exact-loopback
+port, uses an unpredictable per-process bearer token and digest alias, and
+starts with the qualified context, one parallel slot, reasoning disabled, web UI
+disabled, offline mode, no warmup and GPU layers enabled. Proxies and redirects
+remain disabled. Startup has a short aggregate deadline; health, model identity
+and trained context are checked before the first request. The app drains bounded
+diagnostic output without persisting prompts or source text, shares one live
+child for the same direct profile inside the process, and keeps the selected
+child alive until model selection changes or the application exits. Selection
+and exit explicitly terminate/reap the owned child. A port collision, early
+exit, startup timeout, changed alias or failed reap never admits generated
+output.
 
 Direct requests use llama.cpp `POST /completion`, not the GGUF's embedded chat
 template and not its OpenAI-compatible chat route. The app renders one pinned,
@@ -1153,8 +1178,7 @@ that exact digest and repeats all file and executable admission checks before
 state changes. The exact Jack Qwen 3.8 27B Coder GGUF
 `e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041`
 is admitted as an opt-in full preset at an 8,192-token context when executed by
-the qualified llama-server binary
-`0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099`.
+the qualified llama.cpp runtime bundle above.
 The existing Qwen 3 30B-A3B Ollama preset remains the default and strongest
 verifier. Jack does not create a cross-runtime hybrid preset in this slice:
 holding both runners exceeds the qualified machine's GPU-memory envelope, and a
@@ -1175,8 +1199,9 @@ quantization or llama.cpp builds. The slower deck result is displayed honestly;
 it does not replace or weaken the existing default.
 
 Tests cover settings-version migration, registration count/path/label byte
-boundaries, duplicate digests, exact and changed file/runtime hashes, symlink and
-non-regular rejection, descriptor-bound spawn arguments, shell-free execution,
+boundaries, duplicate digests, exact and changed file/runtime manifest hashes,
+symlink and non-regular rejection, descriptor-bound spawn and dependency
+arguments, shell-free execution,
 random authentication, loopback/redirect/proxy rejection, startup timeout and
 early exit, exact prompt rendering and token admission on both sides, schema and
 usage parsing, truncation rejection, child sharing and cleanup, runtime-kind
