@@ -62,6 +62,18 @@ that same durable thread. A boundary probe submits startup from a transient
 requester, lets that requester exit, proves repeated work reaches the same
 supervisor thread, and observes the supervised child remain live.
 
+The standalone exact-head thread poll then caught a separate local-boundary
+defect before merge: the mode-`0700` leaf still came from ambient `tempdir()`,
+so a non-sticky attacker-writable `TMPDIR` parent could permit leaf replacement
+and socket interception. The corrected runtime derives staging from the
+explicit model-settings directory, rejects unsafe canonical ancestry, and
+creates each child directory beneath an effective-user-owned mode-`0700` root.
+Product startup also verifies and tightens app-data ownership and mode before
+database or settings use. Boundary probes accept owner-private and trusted
+sticky ancestry while rejecting non-sticky writable ancestry, a broad-mode or
+symlink runtime root, and symlink/file app-data targets. A live probe observed
+`/tmp/llama-runtime` as mode `0700` and owned by the effective user.
+
 The first validation attempts on this revision correctly stopped before
 inference with `MODEL_RUNTIME_BUSY`: a Website Generator Connect provider kept
 reloading the qualified 30B Ollama runner after the first targeted unload. The
@@ -100,17 +112,23 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 44.31 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,942 | 278.94 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 43.31 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 294.75 s | 0 |
 
-NARA used 20 analysis requests and one verification request, with 452 and 215
+NARA used 20 analysis requests and one verification request, with 438 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
-verification requests, with 5,186 and 1,756 completion tokens respectively.
+verification requests, with 5,198 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported
 prompt and completion token accounting that matched the direct adapter's
 preflight. A live process-boundary probe during the NARA run found the socket in
 a mode-0700 directory, no `--port` argument, and the bearer only in the
 mode-0600 key file rather than the process argument vector.
+
+The isolated live-test binary does not execute the Tauri app-exit hook, so its
+current owner-private child directory remains after process exit even though no
+`llama-server` survives. The desktop app calls managed-runtime shutdown on
+normal exit. Crash/test-process scavenging is not part of this runtime-boundary
+fix; the retained directory is protected by the verified mode-`0700` root.
 
 The qualified runtime is the exact `llama-server` and llama/ggml library bundle
 recorded in `docs/CONTRACTS.md`, at an 8,192-token effective context. A
