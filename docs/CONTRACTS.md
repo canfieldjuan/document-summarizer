@@ -1082,9 +1082,16 @@ registered GGUF. The user explicitly chooses one `.gguf` file through the
 desktop file picker. The application never scans model directories. Registration
 opens the selected path without following a final symlink, requires one regular
 file, hashes bytes from that open descriptor and stores the canonical location,
-size and SHA-256 in private atomic settings. A new or historical run reopens and
-rehashes the file before inference. Missing, replaced, non-regular or
-digest-mismatched input is unavailable and never falls back to another model.
+size, SHA-256 and Linux file identity (`st_dev`, `st_ino`, size, nanosecond mtime
+and nanosecond ctime) in private atomic settings. Registration reads the identity
+before and after hashing and rejects a file that changes during the read. A new
+or historical run reopens the file and requires that complete identity tuple to
+match before inference. Any content mutation changes ctime even if an operator
+restores mtime; replacement changes the inode. Missing, replaced, non-regular or
+identity-mismatched input is unavailable until the user explicitly re-registers
+and rehashes it, and never falls back to another model. This avoids re-reading a
+multi-gigabyte unchanged file on every health check while preserving fail-closed
+content admission.
 The selected descriptor, rather than a later path lookup, is inherited by the
 spawned child through `/proc/self/fd` so a rename or replacement between hash and
 load cannot change the bytes executed. Direct GGUF support is therefore Linux
@@ -1102,9 +1109,10 @@ and GPU layers enabled. Proxies and redirects remain disabled. Startup has a
 short aggregate deadline; health, model identity and trained context are checked
 before the first request. The app drains bounded diagnostic output without
 persisting prompts or source text, shares one live child for the same direct
-profile inside the process, and terminates/reaps its owned child after the final
-holder releases it. A port collision, early exit, startup timeout, changed alias
-or failed reap never admits generated output.
+profile inside the process, and keeps the selected child alive until model
+selection changes or the application exits. Selection and exit explicitly
+terminate/reap the owned child. A port collision, early exit, startup timeout,
+changed alias or failed reap never admits generated output.
 
 Direct requests use llama.cpp `POST /completion`, not the GGUF's embedded chat
 template and not its OpenAI-compatible chat route. The app renders one pinned,
@@ -1114,8 +1122,11 @@ and preserves temperature zero, the run-derived seed and the stage output
 allowance. The app asks the same private server's `/tokenize` endpoint to count
 that exact transmitted prompt before inference. Output plus the existing framing
 reserve must fit the qualified context; truncation is disabled and a response
-reporting prompt truncation is rejected. Response bodies, JSON, content, token
-usage and model identity remain bounded and fail closed. No schema fallback is
+reporting prompt truncation is rejected. Response bodies, JSON, content and token
+usage remain bounded and fail closed. Execution identity comes from the
+descriptor-bound child, its private bearer token and the exact digest alias
+verified at startup; a mutable provider path string in an individual completion
+is not treated as identity. No schema fallback is
 introduced for this adapter. Provider prompt/completion counts and the concrete
 `llama.cpp-qwen-gguf` runtime identity flow through the existing request and run
 diagnostics without recording the file path, token or prompt.
