@@ -880,6 +880,17 @@ library bytes; host C/C++, CUDA driver and system runtime libraries remain the
 operating-system trust boundary. Direct GGUF execution is Linux-only in this
 release.
 
+The registered GGUF itself remains on its source filesystem rather than being
+duplicated into RAM or app storage. Before fork, the app must acquire a Linux
+read lease on the retained read-only descriptor; acquisition fails if a writer
+already has the file open. The child becomes the lease-break signal owner with
+the default terminating disposition before `exec`. A later write-open therefore
+blocks in the kernel and terminates the loader before the writer can reach the
+live inode. The parent releases the lease only after the child is terminated or
+ownership ends. A filesystem without working read-lease enforcement is not
+admitted for direct GGUF execution. Post-load metadata checks remain defense in
+depth, not the mechanism that prevents mutable bytes from reaching the loader.
+
 The child binds a fresh exact-loopback port with an unpredictable per-process
 bearer token and exact digest alias. It uses the qualified context, one parallel
 slot, reasoning disabled, web UI disabled, offline mode, no warmup and GPU
@@ -1206,9 +1217,10 @@ Qualification applies only to these exact model and runtime bytes.
 Direct-runtime tests cover settings migration and bounds, duplicate digest
 registration, regular/symlink/replaced files, cached registration deletion and
 replacement, exact and drifted runtime manifest members, sealed immutable
-runtime bytes, descriptor-backed library names, stale-child termination and
-eviction, idle-versus-active cache replacement, Ollama-only snapshot recovery
-with malformed GGUF settings, shell-free loopback launch, private
+runtime bytes, GGUF read-lease admission and release boundaries,
+descriptor-backed library names, stale-child termination and eviction,
+idle-versus-active cache replacement, Ollama-only snapshot recovery with
+malformed GGUF settings, shell-free loopback launch, private
 authentication, exact alias/context checks, prompt-token admission on both
 sides, control-token injection isolation, truncation, mismatched accounting and
 malformed response rejection, stage snapshot reload, cache identity and
