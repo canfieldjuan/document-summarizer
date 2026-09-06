@@ -198,7 +198,17 @@ factory call, child, lineage, source mutation or event mutation occurs when the
 profile is absent. Contract commit `2cc5e5f` precedes implementation commit
 `9fa1345`.
 
-The local all-target gate passes with 310 library
+The final exact-head catalog review found that multiple installed names could
+resolve to the same qualified immutable digest. The settings catalog then
+exposed duplicate product presets with the same stable ID, and selecting that
+ID depended on input order. Qualified aliases are now collapsed by digest
+after descriptor sorting: the lexicographically first installed name becomes
+the canonical runtime name while every alias remains visible in discovery.
+Reversed-order boundary coverage proves one preset is emitted and both analysis
+and verification use the same canonical alias. Contract commit `499566c`
+precedes implementation commit `408ae1a`.
+
+The local all-target gate passes with 311 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
