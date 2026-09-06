@@ -883,7 +883,10 @@ release.
 The registered GGUF itself remains on its source filesystem rather than being
 duplicated into RAM or app storage. Before fork, the app must acquire a Linux
 read lease on the retained read-only descriptor; acquisition fails if a writer
-already has the file open. The child becomes the lease-break signal owner with
+already has the file open. Complete registered file identity is checked only
+after that lease is held and before any child is spawned, so a modify-and-close
+between an unprotected identity check and lease acquisition cannot reach the
+loader. The child becomes the lease-break signal owner with
 the default terminating disposition before `exec`, and explicitly unblocks the
 lease-break signal in the child so a signal mask inherited from the spawning
 thread cannot defer termination. A later write-open therefore blocks in the
@@ -905,6 +908,11 @@ slot, reasoning disabled, web UI disabled, offline mode, no warmup and GPU
 layers enabled. Proxies and redirects remain disabled. Startup has one bounded
 deadline and verifies health, digest alias, active context and trained context
 before inference; it also rechecks the retained model descriptor after load.
+Before spawning, the parent PID is captured. Immediately after installing the
+parent-death signal, the child compares its actual parent with that captured
+PID and aborts before `exec` if the parent died during the fork-to-handoff
+window; setting a parent-death signal after reparenting is not accepted as
+cleanup protection.
 Stage-boundary health repeats the registered model path identity, retained
 descriptor identity and loaded alias/context checks. Cache reuse first repeats
 the registered-path and retained-descriptor checks; deleting, unlinking or
@@ -1059,12 +1067,18 @@ the deterministic name for a new run. Therefore every rendered preset ID is
 unique and still identifies one immutable capability profile; persisted preset
 selection cannot resolve to a different duplicate row. Historical runs remain
 bound to the exact model name and digest already stored in their snapshot.
+Snapshot recovery validates `preset_id`, analysis stage and verification stage
+as one product-admitted preset before loading settings, taking a profile lease,
+or constructing either runtime. Individually qualified stages cannot be mixed
+into a cross-runtime combination the preset registry never offered.
 
 The user may register one explicit existing `.gguf` through the desktop picker.
 The app never scans model directories, copies the file or mutates the model
-store. Registration opens without following a final symlink, requires a regular
-file, hashes the open descriptor, and stores canonical location, basename, byte
-size, SHA-256 and Linux device/inode/size/nanosecond-mtime/nanosecond-ctime
+store. Registration opens the final component without following symlinks and
+with nonblocking semantics before requiring a regular file, so FIFO, device or
+socket substitution cannot stall registration, catalog admission or cache
+reuse. It hashes the open descriptor, and stores canonical location, basename,
+byte size, SHA-256 and Linux device/inode/size/nanosecond-mtime/nanosecond-ctime
 identity in private atomic settings. Identity is checked before and after the
 one registration hash. Later catalog and runtime admission require the complete
 tuple; replacement or mutation requires explicit re-registration. The selected
@@ -1240,9 +1254,10 @@ Qualification applies only to these exact model and runtime bytes.
 
 Direct-runtime tests cover settings migration and bounds, duplicate digest
 registration, regular/symlink/replaced files, cached registration deletion and
-replacement, exact and drifted runtime manifest members, sealed immutable
-runtime bytes, GGUF read-lease admission and release boundaries, inherited
-lease-signal mask handling, descriptor-backed library names,
+replacement, nonblocking special-file rejection, exact and drifted runtime
+manifest members, sealed immutable runtime bytes, GGUF post-lease identity plus
+read-lease admission and release boundaries, inherited lease-signal mask and
+parent-death handoff handling, descriptor-backed library names,
 lease-broken/dead-child detection and eviction,
 idle-versus-active cache replacement, Ollama-only snapshot recovery with
 malformed GGUF settings, shell-free loopback launch, private
@@ -1250,7 +1265,8 @@ Unix-socket authentication without TCP handoff, exact alias/context checks,
 prompt-token admission on both
 sides, control-token injection isolation, truncation, explicit output-limit and
 unknown-stop rejection, mismatched accounting and malformed response rejection,
-stage snapshot reload, cache identity and lifecycle, concurrent profile leases,
+stage snapshot reload, whole-preset snapshot admission, cache identity and
+lifecycle, concurrent profile leases,
 unavailable-source catalog behavior, and non-mutating admitted Ollama residence
 checks, including definitive absent-listener admission and ambiguous transport
 failure rejection. The unchanged exactness, provenance,
