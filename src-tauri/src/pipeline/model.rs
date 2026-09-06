@@ -8,7 +8,7 @@ use reqwest::{StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -463,7 +463,7 @@ impl OllamaRuntime {
                     content: &request.user_prompt,
                 },
             ],
-            stream: false,
+            stream: true,
             think: false,
             keep_alive: CHAT_RUNNER_KEEP_ALIVE,
             format,
@@ -501,12 +501,117 @@ impl OllamaRuntime {
         let started = Instant::now();
         let result = self.send_chat(request, format).and_then(|response| {
             let status = response.status();
-            read_bounded_body(response).map(|body| (status, body))
+            if status.is_success() {
+                self.read_verified_chat_stream(response)
+                    .map(|body| (status, body))
+            } else {
+                read_bounded_body(response).map(|body| (status, body))
+            }
         });
         let elapsed = started.elapsed();
         result
             .map(|(status, body)| (status, body, elapsed))
             .map_err(|failure| (failure, elapsed))
+    }
+
+    fn read_verified_chat_stream(
+        &self,
+        response: Response,
+    ) -> Result<Vec<u8>, ModelRuntimeFailure> {
+        let mut reader = BufReader::new(response.take(MAX_MODEL_RESPONSE_BYTES + 1));
+        let mut line = Vec::new();
+        let mut raw_bytes = 0_u64;
+        let mut content = String::new();
+        let mut final_usage = ModelTokenUsage::default();
+        let mut execution_proven = self.expected_digest.is_none();
+        let mut saw_non_final = false;
+        let mut saw_final = false;
+
+        loop {
+            line.clear();
+            let count = reader.read_until(b'\n', &mut line).map_err(|_| {
+                runtime_failure(
+                    "MODEL_RESPONSE_INVALID",
+                    "Local model response could not be read",
+                    true,
+                )
+            })?;
+            if count == 0 {
+                break;
+            }
+            raw_bytes = raw_bytes.saturating_add(count as u64);
+            if raw_bytes > MAX_MODEL_RESPONSE_BYTES {
+                return Err(runtime_failure(
+                    "MODEL_RESPONSE_TOO_LARGE",
+                    "Local model response exceeds the supported size limit",
+                    true,
+                ));
+            }
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+            if line.is_empty() {
+                return Err(invalid_stream_response());
+            }
+            let frame: ChatStreamFrame =
+                serde_json::from_slice(&line).map_err(|_| invalid_stream_response())?;
+            if frame.error.is_some() {
+                return Err(runtime_failure(
+                    "MODEL_RUNTIME_REJECTED",
+                    "Local model failed during streamed generation",
+                    true,
+                ));
+            }
+            if saw_final {
+                return Err(invalid_stream_response());
+            }
+            let model = frame.model.as_deref().ok_or_else(invalid_stream_response)?;
+            let done = frame.done.ok_or_else(invalid_stream_response)?;
+            let message = frame.message.ok_or_else(invalid_stream_response)?;
+            if model != self.model_id {
+                return Err(runtime_failure(
+                    "MODEL_EXECUTION_UNVERIFIED",
+                    "Local model stream changed its execution identity",
+                    true,
+                ));
+            }
+            content.push_str(&message.content);
+
+            if done {
+                if !saw_non_final || !execution_proven {
+                    return Err(runtime_failure(
+                        "MODEL_EXECUTION_UNVERIFIED",
+                        "Local model execution was not proven before completion",
+                        true,
+                    ));
+                }
+                saw_final = true;
+                final_usage = ModelTokenUsage {
+                    prompt_tokens: frame.prompt_eval_count,
+                    completion_tokens: frame.eval_count,
+                    total_tokens: frame
+                        .prompt_eval_count
+                        .zip(frame.eval_count)
+                        .map(|(prompt, completion)| prompt.saturating_add(completion)),
+                };
+            } else {
+                saw_non_final = true;
+                if !execution_proven {
+                    self.verify_execution_digest()?;
+                    execution_proven = true;
+                }
+            }
+        }
+
+        if !saw_final {
+            return Err(invalid_stream_response());
+        }
+        serde_json::to_vec(&serde_json::json!({
+            "message": {"content": content},
+            "prompt_eval_count": final_usage.prompt_tokens,
+            "eval_count": final_usage.completion_tokens
+        }))
+        .map_err(|_| invalid_stream_response())
     }
 
     fn verify_execution_digest(&self) -> Result<(), ModelRuntimeFailure> {
@@ -530,8 +635,9 @@ impl OllamaRuntime {
         if !response.status().is_success() {
             return Err(rejected_response(response.status()));
         }
-        let matching: Vec<_> = decode_bounded_json::<ModelsResponse>(response)?
-            .models
+        let models = decode_bounded_json::<ModelsResponse>(response)?.models;
+        validate_running_model_record_count(models.len())?;
+        let matching: Vec<_> = models
             .into_iter()
             .filter(|model| model.name == self.model_id)
             .collect();
@@ -575,6 +681,25 @@ fn validate_model_record_count(count: usize) -> Result<(), ModelRuntimeFailure> 
         ));
     }
     Ok(())
+}
+
+fn validate_running_model_record_count(count: usize) -> Result<(), ModelRuntimeFailure> {
+    if count > MAX_INSTALLED_MODEL_RECORDS {
+        return Err(runtime_failure(
+            "MODEL_EXECUTION_UNVERIFIED",
+            "Running model catalog exceeds the provenance record limit",
+            true,
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_stream_response() -> ModelRuntimeFailure {
+    runtime_failure(
+        "MODEL_RESPONSE_INVALID",
+        "Local model returned an invalid streamed response",
+        true,
+    )
 }
 
 fn model_timeout_seconds(value: Option<&str>) -> Result<u64, ModelRuntimeFailure> {
@@ -732,17 +857,6 @@ impl ModelRuntime for OllamaRuntime {
                 false,
             ));
             return Err(with_request_attempts(rejected_response(status), attempts));
-        }
-        if let Err(failure) = self.verify_execution_digest() {
-            attempts.push(request_attempt_diagnostic(
-                request,
-                attempt_ordinal,
-                transport_attempt.clone(),
-                elapsed,
-                usage.clone(),
-                false,
-            ));
-            return Err(with_request_attempts(failure, attempts));
         }
         let output: ChatResponse = serde_json::from_slice(&body).map_err(|_| {
             attempts.push(request_attempt_diagnostic(
@@ -1176,6 +1290,22 @@ struct ChatOutputMessage {
 }
 
 #[derive(Deserialize)]
+struct ChatStreamFrame {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    message: Option<ChatOutputMessage>,
+    #[serde(default)]
+    done: Option<bool>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
 struct ModelsResponse {
     models: Vec<ModelRecord>,
 }
@@ -1343,6 +1473,51 @@ mod tests {
             .expect("loopback response body should write");
     }
 
+    fn write_chat_stream_headers(stream: &mut TcpStream) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n"
+        )
+        .expect("loopback stream headers should write");
+        stream
+            .flush()
+            .expect("loopback stream headers should flush");
+    }
+
+    fn write_chat_stream_frame(stream: &mut TcpStream, frame: &serde_json::Value) {
+        serde_json::to_writer(&mut *stream, frame).expect("loopback stream frame should serialize");
+        stream
+            .write_all(b"\n")
+            .expect("loopback stream delimiter should write");
+        stream.flush().expect("loopback stream frame should flush");
+    }
+
+    fn write_successful_chat_stream(
+        stream: &mut TcpStream,
+        content: &str,
+        usage: Option<(u64, u64)>,
+    ) {
+        write_chat_stream_headers(stream);
+        write_chat_stream_frame(
+            stream,
+            &serde_json::json!({
+                "model": "fixture-model",
+                "message": {"role": "assistant", "content": content},
+                "done": false
+            }),
+        );
+        write_chat_stream_frame(
+            stream,
+            &serde_json::json!({
+                "model": "fixture-model",
+                "message": {"role": "assistant", "content": ""},
+                "done": true,
+                "prompt_eval_count": usage.map(|value| value.0),
+                "eval_count": usage.map(|value| value.1)
+            }),
+        );
+    }
+
     fn schema_fallback_server() -> (String, thread::JoinHandle<Vec<serde_json::Value>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
         let address = listener
@@ -1362,20 +1537,10 @@ mod tests {
                         }),
                     );
                 } else {
-                    let usage = (index == 1).then(|| {
-                        serde_json::json!({
-                            "prompt_eval_count": 11,
-                            "eval_count": 3
-                        })
-                    });
-                    write_json_response(
+                    write_successful_chat_stream(
                         &mut stream,
-                        "200 OK",
-                        &serde_json::json!({
-                            "message": {"role": "assistant", "content": "{\"status\":\"ok\"}"},
-                            "prompt_eval_count": usage.as_ref().and_then(|value| value["prompt_eval_count"].as_u64()),
-                            "eval_count": usage.as_ref().and_then(|value| value["eval_count"].as_u64())
-                        }),
+                        "{\"status\":\"ok\"}",
+                        (index == 1).then_some((11, 3)),
                     );
                 }
             }
@@ -1406,9 +1571,7 @@ mod tests {
         (format!("http://{address}/v1/"), handle)
     }
 
-    fn execution_digest_server(
-        running_digests: &'static [&'static str],
-    ) -> (String, thread::JoinHandle<()>) {
+    fn execution_model_server(models: Vec<serde_json::Value>) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
         let address = listener
             .local_addr()
@@ -1417,34 +1580,71 @@ mod tests {
             let (mut chat, _) = listener.accept().expect("chat request should arrive");
             let chat_request = read_json_request(&mut chat);
             assert_eq!(chat_request["keep_alive"], CHAT_RUNNER_KEEP_ALIVE);
-            write_json_response(
+            assert_eq!(chat_request["stream"], true);
+            write_chat_stream_headers(&mut chat);
+            write_chat_stream_frame(
                 &mut chat,
-                "200 OK",
                 &serde_json::json!({
-                    "message": {"role": "assistant", "content": "bounded response"},
-                    "prompt_eval_count": 10,
-                    "eval_count": 2
+                    "model": "fixture-model",
+                    "message": {"role": "assistant", "content": "bounded "},
+                    "done": false
                 }),
             );
             let (mut running, _) = listener.accept().expect("digest check should arrive");
             let headers = read_headers(&mut running);
             assert!(headers.starts_with("GET /api/ps HTTP/1.1"));
-            let models: Vec<_> = running_digests
-                .iter()
-                .map(|digest| {
-                    serde_json::json!({
-                        "name": "fixture-model",
-                        "digest": digest,
-                        "size": 12345,
-                        "details": {"family": "qwen3"}
-                    })
-                })
-                .collect();
             write_json_response(
                 &mut running,
                 "200 OK",
                 &serde_json::json!({"models": models}),
             );
+            write_chat_stream_frame(
+                &mut chat,
+                &serde_json::json!({
+                    "model": "fixture-model",
+                    "message": {"role": "assistant", "content": "response"},
+                    "done": true,
+                    "prompt_eval_count": 10,
+                    "eval_count": 2
+                }),
+            );
+        });
+        (format!("http://{address}/"), handle)
+    }
+
+    fn execution_digest_server(running_digests: &[&str]) -> (String, thread::JoinHandle<()>) {
+        let models = running_digests
+            .iter()
+            .map(|digest| {
+                serde_json::json!({
+                    "name": "fixture-model",
+                    "digest": digest,
+                    "size": 12345,
+                    "details": {"family": "qwen3"}
+                })
+            })
+            .collect();
+        execution_model_server(models)
+    }
+
+    fn raw_chat_stream_server(lines: Vec<String>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let handle = thread::spawn(move || {
+            let (mut chat, _) = listener.accept().expect("chat request should arrive");
+            let request = read_json_request(&mut chat);
+            assert_eq!(request["stream"], true);
+            write_chat_stream_headers(&mut chat);
+            for line in lines {
+                if chat.write_all(line.as_bytes()).is_err() || chat.write_all(b"\n").is_err() {
+                    break;
+                }
+                if chat.flush().is_err() {
+                    break;
+                }
+            }
         });
         (format!("http://{address}/"), handle)
     }
@@ -1650,6 +1850,118 @@ mod tests {
             assert_eq!(unproven.code, "MODEL_EXECUTION_UNVERIFIED");
             assert!(unproven.recoverable);
             assert!(!unproven.request_attempts[0].succeeded);
+        }
+    }
+
+    #[test]
+    fn execution_provenance_caps_runner_records_before_filtering() {
+        assert!(validate_running_model_record_count(MAX_INSTALLED_MODEL_RECORDS).is_ok());
+        assert_eq!(
+            validate_running_model_record_count(MAX_INSTALLED_MODEL_RECORDS + 1)
+                .expect_err("max plus one running records must fail")
+                .code,
+            "MODEL_EXECUTION_UNVERIFIED"
+        );
+
+        for (record_count, should_succeed) in [
+            (MAX_INSTALLED_MODEL_RECORDS, true),
+            (MAX_INSTALLED_MODEL_RECORDS + 1, false),
+        ] {
+            let models = (0..record_count)
+                .map(|ordinal| {
+                    let (name, digest) = if ordinal == 0 {
+                        ("fixture-model".to_string(), "qualified-digest".to_string())
+                    } else {
+                        (
+                            format!("unrelated-model-{ordinal}"),
+                            format!("unrelated-digest-{ordinal}"),
+                        )
+                    };
+                    serde_json::json!({
+                        "name": name,
+                        "digest": digest,
+                        "size": 12345,
+                        "details": {"family": "qwen3"}
+                    })
+                })
+                .collect();
+            let (base_url, server) = execution_model_server(models);
+            let result = digest_guard_runtime(&base_url).generate(&digest_guard_request());
+            server
+                .join()
+                .expect("runner-record boundary server should finish");
+            if should_succeed {
+                assert_eq!(
+                    result
+                        .expect("the exact runner-record ceiling must remain valid")
+                        .text,
+                    "bounded response"
+                );
+            } else {
+                assert_eq!(
+                    result
+                        .expect_err("max plus one runner records must fail before filtering")
+                        .code,
+                    "MODEL_EXECUTION_UNVERIFIED"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_generation_rejects_protocol_boundaries_without_exposing_partial_text() {
+        let non_final = serde_json::json!({
+            "model": "fixture-model",
+            "message": {"role": "assistant", "content": "partial"},
+            "done": false
+        })
+        .to_string();
+        let final_frame = serde_json::json!({
+            "model": "fixture-model",
+            "message": {"role": "assistant", "content": " complete"},
+            "done": true
+        })
+        .to_string();
+        let error_frame = serde_json::json!({"error": "fixture mid-stream failure"}).to_string();
+        let cases = [
+            (
+                "final-only",
+                vec![final_frame.clone()],
+                "MODEL_EXECUTION_UNVERIFIED",
+            ),
+            (
+                "malformed",
+                vec![non_final.clone(), "{".to_string()],
+                "MODEL_RESPONSE_INVALID",
+            ),
+            (
+                "mid-stream-error",
+                vec![non_final.clone(), error_frame],
+                "MODEL_RUNTIME_REJECTED",
+            ),
+            (
+                "missing-final",
+                vec![non_final.clone()],
+                "MODEL_RESPONSE_INVALID",
+            ),
+            (
+                "post-final",
+                vec![non_final.clone(), final_frame, non_final],
+                "MODEL_RESPONSE_INVALID",
+            ),
+        ];
+
+        for (case, lines, expected_code) in cases {
+            let (base_url, server) = raw_chat_stream_server(lines);
+            let runtime =
+                OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+                    .expect("stream boundary runtime should configure");
+            let error = runtime
+                .generate(&digest_guard_request())
+                .expect_err("an invalid stream must not return partial text");
+            server.join().expect("stream boundary server should finish");
+            assert_eq!(error.code, expected_code, "unexpected result for {case}");
+            assert!(!error.request_attempts[0].succeeded);
         }
     }
 
@@ -2096,11 +2408,7 @@ mod tests {
                 .accept()
                 .expect("admitted request should arrive");
             let request = read_json_request(&mut stream);
-            write_json_response(
-                &mut stream,
-                "200 OK",
-                &serde_json::json!({"message":{"role":"assistant","content":"ok"}}),
-            );
+            write_successful_chat_stream(&mut stream, "ok", None);
             request
         });
         let admitted = runtime_with_fixture_tokenizer(&admitted_url);
@@ -2301,7 +2609,7 @@ mod tests {
                     content: "user",
                 },
             ],
-            stream: false,
+            stream: true,
             think: false,
             keep_alive: CHAT_RUNNER_KEEP_ALIVE,
             format: Some(json_object_response_format()),
@@ -2313,6 +2621,7 @@ mod tests {
             },
         };
         let serialized = serde_json::to_value(payload).expect("chat payload should serialize");
+        assert_eq!(serialized["stream"], true);
         assert_eq!(serialized["think"], false);
         assert_eq!(serialized["keep_alive"], CHAT_RUNNER_KEEP_ALIVE);
         assert_eq!(serialized["format"], "json");
