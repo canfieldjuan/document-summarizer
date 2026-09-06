@@ -130,7 +130,15 @@ current output remains rejected, while restoring the immutable snapshotted
 profile permits the normal retry preflight. Permanent unsupported-profile and
 configuration failures remain terminal.
 
-The local all-target gate passes with 302 library
+The next concurrency review found that a duplicate Connect request could pass
+the initial job lookup, then lose the race to an identical acceptance while it
+prepared the artifact, and still return a later runtime error without re-reading
+the winner. Runtime-construction, snapshot and guarded-admission failures now
+recheck the job before cleanup or error projection. A deterministic race test
+commits the identical job from the runtime factory, then proves the duplicate
+returns that stored job, preserves its source and removes only the losing import.
+
+The local all-target gate passes with 303 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
