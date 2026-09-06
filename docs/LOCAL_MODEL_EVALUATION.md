@@ -56,7 +56,8 @@ not nominal multi-model support that weakens the product for the smaller files.
 
 Contract commits `76b209b` and `34f036b` precede native runtime/settings commit
 `3a75d04`; immutable run-profile persistence lands last in implementation commit
-`4d42890` as schema version 15. The local all-target gate passes with 286 library
+`4d42890` as schema version 15. Discovery credential parity is hardened in
+`9bc9afc`. The local all-target gate passes with 287 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
