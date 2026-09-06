@@ -1,12 +1,13 @@
 use crate::pipeline::chunk::{chunk_document, ChunkPipelineError};
 use crate::pipeline::contracts::{
     CompletedSummary, ContinuationCheckpoint, DocumentChunker, DocumentNormalizer, DocumentParser,
-    IngestedDocument, ModelRuntime, PipelineRun, PipelineState, StructureInterpreter,
+    IngestedDocument, ModelProfileSnapshot, ModelRuntime, PipelineRun, PipelineState,
+    StructureInterpreter,
 };
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::ingest::prepare_received_run;
-use crate::pipeline::ingest::{ingest_pdf, IngestError};
+use crate::pipeline::ingest::{ingest_pdf, ingest_pdf_with_profile, IngestError};
 use crate::pipeline::normalize::{normalize_document, NormalizePipelineError};
 use crate::pipeline::parser::{parse_document, parse_started_document, ParsePipelineError};
 use crate::pipeline::structure::{structure_document, StructurePipelineError};
@@ -355,8 +356,12 @@ pub fn process_pdf_to_summary(
 pub(crate) fn admit_pdf_for_background(
     conn: &mut Connection,
     file_path: &str,
+    profile_snapshot: Option<&ModelProfileSnapshot>,
 ) -> Result<(IngestedDocument, PipelineRun), DocumentServiceError> {
-    let (document, ingested) = ingest_pdf(conn, file_path)?;
+    let (document, ingested) = match profile_snapshot {
+        Some(snapshot) => ingest_pdf_with_profile(conn, file_path, snapshot)?,
+        None => ingest_pdf(conn, file_path)?,
+    };
     let (parsing, persisted_document) =
         db::start_parsing(conn, &ingested.run_id, ingested.state_version)
             .map_err(ParsePipelineError::from)?;

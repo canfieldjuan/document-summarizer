@@ -123,8 +123,17 @@ impl DesktopJobManager {
 
     pub fn start_pdf(&self, file_path: &str) -> Result<BackgroundRunAccepted, DesktopJobError> {
         let runtime = (self.runtime_factory)(None)?;
+        let profile_snapshot = runtime
+            .profile_snapshot()
+            .ok_or_else(|| ModelRuntimeFailure {
+                code: "MODEL_CONFIG_INVALID".to_string(),
+                message: "Desktop runtime is missing its immutable model profile".to_string(),
+                recoverable: false,
+                request_attempts: Vec::new(),
+            })?;
         let mut conn = db::init_db(&self.db_path)?;
-        let (document, run) = admit_pdf_for_background(&mut conn, file_path)?;
+        let (document, run) =
+            admit_pdf_for_background(&mut conn, file_path, Some(&profile_snapshot))?;
         let accepted = accepted_view(&document, &run);
         self.spawn(run.run_id, BackgroundWork::StartedParsing, Some(runtime))?;
         Ok(accepted)
@@ -499,6 +508,30 @@ mod tests {
         fn model_id(&self) -> &str {
             "background-fixture-model"
         }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_snapshot())
+        }
+    }
+
+    struct SnapshotlessFixtureRuntime;
+
+    impl ModelRuntime for SnapshotlessFixtureRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "snapshotless-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "snapshotless-fixture-model"
+        }
     }
 
     struct SnapshotFixtureRuntime(ModelProfileSnapshot);
@@ -621,6 +654,10 @@ mod tests {
         fn model_id(&self) -> &str {
             "blocking-fixture-model"
         }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_snapshot())
+        }
     }
 
     fn fixture_path() -> PathBuf {
@@ -673,6 +710,13 @@ mod tests {
             )
             .expect("background run should be accepted");
         assert_eq!(accepted.state, PipelineState::Parsing);
+        let admitted = db::init_db(&database.0).expect("admitted run should be observable");
+        assert_eq!(
+            db::get_run_model_profile(&admitted, &accepted.run_id)
+                .expect("admitted profile should load"),
+            Some(fixture_snapshot())
+        );
+        drop(admitted);
 
         wait_until(|| {
             !manager
@@ -707,6 +751,26 @@ mod tests {
         let events_after = list_pipeline_events(&reopened, &accepted.run_id)
             .expect("events should remain readable");
         assert_eq!(events_after, events_before);
+    }
+
+    #[test]
+    fn desktop_start_rejects_snapshotless_runtime_before_persistence() {
+        let database = TestDatabase::new();
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(|_| Ok(Box::new(SnapshotlessFixtureRuntime))),
+        );
+
+        let error = manager
+            .start_pdf(
+                fixture_path()
+                    .to_str()
+                    .expect("fixture path should be UTF-8"),
+            )
+            .expect_err("a product desktop start must require an immutable snapshot");
+
+        assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
+        assert!(!database.0.exists());
     }
 
     #[test]
@@ -1020,6 +1084,7 @@ mod tests {
             fixture_path()
                 .to_str()
                 .expect("fixture path should be UTF-8"),
+            None,
         )
         .expect("newer caller should admit parsing work");
         let stale_version = parsing.state_version.saturating_sub(1);

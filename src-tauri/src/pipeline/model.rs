@@ -820,7 +820,7 @@ impl ModelRuntime for OllamaRuntime {
             return Err(runtime_failure(
                 "MODEL_PROFILE_STALE",
                 "Configured local model digest no longer matches its qualified profile",
-                false,
+                true,
             ));
         }
         let maximum_context = descriptor.maximum_context_tokens.ok_or_else(|| {
@@ -1437,6 +1437,46 @@ mod tests {
         (format!("http://{address}/"), handle)
     }
 
+    fn health_digest_server(digest: &'static str) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let handle = thread::spawn(move || {
+            let (mut tags, _) = listener.accept().expect("tags request should arrive");
+            let headers = read_headers(&mut tags);
+            assert!(headers.starts_with("GET /api/tags HTTP/1.1"));
+            write_json_response(
+                &mut tags,
+                "200 OK",
+                &serde_json::json!({
+                    "models": [{
+                        "name": "fixture-model",
+                        "digest": digest,
+                        "size": 12345,
+                        "details": {"family": "qwen3"}
+                    }]
+                }),
+            );
+
+            let (mut show, _) = listener.accept().expect("show request should arrive");
+            let request = read_json_request(&mut show);
+            assert_eq!(request["model"], "fixture-model");
+            assert_eq!(request["verbose"], false);
+            write_json_response(
+                &mut show,
+                "200 OK",
+                &serde_json::json!({
+                    "model_info": {
+                        "general.architecture": "qwen3",
+                        "qwen3.context_length": 8192
+                    }
+                }),
+            );
+        });
+        (format!("http://{address}/"), handle)
+    }
+
     fn read_headers(stream: &mut TcpStream) -> String {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 1024];
@@ -1565,6 +1605,28 @@ mod tests {
             assert!(unproven.recoverable);
             assert!(!unproven.request_attempts[0].succeeded);
         }
+    }
+
+    #[test]
+    fn stage_health_treats_exact_profile_drift_as_retryable() {
+        let (matching_url, matching_server) = health_digest_server("qualified-digest");
+        digest_guard_runtime(&matching_url)
+            .health()
+            .expect("an unchanged digest should remain healthy");
+        matching_server
+            .join()
+            .expect("matching health server should finish");
+
+        let (changed_url, changed_server) = health_digest_server("repointed-digest");
+        let changed = digest_guard_runtime(&changed_url)
+            .health()
+            .expect_err("a repointed tag must reject the stage boundary");
+        changed_server
+            .join()
+            .expect("changed health server should finish");
+        assert_eq!(changed.code, "MODEL_PROFILE_STALE");
+        assert!(changed.recoverable);
+        assert!(changed.request_attempts.is_empty());
     }
 
     #[test]

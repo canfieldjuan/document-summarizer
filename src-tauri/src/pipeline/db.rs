@@ -1120,6 +1120,15 @@ pub(super) fn persist_ingestion(
     document: &IngestedDocument,
     run: &PipelineRun,
 ) -> Result<PipelineRun, StoreError> {
+    persist_ingestion_with_profile(conn, document, run, None)
+}
+
+pub(crate) fn persist_ingestion_with_profile(
+    conn: &mut Connection,
+    document: &IngestedDocument,
+    run: &PipelineRun,
+    profile_snapshot: Option<&ModelProfileSnapshot>,
+) -> Result<PipelineRun, StoreError> {
     if run.document_id != document.document_id
         || run.state != PipelineState::Received
         || run.state_version != 1
@@ -1131,6 +1140,7 @@ pub(super) fn persist_ingestion(
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let ingested = persist_ingestion_in_transaction(&tx, document, run)?;
+    ensure_run_model_profile(&tx, &ingested.run_id, profile_snapshot)?;
     tx.commit()?;
     Ok(ingested)
 }
