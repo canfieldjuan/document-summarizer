@@ -176,11 +176,13 @@ fn run_history_item(
 ) -> Result<RunHistoryItem, WorkspaceError> {
     let retry_of = db::get_retry_lineage_for_retry(conn, &run.run_id)?;
     let retry_child = db::get_retry_lineage_for_source(conn, &run.run_id)?;
-    let can_retry = run.retry_checkpoint().is_some() && retry_child.is_none();
+    let model_profile_available = db::get_run_model_profile(conn, &run.run_id)?.is_some();
+    let can_retry =
+        run.retry_checkpoint().is_some() && retry_child.is_none() && model_profile_available;
     let continuation_checkpoint = run.continuation_checkpoint();
     let continuation_profile_available = !continuation_checkpoint
         .is_some_and(ContinuationCheckpoint::requires_existing_model_profile)
-        || db::get_run_model_profile(conn, &run.run_id)?.is_some();
+        || model_profile_available;
     Ok(RunHistoryItem {
         run_id: run.run_id,
         document_id: document.document_id,

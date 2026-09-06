@@ -1236,6 +1236,12 @@ pub(crate) fn validate_retry_source(
                 run_id: source_run_id.to_string(),
                 reason: "the failure has no reusable checkpoint".to_string(),
             })?;
+    if get_run_model_profile(conn, source_run_id)?.is_none() {
+        return Err(StoreError::InvalidRetrySource {
+            run_id: source_run_id.to_string(),
+            reason: "the failed run has no immutable model profile to inherit".to_string(),
+        });
+    }
     if let Some(existing) = get_retry_lineage_for_source(conn, source_run_id)? {
         return Err(StoreError::RetryAlreadyExists {
             source_run_id: source_run_id.to_string(),

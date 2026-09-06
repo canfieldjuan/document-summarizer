@@ -146,8 +146,13 @@ impl DesktopJobManager {
     ) -> Result<BackgroundRunAccepted, DesktopJobError> {
         let mut conn = db::init_db(&self.db_path)?;
         validate_retry_for_background(&conn, source_run_id, expected_source_version)?;
-        let snapshot = db::get_run_model_profile(&conn, source_run_id)?;
-        let runtime = (self.runtime_factory)(snapshot.as_ref())?;
+        let snapshot = db::get_run_model_profile(&conn, source_run_id)?.ok_or_else(|| {
+            StoreError::InvalidRetrySource {
+                run_id: source_run_id.to_string(),
+                reason: "the failed run has no immutable model profile to inherit".to_string(),
+            }
+        })?;
+        let runtime = (self.runtime_factory)(Some(&snapshot))?;
         runtime.health()?;
         let (document, run) =
             admit_retry_for_background(&mut conn, source_run_id, expected_source_version)?;
@@ -534,6 +539,31 @@ mod tests {
         }
     }
 
+    struct SnapshotlessRecoverableFailureRuntime;
+
+    impl ModelRuntime for SnapshotlessRecoverableFailureRuntime {
+        fn generate(&self, _request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            Err(ModelRuntimeFailure {
+                code: "FIXTURE_RUNTIME_INTERRUPTED".to_string(),
+                message: "Fixture runtime stopped before producing output.".to_string(),
+                recoverable: true,
+                request_attempts: Vec::new(),
+            })
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "snapshotless-recoverable-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "snapshotless-recoverable-fixture-model"
+        }
+    }
+
     struct SnapshotFixtureRuntime(ModelProfileSnapshot);
 
     impl ModelRuntime for SnapshotFixtureRuntime {
@@ -771,6 +801,91 @@ mod tests {
 
         assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
         assert!(!database.0.exists());
+    }
+
+    #[test]
+    fn snapshotless_historical_retry_is_hidden_and_rejected_before_runtime_or_lineage() {
+        let database = TestDatabase::new();
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let (_, ingested) = crate::pipeline::ingest::ingest_pdf(
+            &mut conn,
+            fixture_path()
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+        )
+        .expect("legacy fixture should ingest without a profile");
+        let parser = PdfExtractParser::new();
+        let normalizer = CanonicalNormalizer::new();
+        let interpreter = DeterministicStructureInterpreter::new();
+        let chunker = DeterministicDocumentChunker::new();
+        crate::pipeline::service::process_ingested_to_summary(
+            &mut conn,
+            &ingested.run_id,
+            SummaryComponents {
+                parser: &parser,
+                normalizer: &normalizer,
+                interpreter: &interpreter,
+                chunker: &chunker,
+                runtime: &SnapshotlessRecoverableFailureRuntime,
+            },
+        )
+        .expect_err("snapshotless fixture should fail recoverably during model work");
+        let failed = get_pipeline_run(&conn, &ingested.run_id)
+            .expect("failed run should load")
+            .expect("failed run should exist");
+        assert!(failed.retry_checkpoint().is_some());
+        assert!(db::get_run_model_profile(&conn, &failed.run_id)
+            .expect("profile lookup should succeed")
+            .is_none());
+        let history = crate::pipeline::workspace::get_run(&conn, &failed.run_id)
+            .expect("history should remain readable");
+        assert!(!history.can_retry);
+        let events = list_pipeline_events(&conn, &failed.run_id).expect("events should load");
+        drop(conn);
+
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let observed_factory_calls = Arc::clone(&factory_calls);
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |_| {
+                observed_factory_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FixtureRuntime))
+            }),
+        );
+        let rejected = manager
+            .start_retry(&failed.run_id, failed.state_version)
+            .expect_err("desktop must reject a retry with no inherited profile");
+        assert_eq!(rejected.code(), "RETRY_NOT_ALLOWED");
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+
+        let mut conn = db::init_db(&database.0).expect("database should reopen");
+        let store_rejected = crate::pipeline::service::retry_failed_run_to_summary(
+            &mut conn,
+            &failed.run_id,
+            failed.state_version,
+            SummaryComponents {
+                parser: &parser,
+                normalizer: &normalizer,
+                interpreter: &interpreter,
+                chunker: &chunker,
+                runtime: &FixtureRuntime,
+            },
+        )
+        .expect_err("the retry transaction must independently reject a missing profile");
+        assert_eq!(store_rejected.code(), "RETRY_NOT_ALLOWED");
+        assert!(db::get_retry_lineage_for_source(&conn, &failed.run_id)
+            .expect("lineage lookup should succeed")
+            .is_none());
+        assert_eq!(
+            get_pipeline_run(&conn, &failed.run_id)
+                .expect("source should reload")
+                .expect("source should exist"),
+            failed
+        );
+        assert_eq!(
+            list_pipeline_events(&conn, &failed.run_id).expect("events should reload"),
+            events
+        );
     }
 
     #[test]
