@@ -12,7 +12,12 @@ read, and qualified Ollama runners were unloaded through a mutable name after a
 digest observation. The final implementation admits only `eos` or configured
 stopping-word completions and never unloads through an Ollama alias. Final DOL
 validation waited for a resident qualified Ollama runner's reported keep-alive
-to expire without sending an unload request.
+to expire without sending an unload request. Review of that exact head then
+found that a cached direct runtime did not prove its owned child was still live,
+and that reserving then releasing a loopback TCP port before child startup left
+a local interception window. The final cache admission reaps and rejects an
+exited child, and the child and client communicate only through a Unix socket in
+an owner-only runtime directory; there is no TCP port handoff.
 
 The exact Jack GGUF
 `e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041`
@@ -23,15 +28,17 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 50.749 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 295.608 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 43.405 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 282.114 s | 0 |
 
 NARA used 20 analysis requests and one verification request, with 438 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
 verification requests, with 5,198 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported
 prompt and completion token accounting that matched the direct adapter's
-preflight.
+preflight. A live process-boundary probe during the NARA run found the socket in
+a mode-0700 directory, no `--port` argument, and the bearer only in the
+mode-0600 key file rather than the process argument vector.
 
 The qualified runtime is the exact `llama-server` and llama/ggml library bundle
 recorded in `docs/CONTRACTS.md`, at an 8,192-token effective context. A
