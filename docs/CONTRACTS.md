@@ -914,6 +914,12 @@ slot, reasoning disabled, web UI disabled, offline mode, no warmup and GPU
 layers enabled. Proxies and redirects remain disabled. Startup has one bounded
 deadline and verifies health, digest alias, active context and trained context
 before inference; it also rechecks the retained model descriptor after load.
+Because the qualified server has one inference slot, the application admits at
+most one direct-model request at a time for a shared child. Callers wait on an
+application-owned mutex before tokenization or completion begins; request
+duration and HTTP timeout begin only after that caller owns the slot. A queued
+caller therefore cannot spend its network timeout behind another generation or
+kill the shared child when only the queue wait was long.
 Before spawning, the parent PID is captured. Immediately after installing the
 parent-death signal, the child compares its actual parent with that captured
 PID and aborts before `exec` if the parent died during the fork-to-handoff
@@ -931,11 +937,16 @@ reaped and evicted before startup; actively referenced children instead produce
 the recoverable busy result. Cached reuse requires both unchanged registered
 identity and a live owned child. A child terminated by a lease-break signal or
 any other exit is reaped and the dead entry is evicted rather than returned as
-a usable runtime. Selection change and app exit clear the owned cache, while an
-active run retains its reference until it finishes. Any model identity failure
-atomically makes the cache entry unavailable and terminates and reaps the owned
-child even if another reference still exists. Every child is terminated and
-reaped on ownership loss, startup failure or identity failure.
+a usable runtime. Selection change prunes only map-owned idle entries; an
+externally referenced runtime remains discoverable under its exact cache key,
+so selecting that profile again shares the existing child rather than starting
+a second process. Ollama construction removes idle direct entries but returns
+recoverable busy while any direct entry is externally referenced. App exit is
+the only selection-independent path that deliberately clears every cache entry.
+Any model identity failure atomically makes the cache entry unavailable and
+terminates and reaps the owned child even if another reference still exists.
+Every child is terminated and reaped on ownership loss, startup failure or
+identity failure.
 
 Direct generation uses llama.cpp `POST /completion` with a pinned minimal Qwen
 ChatML token sequence containing only the existing system and user messages plus
@@ -963,8 +974,13 @@ operator can retry after the application's bounded Ollama keep-alive expires.
 Only an exact loopback connection refusal proves that no Ollama listener is
 present and permits direct startup without a residence response. A timeout,
 connection reset, malformed response, rejected status, or any other ambiguous
-probe failure is recoverable and fails closed before the direct child starts;
-it is not treated as evidence that GPU residency is empty.
+probe failure is recoverable and fails closed before the direct child starts.
+Every record in a successful non-empty residence response must carry a canonical
+64-character lowercase hexadecimal digest. A missing or malformed digest is an
+unverifiable resident and fails recoverably before direct startup, even when its
+name or other fields appear unrelated. A valid foreign digest remains untouched
+and does not become an admitted model. None of these ambiguous states is treated
+as evidence that GPU residency is empty.
 The application does not request unload through a mutable model alias because
 the local Ollama API cannot atomically bind that name-addressed operation to the
 digest observed by `/api/ps`. Same-name/different-digest and unrelated models
@@ -1063,7 +1079,8 @@ an attempted handoff returns a recoverable busy status; it never unloads the
 runtime beneath an active job. Same-preset selection is a no-op rather than a
 cache eviction. Constructing an Ollama runtime clears an idle app-managed direct
 child; an active direct owner prevents construction at the preceding lease
-boundary.
+boundary. Cache retention independently preserves the discoverable child for
+same-profile work while a selection changes away and back.
 
 Multiple installed Ollama names for the same qualified immutable digest are
 aliases, not distinct product presets. The installed-model catalog keeps every
@@ -1275,8 +1292,10 @@ stage snapshot reload, whole-preset snapshot admission, cache identity and
 lifecycle, concurrent profile leases,
 unavailable-source catalog behavior, and non-mutating admitted Ollama residence
 checks, including definitive absent-listener admission and ambiguous transport
-failure rejection. The unchanged exactness, provenance,
-fail-closed, NARA, DOL, clippy and formatting gates remain required.
+failure rejection, missing/malformed resident-digest rejection, active-cache
+retention across selection changes, and serialized shared-child generation.
+The unchanged exactness, provenance, fail-closed, NARA, DOL, clippy and
+formatting gates remain required.
 
 #### Explicit non-scope and deployment boundary
 
