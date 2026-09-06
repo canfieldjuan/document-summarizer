@@ -10,6 +10,8 @@ use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
     AnalysisPageOmission, ModelRuntime, ModelRuntimeFailure, NormalizedDocument, SummaryArtifacts,
 };
+#[cfg(test)]
+use crate::pipeline::contracts::{ModelProfileSnapshot, ModelStageProfileSnapshot};
 use crate::pipeline::db;
 use crate::pipeline::ingest::prepare_pdf_ingestion;
 use crate::pipeline::model_settings::{runtime_from_settings, settings_path};
@@ -21,6 +23,7 @@ use crate::pipeline::service::{
 use crate::pipeline::structure::DeterministicStructureInterpreter;
 use crate::pipeline::summary::{
     delivery_claim_prefix_coverage_satisfied, render_citation_claim_lines, SummaryDeliveryPolicy,
+    SummaryPipelineError,
 };
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -735,6 +738,18 @@ async fn create_job_for(
             return Err(ProviderHttpError::runtime(error));
         }
     };
+    let profile_snapshot = match runtime.profile_snapshot() {
+        Some(snapshot) => snapshot,
+        None => {
+            remove_file_quietly(&import_path).await;
+            return Err(ProviderHttpError::runtime(ModelRuntimeFailure {
+                code: "MODEL_CONFIG_INVALID".to_string(),
+                message: "Connect runtime is missing its immutable model profile".to_string(),
+                recoverable: false,
+                request_attempts: Vec::new(),
+            }));
+        }
+    };
     let provider_instance_id = match version {
         WireVersion::V1 => &state.instance_id_v1,
         WireVersion::V2 => &state.instance_id_v2,
@@ -747,6 +762,7 @@ async fn create_job_for(
         provider_instance_id,
         &document,
         &run,
+        Some(&profile_snapshot),
         || state.entitlement.decision().is_active(),
     );
     let accepted = match accepted {
@@ -896,6 +912,13 @@ enum ProcessJobError {
 impl ProcessJobError {
     fn public_error(&self) -> JobError {
         match self {
+            Self::Service(crate::pipeline::service::DocumentServiceError::Summary(
+                SummaryPipelineError::StageFailed(failure),
+            )) => job_error(
+                &failure.code,
+                "Document summarization failed in the provider.",
+                failure.recoverable,
+            ),
             Self::Service(error) => job_error(
                 error.code(),
                 "Document summarization failed in the provider.",
@@ -1703,8 +1726,8 @@ mod tests {
     };
     use crate::connect::entitlement::{EntitlementGate, ENTITLEMENT_FILE_NAME, FEATURE_ID};
     use crate::pipeline::contracts::{
-        CitationArtifact, CitedClaim, EvidenceItem, ModelRequest, ModelResponse, SourceSpan,
-        SourceType, SummaryArtifact,
+        CitationArtifact, CitedClaim, EvidenceItem, ModelRequest, ModelResponse, PipelineFailure,
+        PipelineStage, SourceSpan, SourceType, SummaryArtifact,
     };
     use crate::pipeline::normalize::normalize_document;
     use crate::pipeline::parser::parse_document;
@@ -1847,6 +1870,22 @@ mod tests {
 
     struct FixtureRuntime;
 
+    fn fixture_profile_snapshot() -> ModelProfileSnapshot {
+        let stage = ModelStageProfileSnapshot {
+            profile_id: "connect-fixture-profile".to_string(),
+            model_name: "connect-fixture-model".to_string(),
+            model_digest: "connect-fixture-digest".to_string(),
+            context_tokens: 8_192,
+            tokenizer_version: "connect-fixture-tokenizer".to_string(),
+        };
+        ModelProfileSnapshot {
+            version: 1,
+            preset_id: "connect-fixture-preset".to_string(),
+            analysis: stage.clone(),
+            verification: stage,
+        }
+    }
+
     impl ModelRuntime for FixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             Ok(ModelResponse {
@@ -1867,6 +1906,30 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "connect-fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_profile_snapshot())
+        }
+    }
+
+    struct SnapshotlessFixtureRuntime;
+
+    impl ModelRuntime for SnapshotlessFixtureRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "snapshotless-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "snapshotless-fixture-model"
         }
     }
 
@@ -2846,7 +2909,7 @@ mod tests {
             Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)
         });
         let provider = ConnectProvider::start_at(
-            db_path,
+            db_path.clone(),
             app_data,
             runtime_root,
             DEFAULT_MAX_INPUT_BYTES,
@@ -2866,6 +2929,15 @@ mod tests {
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);
         assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
         assert!(observed_before_acceptance.load(Ordering::SeqCst));
+        let conn = db::init_db(&db_path).expect("provider database should reopen");
+        let accepted_job = store::get_job(&conn, &request.job_id)
+            .expect("accepted job should be readable")
+            .expect("accepted job should exist");
+        assert_eq!(
+            db::get_run_model_profile(&conn, &accepted_job.pipeline_run_id)
+                .expect("accepted profile should be readable"),
+            Some(fixture_profile_snapshot())
+        );
         assert_eq!(
             wait_for_terminal(
                 &http,
@@ -2876,6 +2948,68 @@ mod tests {
             .status,
             JobState::Completed
         );
+    }
+
+    #[test]
+    fn connect_rejects_a_snapshotless_runtime_before_job_acceptance() {
+        let root = TestDirectory::new("doc-sum-connect-snapshotless-runtime");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(SnapshotlessFixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .expect("provider should start");
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(source).expect("fixture should read");
+        let request = fixture_request(&bytes);
+
+        let response = client()
+            .post(format!("{}v1/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form(&request, bytes))
+            .send()
+            .expect("snapshot rejection should return a response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = response.json::<ErrorEnvelope>().unwrap().error;
+        assert_eq!(error.code, "MODEL_CONFIG_INVALID");
+        assert!(!error.retryable);
+        let conn = db::init_db(&db_path).expect("provider database should reopen");
+        assert!(store::get_job(&conn, &request.job_id).unwrap().is_none());
+        assert!(fs::read_dir(app_data.join("connect-imports"))
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn process_job_errors_preserve_typed_pipeline_recoverability() {
+        for (code, recoverable) in [
+            ("MODEL_NOT_AVAILABLE", true),
+            ("MODEL_TOKENIZER_INVALID", false),
+        ] {
+            let error =
+                ProcessJobError::Service(crate::pipeline::service::DocumentServiceError::Summary(
+                    SummaryPipelineError::StageFailed(PipelineFailure {
+                        code: code.to_string(),
+                        message: "fixture failure".to_string(),
+                        stage: Some(PipelineStage::Analyze),
+                        recoverable,
+                    }),
+                ))
+                .public_error();
+            assert_eq!(error.code, code);
+            assert_eq!(error.retryable, recoverable);
+        }
     }
 
     #[test]

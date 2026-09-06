@@ -27,6 +27,7 @@ const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_SCHEMA_NAME_BYTES: usize = 64;
 const MIN_SUPPORTED_CONTEXT_TOKENS: u32 = 4_096;
 const MAX_SUPPORTED_CONTEXT_TOKENS: u32 = 1_048_576;
+const CHAT_RUNNER_KEEP_ALIVE: &str = "30s";
 pub(super) const MAX_DECODER_STRING_LENGTH: u64 = 1_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +450,7 @@ impl OllamaRuntime {
             ],
             stream: false,
             think: false,
+            keep_alive: CHAT_RUNNER_KEEP_ALIVE,
             format,
             options: ChatOptions {
                 num_ctx: self.context_tokens,
@@ -492,25 +494,43 @@ impl OllamaRuntime {
             .map_err(|failure| (failure, elapsed))
     }
 
-    fn verify_expected_digest(&self) -> Result<(), ModelRuntimeFailure> {
+    fn verify_execution_digest(&self) -> Result<(), ModelRuntimeFailure> {
         let Some(expected) = self.expected_digest.as_ref() else {
             return Ok(());
         };
-        let actual = self
-            .installed_model_records()?
-            .into_iter()
-            .find(|model| model.name == self.model_id)
-            .ok_or_else(|| {
+        let response = self
+            .authorize(
+                self.client
+                    .get(self.endpoint("api/ps")?)
+                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
+            )
+            .send()
+            .map_err(|_| {
                 runtime_failure(
-                    "MODEL_NOT_AVAILABLE",
-                    "Configured local model is not currently available",
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "Local model execution provenance is unavailable",
                     true,
                 )
             })?;
-        if &actual.digest != expected {
+        if !response.status().is_success() {
+            return Err(rejected_response(response.status()));
+        }
+        let matching: Vec<_> = decode_bounded_json::<ModelsResponse>(response)?
+            .models
+            .into_iter()
+            .filter(|model| model.name == self.model_id)
+            .collect();
+        if matching.len() != 1 {
+            return Err(runtime_failure(
+                "MODEL_EXECUTION_UNVERIFIED",
+                "Local model execution could not be bound to one running model record",
+                false,
+            ));
+        }
+        if &matching[0].digest != expected {
             return Err(runtime_failure(
                 "MODEL_PROFILE_STALE",
-                "Configured local model digest changed while processing the request",
+                "Local model execution used a digest outside the qualified profile",
                 false,
             ));
         }
@@ -674,7 +694,7 @@ impl ModelRuntime for OllamaRuntime {
             ));
             return Err(with_request_attempts(rejected_response(status), attempts));
         }
-        if let Err(failure) = self.verify_expected_digest() {
+        if let Err(failure) = self.verify_execution_digest() {
             attempts.push(request_attempt_diagnostic(
                 request,
                 attempt_ordinal,
@@ -1073,6 +1093,7 @@ struct ChatRequest<'a> {
     messages: [ChatMessage<'a>; 2],
     stream: bool,
     think: bool,
+    keep_alive: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<serde_json::Value>,
     options: ChatOptions,
@@ -1333,14 +1354,17 @@ mod tests {
         (format!("http://{address}/v1/"), handle)
     }
 
-    fn digest_guard_server(post_request_digest: &'static str) -> (String, thread::JoinHandle<()>) {
+    fn execution_digest_server(
+        running_digests: &'static [&'static str],
+    ) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
         let address = listener
             .local_addr()
             .expect("loopback address should resolve");
         let handle = thread::spawn(move || {
             let (mut chat, _) = listener.accept().expect("chat request should arrive");
-            let _ = read_json_request(&mut chat);
+            let chat_request = read_json_request(&mut chat);
+            assert_eq!(chat_request["keep_alive"], CHAT_RUNNER_KEEP_ALIVE);
             write_json_response(
                 &mut chat,
                 "200 OK",
@@ -1350,19 +1374,24 @@ mod tests {
                     "eval_count": 2
                 }),
             );
-            let (mut tags, _) = listener.accept().expect("digest check should arrive");
-            let _ = read_headers(&mut tags);
-            write_json_response(
-                &mut tags,
-                "200 OK",
-                &serde_json::json!({
-                    "models": [{
+            let (mut running, _) = listener.accept().expect("digest check should arrive");
+            let headers = read_headers(&mut running);
+            assert!(headers.starts_with("GET /api/ps HTTP/1.1"));
+            let models: Vec<_> = running_digests
+                .iter()
+                .map(|digest| {
+                    serde_json::json!({
                         "name": "fixture-model",
-                        "digest": post_request_digest,
+                        "digest": digest,
                         "size": 12345,
                         "details": {"family": "qwen3"}
-                    }]
-                }),
+                    })
+                })
+                .collect();
+            write_json_response(
+                &mut running,
+                "200 OK",
+                &serde_json::json!({"models": models}),
             );
         });
         (format!("http://{address}/"), handle)
@@ -1461,8 +1490,8 @@ mod tests {
     }
 
     #[test]
-    fn request_output_is_accepted_only_while_the_qualified_digest_still_matches() {
-        let (matching_url, matching_server) = digest_guard_server("qualified-digest");
+    fn request_output_is_accepted_only_when_the_execution_digest_is_proven() {
+        let (matching_url, matching_server) = execution_digest_server(&["qualified-digest"]);
         let matching = digest_guard_runtime(&matching_url)
             .generate(&digest_guard_request())
             .expect("an unchanged digest should admit the response");
@@ -1472,7 +1501,7 @@ mod tests {
         assert_eq!(matching.text, "bounded response");
         assert!(matching.request_attempts[0].succeeded);
 
-        let (changed_url, changed_server) = digest_guard_server("repointed-digest");
+        let (changed_url, changed_server) = execution_digest_server(&["repointed-digest"]);
         let changed = digest_guard_runtime(&changed_url)
             .generate(&digest_guard_request())
             .expect_err("a repointed tag must reject the generated response");
@@ -1482,6 +1511,18 @@ mod tests {
         assert_eq!(changed.code, "MODEL_PROFILE_STALE");
         assert_eq!(changed.request_attempts.len(), 1);
         assert!(!changed.request_attempts[0].succeeded);
+
+        for running_digests in [&[][..], &["qualified-digest", "qualified-digest"][..]] {
+            let (unproven_url, unproven_server) = execution_digest_server(running_digests);
+            let unproven = digest_guard_runtime(&unproven_url)
+                .generate(&digest_guard_request())
+                .expect_err("missing or ambiguous execution records must reject the response");
+            unproven_server
+                .join()
+                .expect("unproven digest server should finish");
+            assert_eq!(unproven.code, "MODEL_EXECUTION_UNVERIFIED");
+            assert!(!unproven.request_attempts[0].succeeded);
+        }
     }
 
     #[test]
@@ -2006,6 +2047,7 @@ mod tests {
             ],
             stream: false,
             think: false,
+            keep_alive: CHAT_RUNNER_KEEP_ALIVE,
             format: Some(json_object_response_format()),
             options: ChatOptions {
                 num_ctx: 16_384,
@@ -2016,6 +2058,7 @@ mod tests {
         };
         let serialized = serde_json::to_value(payload).expect("chat payload should serialize");
         assert_eq!(serialized["think"], false);
+        assert_eq!(serialized["keep_alive"], CHAT_RUNNER_KEEP_ALIVE);
         assert_eq!(serialized["format"], "json");
         assert_eq!(serialized["options"]["num_ctx"], 16_384);
         assert_eq!(serialized["options"]["seed"], 7_654_321);

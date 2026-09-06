@@ -175,7 +175,7 @@ pub fn schema_version(conn: &Connection) -> Result<u32, StoreError> {
     Ok(schema::version(conn)?)
 }
 
-pub(super) fn ensure_run_model_profile(
+pub(crate) fn ensure_run_model_profile(
     conn: &Connection,
     run_id: &str,
     snapshot: Option<&ModelProfileSnapshot>,
