@@ -927,6 +927,15 @@ application-data directory; malformed, unknown, unsupported or stale-digest
 values fail closed to an explicit unavailable state, never to an arbitrary
 installed model. A settings change affects new runs only.
 
+Multiple installed Ollama names for the same qualified immutable digest are
+aliases, not distinct product presets. The installed-model catalog keeps every
+name visible, while preset construction deduplicates by qualified digest before
+full or hybrid routing and chooses the lexicographically first enabled alias as
+the deterministic name for a new run. Therefore every rendered preset ID is
+unique and still identifies one immutable capability profile; persisted preset
+selection cannot resolve to a different duplicate row. Historical runs remain
+bound to the exact model name and digest already stored in their snapshot.
+
 A full preset routes analysis and verification to the same model and is offered
 only after that exact digest passes the full qualification contract. A hybrid
 preset routes selection/paraphrase to the chosen qualified smaller model and
@@ -1004,6 +1013,9 @@ atomic setting recovery; immutable continuation; and both sides of every token
 admission boundary. Tests prove that a small analysis model cannot become the
 verifier through a falsy/default path and that downstream code uses the admitted
 profile and counted payload rather than raw settings or character proxies.
+Catalog tests supply the same qualified digest under two names in reverse order,
+retain both installed descriptors, and require one uniquely identified preset
+using the deterministic canonical alias.
 Recovery tests also cover a healthy immutable run snapshot while the selected
 global preset is unavailable, plus model removal between tags and metadata
 lookup; both paths must preserve the checkpoint and remain retryable.
