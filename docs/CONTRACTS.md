@@ -873,8 +873,18 @@ remain visible only as unsupported installed entries and cannot be selected.
 The bounded `/api/tags` body may contain at most 256 model records. Discovery
 rejects a larger catalog before any `/api/show` request, and all metadata probes
 share one five-second aggregate deadline that begins before the tags request.
+Response-body bounds are not retained-memory bounds: every externally supplied
+string copied into an installed descriptor is therefore limited to 512 UTF-8
+bytes, and the sum of all retained descriptor strings is limited to 256 KiB.
+The per-field guard applies to names, digests, architecture/family,
+parameter-size and quantization metadata before the value can be returned or
+used to construct another request. The aggregate guard is checked while the
+descriptor vector is built, before it can be serialized to the webview. An
+oversized field, arithmetic overflow, or aggregate maximum plus one fails the
+catalog as a whole with no truncated or partially trusted metadata; exact
+maxima remain valid.
 Per-request timeouts remain defense in depth; they do not multiply into an
-unbounded startup delay. Reaching either discovery bound fails the catalog as a
+unbounded startup delay. Reaching any discovery bound fails the catalog as a
 whole rather than returning a silently truncated model list.
 
 #### Qualified profiles, context and token planning
@@ -1016,6 +1026,10 @@ profile and counted payload rather than raw settings or character proxies.
 Catalog tests supply the same qualified digest under two names in reverse order,
 retain both installed descriptors, and require one uniquely identified preset
 using the deterministic canonical alias.
+Discovery resource tests cover each retained external string at 512 UTF-8 bytes
+and 513 bytes, plus descriptor aggregates at 256 KiB and 256 KiB plus one. They
+prove the checked descriptor-building path, rather than a detached validator,
+owns the values ultimately returned to settings and the webview.
 Recovery tests also cover a healthy immutable run snapshot while the selected
 global preset is unavailable, plus model removal between tags and metadata
 lookup; both paths must preserve the checkpoint and remain retryable.
