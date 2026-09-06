@@ -2,15 +2,14 @@ use crate::pipeline::model::QwenTokenizerFamily;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tokenizers::models::bpe::{Vocab, BPE};
-use tokenizers::normalizers::unicode::NFC;
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::pre_tokenizers::sequence::Sequence;
 use tokenizers::pre_tokenizers::split::{Split, SplitPattern};
 use tokenizers::{SplitDelimiterBehavior, Tokenizer};
 
 pub const TOKENIZER_FRAMING_RESERVE_TOKENS: u32 = 512;
-pub const QWEN3_TOKENIZER_VERSION: &str = "qwen3-qwen2-pre-f2ec4434-v1";
-pub const QWEN35_TOKENIZER_VERSION: &str = "qwen35-pre-cc5fb918-v1";
+pub const QWEN3_TOKENIZER_VERSION: &str = "qwen3-qwen2-pre-f2ec4434-v2";
+pub const QWEN35_TOKENIZER_VERSION: &str = "qwen35-pre-cc5fb918-v2";
 
 const QWEN3_TOKENIZER_FINGERPRINT: &str =
     "3cedcd85881d197ef65742e4d74622256b8159faed015b24aa6d16982dbe5335";
@@ -110,20 +109,9 @@ impl QwenPromptTokenizer {
             .vocab_and_merges(vocab, merges)
             .build()
             .map_err(|_| "Pinned Qwen tokenizer model could not be built".to_string())?;
-        let split = Split::new(
-            SplitPattern::Regex(pattern.to_string()),
-            SplitDelimiterBehavior::Isolated,
-            false,
-        )
-        .map_err(|_| "Pinned Qwen pre-tokenizer could not be built".to_string())?;
-        let byte_level = ByteLevel::default()
-            .add_prefix_space(false)
-            .trim_offsets(false)
-            .use_regex(false);
-        let mut tokenizer = Tokenizer::new(model);
-        tokenizer.with_normalizer(Some(NFC));
-        tokenizer.with_pre_tokenizer(Some(Sequence::new(vec![split.into(), byte_level.into()])));
-        Ok(Self { tokenizer })
+        Ok(Self {
+            tokenizer: tokenizer_from_bpe(model, pattern)?,
+        })
     }
 
     pub fn count(&self, payload: &str) -> Result<u32, String> {
@@ -133,6 +121,22 @@ impl QwenPromptTokenizer {
             .map_err(|_| "Pinned Qwen tokenizer could not encode the request".to_string())?;
         u32::try_from(encoding.len()).map_err(|_| "Token count exceeds supported range".to_string())
     }
+}
+
+fn tokenizer_from_bpe(model: BPE, pattern: &str) -> Result<Tokenizer, String> {
+    let split = Split::new(
+        SplitPattern::Regex(pattern.to_string()),
+        SplitDelimiterBehavior::Isolated,
+        false,
+    )
+    .map_err(|_| "Pinned Qwen pre-tokenizer could not be built".to_string())?;
+    let byte_level = ByteLevel::default()
+        .add_prefix_space(false)
+        .trim_offsets(false)
+        .use_regex(false);
+    let mut tokenizer = Tokenizer::new(model);
+    tokenizer.with_pre_tokenizer(Some(Sequence::new(vec![split.into(), byte_level.into()])));
+    Ok(tokenizer)
 }
 
 pub fn tokenizer_version(family: QwenTokenizerFamily) -> &'static str {
@@ -153,11 +157,57 @@ pub fn request_fits_context(input_tokens: u32, output_tokens: u32, context_token
 mod tests {
     use super::*;
 
+    fn byte_complete_prompt_tokenizer() -> QwenPromptTokenizer {
+        let mut alphabet: Vec<_> = ByteLevel::alphabet().into_iter().collect();
+        alphabet.sort_unstable();
+        let vocab: Vocab = alphabet
+            .into_iter()
+            .enumerate()
+            .map(|(index, token)| {
+                (
+                    token.to_string(),
+                    u32::try_from(index).expect("byte alphabet should fit in u32"),
+                )
+            })
+            .collect();
+        let model = BPE::builder()
+            .vocab_and_merges(vocab, Vec::new())
+            .build()
+            .expect("byte-complete fixture model should build");
+        QwenPromptTokenizer {
+            tokenizer: tokenizer_from_bpe(model, QWEN3_PATTERN)
+                .expect("production pre-tokenizer should build"),
+        }
+    }
+
     #[test]
     fn token_admission_checks_both_sides_of_the_context_boundary() {
         assert!(request_fits_context(3_584, 4_096, 8_192));
         assert!(!request_fits_context(3_585, 4_096, 8_192));
         assert!(!request_fits_context(u32::MAX, 1, u32::MAX));
+    }
+
+    #[test]
+    fn token_count_preserves_decomposed_unicode_from_the_transmitted_payload() {
+        let tokenizer = byte_complete_prompt_tokenizer();
+        let composed = tokenizer
+            .count("\u{00e9}")
+            .expect("composed input should tokenize");
+        let decomposed = tokenizer
+            .count("e\u{0301}")
+            .expect("decomposed input should tokenize");
+
+        assert_eq!(composed, 2);
+        assert_eq!(decomposed, 3);
+        assert!(decomposed > composed);
+        assert_eq!(
+            tokenizer_version(QwenTokenizerFamily::Qwen3),
+            QWEN3_TOKENIZER_VERSION
+        );
+        assert_eq!(
+            tokenizer_version(QwenTokenizerFamily::Qwen35),
+            QWEN35_TOKENIZER_VERSION
+        );
     }
 
     #[test]
