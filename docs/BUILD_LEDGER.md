@@ -23,13 +23,14 @@ This document tracks the vertical slices and architectural decisions for the Doc
   remain close-on-exec, file identity is rechecked after load and at stage
   health, and rejected responses retain any token usage the provider supplied.
 - NARA delivered 8 supported claims from 8 evidence items across 8/11 raw pages
-  in 21 requests and 667 completion tokens. DOL delivered 83/83 supported
-  claims across 83/111 raw pages in 180 requests and 6,960 completion tokens.
+  in 21 requests and 653 completion tokens. DOL delivered 83/83 supported
+  claims across 83/111 raw pages in 180 requests and 6,954 completion tokens.
   Both completed with warnings and zero schema-fallback attempts.
-- The first direct start was safely refused while another local application had
-  loaded the qualified Ollama runner. The app did not terminate unrelated work;
-  the unchanged corpus run passed after that workload completed. Cross-process
-  handoff remains a recoverable admission boundary, not silent preemption.
+- The first read-lease-enabled direct start exited before readiness with an
+  undetermined cause because that revision retained neither child stderr nor
+  exit status. Subsequent starts passed after exit-status diagnostics were
+  added. The final handoff no longer unloads qualified Ollama runners through a
+  mutable alias; it returns recoverable busy until their keep-alive expires.
 
 ## Slice 0: Repository and Architecture Foundation
 **Status**: Implemented

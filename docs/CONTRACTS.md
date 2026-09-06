@@ -1066,7 +1066,9 @@ list, then upgrade atomically on the next write. The catalog combines Ollama and
 registered-GGUF descriptors; one unavailable discovery source does not hide the
 other. Routine presentation exposes runtime kind, basename, size, family,
 trained maximum, qualified context and disabled reason, never the absolute
-private path. Switching runtimes releases the previous app-owned runner.
+private path. Switching to Ollama clears an idle app-managed direct child;
+switching to direct GGUF does not mutate an Ollama runner and remains busy while
+an admitted Ollama digest is resident.
 
 A full preset routes analysis and verification to the same model and is offered
 only after that exact digest passes the full qualification contract. A hybrid
@@ -1197,9 +1199,9 @@ carrying the same family name.
 Direct Jack qualification used the unchanged prompts, validators, 900-second
 timeout, 8,192-token context and corpus gates. With the pinned minimal template,
 NARA delivered 8 supported claims from 8 evidence items across 8 of 11
-native-text pages in 21 requests and 667 completion tokens; DOL delivered 83
+native-text pages in 21 requests and 653 completion tokens; DOL delivered 83
 supported claims from 83 evidence items across 83 of 111 pages in 180 requests
-and 6,960 completion tokens. Neither run used schema fallback. A controlled
+and 6,954 completion tokens. Neither run used schema fallback. A controlled
 trivial structured-output probe used 3,761 prompt tokens through the embedded
 template and 22 through the pinned minimal sequence, so the embedded template
 is not qualified.

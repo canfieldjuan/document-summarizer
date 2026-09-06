@@ -33,10 +33,13 @@ readiness, discovers Ollama models, combines them with explicit GGUF
 registrations, and shows exact-digest qualified presets with runtime kind, size
 and context. Installed but unqualified models remain visible with an unavailable
 reason and cannot be selected. The app does not start Ollama or download model
-weights. Switching between Ollama and direct GGUF releases the previous
-qualified local runner because both large models do not fit in GPU memory at
-once. Model-generation requests retain the 900-second deadline; connection,
-health and direct-child startup keep shorter fail-fast deadlines.
+weights. Runtime changes wait for active work to finish. An idle app-managed
+direct child is stopped before Ollama use; switching to direct GGUF returns a
+recoverable busy result while a qualified Ollama runner remains resident, then
+can be retried after its bounded keep-alive expires. The app never unloads an
+Ollama runner through a mutable alias. Model-generation requests retain the
+900-second deadline; connection, health and direct-child startup keep shorter
+fail-fast deadlines.
 
 Deployment overrides remain available through `DOC_SUM_MODEL_BASE_URL`,
 `DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional `DOC_SUM_MODEL_API_TOKEN_FILE`.
