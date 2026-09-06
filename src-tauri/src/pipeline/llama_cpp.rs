@@ -32,10 +32,13 @@ const MAX_TOKENIZE_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_MODEL_RECORDS: usize = 8;
 #[cfg(unix)]
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
+#[cfg(unix)]
+const RUNTIME_ROOT_DIRECTORY: &str = "llama-runtime";
 
 #[derive(Debug, Clone)]
 pub struct GgufRuntimeConfig {
     pub model_path: PathBuf,
+    pub runtime_parent: PathBuf,
     pub model_digest: String,
     pub expected_size_bytes: u64,
     pub expected_file_identity: FileIdentity,
@@ -166,7 +169,8 @@ extern "C" fn record_model_lease_break(_signal: libc::c_int) {
 }
 
 impl LlamaCppRuntime {
-    pub fn shared(config: GgufRuntimeConfig) -> Result<Arc<Self>, ModelRuntimeFailure> {
+    pub fn shared(mut config: GgufRuntimeConfig) -> Result<Arc<Self>, ModelRuntimeFailure> {
+        config.runtime_parent = prepare_private_runtime_root(&config.runtime_parent)?;
         let cache_key = runtime_cache_key(&config)?;
         let runtimes = RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()));
         let mut runtimes = runtimes.lock().map_err(|_| {
@@ -224,7 +228,8 @@ impl LlamaCppRuntime {
             &config.expected_server_digest,
             config.expected_runtime_libraries,
         )?;
-        let runtime_library_directory = build_descriptor_library_directory(&runtime_libraries)?;
+        let runtime_library_directory =
+            build_descriptor_library_directory(&config.runtime_parent, &runtime_libraries)?;
 
         let socket_path = runtime_socket_path(runtime_library_directory.path())?;
         let socket_argument = socket_path.to_str().ok_or_else(|| {
@@ -1123,12 +1128,97 @@ fn validate_runtime_file_name(file_name: &str) -> Result<(), ModelRuntimeFailure
 }
 
 #[cfg(unix)]
+fn prepare_private_runtime_root(runtime_parent: &Path) -> Result<PathBuf, ModelRuntimeFailure> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    let runtime_parent = fs::canonicalize(runtime_parent).map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Model settings directory is unavailable for private runtime staging",
+            true,
+        )
+    })?;
+    let effective_user = unsafe { libc::geteuid() };
+    for ancestor in runtime_parent.ancestors() {
+        let metadata = fs::symlink_metadata(ancestor).map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "A runtime staging ancestor could not be verified",
+                true,
+            )
+        })?;
+        let mode = metadata.mode();
+        let trusted_sticky_directory =
+            mode & libc::S_ISVTX != 0 && (metadata.uid() == 0 || metadata.uid() == effective_user);
+        if !metadata.file_type().is_dir() || mode & 0o022 != 0 && !trusted_sticky_directory {
+            return Err(failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Runtime staging requires a trusted directory ancestry",
+                false,
+            ));
+        }
+    }
+
+    let runtime_root = runtime_parent.join(RUNTIME_ROOT_DIRECTORY);
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(&runtime_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => {
+            return Err(failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Private runtime root could not be created",
+                true,
+            ))
+        }
+    }
+    verify_private_runtime_root(&runtime_root)?;
+    Ok(runtime_root)
+}
+
+#[cfg(not(unix))]
+fn prepare_private_runtime_root(_runtime_parent: &Path) -> Result<PathBuf, ModelRuntimeFailure> {
+    Err(failure(
+        "MODEL_RUNTIME_UNAVAILABLE",
+        "Direct GGUF execution is supported only on Linux",
+        false,
+    ))
+}
+
+#[cfg(unix)]
+fn verify_private_runtime_root(runtime_root: &Path) -> Result<(), ModelRuntimeFailure> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(runtime_root).map_err(|_| {
+        failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Private runtime root metadata is unavailable",
+            true,
+        )
+    })?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Private runtime root ownership or permissions are unsafe",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn build_descriptor_library_directory(
+    runtime_root: &Path,
     libraries: &[(String, File)],
 ) -> Result<tempfile::TempDir, ModelRuntimeFailure> {
+    verify_private_runtime_root(runtime_root)?;
     let directory = tempfile::Builder::new()
         .prefix("docsum-llama-libs-")
-        .tempdir()
+        .tempdir_in(runtime_root)
         .map_err(|_| {
             failure(
                 "MODEL_RUNTIME_UNAVAILABLE",
@@ -1183,6 +1273,7 @@ fn build_descriptor_library_directory(
 
 #[cfg(not(unix))]
 fn build_descriptor_library_directory(
+    _runtime_root: &Path,
     _libraries: &[(String, File)],
 ) -> Result<tempfile::TempDir, ModelRuntimeFailure> {
     Err(failure(
@@ -1358,6 +1449,8 @@ fn runtime_cache_key(config: &GgufRuntimeConfig) -> Result<String, ModelRuntimeF
     validate_digest(&config.expected_server_digest)?;
     let mut hasher = Sha256::new();
     hasher.update(config.model_path.as_os_str().as_encoded_bytes());
+    hasher.update([0]);
+    hasher.update(config.runtime_parent.as_os_str().as_encoded_bytes());
     hasher.update([0]);
     hasher.update(config.model_digest.as_bytes());
     hasher.update(config.expected_size_bytes.to_be_bytes());
@@ -2458,11 +2551,15 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = build_descriptor_library_directory(&[]).unwrap();
+        let settings_directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(settings_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime_root = prepare_private_runtime_root(settings_directory.path()).unwrap();
+        let directory = build_descriptor_library_directory(&runtime_root, &[]).unwrap();
         assert_eq!(
             directory.path().metadata().unwrap().permissions().mode() & 0o777,
             0o700
         );
+        assert_eq!(directory.path().parent(), Some(runtime_root.as_path()));
         let socket = runtime_socket_path(directory.path()).unwrap();
         assert_eq!(socket.parent(), Some(directory.path()));
         assert!(socket.ends_with("llama.sock"));
@@ -2476,6 +2573,77 @@ mod tests {
         let oversized_directory = PathBuf::from(format!("/{}", "a".repeat(96)));
         assert_eq!(
             runtime_socket_path(&oversized_directory).unwrap_err().code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_root_accepts_safe_ancestry_and_rejects_both_trust_boundaries() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let safe_parent = tempfile::tempdir().unwrap();
+        fs::set_permissions(safe_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime_root = prepare_private_runtime_root(safe_parent.path()).unwrap();
+        assert_eq!(
+            runtime_root.parent(),
+            Some(fs::canonicalize(safe_parent.path()).unwrap().as_path())
+        );
+        assert_eq!(
+            fs::symlink_metadata(&runtime_root)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+        let child = build_descriptor_library_directory(&runtime_root, &[]).unwrap();
+        assert_eq!(child.path().parent(), Some(runtime_root.as_path()));
+
+        let sticky_parent = tempfile::tempdir().unwrap();
+        fs::set_permissions(sticky_parent.path(), fs::Permissions::from_mode(0o1777)).unwrap();
+        let sticky_root = prepare_private_runtime_root(sticky_parent.path()).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(sticky_root)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+
+        let writable_parent = tempfile::tempdir().unwrap();
+        fs::set_permissions(writable_parent.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            prepare_private_runtime_root(writable_parent.path())
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+
+        let unsafe_root_parent = tempfile::tempdir().unwrap();
+        let unsafe_root = unsafe_root_parent.path().join(RUNTIME_ROOT_DIRECTORY);
+        fs::create_dir(&unsafe_root).unwrap();
+        fs::set_permissions(&unsafe_root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            prepare_private_runtime_root(unsafe_root_parent.path())
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+
+        let symlink_parent = tempfile::tempdir().unwrap();
+        let symlink_target = symlink_parent.path().join("target");
+        fs::create_dir(&symlink_target).unwrap();
+        std::os::unix::fs::symlink(
+            &symlink_target,
+            symlink_parent.path().join(RUNTIME_ROOT_DIRECTORY),
+        )
+        .unwrap();
+        assert_eq!(
+            prepare_private_runtime_root(symlink_parent.path())
+                .unwrap_err()
+                .code,
             "MODEL_RUNTIME_UNAVAILABLE"
         );
     }
@@ -2494,6 +2662,7 @@ mod tests {
         }];
         let config = GgufRuntimeConfig {
             model_path: PathBuf::from("/model.gguf"),
+            runtime_parent: PathBuf::from("/runtime"),
             model_digest: "a".repeat(64),
             expected_size_bytes: 1,
             expected_file_identity: FileIdentity {
@@ -2522,6 +2691,14 @@ mod tests {
         assert_ne!(
             runtime_cache_key(&GgufRuntimeConfig {
                 expected_server_digest: "c".repeat(64),
+                ..config.clone()
+            })
+            .unwrap(),
+            exact
+        );
+        assert_ne!(
+            runtime_cache_key(&GgufRuntimeConfig {
+                runtime_parent: PathBuf::from("/other-runtime"),
                 ..config.clone()
             })
             .unwrap(),
@@ -2557,6 +2734,11 @@ mod tests {
     #[test]
     fn runtime_manifest_accepts_exact_descriptors_and_rejects_drift() {
         let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let server = directory.path().join("llama-server");
         let library_target = directory.path().join("libfixture.so.1.0");
         let library_name = directory.path().join("libfixture.so.1");
@@ -2604,7 +2786,9 @@ mod tests {
                 .write_all(b"changed")
                 .is_err());
         }
-        let descriptor_directory = build_descriptor_library_directory(&libraries).unwrap();
+        let runtime_root = prepare_private_runtime_root(directory.path()).unwrap();
+        let descriptor_directory =
+            build_descriptor_library_directory(&runtime_root, &libraries).unwrap();
         let linked = fs::read_link(descriptor_directory.path().join("libfixture.so.1")).unwrap();
         assert!(linked.to_string_lossy().starts_with("/proc/self/fd/"));
 
@@ -2635,6 +2819,7 @@ mod tests {
         let (_, size, digest, identity) = inspect_regular_file(&model).unwrap();
         let config = GgufRuntimeConfig {
             model_path: model.clone(),
+            runtime_parent: directory.path().to_path_buf(),
             model_digest: digest,
             expected_size_bytes: size,
             expected_file_identity: identity.clone(),
@@ -2671,6 +2856,7 @@ mod tests {
         let (_, size, digest, identity) = inspect_regular_file(&model).unwrap();
         let config = GgufRuntimeConfig {
             model_path: model.clone(),
+            runtime_parent: directory.path().to_path_buf(),
             model_digest: digest,
             expected_size_bytes: size,
             expected_file_identity: identity.clone(),

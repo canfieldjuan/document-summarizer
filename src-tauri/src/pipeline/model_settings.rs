@@ -889,6 +889,7 @@ impl QwenProfileRuntime {
             analysis_profile,
             verification_profile,
             &settings,
+            settings_path,
             profile_lease,
         )
     }
@@ -898,18 +899,35 @@ impl QwenProfileRuntime {
         analysis_profile: &'static QualifiedProfile,
         verification_profile: &'static QualifiedProfile,
         settings: &ModelSettings,
+        settings_path: &Path,
         profile_lease: RuntimeProfileLease,
     ) -> Result<Self, ModelRuntimeFailure> {
-        let analysis = stage_runtime(&snapshot.analysis, analysis_profile, settings)?;
+        let runtime_parent = settings_path
+            .parent()
+            .ok_or_else(|| config_failure("Model settings path is invalid"))?;
+        let analysis = stage_runtime(
+            &snapshot.analysis,
+            analysis_profile,
+            settings,
+            runtime_parent,
+        )?;
         let verification = if snapshot.analysis == snapshot.verification {
             match &analysis {
                 StageRuntime::LlamaCpp(runtime) => StageRuntime::LlamaCpp(Arc::clone(runtime)),
-                StageRuntime::Ollama(_) => {
-                    stage_runtime(&snapshot.verification, verification_profile, settings)?
-                }
+                StageRuntime::Ollama(_) => stage_runtime(
+                    &snapshot.verification,
+                    verification_profile,
+                    settings,
+                    runtime_parent,
+                )?,
             }
         } else {
-            stage_runtime(&snapshot.verification, verification_profile, settings)?
+            stage_runtime(
+                &snapshot.verification,
+                verification_profile,
+                settings,
+                runtime_parent,
+            )?
         };
         Ok(Self {
             preset_id: snapshot.preset_id.clone(),
@@ -983,6 +1001,7 @@ fn stage_runtime(
     snapshot: &ModelStageProfileSnapshot,
     profile: &'static QualifiedProfile,
     settings: &ModelSettings,
+    runtime_parent: &Path,
 ) -> Result<StageRuntime, ModelRuntimeFailure> {
     match profile.runtime_kind {
         ModelRuntimeKind::OllamaNative => {
@@ -1015,6 +1034,7 @@ fn stage_runtime(
             Ok(StageRuntime::LlamaCpp(LlamaCppRuntime::shared(
                 GgufRuntimeConfig {
                     model_path: registration.canonical_path.clone(),
+                    runtime_parent: runtime_parent.to_path_buf(),
                     model_digest: snapshot.model_digest.clone(),
                     expected_size_bytes: registration.size_bytes,
                     expected_file_identity: registration.file_identity.clone(),

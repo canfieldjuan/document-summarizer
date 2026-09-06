@@ -44,6 +44,38 @@ use std::error::Error;
 use std::path::Path;
 use tauri::{Manager, State};
 
+#[cfg(unix)]
+fn ensure_private_app_data_directory(path: &Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let before = std::fs::symlink_metadata(path)?;
+    if !before.file_type().is_dir() || before.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "application data directory is not owned by the effective user",
+        ));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    let after = std::fs::symlink_metadata(path)?;
+    if !after.file_type().is_dir()
+        || after.uid() != before.uid()
+        || after.dev() != before.dev()
+        || after.ino() != before.ino()
+        || after.mode() & 0o7777 != 0o700
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "application data directory identity or permissions are unsafe",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_app_data_directory(_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
 struct AppState {
     jobs: DesktopJobManager,
     model_settings_path: std::path::PathBuf,
@@ -374,6 +406,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
+            ensure_private_app_data_directory(&app_data_dir)?;
             let db_path = app_data_dir.join("summarizer.db");
             let settings_path = model_settings_path(&app_data_dir);
             let mut conn = init_db(&db_path)?;
@@ -445,6 +478,44 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod capability_tests {
     use serde_json::Value;
+
+    #[cfg(unix)]
+    #[test]
+    fn app_data_privacy_accepts_owned_directory_and_rejects_symlink_or_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        super::ensure_private_app_data_directory(directory.path()).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(directory.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let symlink = parent.path().join("app-data-link");
+        std::os::unix::fs::symlink(&target, &symlink).unwrap();
+        assert_eq!(
+            super::ensure_private_app_data_directory(&symlink)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        let file = parent.path().join("app-data-file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert_eq!(
+            super::ensure_private_app_data_directory(&file)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
 
     #[test]
     fn main_window_can_open_files_without_broader_dialog_permissions() {
