@@ -12,23 +12,26 @@ usable on its own.
 The supported default is:
 
 ```text
-Ollama endpoint: http://127.0.0.1:11434/v1/
-Model: qwen3-30b-a3b:latest
-Context: managed by Ollama; the accepted local deployment uses 8192
+Ollama endpoint: http://127.0.0.1:11434/
+Qualified preset: Qwen 3 30B-A3B
+Effective context: 8192 tokens per native /api/chat request
 ```
 
 Ollama and the model are managed outside the application. The desktop app checks
-readiness and explains when either is unavailable; it does not start Ollama or
-download model weights. Model-generation requests default to a 900-second
-deadline so the selected model can complete bounded multi-stage document work
-without requiring a hidden deployment override. Connection and health checks
-retain their shorter fail-fast deadlines.
+readiness, discovers installed models through Ollama, and shows exact-digest
+qualified presets with model size and context. Installed but unqualified models
+remain visible with an unavailable reason and cannot be selected. The app does
+not start Ollama or download model weights. Model-generation requests default
+to a 900-second deadline so the selected model can complete bounded multi-stage
+document work without requiring a hidden deployment override. Connection and
+health checks retain their shorter fail-fast deadlines.
 
-Existing deployment overrides remain available through
-`DOC_SUM_MODEL_BASE_URL`, `DOC_SUM_MODEL_NAME`,
-`DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional
-`DOC_SUM_MODEL_API_TOKEN_FILE`. The endpoint admission rule remains exact
-loopback HTTP only.
+Deployment overrides remain available through `DOC_SUM_MODEL_BASE_URL`,
+`DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional `DOC_SUM_MODEL_API_TOKEN_FILE`.
+The desktop model choice is a persisted application setting, not
+`DOC_SUM_MODEL_NAME`. The endpoint admission rule remains exact loopback HTTP
+only. Each run durably snapshots its exact model digest, qualified context and
+tokenizer version; continuation and retry never silently switch profiles.
 
 ## Connect entitlement
 

@@ -1,5 +1,68 @@
 # Corpus and native Ollama evaluation — updated 2026-09-05
 
+## Qwen-family qualification: four candidates fail; baseline passes
+
+**Failures first. Neither smaller model qualifies, and neither Qwen 3.8 27B
+GGUF can initialize in the current Ollama runtime.** No prompt, validator,
+coverage threshold, output allowance, timeout or summary limit was changed
+between candidates. Failed candidates remain visible as installed models but do
+not enter the product preset registry.
+
+| Candidate and exact digest | NARA robustness fixture | DOL product fixture | Qualification |
+| --- | --- | --- | --- |
+| Qwen 3.5 4B Q4_K_M, `fa9cc8f5d580d7aa9492360539a99a95cdab2cab11848b2ce0aba1a2bf88b7c5` | **Fail:** 1 claim / 1 evidence; 1/11 raw, 1/10 adjusted pages; 10 omissions; 30 requests; 3,110 completion tokens; 53.39 s | **Fail in analysis:** no delivered claims; 203 requests; 17,693 completion tokens; 273.99 s | Hidden |
+| Qwen 3.5 9B Q4_K_M, `9a83bb8ce0da6b12ab5b6cc3f35eb65e6c0bd4ff39b6e134871b89c1ab522fb7` | **Fail:** 1 supported claim / 3 evidence; 1/11 raw, 1/10 adjusted pages; 8 omissions and 2 withheld claims; 29 requests; 5,905 completion tokens; 109.60 s | **Fail in analysis:** no delivered claims; 20 requests; 3,977 completion tokens; 67.92 s | Hidden |
+| Base Qwen 3.8 27B Q4_K_M, `f9afc1701e366c19aaf6a7a2fd0b38dcef79610a83e8b19094fa33d7ed52a6f4` | Not started: loader failure | Not started: loader failure | Hidden |
+| Jack Qwen 3.8 27B Coder, `ae9075536f80595201465f14970ca65eade0950c53ab71ff2fee34c8f24b1ec8` | Not started: loader failure | Not started: loader failure | Hidden |
+| Qwen 3 30B-A3B Q4_K_S, `1eda56426671cdf365913097543c2253a73c57e35b12741306689968d7f70292` | **Pass:** 6 claims / 7 evidence; 6/11 raw (54.55%), 6/7 adjusted (85.71%); 4 omissions and 1 withheld claim; 21 requests; 425 completion tokens; 18.18 s | **Pass:** 82 claims / 83 evidence; 82/111 raw and adjusted (73.87%); no omissions and 1 withheld claim; 176 requests; 5,615 completion tokens; 91.40 s | Selectable full preset and strongest verifier |
+
+The 4B and 9B failures are capability results, not low-context results. Both
+were run as analysis models at an 8,192-token qualified context with the
+qualified 30B verifier. Both repeatedly filled the 1,536-character grammar
+ceiling instead of returning a complete bounded paraphrase; their DOL runs
+failed before verification. NARA additionally showed extensive typed
+`ParaphraseUnrepairable` omissions. All loadable-candidate attempts used native
+structured output with zero schema-fallback attempts.
+
+The two 27B files are distinct candidates and were tested through Ollama, not
+the LM Studio runtime. `/api/show` reports `qwen35`, 27.3B parameters and a
+262,144-token model maximum for both. The base file is 16,810,714,604 bytes and
+the Jack file is 12,599,204,589 bytes. A minimal native structured `/api/chat`
+request fails for each before generation with `qwen3next: layer 64 missing
+attn_qkv/attn_gate projections`. This is an Ollama loader incompatibility, not a
+prompt, schema or corpus verdict.
+
+The three loadable model descriptors all report a 262,144-token maximum, but
+qualification intentionally retains an 8,192-token effective context. Every
+native request carries that `num_ctx`, its stage `num_predict`, `think: false`,
+temperature zero and the run-derived seed. Exact serialized request admission
+uses the pinned tokenizer versions `qwen3-qwen2-pre-f2ec4434-v1` and
+`qwen35-pre-cc5fb918-v1`; it does not infer compatibility from a model name.
+
+| Model / fixture | Analysis requests / completion tokens | Verification requests / completion tokens | Schema fallback attempts |
+| --- | ---: | ---: | ---: |
+| 30B / NARA | 20 / 341 | 1 / 84 | 0 |
+| 30B / DOL | 170 / 4,627 | 6 / 988 | 0 |
+| 4B / NARA | 29 / 3,092 | 1 / 18 | 0 |
+| 4B / DOL | 203 / 17,693 | 0 / 0 | 0 |
+| 9B / NARA | 28 / 5,865 | 1 / 40 | 0 |
+| 9B / DOL | 20 / 3,977 | 0 / 0 | 0 |
+
+The hoped-for small-model speedup did not materialize. On DOL, 4B ran about
+three times longer than the completed baseline before failing; 9B failed early
+and therefore is not a completed-work speed comparison. The accepted outcome is
+therefore a stronger Qwen-family runtime boundary with one qualified preset,
+not nominal multi-model support that weakens the product for the smaller files.
+
+Contract commits `76b209b` and `34f036b` precede native runtime/settings commit
+`3a75d04`; immutable run-profile persistence lands last in implementation commit
+`4d42890` as schema version 15. The local all-target gate passes with 286 library
+tests and six ignored, three acceptance tests and three ignored, and three
+release tests. Strict all-target/all-feature clippy with warnings denied,
+formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
+claimed; the operator requires local checks because private-repository Actions
+minutes are exhausted.
+
 ## Latest slice: both corpus acceptances pass; NARA remains robustness-only
 
 **Known fidelity limitation first: NARA is not OCR-table accuracy evidence.**

@@ -196,9 +196,10 @@ startup never invokes a parser or model.
   an appropriate `SourceType`.
 - `ModelRuntime` accepts a provider-neutral `ModelRequest` and returns either a
   `ModelResponse` or structured `ModelRuntimeFailure`. Generic run state and
-  artifact persistence contain no model-family or SDK types. The first adapter
-  uses an OpenAI-compatible exact-loopback HTTP endpoint and can be replaced
-  without changing analysis, synthesis, verification, or Connect contracts.
+  artifact persistence contain no model-family or SDK types. The current
+  adapter uses native Ollama endpoints on exact-loopback HTTP and can be
+  replaced without changing analysis, synthesis, verification, or Connect
+  contracts.
 
 ## `ParsedDocument` (Slice 2)
 
@@ -761,14 +762,16 @@ identity.
 
 ### Runtime, reporting and explicit limits
 
-The supported runtime remains loopback Ollama through the OpenAI-compatible
-API, default `http://127.0.0.1:11434/v1/`, model `qwen3-30b-a3b:latest`.
-The timeout remains 900 seconds, with separate short connection/health limits.
-The adapter rejects non-loopback HTTP hosts, credentials in the URL, proxies
-and redirects; optional credentials come from its bounded token file.
-Deployment environment overrides remain unchanged. All source text is marked
-untrusted in prompts. Temperature remains zero and the request asks for
-`reasoning_effort: "none"`; template/runtime behavior must be measured.
+The supported runtime is native loopback Ollama, default
+`http://127.0.0.1:11434/`, with an exact-digest qualified Qwen preset selected
+through persisted application settings. The timeout remains 900 seconds, with
+separate short connection/health limits. The adapter rejects non-loopback HTTP
+hosts, credentials in the URL, proxies and redirects; optional credentials come
+from its bounded token file. Deployment endpoint, timeout and token-file
+overrides remain available; the desktop model choice is not an environment
+variable. All source text is marked untrusted in prompts. Temperature remains
+zero and native requests set `think: false`; template/runtime behavior must be
+measured.
 
 Run-derived signed-range seeds remain in requests for reproducibility. A changed
 seed alone is not represented as a meaningful greedy retry. Actual paraphrase
@@ -785,8 +788,10 @@ and accepted lengths. Only the exact vocabulary-loading failure may retry in
 JSON-object mode; other failures do not trigger that fallback. Transport
 success is not proof of semantic correctness.
 
-Analysis system-plus-user input remains
-`min(16_000, 3*(8192-2048-512)) = 16,000` characters.
+Analysis system-plus-user input retains the defense-in-depth character bound
+`min(16_000, 3*(C-2048-512))`, where `C` is the admitted analysis profile
+context; the pinned-tokenizer admission over the full native payload is
+authoritative.
 Source chunks retain their 100,000-character admission guard. The claim ceiling
 does not remove page/catalog/input/output/verifier constraints. New direct
 synthesis has no model-request budget to exhaust; the old 256-request
@@ -817,33 +822,6 @@ head, followed by a separate fresh unresolved-thread and review-state poll. A
 thread count from a previous-head review is not evidence about the final head.
 PR #30 violated this ordering when its final-head review arrived after merge; this
 correction must not repeat that process failure.
-
-### Pending native Ollama and Qwen-family runtime contract
-
-Status: this section is proposed behavior. It is not implemented by the current
-OpenAI-compatible adapter. Contract and implementation must remain separate
-commits. When the implementation and qualification matrix land, fold the final
-behavior into the current runtime sections and delete this pending section so a
-reader cannot mistake a proposal for shipped behavior.
-
-#### Root cause and required change surface
-
-The current adapter reaches loopback Ollama through its OpenAI-compatible route,
-selects one model from an environment variable and plans every request against a
-compiled 8,192-token context. That cannot represent an installed model's actual
-maximum context, a locally qualified safe context, a stage-specific hybrid
-profile or the immutable model identity used by an in-flight run. A model with a
-larger usable context is needlessly constrained; a model with a smaller usable
-context can receive an oversized request. An environment-only model choice is
-also not a user setting and cannot make resumed work reproducible.
-
-Replace that boundary with native loopback Ollama discovery and chat. The change
-surface includes the model adapter, request budgeting, model/profile settings,
-stage routing, immutable run identity, the desktop runtime-status projection and
-UI, persistence and historical reload, plus the live corpus harness and its
-evaluation record. Schema work, if required for immutable run identity, lands
-last as a separately reviewable implementation commit. It does not weaken or
-redefine summary quality, provenance or verification.
 
 #### Native transport and discovery
 
@@ -955,6 +933,13 @@ Jack and base Qwen 3.8 are reported separately. Qualification is evidence for an
 exact digest and profile, not a blanket claim about every quantization or model
 carrying the same family name.
 
+The current product registry contains only the exact qualified Qwen 3 30B-A3B
+digest. The tested Qwen 3.5 4B and 9B digests remain installed but unqualified
+because both corpus documents failed without prompt or threshold changes. The
+base and Jack Qwen 3.8 27B digests remain installed but unqualified because the
+current Ollama loader cannot initialize either GGUF. They remain visible with an
+unavailable reason and cannot become a full or hybrid preset.
+
 #### Explicit non-scope and deployment boundary
 
 This slice does not add non-Qwen providers, cloud inference, arbitrary endpoint
@@ -1003,13 +988,13 @@ currently verified Debian package; AppImage, RPM, macOS, and Windows packaging
 remain separate target-platform work. A supported Linux package must contain the
 desktop executable, desktop entry, and icons without legacy probe executables.
 
-Connect, entitlement, packaging, parsing, OCR/vision, model choice, endpoint,
-context and customer-visible presentation changes remain outside this slice.
-The UI continues to render cited claim cards; optional prose consolidation and
-PDF-viewer navigation are separate product decisions. A later native Ollama
-evaluation may test `options.num_ctx`, schema format, GPU residency and
-KV-cache costs under a separately stated runtime configuration. This slice
-does not perform that cutover.
+Connect, entitlement, packaging, parsing, OCR/vision and customer-visible
+summary presentation changes remain outside this runtime slice. The UI
+continues to render cited claim cards; optional prose consolidation and
+PDF-viewer navigation are separate product decisions. GPU residency and
+KV-cache cost at contexts above each profile's qualified value remain separate
+deployment evaluations; discovery of a larger model maximum does not qualify a
+larger effective context by itself.
 
 ## Stable checkpoint continuation
 
