@@ -884,6 +884,16 @@ estimates. A request that cannot fit the qualified context fails before
 inference with measured token counts; the adapter does not ask Ollama to
 truncate or expand context implicitly.
 
+Token admission counts the exact serialized native-chat payload that is sent.
+The pinned counter must not apply NFC, NFD or any other Unicode normalization
+unless the transmitted payload is changed by the identical operation first;
+decomposed source text therefore retains its actual byte-level token cost.
+Removing the prior counter-only NFC step advances both Qwen tokenizer profile
+versions rather than changing the meaning of a persisted version in place.
+Regression evidence compares canonically equivalent composed and decomposed
+input through the production pre-tokenizer and proves that the extra transmitted
+code point is not normalized away before the context decision.
+
 The supported candidate matrix is Qwen 3.5 4B, Qwen 3.5 9B, base Qwen 3.8 27B,
 Jack Qwen 3.8 27B Coder and the existing Qwen 3 30B-A3B baseline. The locally
 available Jack GGUF is a distinct candidate, not an alias for base Qwen 3.8 and
