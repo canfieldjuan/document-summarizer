@@ -14,6 +14,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -92,6 +93,10 @@ impl ModelIdentityGuard {
     fn matches(&self, config: &GgufRuntimeConfig) -> bool {
         self.path == config.model_path && self.expected == config.expected_file_identity
     }
+
+    fn release_lease(&self) {
+        release_model_read_lease(&self.file);
+    }
 }
 
 struct PromptFraming {
@@ -103,6 +108,7 @@ struct PromptFraming {
 struct ServerOwner {
     child: Mutex<Child>,
     _runtime_library_directory: tempfile::TempDir,
+    _api_key_file: tempfile::NamedTempFile,
 }
 
 impl ServerOwner {
@@ -124,6 +130,12 @@ impl Drop for ServerOwner {
 }
 
 static RUNTIMES: OnceLock<Mutex<HashMap<String, Arc<LlamaCppRuntime>>>> = OnceLock::new();
+static MODEL_LEASE_BREAK_REQUESTED: AtomicBool = AtomicBool::new(false);
+static MODEL_LEASE_HANDLER_INSTALLED: OnceLock<bool> = OnceLock::new();
+
+extern "C" fn record_model_lease_break(_signal: libc::c_int) {
+    MODEL_LEASE_BREAK_REQUESTED.store(true, Ordering::SeqCst);
+}
 
 impl LlamaCppRuntime {
     pub fn shared(config: GgufRuntimeConfig) -> Result<Arc<Self>, ModelRuntimeFailure> {
@@ -180,6 +192,7 @@ impl LlamaCppRuntime {
                 true,
             ));
         }
+        acquire_model_read_lease(&model_file)?;
 
         let server_path = resolve_server_path()?;
         let (server_file, mut runtime_libraries) = open_qualified_runtime_bundle(
@@ -191,6 +204,15 @@ impl LlamaCppRuntime {
 
         let port = reserve_loopback_port()?;
         let api_token = Uuid::new_v4().simple().to_string();
+        let api_key_file =
+            create_private_api_key_file(runtime_library_directory.path(), &api_token)?;
+        let api_key_argument = api_key_file.path().to_str().ok_or_else(|| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Private runtime credential path is invalid",
+                false,
+            )
+        })?;
         let model_argument = inherited_fd_path(&model_file)?;
         let executable_argument = inherited_fd_path(&server_file)?;
         let client = Client::builder()
@@ -218,6 +240,11 @@ impl LlamaCppRuntime {
             );
             descriptors
         };
+        #[cfg(unix)]
+        let model_descriptor = {
+            use std::os::fd::AsRawFd;
+            model_file.as_raw_fd()
+        };
         let mut command = Command::new(&executable_argument);
         #[cfg(unix)]
         {
@@ -228,6 +255,14 @@ impl LlamaCppRuntime {
             unsafe {
                 command.pre_exec(move || {
                     if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let mut default_action: libc::sigaction = std::mem::zeroed();
+                    default_action.sa_sigaction = libc::SIG_DFL;
+                    if libc::sigemptyset(&mut default_action.sa_mask) != 0
+                        || libc::sigaction(libc::SIGIO, &default_action, std::ptr::null_mut()) != 0
+                        || libc::fcntl(model_descriptor, libc::F_SETOWN, libc::getpid()) < 0
+                    {
                         return Err(std::io::Error::last_os_error());
                     }
                     for descriptor in &inherited_fds {
@@ -262,8 +297,8 @@ impl LlamaCppRuntime {
                 "999",
                 "--reasoning",
                 "off",
-                "--api-key",
-                &api_token,
+                "--api-key-file",
+                api_key_argument,
                 "--offline",
                 "--no-webui",
                 "--no-warmup",
@@ -279,6 +314,15 @@ impl LlamaCppRuntime {
                     true,
                 )
             })?;
+        if MODEL_LEASE_BREAK_REQUESTED.swap(false, Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(failure(
+                "MODEL_PROFILE_STALE",
+                "Registered GGUF write exclusion was interrupted during startup",
+                true,
+            ));
+        }
         runtime_libraries.clear();
 
         let base_url = format!("http://127.0.0.1:{port}");
@@ -329,6 +373,7 @@ impl LlamaCppRuntime {
             owner: Some(ServerOwner {
                 child: Mutex::new(child),
                 _runtime_library_directory: runtime_library_directory,
+                _api_key_file: api_key_file,
             }),
         })
     }
@@ -371,6 +416,9 @@ impl LlamaCppRuntime {
     fn terminate_owner(&self) {
         if let Some(owner) = &self.owner {
             owner.terminate();
+        }
+        if let Some(guard) = &self.model_identity_guard {
+            guard.release_lease();
         }
     }
 
@@ -576,6 +624,9 @@ impl ModelRuntime for LlamaCppRuntime {
                 request_attempts: vec![diagnostic(request, elapsed, observed_usage, true)],
             }),
             Err(mut error) => {
+                if error.code == "MODEL_RUNTIME_UNAVAILABLE" {
+                    self.invalidate_managed_runtime();
+                }
                 error.request_attempts = vec![diagnostic(request, elapsed, observed_usage, false)];
                 Err(error)
             }
@@ -918,6 +969,67 @@ fn build_descriptor_library_directory(
     ))
 }
 
+fn create_private_api_key_file(
+    directory: &Path,
+    token: &str,
+) -> Result<tempfile::NamedTempFile, ModelRuntimeFailure> {
+    let mut file = tempfile::Builder::new()
+        .prefix("api-key-")
+        .tempfile_in(directory)
+        .map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Private runtime credential could not be created",
+                true,
+            )
+        })?;
+    file.write_all(token.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.flush())
+        .map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Private runtime credential could not be written",
+                true,
+            )
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|_| {
+                failure(
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "Private runtime credential permissions could not be fixed",
+                    true,
+                )
+            })?;
+        if file
+            .as_file()
+            .metadata()
+            .map_err(|_| {
+                failure(
+                    "MODEL_RUNTIME_UNAVAILABLE",
+                    "Private runtime credential metadata is unavailable",
+                    true,
+                )
+            })?
+            .permissions()
+            .mode()
+            & 0o777
+            != 0o600
+        {
+            return Err(failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Private runtime credential permissions are unsafe",
+                false,
+            ));
+        }
+    }
+    Ok(file)
+}
+
 impl PromptFraming {
     fn load(client: &Client, base_url: &str, token: &str) -> Result<Self, ModelRuntimeFailure> {
         let system_open = tokenize_text(client, base_url, token, "<|im_start|>system\n", true)?;
@@ -1038,6 +1150,67 @@ fn stale_model_failure() -> ModelRuntimeFailure {
         true,
     )
 }
+
+#[cfg(unix)]
+fn acquire_model_read_lease(file: &File) -> Result<(), ModelRuntimeFailure> {
+    use std::os::fd::AsRawFd;
+
+    let handler_installed = *MODEL_LEASE_HANDLER_INSTALLED.get_or_init(|| {
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = record_model_lease_break as *const () as usize;
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask) == 0
+                && libc::sigaction(libc::SIGIO, &action, std::ptr::null_mut()) == 0
+        }
+    });
+    if !handler_installed {
+        return Err(failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "GGUF write-exclusion signal could not be installed",
+            true,
+        ));
+    }
+    MODEL_LEASE_BREAK_REQUESTED.store(false, Ordering::SeqCst);
+    let descriptor = file.as_raw_fd();
+    if unsafe { libc::fcntl(descriptor, libc::F_SETOWN, libc::getpid()) } < 0
+        || unsafe { libc::fcntl(descriptor, libc::F_SETLEASE, libc::F_RDLCK) } < 0
+    {
+        return Err(failure(
+            "MODEL_RUNTIME_UNAVAILABLE",
+            "Registered GGUF filesystem cannot enforce write exclusion",
+            true,
+        ));
+    }
+    if MODEL_LEASE_BREAK_REQUESTED.load(Ordering::SeqCst) {
+        release_model_read_lease(file);
+        return Err(failure(
+            "MODEL_PROFILE_STALE",
+            "Registered GGUF write exclusion was interrupted before startup",
+            true,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn acquire_model_read_lease(_file: &File) -> Result<(), ModelRuntimeFailure> {
+    Err(failure(
+        "MODEL_RUNTIME_UNAVAILABLE",
+        "Direct GGUF execution is supported only on Linux",
+        false,
+    ))
+}
+
+#[cfg(unix)]
+fn release_model_read_lease(file: &File) {
+    use std::os::fd::AsRawFd;
+    unsafe {
+        libc::fcntl(file.as_raw_fd(), libc::F_SETLEASE, libc::F_UNLCK);
+    }
+}
+
+#[cfg(not(unix))]
+fn release_model_read_lease(_file: &File) {}
 
 fn open_regular_nofollow(path: &Path) -> Result<File, ModelRuntimeFailure> {
     let mut options = OpenOptions::new();
@@ -1203,20 +1376,16 @@ fn wait_for_startup(
 ) -> Result<(), ModelRuntimeFailure> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
-        if child
-            .try_wait()
-            .map_err(|_| {
-                failure(
-                    "MODEL_RUNTIME_UNAVAILABLE",
-                    "llama-server state could not be read",
-                    true,
-                )
-            })?
-            .is_some()
-        {
+        if let Some(status) = child.try_wait().map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "llama-server state could not be read",
+                true,
+            )
+        })? {
             return Err(failure(
                 "MODEL_RUNTIME_UNAVAILABLE",
-                "llama-server exited before becoming ready",
+                format!("llama-server exited before becoming ready ({status})"),
                 true,
             ));
         }
@@ -1538,6 +1707,59 @@ mod tests {
     }
 
     #[test]
+    fn model_read_lease_accepts_idle_file_rejects_open_writer_and_releases() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("model.gguf");
+        fs::write(&model, b"model").unwrap();
+        let reader = open_regular_nofollow(&model).unwrap();
+        let writer = OpenOptions::new().write(true).open(&model).unwrap();
+        assert_eq!(
+            acquire_model_read_lease(&reader).unwrap_err().code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+        drop(writer);
+
+        acquire_model_read_lease(&reader).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            assert_eq!(
+                unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETLEASE) },
+                libc::F_RDLCK
+            );
+        }
+        release_model_read_lease(&reader);
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            assert_eq!(
+                unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETLEASE) },
+                libc::F_UNLCK
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_api_key_file_is_owner_private_and_path_does_not_expose_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let token = "secret-token-that-must-not-appear-in-argv";
+        let file = create_private_api_key_file(directory.path(), token).unwrap();
+        assert_eq!(
+            fs::read_to_string(file.path()).unwrap(),
+            format!("{token}\n")
+        );
+        assert!(!file.path().to_string_lossy().contains(token));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                file.as_file().metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
     fn request_fit_keeps_framing_reserve_on_both_sides() {
         assert!(request_fits_context(3_584, 4_096, 8_192));
         assert!(!request_fits_context(3_585, 4_096, 8_192));
@@ -1726,9 +1948,12 @@ mod tests {
             file: open_regular_nofollow(&model).unwrap(),
             expected: identity,
         });
+        let runtime_directory = tempfile::tempdir().unwrap();
+        let api_key_file = create_private_api_key_file(runtime_directory.path(), "secret").unwrap();
         runtime.owner = Some(ServerOwner {
             child: Mutex::new(Command::new("sleep").arg("60").spawn().unwrap()),
-            _runtime_library_directory: tempfile::tempdir().unwrap(),
+            _runtime_library_directory: runtime_directory,
+            _api_key_file: api_key_file,
         });
         fs::write(&model, b"changed").unwrap();
 
