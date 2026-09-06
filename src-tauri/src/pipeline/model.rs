@@ -100,6 +100,9 @@ impl OllamaRuntime {
     pub fn discovery_from_environment() -> Result<Self, ModelRuntimeFailure> {
         let base_url = std::env::var("DOC_SUM_MODEL_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let token = std::env::var_os("DOC_SUM_MODEL_API_TOKEN_FILE")
+            .map(|value| read_token(Path::new(&value)))
+            .transpose()?;
         Self::new_internal(
             &base_url,
             DEFAULT_MODEL,
@@ -107,7 +110,7 @@ impl OllamaRuntime {
             None,
             LEGACY_DEFAULT_CONTEXT_TOKENS,
             Duration::from_secs(HEALTH_TIMEOUT_SECONDS),
-            None,
+            token,
             false,
         )
     }
@@ -1263,6 +1266,23 @@ mod tests {
         (format!("http://{address}/v1/"), handle)
     }
 
+    fn read_headers(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = stream
+                .read(&mut buffer)
+                .expect("loopback headers should be readable");
+            assert!(count > 0, "loopback request ended before headers");
+            request.extend_from_slice(&buffer[..count]);
+            if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                return std::str::from_utf8(&request[..position + 4])
+                    .expect("loopback headers should be UTF-8")
+                    .to_string();
+            }
+        }
+    }
+
     fn runtime_with_fixture_tokenizer(base_url: &str) -> OllamaRuntime {
         let runtime = OllamaRuntime::new_internal(
             base_url,
@@ -1328,6 +1348,38 @@ mod tests {
             None,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn model_discovery_uses_the_configured_authorization_boundary() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("discovery request should arrive");
+            let headers = read_headers(&mut stream);
+            write_json_response(&mut stream, "200 OK", &serde_json::json!({"models": []}));
+            headers
+        });
+        let runtime = OllamaRuntime::new(
+            &format!("http://{address}/"),
+            "fixture-model",
+            Duration::from_secs(5),
+            Some("private-discovery-token".to_string()),
+        )
+        .expect("discovery runtime should configure");
+        assert!(runtime
+            .installed_model_records()
+            .expect("authenticated discovery should succeed")
+            .is_empty());
+        let headers = server.join().expect("discovery server should finish");
+        assert!(
+            headers
+                .lines()
+                .any(|line| line
+                    .eq_ignore_ascii_case("authorization: Bearer private-discovery-token"))
+        );
     }
 
     #[test]
