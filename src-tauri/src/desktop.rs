@@ -138,6 +138,7 @@ impl DesktopJobManager {
         let mut conn = db::init_db(&self.db_path)?;
         let snapshot = db::get_run_model_profile(&conn, source_run_id)?;
         let runtime = (self.runtime_factory)(snapshot.as_ref())?;
+        runtime.health()?;
         let (document, run) =
             admit_retry_for_background(&mut conn, source_run_id, expected_source_version)?;
         let accepted = accepted_view(&document, &run);
@@ -163,7 +164,9 @@ impl DesktopJobManager {
                 plan.checkpoint,
                 db::get_run_model_profile(&conn, run_id)?,
             )?;
-            Some((self.runtime_factory)(snapshot.as_ref())?)
+            let runtime = (self.runtime_factory)(snapshot.as_ref())?;
+            runtime.health()?;
+            Some(runtime)
         } else {
             None
         };
@@ -521,6 +524,35 @@ mod tests {
         }
     }
 
+    struct UnavailableSnapshotRuntime(ModelProfileSnapshot);
+
+    impl ModelRuntime for UnavailableSnapshotRuntime {
+        fn generate(&self, _request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            panic!("unavailable snapshot runtime must fail during admission")
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Err(ModelRuntimeFailure {
+                code: "MODEL_NOT_AVAILABLE".to_string(),
+                message: "Fixture snapshot model is unavailable.".to_string(),
+                recoverable: true,
+                request_attempts: Vec::new(),
+            })
+        }
+
+        fn runtime_id(&self) -> &str {
+            "unavailable-snapshot-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "unavailable-snapshot-fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(self.0.clone())
+        }
+    }
+
     struct BlockingRuntime {
         gate: Arc<BlockingGate>,
     }
@@ -755,6 +787,94 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn unavailable_snapshot_runtime_cannot_mutate_continuation_or_retry_state() {
+        let database = TestDatabase::new();
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let (_, ingested) = crate::pipeline::ingest::ingest_pdf(
+            &mut conn,
+            fixture_path()
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+        )
+        .expect("fixture should ingest");
+        let snapshot = fixture_snapshot();
+        conn.execute(
+            "INSERT INTO pipeline_run_model_profiles (run_id, profile_snapshot, created_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                ingested.run_id,
+                serde_json::to_string(&snapshot).expect("snapshot should serialize"),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .expect("snapshot should persist");
+        let continuation_events =
+            list_pipeline_events(&conn, &ingested.run_id).expect("events should load");
+        drop(conn);
+
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |received| {
+                let received = received
+                    .cloned()
+                    .expect("recovery must use the persisted snapshot");
+                Ok(Box::new(UnavailableSnapshotRuntime(received)))
+            }),
+        );
+        let continuation_error = manager
+            .start_continuation(&ingested.run_id, ingested.state_version)
+            .expect_err("unavailable snapshot runtime must reject continuation admission");
+        assert_eq!(continuation_error.code(), "MODEL_NOT_AVAILABLE");
+        assert!(!manager
+            .is_active(&ingested.run_id)
+            .expect("registry should remain readable"));
+
+        let conn = db::init_db(&database.0).expect("database should reopen");
+        assert_eq!(
+            get_pipeline_run(&conn, &ingested.run_id)
+                .expect("run should reload")
+                .expect("run should exist"),
+            ingested
+        );
+        assert_eq!(
+            list_pipeline_events(&conn, &ingested.run_id).expect("events should reload"),
+            continuation_events
+        );
+
+        manager
+            .finalize(
+                &ingested.run_id,
+                Ok(Err(DocumentServiceError::RuntimeRequiredForBackground(
+                    ingested.run_id.clone(),
+                ))),
+            )
+            .expect("fixture source failure should persist");
+        let failed = get_pipeline_run(&conn, &ingested.run_id)
+            .expect("failed source should load")
+            .expect("failed source should exist");
+        let retry_events =
+            list_pipeline_events(&conn, &ingested.run_id).expect("failed events should load");
+
+        let retry_error = manager
+            .start_retry(&failed.run_id, failed.state_version)
+            .expect_err("unavailable snapshot runtime must reject retry admission");
+        assert_eq!(retry_error.code(), "MODEL_NOT_AVAILABLE");
+        assert_eq!(
+            get_pipeline_run(&conn, &failed.run_id)
+                .expect("source should reload")
+                .expect("source should exist"),
+            failed
+        );
+        assert_eq!(
+            list_pipeline_events(&conn, &failed.run_id).expect("events should remain stable"),
+            retry_events
+        );
+        assert!(db::get_retry_lineage_for_source(&conn, &failed.run_id)
+            .expect("retry lineage should remain readable")
+            .is_none());
     }
 
     #[test]
