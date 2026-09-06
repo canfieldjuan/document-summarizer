@@ -39,7 +39,24 @@ shared child's complete tokenization/completion sequence behind one mutex, and
 requires every resident record to carry a canonical digest before direct
 startup.
 
-The first final-head NARA attempt correctly stopped before inference with
+Review of that evidence head found three remaining races. A parent read lease
+could be broken while slow runtime-bundle preparation ran, because startup did
+not revalidate the kernel lease immediately before spawn. Its process-directed
+`SIGIO` could also be handled late by a different thread, after the final parent
+check. Finally, a canceled run could wait indefinitely on the shared inference
+mutex and later issue a request. The corrected implementation targets lease
+breaks to the exact acquiring Linux thread, revalidates the break flag, kernel
+lease and complete GGUF identity immediately before spawn, and makes inference
+slot acquisition cancellation-aware with one absolute wait deadline. Boundary
+probes accept an intact lease and normal serialized request while rejecting
+signaled and released leases and a canceled queued request before transport.
+
+The first validation attempts on this revision correctly stopped before
+inference with `MODEL_RUNTIME_BUSY`: a Website Generator Connect provider kept
+reloading the qualified 30B Ollama runner after the first targeted unload. The
+provider child was stopped under operator authorization, the exact runner was
+unloaded, and `/api/ps` was empty before the passing direct runs. An earlier
+final-head NARA attempt also correctly stopped before inference with
 `MODEL_RUNTIME_BUSY`: the qualified 30B runner was resident, followed by a
 qualified 9B runner used by another local workload. No unload request was sent.
 After `/api/ps` reported an empty catalog, the same exact head passed both corpus
@@ -65,12 +82,12 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 43.55 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 277.92 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 667 | 43.42 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,966 | 280.40 s | 0 |
 
-NARA used 20 analysis requests and one verification request, with 438 and 215
+NARA used 20 analysis requests and one verification request, with 452 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
-verification requests, with 5,198 and 1,756 completion tokens respectively.
+verification requests, with 5,210 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported
 prompt and completion token accounting that matched the direct adapter's
 preflight. A live process-boundary probe during the NARA run found the socket in
