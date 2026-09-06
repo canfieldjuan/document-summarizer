@@ -1,17 +1,17 @@
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
-    CompletedSummary, ModelRuntime, ModelRuntimeFailure, PipelineFailure, PipelineRun,
-    PipelineStage, PipelineState,
+    CompletedSummary, ModelProfileSnapshot, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
+    PipelineRun, PipelineStage, PipelineState,
 };
 use crate::pipeline::control::CancellationToken;
 use crate::pipeline::db::{self, StoreError};
-use crate::pipeline::model::OllamaRuntime;
+use crate::pipeline::model_settings::{runtime_from_settings, runtime_from_snapshot};
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
 use crate::pipeline::service::{
     admit_pdf_for_background, admit_retry_for_background, continuation_plan,
     continue_run_to_summary_controlled, process_started_parsing_to_summary_controlled,
-    ContinuationComponents, DocumentServiceError, SummaryComponents,
+    validate_retry_for_background, ContinuationComponents, DocumentServiceError, SummaryComponents,
 };
 use crate::pipeline::structure::DeterministicStructureInterpreter;
 use serde::Serialize;
@@ -23,8 +23,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use thiserror::Error;
 
-type RuntimeFactory =
-    Arc<dyn Fn() -> Result<Box<dyn ModelRuntime>, ModelRuntimeFailure> + Send + Sync + 'static>;
+type RuntimeFactory = Arc<
+    dyn Fn(Option<&ModelProfileSnapshot>) -> Result<Box<dyn ModelRuntime>, ModelRuntimeFailure>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +49,8 @@ pub enum DesktopJobError {
     Service(#[from] DocumentServiceError),
     #[error("Model runtime configuration failed: {0:?}")]
     Runtime(#[from] ModelRuntimeFailure),
+    #[error("Pipeline run {0} has no immutable model profile for continued model work")]
+    RuntimeProfileUnavailable(String),
     #[error("Pipeline run already has a desktop worker: {0}")]
     AlreadyRunning(String),
     #[error("Pipeline run does not have an active desktop worker: {0}")]
@@ -70,6 +76,7 @@ impl DesktopJobError {
             Self::Store(_) => "PIPELINE_STORE_ERROR",
             Self::Service(error) => error.code(),
             Self::Runtime(failure) => &failure.code,
+            Self::RuntimeProfileUnavailable(_) => "CONTINUATION_RUNTIME_PROFILE_UNAVAILABLE",
             Self::AlreadyRunning(_) => "BACKGROUND_JOB_ALREADY_RUNNING",
             Self::NotRunning(_) => "BACKGROUND_JOB_NOT_RUNNING",
             Self::RegistryUnavailable => "BACKGROUND_JOB_REGISTRY_UNAVAILABLE",
@@ -89,12 +96,15 @@ pub struct DesktopJobManager {
 }
 
 impl DesktopJobManager {
-    pub fn new(db_path: PathBuf) -> Self {
+    pub fn new(db_path: PathBuf, settings_path: PathBuf) -> Self {
         Self::with_runtime_factory(
             db_path,
-            Arc::new(|| {
-                OllamaRuntime::from_environment()
-                    .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
+            Arc::new(move |snapshot| {
+                let runtime = match snapshot {
+                    Some(snapshot) => runtime_from_snapshot(snapshot),
+                    None => runtime_from_settings(&settings_path),
+                }?;
+                Ok(Box::new(runtime) as Box<dyn ModelRuntime>)
             }),
         )
     }
@@ -112,9 +122,18 @@ impl DesktopJobManager {
     }
 
     pub fn start_pdf(&self, file_path: &str) -> Result<BackgroundRunAccepted, DesktopJobError> {
-        let runtime = (self.runtime_factory)()?;
+        let runtime = (self.runtime_factory)(None)?;
+        let profile_snapshot = runtime
+            .profile_snapshot()
+            .ok_or_else(|| ModelRuntimeFailure {
+                code: "MODEL_CONFIG_INVALID".to_string(),
+                message: "Desktop runtime is missing its immutable model profile".to_string(),
+                recoverable: false,
+                request_attempts: Vec::new(),
+            })?;
         let mut conn = db::init_db(&self.db_path)?;
-        let (document, run) = admit_pdf_for_background(&mut conn, file_path)?;
+        let (document, run) =
+            admit_pdf_for_background(&mut conn, file_path, Some(&profile_snapshot))?;
         let accepted = accepted_view(&document, &run);
         self.spawn(run.run_id, BackgroundWork::StartedParsing, Some(runtime))?;
         Ok(accepted)
@@ -125,8 +144,16 @@ impl DesktopJobManager {
         source_run_id: &str,
         expected_source_version: u32,
     ) -> Result<BackgroundRunAccepted, DesktopJobError> {
-        let runtime = (self.runtime_factory)()?;
         let mut conn = db::init_db(&self.db_path)?;
+        validate_retry_for_background(&conn, source_run_id, expected_source_version)?;
+        let snapshot = db::get_run_model_profile(&conn, source_run_id)?.ok_or_else(|| {
+            StoreError::InvalidRetrySource {
+                run_id: source_run_id.to_string(),
+                reason: "the failed run has no immutable model profile to inherit".to_string(),
+            }
+        })?;
+        let runtime = (self.runtime_factory)(Some(&snapshot))?;
+        runtime.health()?;
         let (document, run) =
             admit_retry_for_background(&mut conn, source_run_id, expected_source_version)?;
         let accepted = accepted_view(&document, &run);
@@ -146,10 +173,18 @@ impl DesktopJobManager {
             .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
         let document = db::get_document(&conn, &run.document_id)?
             .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
-        let runtime = plan
-            .requires_runtime
-            .then(|| (self.runtime_factory)())
-            .transpose()?;
+        let runtime = if plan.requires_runtime {
+            let snapshot = continuation_runtime_snapshot(
+                run_id,
+                plan.checkpoint,
+                db::get_run_model_profile(&conn, run_id)?,
+            )?;
+            let runtime = (self.runtime_factory)(snapshot.as_ref())?;
+            runtime.health()?;
+            Some(runtime)
+        } else {
+            None
+        };
         let accepted = accepted_view(&document, &run);
         self.spawn(
             run.run_id,
@@ -360,6 +395,19 @@ impl DesktopJobManager {
     }
 }
 
+fn continuation_runtime_snapshot(
+    run_id: &str,
+    checkpoint: crate::pipeline::contracts::ContinuationCheckpoint,
+    snapshot: Option<ModelProfileSnapshot>,
+) -> Result<Option<ModelProfileSnapshot>, DesktopJobError> {
+    if checkpoint.requires_existing_model_profile() && snapshot.is_none() {
+        return Err(DesktopJobError::RuntimeProfileUnavailable(
+            run_id.to_string(),
+        ));
+    }
+    Ok(snapshot)
+}
+
 #[derive(Clone, Copy)]
 enum BackgroundWork {
     StartedParsing,
@@ -416,14 +464,14 @@ impl TerminalState for PipelineState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::contracts::{ModelRequest, ModelResponse};
+    use crate::pipeline::contracts::{ModelRequest, ModelResponse, ModelStageProfileSnapshot};
     use crate::pipeline::db::{
         get_analyzed_document, get_pipeline_run, get_summary_artifact, list_pipeline_events,
     };
     use crate::pipeline::service::ContinuationPipelineError;
     use crate::pipeline::state::TransitionError;
     use std::fs;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex as StdMutex};
     use std::time::{Duration, Instant};
     use uuid::Uuid;
@@ -464,6 +512,108 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "background-fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_snapshot())
+        }
+    }
+
+    struct SnapshotlessFixtureRuntime;
+
+    impl ModelRuntime for SnapshotlessFixtureRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "snapshotless-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "snapshotless-fixture-model"
+        }
+    }
+
+    struct SnapshotlessRecoverableFailureRuntime;
+
+    impl ModelRuntime for SnapshotlessRecoverableFailureRuntime {
+        fn generate(&self, _request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            Err(ModelRuntimeFailure {
+                code: "FIXTURE_RUNTIME_INTERRUPTED".to_string(),
+                message: "Fixture runtime stopped before producing output.".to_string(),
+                recoverable: true,
+                request_attempts: Vec::new(),
+            })
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "snapshotless-recoverable-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "snapshotless-recoverable-fixture-model"
+        }
+    }
+
+    struct SnapshotFixtureRuntime(ModelProfileSnapshot);
+
+    impl ModelRuntime for SnapshotFixtureRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "snapshot-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "snapshot-fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(self.0.clone())
+        }
+    }
+
+    struct UnavailableSnapshotRuntime(ModelProfileSnapshot);
+
+    impl ModelRuntime for UnavailableSnapshotRuntime {
+        fn generate(&self, _request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            panic!("unavailable snapshot runtime must fail during admission")
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Err(ModelRuntimeFailure {
+                code: "MODEL_NOT_AVAILABLE".to_string(),
+                message: "Fixture snapshot model is unavailable.".to_string(),
+                recoverable: true,
+                request_attempts: Vec::new(),
+            })
+        }
+
+        fn runtime_id(&self) -> &str {
+            "unavailable-snapshot-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "unavailable-snapshot-fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(self.0.clone())
         }
     }
 
@@ -534,6 +684,10 @@ mod tests {
         fn model_id(&self) -> &str {
             "blocking-fixture-model"
         }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_snapshot())
+        }
     }
 
     fn fixture_path() -> PathBuf {
@@ -543,8 +697,24 @@ mod tests {
     fn fixture_manager(database: &TestDatabase) -> DesktopJobManager {
         DesktopJobManager::with_runtime_factory(
             database.0.clone(),
-            Arc::new(|| Ok(Box::new(FixtureRuntime))),
+            Arc::new(|_| Ok(Box::new(FixtureRuntime))),
         )
+    }
+
+    fn fixture_snapshot() -> ModelProfileSnapshot {
+        let stage = ModelStageProfileSnapshot {
+            profile_id: "fixture-profile-v1".to_string(),
+            model_name: "fixture-model:latest".to_string(),
+            model_digest: "fixture-digest".to_string(),
+            context_tokens: 8_192,
+            tokenizer_version: "fixture-tokenizer-v1".to_string(),
+        };
+        ModelProfileSnapshot {
+            version: 1,
+            preset_id: "fixture-preset-v1".to_string(),
+            analysis: stage.clone(),
+            verification: stage,
+        }
     }
 
     fn wait_until(mut condition: impl FnMut() -> bool) {
@@ -570,6 +740,13 @@ mod tests {
             )
             .expect("background run should be accepted");
         assert_eq!(accepted.state, PipelineState::Parsing);
+        let admitted = db::init_db(&database.0).expect("admitted run should be observable");
+        assert_eq!(
+            db::get_run_model_profile(&admitted, &accepted.run_id)
+                .expect("admitted profile should load"),
+            Some(fixture_snapshot())
+        );
+        drop(admitted);
 
         wait_until(|| {
             !manager
@@ -607,13 +784,308 @@ mod tests {
     }
 
     #[test]
+    fn desktop_start_rejects_snapshotless_runtime_before_persistence() {
+        let database = TestDatabase::new();
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(|_| Ok(Box::new(SnapshotlessFixtureRuntime))),
+        );
+
+        let error = manager
+            .start_pdf(
+                fixture_path()
+                    .to_str()
+                    .expect("fixture path should be UTF-8"),
+            )
+            .expect_err("a product desktop start must require an immutable snapshot");
+
+        assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
+        assert!(!database.0.exists());
+    }
+
+    #[test]
+    fn snapshotless_historical_retry_is_hidden_and_rejected_before_runtime_or_lineage() {
+        let database = TestDatabase::new();
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let (_, ingested) = crate::pipeline::ingest::ingest_pdf(
+            &mut conn,
+            fixture_path()
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+        )
+        .expect("legacy fixture should ingest without a profile");
+        let parser = PdfExtractParser::new();
+        let normalizer = CanonicalNormalizer::new();
+        let interpreter = DeterministicStructureInterpreter::new();
+        let chunker = DeterministicDocumentChunker::new();
+        crate::pipeline::service::process_ingested_to_summary(
+            &mut conn,
+            &ingested.run_id,
+            SummaryComponents {
+                parser: &parser,
+                normalizer: &normalizer,
+                interpreter: &interpreter,
+                chunker: &chunker,
+                runtime: &SnapshotlessRecoverableFailureRuntime,
+            },
+        )
+        .expect_err("snapshotless fixture should fail recoverably during model work");
+        let failed = get_pipeline_run(&conn, &ingested.run_id)
+            .expect("failed run should load")
+            .expect("failed run should exist");
+        assert!(failed.retry_checkpoint().is_some());
+        assert!(db::get_run_model_profile(&conn, &failed.run_id)
+            .expect("profile lookup should succeed")
+            .is_none());
+        let history = crate::pipeline::workspace::get_run(&conn, &failed.run_id)
+            .expect("history should remain readable");
+        assert!(!history.can_retry);
+        let events = list_pipeline_events(&conn, &failed.run_id).expect("events should load");
+        drop(conn);
+
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let observed_factory_calls = Arc::clone(&factory_calls);
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |_| {
+                observed_factory_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FixtureRuntime))
+            }),
+        );
+        let rejected = manager
+            .start_retry(&failed.run_id, failed.state_version)
+            .expect_err("desktop must reject a retry with no inherited profile");
+        assert_eq!(rejected.code(), "RETRY_NOT_ALLOWED");
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+
+        let mut conn = db::init_db(&database.0).expect("database should reopen");
+        let store_rejected = crate::pipeline::service::retry_failed_run_to_summary(
+            &mut conn,
+            &failed.run_id,
+            failed.state_version,
+            SummaryComponents {
+                parser: &parser,
+                normalizer: &normalizer,
+                interpreter: &interpreter,
+                chunker: &chunker,
+                runtime: &FixtureRuntime,
+            },
+        )
+        .expect_err("the retry transaction must independently reject a missing profile");
+        assert_eq!(store_rejected.code(), "RETRY_NOT_ALLOWED");
+        assert!(db::get_retry_lineage_for_source(&conn, &failed.run_id)
+            .expect("lineage lookup should succeed")
+            .is_none());
+        assert_eq!(
+            get_pipeline_run(&conn, &failed.run_id)
+                .expect("source should reload")
+                .expect("source should exist"),
+            failed
+        );
+        assert_eq!(
+            list_pipeline_events(&conn, &failed.run_id).expect("events should reload"),
+            events
+        );
+    }
+
+    #[test]
+    fn continuation_runtime_factory_receives_the_persisted_run_snapshot() {
+        let database = TestDatabase::new();
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let (_, ingested) = crate::pipeline::ingest::ingest_pdf(
+            &mut conn,
+            fixture_path()
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+        )
+        .expect("fixture should ingest");
+        let snapshot = fixture_snapshot();
+        conn.execute(
+            "INSERT INTO pipeline_run_model_profiles (run_id, profile_snapshot, created_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                ingested.run_id,
+                serde_json::to_string(&snapshot).expect("snapshot should serialize"),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .expect("snapshot should persist");
+        drop(conn);
+
+        let observed = Arc::new(StdMutex::new(None));
+        let factory_observed = Arc::clone(&observed);
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |received| {
+                let received = received
+                    .cloned()
+                    .expect("continuation must supply its persisted snapshot");
+                *factory_observed
+                    .lock()
+                    .expect("observation lock should remain available") = Some(received.clone());
+                Ok(Box::new(SnapshotFixtureRuntime(received)))
+            }),
+        );
+        let accepted = manager
+            .start_continuation(&ingested.run_id, ingested.state_version)
+            .expect("continuation should be accepted");
+        assert_eq!(
+            *observed
+                .lock()
+                .expect("observation lock should remain available"),
+            Some(snapshot)
+        );
+        wait_until(|| {
+            !manager
+                .is_active(&accepted.run_id)
+                .expect("registry should remain readable")
+        });
+    }
+
+    #[test]
+    fn model_artifact_continuation_requires_a_snapshot_before_worker_admission() {
+        use crate::pipeline::contracts::ContinuationCheckpoint;
+
+        for checkpoint in [
+            ContinuationCheckpoint::Analyzed,
+            ContinuationCheckpoint::Synthesized,
+        ] {
+            let error = continuation_runtime_snapshot("legacy-run", checkpoint, None)
+                .expect_err("model artifacts without a profile must not be activated");
+            assert_eq!(error.code(), "CONTINUATION_RUNTIME_PROFILE_UNAVAILABLE");
+        }
+        for checkpoint in [
+            ContinuationCheckpoint::Ingested,
+            ContinuationCheckpoint::Parsed,
+            ContinuationCheckpoint::Normalized,
+            ContinuationCheckpoint::Structured,
+            ContinuationCheckpoint::Chunked,
+        ] {
+            assert_eq!(
+                continuation_runtime_snapshot("pre-model-run", checkpoint, None)
+                    .expect("pre-model checkpoints may select a runtime on continuation"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_snapshot_runtime_cannot_mutate_continuation_or_retry_state() {
+        let database = TestDatabase::new();
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let (_, ingested) = crate::pipeline::ingest::ingest_pdf(
+            &mut conn,
+            fixture_path()
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+        )
+        .expect("fixture should ingest");
+        let snapshot = fixture_snapshot();
+        conn.execute(
+            "INSERT INTO pipeline_run_model_profiles (run_id, profile_snapshot, created_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                ingested.run_id,
+                serde_json::to_string(&snapshot).expect("snapshot should serialize"),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .expect("snapshot should persist");
+        let continuation_events =
+            list_pipeline_events(&conn, &ingested.run_id).expect("events should load");
+        drop(conn);
+
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |received| {
+                let received = received
+                    .cloned()
+                    .expect("recovery must use the persisted snapshot");
+                Ok(Box::new(UnavailableSnapshotRuntime(received)))
+            }),
+        );
+        let continuation_error = manager
+            .start_continuation(&ingested.run_id, ingested.state_version)
+            .expect_err("unavailable snapshot runtime must reject continuation admission");
+        assert_eq!(continuation_error.code(), "MODEL_NOT_AVAILABLE");
+        assert!(!manager
+            .is_active(&ingested.run_id)
+            .expect("registry should remain readable"));
+
+        let conn = db::init_db(&database.0).expect("database should reopen");
+        assert_eq!(
+            get_pipeline_run(&conn, &ingested.run_id)
+                .expect("run should reload")
+                .expect("run should exist"),
+            ingested
+        );
+        assert_eq!(
+            list_pipeline_events(&conn, &ingested.run_id).expect("events should reload"),
+            continuation_events
+        );
+
+        let invalid_factory_calls = Arc::new(AtomicUsize::new(0));
+        let observed_factory_calls = Arc::clone(&invalid_factory_calls);
+        let invalid_retry_manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |_| {
+                observed_factory_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FixtureRuntime))
+            }),
+        );
+        let invalid_retry = invalid_retry_manager
+            .start_retry(&ingested.run_id, ingested.state_version)
+            .expect_err("a nonfailed source must be rejected before runtime discovery");
+        assert_eq!(invalid_retry.code(), "RETRY_NOT_ALLOWED");
+        assert_eq!(invalid_factory_calls.load(Ordering::SeqCst), 0);
+
+        manager
+            .finalize(
+                &ingested.run_id,
+                Ok(Err(DocumentServiceError::RuntimeRequiredForBackground(
+                    ingested.run_id.clone(),
+                ))),
+            )
+            .expect("fixture source failure should persist");
+        let failed = get_pipeline_run(&conn, &ingested.run_id)
+            .expect("failed source should load")
+            .expect("failed source should exist");
+        let retry_events =
+            list_pipeline_events(&conn, &ingested.run_id).expect("failed events should load");
+
+        let stale_retry = invalid_retry_manager
+            .start_retry(&failed.run_id, failed.state_version - 1)
+            .expect_err("a stale retry must be rejected before runtime discovery");
+        assert_eq!(stale_retry.code(), "RETRY_STALE_STATE");
+        assert_eq!(invalid_factory_calls.load(Ordering::SeqCst), 0);
+
+        let retry_error = manager
+            .start_retry(&failed.run_id, failed.state_version)
+            .expect_err("unavailable snapshot runtime must reject retry admission");
+        assert_eq!(retry_error.code(), "MODEL_NOT_AVAILABLE");
+        assert_eq!(
+            get_pipeline_run(&conn, &failed.run_id)
+                .expect("source should reload")
+                .expect("source should exist"),
+            failed
+        );
+        assert_eq!(
+            list_pipeline_events(&conn, &failed.run_id).expect("events should remain stable"),
+            retry_events
+        );
+        assert!(db::get_retry_lineage_for_source(&conn, &failed.run_id)
+            .expect("retry lineage should remain readable")
+            .is_none());
+    }
+
+    #[test]
     fn cancellation_wins_atomically_during_model_work_and_survives_reopen() {
         let database = TestDatabase::new();
         let gate = Arc::new(BlockingGate::new());
         let factory_gate = gate.clone();
         let manager = DesktopJobManager::with_runtime_factory(
             database.0.clone(),
-            Arc::new(move || {
+            Arc::new(move |_| {
                 Ok(Box::new(BlockingRuntime {
                     gate: factory_gate.clone(),
                 }))
@@ -727,6 +1199,7 @@ mod tests {
             fixture_path()
                 .to_str()
                 .expect("fixture path should be UTF-8"),
+            None,
         )
         .expect("newer caller should admit parsing work");
         let stale_version = parsing.state_version.saturating_sub(1);

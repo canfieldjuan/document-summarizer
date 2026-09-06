@@ -1,12 +1,13 @@
 use crate::pipeline::chunk::{chunk_document, ChunkPipelineError};
 use crate::pipeline::contracts::{
     CompletedSummary, ContinuationCheckpoint, DocumentChunker, DocumentNormalizer, DocumentParser,
-    IngestedDocument, ModelRuntime, PipelineRun, PipelineState, StructureInterpreter,
+    IngestedDocument, ModelProfileSnapshot, ModelRuntime, PipelineRun, PipelineState,
+    StructureInterpreter,
 };
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::ingest::prepare_received_run;
-use crate::pipeline::ingest::{ingest_pdf, IngestError};
+use crate::pipeline::ingest::{ingest_pdf, ingest_pdf_with_profile, IngestError};
 use crate::pipeline::normalize::{normalize_document, NormalizePipelineError};
 use crate::pipeline::parser::{parse_document, parse_started_document, ParsePipelineError};
 use crate::pipeline::structure::{structure_document, StructurePipelineError};
@@ -42,6 +43,8 @@ pub enum DocumentServiceError {
     Retry(#[from] RetryPipelineError),
     #[error(transparent)]
     Continuation(#[from] ContinuationPipelineError),
+    #[error(transparent)]
+    ModelProfile(#[from] StoreError),
     #[error("Pipeline cancellation was observed at a safe work boundary")]
     CancellationObserved,
     #[error("Pipeline run {0} requires the local model runtime for background processing")]
@@ -59,6 +62,8 @@ impl DocumentServiceError {
             Self::Summary(error) => error.code(),
             Self::Retry(error) => error.code(),
             Self::Continuation(error) => error.code(),
+            Self::ModelProfile(StoreError::ModelProfileMismatch { .. }) => "MODEL_PROFILE_MISMATCH",
+            Self::ModelProfile(_) => "PIPELINE_STORE_ERROR",
             Self::CancellationObserved => "PIPELINE_CANCELLATION_OBSERVED",
             Self::RuntimeRequiredForBackground(_) => "BACKGROUND_RUNTIME_REQUIRED",
         }
@@ -106,6 +111,7 @@ impl DocumentServiceError {
             | Self::Continuation(ContinuationPipelineError::Store(error)) => {
                 is_stale_store_error(error)
             }
+            Self::ModelProfile(error) => is_stale_store_error(error),
             Self::Continuation(ContinuationPipelineError::StaleState { .. }) => true,
             _ => false,
         }
@@ -350,8 +356,12 @@ pub fn process_pdf_to_summary(
 pub(crate) fn admit_pdf_for_background(
     conn: &mut Connection,
     file_path: &str,
+    profile_snapshot: Option<&ModelProfileSnapshot>,
 ) -> Result<(IngestedDocument, PipelineRun), DocumentServiceError> {
-    let (document, ingested) = ingest_pdf(conn, file_path)?;
+    let (document, ingested) = match profile_snapshot {
+        Some(snapshot) => ingest_pdf_with_profile(conn, file_path, snapshot)?,
+        None => ingest_pdf(conn, file_path)?,
+    };
     let (parsing, persisted_document) =
         db::start_parsing(conn, &ingested.run_id, ingested.state_version)
             .map_err(ParsePipelineError::from)?;
@@ -365,6 +375,16 @@ pub(crate) fn admit_retry_for_background(
     expected_source_version: u32,
 ) -> Result<(IngestedDocument, PipelineRun), DocumentServiceError> {
     create_retry_processing_run(conn, source_run_id, expected_source_version)
+}
+
+pub(crate) fn validate_retry_for_background(
+    conn: &Connection,
+    source_run_id: &str,
+    expected_source_version: u32,
+) -> Result<(), DocumentServiceError> {
+    db::validate_retry_source(conn, source_run_id, expected_source_version)
+        .map_err(RetryPipelineError::from)?;
+    Ok(())
 }
 
 pub fn retry_failed_run_to_summary(
@@ -455,6 +475,7 @@ pub fn process_ingested_to_summary_with_delivery_policy(
     normalize_document(conn, components.normalizer, run_id)?;
     structure_document(conn, components.interpreter, run_id)?;
     chunk_document(conn, components.chunker, run_id)?;
+    ensure_runtime_profile(conn, run_id, components.runtime)?;
     analyze_chunked_document_controlled_with_delivery(
         conn,
         components.runtime,
@@ -532,6 +553,7 @@ fn process_chunked_to_summary_controlled(
     control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     cancellation_checkpoint(control)?;
+    ensure_runtime_profile(conn, run_id, runtime)?;
     analyze_chunked_document_controlled(conn, runtime, run_id, control)?;
     process_analyzed_to_summary_controlled(conn, run_id, runtime, control)
 }
@@ -543,6 +565,7 @@ fn process_analyzed_to_summary_controlled(
     control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     cancellation_checkpoint(control)?;
+    ensure_runtime_profile(conn, run_id, runtime)?;
     synthesize_analyzed_document_controlled(conn, runtime, run_id, control)?;
     process_synthesized_to_summary_controlled(conn, run_id, runtime, control)
 }
@@ -554,9 +577,20 @@ fn process_synthesized_to_summary_controlled(
     control: &dyn ExecutionControl,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
     cancellation_checkpoint(control)?;
+    ensure_runtime_profile(conn, run_id, runtime)?;
     verify_synthesized_document_controlled(conn, runtime, run_id, control)?;
     cancellation_checkpoint(control)?;
     Ok(complete_verified_document(conn, run_id)?)
+}
+
+fn ensure_runtime_profile(
+    conn: &Connection,
+    run_id: &str,
+    runtime: &dyn ModelRuntime,
+) -> Result<(), DocumentServiceError> {
+    let snapshot = runtime.profile_snapshot();
+    db::ensure_run_model_profile(conn, run_id, snapshot.as_ref())?;
+    Ok(())
 }
 
 fn cancellation_checkpoint(control: &dyn ExecutionControl) -> Result<(), DocumentServiceError> {
@@ -571,8 +605,8 @@ mod tests {
     use super::*;
     use crate::pipeline::chunk::DeterministicDocumentChunker;
     use crate::pipeline::contracts::{
-        ModelRequest, ModelResponse, ModelRuntimeFailure, PipelineStage, PipelineState,
-        PipelineWarning, RetryCheckpoint,
+        ModelProfileSnapshot, ModelRequest, ModelResponse, ModelRuntimeFailure,
+        ModelStageProfileSnapshot, PipelineStage, PipelineState, PipelineWarning, RetryCheckpoint,
     };
     use crate::pipeline::db::{
         get_analyzed_document, get_chunked_document, get_citation_artifact, get_document,
@@ -632,6 +666,27 @@ mod tests {
 
     struct FixtureRuntime;
 
+    fn fixture_model_profile() -> ModelProfileSnapshot {
+        ModelProfileSnapshot {
+            version: 1,
+            preset_id: "fixture-full-v1".to_string(),
+            analysis: ModelStageProfileSnapshot {
+                profile_id: "fixture-analysis-v1".to_string(),
+                model_name: "fixture-model".to_string(),
+                model_digest: "fixture-analysis-digest".to_string(),
+                context_tokens: 8_192,
+                tokenizer_version: "fixture-tokenizer-v1".to_string(),
+            },
+            verification: ModelStageProfileSnapshot {
+                profile_id: "fixture-verification-v1".to_string(),
+                model_name: "fixture-model".to_string(),
+                model_digest: "fixture-verification-digest".to_string(),
+                context_tokens: 8_192,
+                tokenizer_version: "fixture-tokenizer-v1".to_string(),
+            },
+        }
+    }
+
     impl ModelRuntime for FixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             Ok(ModelResponse {
@@ -652,6 +707,10 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_model_profile())
         }
     }
 
@@ -691,6 +750,10 @@ mod tests {
         fn model_id(&self) -> &str {
             "fixture-model"
         }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_model_profile())
+        }
     }
 
     struct RecoverableFailureRuntime;
@@ -715,6 +778,10 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_model_profile())
         }
     }
 
@@ -753,6 +820,10 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_model_profile())
         }
     }
 
@@ -837,6 +908,8 @@ mod tests {
                 .expect("run should exist");
         }
 
+        ensure_runtime_profile(conn, &ingested.run_id, runtime)
+            .expect("first model work should persist its runtime profile");
         analyze_chunked_document(conn, runtime, &ingested.run_id)
             .expect("fixture should analyze to checkpoint");
         if checkpoint == ContinuationCheckpoint::Analyzed {
@@ -1095,6 +1168,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn legacy_model_artifact_without_a_profile_is_not_advertised_as_continuable() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let runtime = CountingFixtureRuntime::default();
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let chunked = prepare_checkpoint(
+            &mut conn,
+            &source,
+            &pipeline,
+            &runtime,
+            ContinuationCheckpoint::Chunked,
+        );
+        analyze_chunked_document(&mut conn, &runtime, &chunked.run_id)
+            .expect("legacy-shaped fixture should reach analyzed without a v15 profile");
+
+        let history = crate::pipeline::workspace::list_recent_runs(&conn)
+            .expect("legacy history should load without activating a runtime");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].continuation_checkpoint,
+            Some(ContinuationCheckpoint::Analyzed)
+        );
+        assert!(history[0].continuation_requires_runtime);
+        assert!(!history[0].can_continue);
     }
 
     #[test]
@@ -1526,6 +1626,16 @@ mod tests {
                     .expect("child lineage should load")
                     .expect("child lineage should exist"),
                 lineage
+            );
+            assert_eq!(
+                db::get_run_model_profile(&conn, &parent.run_id)
+                    .expect("parent profile should load"),
+                Some(fixture_model_profile())
+            );
+            assert_eq!(
+                db::get_run_model_profile(&conn, &completed.run_id)
+                    .expect("retry profile should load"),
+                Some(fixture_model_profile())
             );
 
             let completed_events =

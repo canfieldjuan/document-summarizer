@@ -3,7 +3,7 @@ use crate::pipeline::contracts::{
     PipelineRun, PipelineState, PipelineWarning, SummaryArtifact,
 };
 use crate::pipeline::db::{self, StoreError};
-use crate::pipeline::model::OllamaRuntime;
+use crate::pipeline::model_settings::runtime_from_settings;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -127,8 +127,8 @@ impl WorkspaceError {
     }
 }
 
-pub fn ollama_runtime_status() -> RuntimeStatus {
-    match OllamaRuntime::from_environment() {
+pub fn ollama_runtime_status(settings_path: &std::path::Path) -> RuntimeStatus {
+    match runtime_from_settings(settings_path) {
         Ok(runtime) => assess_runtime(&runtime),
         Err(failure) => unavailable_runtime_status(None, None, failure),
     }
@@ -176,8 +176,13 @@ fn run_history_item(
 ) -> Result<RunHistoryItem, WorkspaceError> {
     let retry_of = db::get_retry_lineage_for_retry(conn, &run.run_id)?;
     let retry_child = db::get_retry_lineage_for_source(conn, &run.run_id)?;
-    let can_retry = run.retry_checkpoint().is_some() && retry_child.is_none();
+    let model_profile_available = db::get_run_model_profile(conn, &run.run_id)?.is_some();
+    let can_retry =
+        run.retry_checkpoint().is_some() && retry_child.is_none() && model_profile_available;
     let continuation_checkpoint = run.continuation_checkpoint();
+    let continuation_profile_available = !continuation_checkpoint
+        .is_some_and(ContinuationCheckpoint::requires_existing_model_profile)
+        || model_profile_available;
     Ok(RunHistoryItem {
         run_id: run.run_id,
         document_id: document.document_id,
@@ -195,7 +200,7 @@ fn run_history_item(
         retry_run_id: retry_child.map(|lineage| lineage.retry_run_id),
         can_retry,
         continuation_checkpoint,
-        can_continue: continuation_checkpoint.is_some(),
+        can_continue: continuation_checkpoint.is_some() && continuation_profile_available,
         continuation_requires_runtime: continuation_checkpoint
             .is_some_and(ContinuationCheckpoint::requires_runtime),
         cancellation_requested: run.cancellation_requested,

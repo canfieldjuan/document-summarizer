@@ -1,8 +1,8 @@
 use crate::pipeline::contracts::{
-    AnalyzedDocument, ChunkedDocument, CitationArtifact, IngestedDocument, NormalizedDocument,
-    ParsedDocument, PipelineEvent, PipelineFailure, PipelineRun, PipelineStage, PipelineState,
-    PipelineWarning, RetryCheckpoint, RetryLineage, StructuredDocument, SummaryArtifact,
-    SynthesizedDocument, VerifiedDocument,
+    AnalyzedDocument, ChunkedDocument, CitationArtifact, IngestedDocument, ModelProfileSnapshot,
+    NormalizedDocument, ParsedDocument, PipelineEvent, PipelineFailure, PipelineRun, PipelineStage,
+    PipelineState, PipelineWarning, RetryCheckpoint, RetryLineage, StructuredDocument,
+    SummaryArtifact, SynthesizedDocument, VerifiedDocument,
 };
 use crate::pipeline::schema::{self, MigrationError};
 use crate::pipeline::state::{StateMachine, TransitionError};
@@ -116,6 +116,8 @@ pub enum StoreError {
     },
     #[error("Retry lineage metadata is inconsistent for run {retry_run_id}")]
     RetryLineageMismatch { retry_run_id: String },
+    #[error("Pipeline run {run_id} model profile does not match its immutable snapshot")]
+    ModelProfileMismatch { run_id: String },
     #[error("Pipeline run {run_id} cannot be cancelled from {state:?}")]
     CancellationNotAllowed {
         run_id: String,
@@ -171,6 +173,65 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, StoreError> {
 
 pub fn schema_version(conn: &Connection) -> Result<u32, StoreError> {
     Ok(schema::version(conn)?)
+}
+
+pub(crate) fn ensure_run_model_profile(
+    conn: &Connection,
+    run_id: &str,
+    snapshot: Option<&ModelProfileSnapshot>,
+) -> Result<(), StoreError> {
+    let persisted = conn
+        .query_row(
+            "SELECT profile_snapshot FROM pipeline_run_model_profiles WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match (persisted, snapshot) {
+        (Some(persisted), Some(snapshot)) => {
+            let persisted: ModelProfileSnapshot = from_json(&persisted)?;
+            if &persisted != snapshot {
+                return Err(StoreError::ModelProfileMismatch {
+                    run_id: run_id.to_string(),
+                });
+            }
+            Ok(())
+        }
+        (Some(_), None) => Err(StoreError::ModelProfileMismatch {
+            run_id: run_id.to_string(),
+        }),
+        (None, Some(snapshot)) => {
+            let run_exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pipeline_runs WHERE run_id = ?1)",
+                [run_id],
+                |row| row.get(0),
+            )?;
+            if !run_exists {
+                return Err(StoreError::RunNotFound(run_id.to_string()));
+            }
+            conn.execute(
+                "INSERT INTO pipeline_run_model_profiles (run_id, profile_snapshot, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![run_id, to_json(snapshot)?, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        }
+        (None, None) => Ok(()),
+    }
+}
+
+pub(crate) fn get_run_model_profile(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<ModelProfileSnapshot>, StoreError> {
+    conn.query_row(
+        "SELECT profile_snapshot FROM pipeline_run_model_profiles WHERE run_id = ?1",
+        [run_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| from_json(&value))
+    .transpose()
 }
 
 fn to_json<T: Serialize>(value: &T) -> Result<String, StoreError> {
@@ -1059,6 +1120,15 @@ pub(super) fn persist_ingestion(
     document: &IngestedDocument,
     run: &PipelineRun,
 ) -> Result<PipelineRun, StoreError> {
+    persist_ingestion_with_profile(conn, document, run, None)
+}
+
+pub(crate) fn persist_ingestion_with_profile(
+    conn: &mut Connection,
+    document: &IngestedDocument,
+    run: &PipelineRun,
+    profile_snapshot: Option<&ModelProfileSnapshot>,
+) -> Result<PipelineRun, StoreError> {
     if run.document_id != document.document_id
         || run.state != PipelineState::Received
         || run.state_version != 1
@@ -1070,6 +1140,7 @@ pub(super) fn persist_ingestion(
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let ingested = persist_ingestion_in_transaction(&tx, document, run)?;
+    ensure_run_model_profile(&tx, &ingested.run_id, profile_snapshot)?;
     tx.commit()?;
     Ok(ingested)
 }
@@ -1137,14 +1208,12 @@ fn persist_received_run_to_ingested(
     Ok(ingested)
 }
 
-pub(super) fn create_retry_run(
-    conn: &mut Connection,
+pub(crate) fn validate_retry_source(
+    conn: &Connection,
     source_run_id: &str,
     expected_source_version: u32,
-    retry_run: &PipelineRun,
-) -> Result<(PipelineRun, IngestedDocument, RetryLineage), StoreError> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let source_run = get_pipeline_run(&tx, source_run_id)?
+) -> Result<(PipelineRun, RetryCheckpoint), StoreError> {
+    let source_run = get_pipeline_run(conn, source_run_id)?
         .ok_or_else(|| StoreError::RunNotFound(source_run_id.to_string()))?;
     if source_run.state != PipelineState::Failed {
         return Err(StoreError::InvalidRetrySource {
@@ -1167,12 +1236,30 @@ pub(super) fn create_retry_run(
                 run_id: source_run_id.to_string(),
                 reason: "the failure has no reusable checkpoint".to_string(),
             })?;
-    if let Some(existing) = get_retry_lineage_for_source(&tx, source_run_id)? {
+    if get_run_model_profile(conn, source_run_id)?.is_none() {
+        return Err(StoreError::InvalidRetrySource {
+            run_id: source_run_id.to_string(),
+            reason: "the failed run has no immutable model profile to inherit".to_string(),
+        });
+    }
+    if let Some(existing) = get_retry_lineage_for_source(conn, source_run_id)? {
         return Err(StoreError::RetryAlreadyExists {
             source_run_id: source_run_id.to_string(),
             retry_run_id: existing.retry_run_id,
         });
     }
+    Ok((source_run, checkpoint))
+}
+
+pub(super) fn create_retry_run(
+    conn: &mut Connection,
+    source_run_id: &str,
+    expected_source_version: u32,
+    retry_run: &PipelineRun,
+) -> Result<(PipelineRun, IngestedDocument, RetryLineage), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (source_run, checkpoint) =
+        validate_retry_source(&tx, source_run_id, expected_source_version)?;
     if retry_run.document_id != source_run.document_id
         || retry_run.state != PipelineState::Received
         || retry_run.state_version != 1
@@ -1218,6 +1305,16 @@ pub(super) fn create_retry_run(
             lineage.source_run_id,
             to_json(&lineage.checkpoint)?,
             lineage.created_at.to_rfc3339(),
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO pipeline_run_model_profiles (run_id, profile_snapshot, created_at)
+         SELECT ?1, profile_snapshot, ?2
+         FROM pipeline_run_model_profiles WHERE run_id = ?3",
+        params![
+            retry_run.run_id,
+            retry_run.created_at.to_rfc3339(),
+            source_run_id
         ],
     )?;
     tx.commit()?;
@@ -2555,6 +2652,57 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
         }
+    }
+
+    fn model_profile_snapshot() -> ModelProfileSnapshot {
+        ModelProfileSnapshot {
+            version: 1,
+            preset_id: "full-test-v1".to_string(),
+            analysis: crate::pipeline::contracts::ModelStageProfileSnapshot {
+                profile_id: "analysis-v1".to_string(),
+                model_name: "analysis:latest".to_string(),
+                model_digest: "analysis-digest".to_string(),
+                context_tokens: 8_192,
+                tokenizer_version: "qwen-test-v1".to_string(),
+            },
+            verification: crate::pipeline::contracts::ModelStageProfileSnapshot {
+                profile_id: "verification-v1".to_string(),
+                model_name: "verification:latest".to_string(),
+                model_digest: "verification-digest".to_string(),
+                context_tokens: 16_384,
+                tokenizer_version: "qwen-test-v1".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn run_model_profile_is_insert_once_and_must_match_on_continuation() {
+        let source = TestFile::new("pdf", b"%PDF-1.4\nMODEL_PROFILE_SNAPSHOT");
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let (_, run) = ingest_pdf(&mut conn, source.0.to_str().expect("UTF-8 path"))
+            .expect("candidate should ingest");
+        let snapshot = model_profile_snapshot();
+        ensure_run_model_profile(&conn, &run.run_id, Some(&snapshot))
+            .expect("first profile should persist");
+        assert_eq!(
+            get_run_model_profile(&conn, &run.run_id).expect("profile should load"),
+            Some(snapshot.clone())
+        );
+        ensure_run_model_profile(&conn, &run.run_id, Some(&snapshot))
+            .expect("the identical continuation profile should pass");
+
+        let mut changed = snapshot;
+        changed.analysis.context_tokens += 1;
+        assert!(matches!(
+            ensure_run_model_profile(&conn, &run.run_id, Some(&changed)),
+            Err(StoreError::ModelProfileMismatch { .. })
+        ));
+        assert!(conn
+            .execute(
+                "UPDATE pipeline_run_model_profiles SET profile_snapshot = '{}' WHERE run_id = ?1",
+                [&run.run_id],
+            )
+            .is_err());
     }
 
     #[test]

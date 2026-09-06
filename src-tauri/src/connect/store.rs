@@ -3,7 +3,7 @@ use crate::connect::contracts::{
     JobStatus, ProviderRef, CAPABILITY_ID, CAPABILITY_VERSION, PROTOCOL_VERSION,
 };
 use crate::connect::v2;
-use crate::pipeline::contracts::{IngestedDocument, PipelineRun};
+use crate::pipeline::contracts::{IngestedDocument, ModelProfileSnapshot, PipelineRun};
 use crate::pipeline::db::{self, StoreError};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -84,6 +84,7 @@ pub fn accept_job_with_ingestion(
         provider_instance_id,
         document,
         run,
+        None,
         || true,
     )?
     .ok_or_else(|| {
@@ -102,6 +103,7 @@ pub fn accept_job_with_ingestion_guarded<F>(
     provider_instance_id: &str,
     document: &IngestedDocument,
     run: &PipelineRun,
+    profile_snapshot: Option<&ModelProfileSnapshot>,
     mut admission_check: F,
 ) -> Result<Option<(PipelineRun, StoredConnectJob)>, ConnectStoreError>
 where
@@ -115,6 +117,7 @@ where
     }
     let now = Utc::now();
     let ingested_run = db::persist_ingestion_in_transaction(&tx, document, run)?;
+    db::ensure_run_model_profile(&tx, &ingested_run.run_id, profile_snapshot)?;
     tx.execute(
         "INSERT INTO connect_jobs (
             job_id, request_hash, protocol_version, capability_id, capability_version,
@@ -402,6 +405,7 @@ fn validate_state_payload(
 mod tests {
     use super::*;
     use crate::connect::contracts::{job_error, CAPABILITY_ID, CAPABILITY_VERSION};
+    use crate::pipeline::contracts::ModelStageProfileSnapshot;
     use crate::pipeline::ingest::prepare_pdf_ingestion;
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -444,6 +448,22 @@ mod tests {
         }
     }
 
+    fn profile_snapshot() -> ModelProfileSnapshot {
+        let stage = ModelStageProfileSnapshot {
+            profile_id: "connect-store-profile".to_string(),
+            model_name: "connect-store-model".to_string(),
+            model_digest: "connect-store-digest".to_string(),
+            context_tokens: 8_192,
+            tokenizer_version: "connect-store-tokenizer".to_string(),
+        };
+        ModelProfileSnapshot {
+            version: 1,
+            preset_id: "connect-store-preset".to_string(),
+            analysis: stage.clone(),
+            verification: stage,
+        }
+    }
+
     #[test]
     fn accepted_job_and_ingestion_commit_atomically_and_enforce_one_active_job() {
         let file = TestFile::pdf();
@@ -455,7 +475,8 @@ mod tests {
             Some(&first.inputs[0].display_name),
         )
         .expect("ingestion should prepare");
-        let (_, stored) = accept_job_with_ingestion(
+        let snapshot = profile_snapshot();
+        let (_, stored) = accept_job_with_ingestion_guarded(
             &mut conn,
             &first,
             &first.canonical_hash().unwrap(),
@@ -463,9 +484,16 @@ mod tests {
             &Uuid::new_v4().to_string(),
             &document,
             &run,
+            Some(&snapshot),
+            || true,
         )
-        .expect("first job should atomically accept");
+        .expect("first guarded admission should succeed")
+        .expect("active entitlement should admit the job");
         assert_eq!(stored.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(
+            db::get_run_model_profile(&conn, &run.run_id).unwrap(),
+            Some(snapshot.clone())
+        );
 
         let second = request(&bytes);
         let (second_document, second_run) = prepare_pdf_ingestion(
@@ -473,7 +501,7 @@ mod tests {
             Some(&second.inputs[0].display_name),
         )
         .unwrap();
-        assert!(accept_job_with_ingestion(
+        assert!(accept_job_with_ingestion_guarded(
             &mut conn,
             &second,
             &second.canonical_hash().unwrap(),
@@ -481,10 +509,15 @@ mod tests {
             &Uuid::new_v4().to_string(),
             &second_document,
             &second_run,
+            Some(&snapshot),
+            || true,
         )
         .is_err());
         assert!(db::get_pipeline_run(&conn, &second_run.run_id)
             .expect("run query should work")
+            .is_none());
+        assert!(db::get_run_model_profile(&conn, &second_run.run_id)
+            .expect("profile query should work")
             .is_none());
     }
 

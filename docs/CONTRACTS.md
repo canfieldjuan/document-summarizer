@@ -196,9 +196,10 @@ startup never invokes a parser or model.
   an appropriate `SourceType`.
 - `ModelRuntime` accepts a provider-neutral `ModelRequest` and returns either a
   `ModelResponse` or structured `ModelRuntimeFailure`. Generic run state and
-  artifact persistence contain no model-family or SDK types. The first adapter
-  uses an OpenAI-compatible exact-loopback HTTP endpoint and can be replaced
-  without changing analysis, synthesis, verification, or Connect contracts.
+  artifact persistence contain no model-family or SDK types. The current
+  adapter uses native Ollama endpoints on exact-loopback HTTP and can be
+  replaced without changing analysis, synthesis, verification, or Connect
+  contracts.
 
 ## `ParsedDocument` (Slice 2)
 
@@ -761,14 +762,16 @@ identity.
 
 ### Runtime, reporting and explicit limits
 
-The supported runtime remains loopback Ollama through the OpenAI-compatible
-API, default `http://127.0.0.1:11434/v1/`, model `qwen3-30b-a3b:latest`.
-The timeout remains 900 seconds, with separate short connection/health limits.
-The adapter rejects non-loopback HTTP hosts, credentials in the URL, proxies
-and redirects; optional credentials come from its bounded token file.
-Deployment environment overrides remain unchanged. All source text is marked
-untrusted in prompts. Temperature remains zero and the request asks for
-`reasoning_effort: "none"`; template/runtime behavior must be measured.
+The supported runtime is native loopback Ollama, default
+`http://127.0.0.1:11434/`, with an exact-digest qualified Qwen preset selected
+through persisted application settings. The timeout remains 900 seconds, with
+separate short connection/health limits. The adapter rejects non-loopback HTTP
+hosts, credentials in the URL, proxies and redirects; optional credentials come
+from its bounded token file. Deployment endpoint, timeout and token-file
+overrides remain available; the desktop model choice is not an environment
+variable. All source text is marked untrusted in prompts. Temperature remains
+zero and native requests set `think: false`; template/runtime behavior must be
+measured.
 
 Run-derived signed-range seeds remain in requests for reproducibility. A changed
 seed alone is not represented as a meaningful greedy retry. Actual paraphrase
@@ -785,8 +788,10 @@ and accepted lengths. Only the exact vocabulary-loading failure may retry in
 JSON-object mode; other failures do not trigger that fallback. Transport
 success is not proof of semantic correctness.
 
-Analysis system-plus-user input remains
-`min(16_000, 3*(8192-2048-512)) = 16,000` characters.
+Analysis system-plus-user input retains the defense-in-depth character bound
+`min(16_000, 3*(C-2048-512))`, where `C` is the admitted analysis profile
+context; the pinned-tokenizer admission over the full native payload is
+authoritative.
 Source chunks retain their 100,000-character admission guard. The claim ceiling
 does not remove page/catalog/input/output/verifier constraints. New direct
 synthesis has no model-request budget to exhaust; the old 256-request
@@ -817,6 +822,262 @@ head, followed by a separate fresh unresolved-thread and review-state poll. A
 thread count from a previous-head review is not evidence about the final head.
 PR #30 violated this ordering when its final-head review arrived after merge; this
 correction must not repeat that process failure.
+
+#### Native transport and discovery
+
+Production generation uses native `POST /api/chat`; discovery uses `/api/tags`
+and `POST /api/show`. Requests retain temperature zero, the run-derived seed,
+the stage output allowance and the projected JSON schema. Native options carry
+the qualified `num_ctx` and `num_predict`; the schema is sent in `format`.
+Responses record provider prompt and completion counts when supplied. The same
+loopback-only URL, no-proxy, no-redirect, bounded credential-file, timeout,
+diagnostic-redaction and exact schema-fallback boundaries remain authoritative.
+Each qualified chat request asks Ollama to retain its runner for a bounded
+execution-provenance check. Qualified generation uses native NDJSON streaming.
+After receiving the first non-final frame and before reading the final frame,
+the adapter reads authenticated `/api/ps`, caps its record count before
+filtering, and requires exactly one active record for the response model name
+with the digest admitted for that run. This overlaps the proof with the still
+active request instead of correlating output with a later global runner state.
+Only after that proof may the remaining frames be read and their message
+content assembled. A final-only response, changed model name, oversized,
+missing, ambiguous or mismatched runner catalog, malformed frame, mid-stream
+error, missing final frame or data after the final frame rejects the entire
+output. No partial content reaches a stage parser or artifact.
+
+The running-model record cap is the same explicit 256-record ceiling used for
+installed-model discovery and applies on every provenance query. The bounded
+response-byte limit remains independent. A post-response `/api/tags` or
+`/api/ps` lookup is insufficient because mutable global state can change after
+the completed request. Ollama 0.24.0 does not accept either a raw digest or a
+`sha256:` digest as the chat model address, so request-time streaming proof is
+the supported binding for this adapter rather than nominal content addressing.
+Unqualified qualification probes may consume the same bounded stream without a
+digest proof; they never become product runtimes or persist qualified identity.
+Execution-provenance rejection is recoverable: the unproven response is
+discarded, the immutable run snapshot remains authoritative, and retry admission
+must recheck that exact profile before creating work. A permanently unsupported
+or unqualified profile remains a terminal configuration error.
+The same temporary exact-digest drift detected by a stage-boundary health check
+is recoverable; restoring the snapshotted digest may admit a retry, while the
+current stage remains rejected.
+
+Discovery admits only Qwen-family architectures that the application explicitly
+supports. An installed descriptor records the exact Ollama name and digest,
+byte size, architecture, parameter-size and quantization metadata when reported,
+the model maximum context read from architecture-scoped `model_info`, and its
+qualification state. Names, filenames and display metadata are not capability
+proof. Missing, malformed, zero or implausible context metadata leaves a model
+visible but unqualified; it never silently falls back to 8,192. Non-Qwen models
+remain visible only as unsupported installed entries and cannot be selected.
+The bounded `/api/tags` body may contain at most 256 model records. Discovery
+rejects a larger catalog before any `/api/show` request, and all metadata probes
+share one five-second aggregate deadline that begins before the tags request.
+Response-body bounds are not retained-memory bounds: every externally supplied
+string copied into an installed descriptor is therefore limited to 512 UTF-8
+bytes, and the sum of all retained descriptor strings is limited to 256 KiB.
+The per-field guard applies to names, digests, architecture/family,
+parameter-size and quantization metadata before the value can be returned or
+used to construct another request. The aggregate guard is checked while the
+descriptor vector is built, before it can be serialized to the webview. An
+oversized field, arithmetic overflow, or aggregate maximum plus one fails the
+catalog as a whole with no truncated or partially trusted metadata; exact
+maxima remain valid.
+Per-request timeouts remain defense in depth; they do not multiply into an
+unbounded startup delay. Reaching any discovery bound fails the catalog as a
+whole rather than returning a silently truncated model list.
+
+#### Qualified profiles, context and token planning
+
+A selectable model profile is keyed by immutable model digest, Qwen tokenizer
+family and profile version. It carries a measured safe context no greater than
+the discovered model maximum, supported stages and corpus qualification result.
+There is no free-form context slider. A profile whose digest no longer matches
+the installed model becomes unavailable until it is qualified again.
+
+Every request uses the selected stage profile's context. The runtime exposes
+that value to the planner; analysis and verification therefore need not share a
+context. Input admission counts the actual serialized native system/user/schema
+payload with an application-pinned tokenizer for that Qwen tokenizer family,
+then reserves the output allowance and an explicit framing margin. The pinned
+asset may be reconstructed from Ollama's verbose GGUF token and merge tables
+only when their canonical fingerprint and pre-tokenizer kind exactly match the
+profile; missing or changed metadata fails before inference. Qwen 3 and Qwen
+3.5/3.8 tokenizer fingerprints, pre-tokenizer implementations and versions are
+distinct. Character limits remain defense-in-depth payload caps, not token
+estimates. A request that cannot fit the qualified context fails before
+inference with measured token counts; the adapter does not ask Ollama to
+truncate or expand context implicitly.
+
+Token admission counts the exact serialized native-chat payload that is sent.
+The pinned counter must not apply NFC, NFD or any other Unicode normalization
+unless the transmitted payload is changed by the identical operation first;
+decomposed source text therefore retains its actual byte-level token cost.
+Removing the prior counter-only NFC step advances both Qwen tokenizer profile
+versions rather than changing the meaning of a persisted version in place.
+Regression evidence compares canonically equivalent composed and decomposed
+input through the production pre-tokenizer and proves that the extra transmitted
+code point is not normalized away before the context decision.
+
+The supported candidate matrix is Qwen 3.5 4B, Qwen 3.5 9B, base Qwen 3.8 27B,
+Jack Qwen 3.8 27B Coder and the existing Qwen 3 30B-A3B baseline. The locally
+available Jack GGUF is a distinct candidate, not an alias for base Qwen 3.8 and
+not presumed equivalent from its filename or footprint. Models below 4B are not
+exposed as product presets in this slice. A weak candidate must not reduce the
+baseline build's limits, prompts, validators, coverage targets or verifier
+standard.
+
+#### User settings and stage routing
+
+The desktop exposes installed Qwen descriptors and qualified presets, including
+model size, family, maximum context, qualified effective context and disabled
+reason. The user selects a persisted preset in the application rather than by
+editing an environment variable. Settings are written atomically in the private
+application-data directory; malformed, unknown, unsupported or stale-digest
+values fail closed to an explicit unavailable state, never to an arbitrary
+installed model. A settings change affects new runs only.
+
+Multiple installed Ollama names for the same qualified immutable digest are
+aliases, not distinct product presets. The installed-model catalog keeps every
+name visible, while preset construction deduplicates by qualified digest before
+full or hybrid routing and chooses the lexicographically first enabled alias as
+the deterministic name for a new run. Therefore every rendered preset ID is
+unique and still identifies one immutable capability profile; persisted preset
+selection cannot resolve to a different duplicate row. Historical runs remain
+bound to the exact model name and digest already stored in their snapshot.
+
+A full preset routes analysis and verification to the same model and is offered
+only after that exact digest passes the full qualification contract. A hybrid
+preset routes selection/paraphrase to the chosen qualified smaller model and
+verification to the strongest installed qualified verifier. Routing is based on
+the typed request stage, not prompt inspection. Direct synthesis remains local
+and deterministic. A hybrid preset cannot route verification to a model with a
+lower verifier qualification tier merely because it is smaller or currently
+selected. If the required verifier is absent or changed, starting the run fails
+before document work rather than silently weakening verification.
+
+#### Immutable run identity and historical behavior
+
+A new run snapshots the preset/profile versions, actual Ollama names and digests,
+per-stage qualified contexts and tokenizer versions before the first model call.
+Every generated artifact continues to record the actual runtime/model identity
+that produced it. Continuation uses the snapshot and refuses a missing or changed
+model; it never switches because the global setting changed. A retry run inherits
+the source run's snapshot unless an explicitly user-started new run selects the
+current preset. Historical runs without a snapshot remain readable under their
+stored legacy runtime/model identifiers and compiled historical budgeting rules;
+they are not relabeled as native or qualified.
+
+Connect runtime selection happens before admission, and the selected profile
+snapshot is inserted in the same SQLite transaction as ingestion and the
+accepted job-to-run mapping. Therefore an accepted Connect job cannot expose a
+stable ingested checkpoint without its immutable runtime identity, including if
+the process exits before worker scheduling. A production Connect runtime without
+a profile snapshot is rejected before the acceptance transaction.
+If runtime construction or snapshot admission fails after artifact preparation,
+the provider rechecks the job identifier before returning that error. An
+identical request that committed concurrently returns the stored idempotent job;
+a conflicting request returns the existing job-ID conflict. Cleanup removes only
+the losing request's separately allocated import and never the accepted job's
+owned source.
+
+Desktop new-run admission likewise requires a runtime profile snapshot and
+inserts it in the same SQLite transaction that first persists the document and
+run. Starting parsing may follow in its existing transition, but a crash at any
+point after admission cannot leave the new run without the selected immutable
+profile. Test-only legacy setup may explicitly construct snapshotless historical
+checkpoints; the product start path may not.
+
+A failed historical run without an immutable model profile is not retryable.
+History does not advertise Retry for that run, desktop retry admission rejects
+it before runtime construction or health, and the immediate retry-lineage
+transaction repeats the profile-presence check before creating a child. A retry
+may never substitute the current global preset for an absent inherited profile;
+the user must explicitly start a new run to select the current preset. Current
+product runs already persist their profile at admission, so this restriction is
+limited to snapshotless historical or test-created state.
+
+The selected global runtime status gates new-document admission only. A history
+item that advertises retry or runtime-required continuation remains actionable
+when the current global preset is unavailable, because the recovery command
+reconstructs and health-checks that run's immutable snapshot independently.
+Snapshot preflight still occurs before retry lineage, state or events mutate;
+an unavailable historical runtime returns its typed error without consuming the
+checkpoint. The frontend must not replace that per-run backend authority with
+the readiness of an unrelated current preset.
+
+Model disappearance is a recoverable availability failure at every metadata
+lookup. In particular, if `/api/tags` reports the snapshotted name and a later
+`/api/show` returns not-found during stage health or tokenizer loading, the
+adapter returns retryable `MODEL_NOT_AVAILABLE`, rejects the current work and
+accepts no generated bytes. Authentication, malformed metadata, unsupported
+architecture/tokenizer and invalid context remain their existing terminal or
+typed boundaries; a not-found response does not relax profile matching.
+
+#### Qualification and acceptance evidence
+
+Unit and integration evidence must cover native request projection, schema and
+usage parsing; exact stage routing; model-maximum versus qualified-context
+boundaries; malformed and stale discovery; loopback and redirect rejection;
+atomic setting recovery; immutable continuation; and both sides of every token
+admission boundary. Tests prove that a small analysis model cannot become the
+verifier through a falsy/default path and that downstream code uses the admitted
+profile and counted payload rather than raw settings or character proxies.
+Catalog tests supply the same qualified digest under two names in reverse order,
+retain both installed descriptors, and require one uniquely identified preset
+using the deterministic canonical alias.
+Discovery resource tests cover each retained external string at 512 UTF-8 bytes
+and 513 bytes, plus descriptor aggregates at 256 KiB and 256 KiB plus one. They
+prove the checked descriptor-building path, rather than a detached validator,
+owns the values ultimately returned to settings and the webview.
+Recovery tests also cover a healthy immutable run snapshot while the selected
+global preset is unavailable, plus model removal between tags and metadata
+lookup; both paths must preserve the checkpoint and remain retryable.
+They also prove that a snapshotless failed historical run is not advertised as
+retryable, invokes no runtime factory when retry is attempted, and cannot create
+retry lineage through the transactional store boundary.
+Streaming tests hold the final chat frame until the provenance request is
+observed, prove that output is assembled only after a matching in-flight runner
+record, and cover missing, duplicate, mismatched, exactly-256 and 257-record
+runner catalogs. They also reject final-only, malformed, mid-stream-error,
+missing-final and post-final frames without exposing partial generated text.
+
+Each candidate is run through the same live NARA robustness fixture and DOL
+product fixture without changing prompts, validators, timeouts or acceptance
+thresholds between models. The record includes exact model name and digest,
+preset and stage routing, discovered maximum and qualified contexts, tokenizer
+version, claims, evidence, raw and adjusted cited-page fractions, omissions and
+withheld claims, per-stage request and token counts, wall time, schema fallback
+and failure. Failures lead the report. NARA proves delivery and warning behavior
+on an OCR-layer stress document, not table accuracy. DOL must deliver at the
+existing product thresholds before a model is eligible for a full preset.
+Hybrid qualification additionally requires the selected small model to complete
+analysis and the qualified verifier to preserve the same verification contract.
+
+The existing Qwen 3 30B-A3B result is the non-regression baseline. A smaller
+candidate may improve footprint or analysis latency, but it does not become a
+full preset solely because it loads, returns valid JSON or produces more claims.
+Jack and base Qwen 3.8 are reported separately. Qualification is evidence for an
+exact digest and profile, not a blanket claim about every quantization or model
+carrying the same family name.
+
+The current product registry contains only the exact qualified Qwen 3 30B-A3B
+digest. The tested Qwen 3.5 4B and 9B digests remain installed but unqualified
+because both corpus documents failed without prompt or threshold changes. The
+base and Jack Qwen 3.8 27B digests remain installed but unqualified because the
+current Ollama loader cannot initialize either GGUF. They remain visible with an
+unavailable reason and cannot become a full or hybrid preset.
+
+#### Explicit non-scope and deployment boundary
+
+This slice does not add non-Qwen providers, cloud inference, arbitrary endpoint
+entry, model downloading/importing from the UI, a context slider, automatic
+quantization choice, OCR/vision, parser changes, prompt loosening, timeout
+increases, coverage reductions or verifier bypass. Ollama model-store relocation
+and GGUF import are operator deployment steps, documented and performed
+copy-first on the development machine; application code never scans arbitrary
+filesystem paths or mutates the Ollama store. Existing models are not deleted as
+part of migration or qualification.
 
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
@@ -855,13 +1116,13 @@ currently verified Debian package; AppImage, RPM, macOS, and Windows packaging
 remain separate target-platform work. A supported Linux package must contain the
 desktop executable, desktop entry, and icons without legacy probe executables.
 
-Connect, entitlement, packaging, parsing, OCR/vision, model choice, endpoint,
-context and customer-visible presentation changes remain outside this slice.
-The UI continues to render cited claim cards; optional prose consolidation and
-PDF-viewer navigation are separate product decisions. A later native Ollama
-evaluation may test `options.num_ctx`, schema format, GPU residency and
-KV-cache costs under a separately stated runtime configuration. This slice
-does not perform that cutover.
+Connect, entitlement, packaging, parsing, OCR/vision and customer-visible
+summary presentation changes remain outside this runtime slice. The UI
+continues to render cited claim cards; optional prose consolidation and
+PDF-viewer navigation are separate product decisions. GPU residency and
+KV-cache cost at contexts above each profile's qualified value remain separate
+deployment evaluations; discovery of a larger model maximum does not qualify a
+larger effective context by itself.
 
 ## Stable checkpoint continuation
 
@@ -1049,6 +1310,9 @@ SQLite transaction as the accepted job-to-run mapping. A partial unique index
 permits only one accepted/processing Connect job. Same job ID plus the same
 canonical request returns the existing job; different input returns a conflict.
 Interrupted active jobs become durable retryable failures on provider restart.
+When pipeline processing fails after acceptance, the public Connect job error
+preserves the typed pipeline failure's `recoverable` value; a separate code
+allowlist must not silently turn a recoverable model outage into a terminal job.
 
 Job processing calls the same UI-neutral Rust application service as standalone
 use. Completed wire output contains plain text, bounded warnings, and the input

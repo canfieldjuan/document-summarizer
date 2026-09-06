@@ -48,6 +48,8 @@ subtle = "2"
 ring = "0.17"
 libc = "0.2"
 unicode-properties = { version = "=0.1.4", default-features = false, features = ["general-category"] }
+tokenizers = { version = "=0.21.4", default-features = false, features = ["fancy-regex"] }
+tempfile = "3.27"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

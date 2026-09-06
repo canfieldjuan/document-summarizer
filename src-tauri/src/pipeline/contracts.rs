@@ -189,6 +189,10 @@ impl ContinuationCheckpoint {
     pub fn requires_runtime(self) -> bool {
         !matches!(self, Self::Verified)
     }
+
+    pub fn requires_existing_model_profile(self) -> bool {
+        matches!(self, Self::Analyzed | Self::Synthesized)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,6 +405,25 @@ pub struct ModelResponse {
     pub runtime_id: String,
     pub model_id: String,
     pub request_attempts: Vec<ModelRequestAttemptDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelStageProfileSnapshot {
+    pub profile_id: String,
+    pub model_name: String,
+    pub model_digest: String,
+    pub context_tokens: u32,
+    pub tokenizer_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelProfileSnapshot {
+    pub version: u32,
+    pub preset_id: String,
+    pub analysis: ModelStageProfileSnapshot,
+    pub verification: ModelStageProfileSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -642,4 +665,17 @@ pub trait ModelRuntime: Send + Sync {
     fn health(&self) -> Result<(), ModelRuntimeFailure>;
     fn runtime_id(&self) -> &str;
     fn model_id(&self) -> &str;
+    fn runtime_id_for_stage(&self, _stage: PipelineStage) -> &str {
+        self.runtime_id()
+    }
+    fn model_id_for_stage(&self, _stage: PipelineStage) -> &str {
+        self.model_id()
+    }
+    fn context_tokens(&self, _stage: PipelineStage) -> u32 {
+        8_192
+    }
+
+    fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+        None
+    }
 }

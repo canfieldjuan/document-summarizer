@@ -1,4 +1,6 @@
-use crate::pipeline::contracts::{IngestedDocument, PipelineProgress, PipelineRun, PipelineState};
+use crate::pipeline::contracts::{
+    IngestedDocument, ModelProfileSnapshot, PipelineProgress, PipelineRun, PipelineState,
+};
 use crate::pipeline::db::{self, StoreError};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -44,6 +46,17 @@ pub fn ingest_pdf(
 ) -> Result<(IngestedDocument, PipelineRun), IngestError> {
     let (document, run) = prepare_pdf_ingestion(file_path, None)?;
     let ingested_run = db::persist_ingestion(conn, &document, &run)?;
+    Ok((document, ingested_run))
+}
+
+pub(crate) fn ingest_pdf_with_profile(
+    conn: &mut Connection,
+    file_path: &str,
+    profile_snapshot: &ModelProfileSnapshot,
+) -> Result<(IngestedDocument, PipelineRun), IngestError> {
+    let (document, run) = prepare_pdf_ingestion(file_path, None)?;
+    let ingested_run =
+        db::persist_ingestion_with_profile(conn, &document, &run, Some(profile_snapshot))?;
     Ok((document, ingested_run))
 }
 

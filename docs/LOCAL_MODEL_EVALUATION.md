@@ -1,5 +1,241 @@
 # Corpus and native Ollama evaluation — updated 2026-09-05
 
+## Qwen-family qualification: four candidates fail; baseline passes
+
+**Failures first. Neither smaller model qualifies, and neither Qwen 3.8 27B
+GGUF can initialize in the current Ollama runtime.** No prompt, validator,
+coverage threshold, output allowance, timeout or summary limit was changed
+between candidates. Failed candidates remain visible as installed models but do
+not enter the product preset registry.
+
+| Candidate and exact digest | NARA robustness fixture | DOL product fixture | Qualification |
+| --- | --- | --- | --- |
+| Qwen 3.5 4B Q4_K_M, `fa9cc8f5d580d7aa9492360539a99a95cdab2cab11848b2ce0aba1a2bf88b7c5` | **Fail:** 1 claim / 1 evidence; 1/11 raw, 1/10 adjusted pages; 10 omissions; 30 requests; 3,110 completion tokens; 53.39 s | **Fail in analysis:** no delivered claims; 203 requests; 17,693 completion tokens; 273.99 s | Hidden |
+| Qwen 3.5 9B Q4_K_M, `9a83bb8ce0da6b12ab5b6cc3f35eb65e6c0bd4ff39b6e134871b89c1ab522fb7` | **Fail:** 1 supported claim / 3 evidence; 1/11 raw, 1/10 adjusted pages; 8 omissions and 2 withheld claims; 29 requests; 5,905 completion tokens; 109.60 s | **Fail in analysis:** no delivered claims; 20 requests; 3,977 completion tokens; 67.92 s | Hidden |
+| Base Qwen 3.8 27B Q4_K_M, `f9afc1701e366c19aaf6a7a2fd0b38dcef79610a83e8b19094fa33d7ed52a6f4` | Not started: loader failure | Not started: loader failure | Hidden |
+| Jack Qwen 3.8 27B Coder, `ae9075536f80595201465f14970ca65eade0950c53ab71ff2fee34c8f24b1ec8` | Not started: loader failure | Not started: loader failure | Hidden |
+| Qwen 3 30B-A3B Q4_K_S, `1eda56426671cdf365913097543c2253a73c57e35b12741306689968d7f70292` | **Pass:** 6 claims / 7 evidence; 6/11 raw (54.55%), 6/7 adjusted (85.71%); 4 omissions and 1 withheld claim; 21 requests; 425 completion tokens; 18.18 s | **Pass:** 82 claims / 83 evidence; 82/111 raw and adjusted (73.87%); no omissions and 1 withheld claim; 176 requests; 5,615 completion tokens; 91.40 s | Selectable full preset and strongest verifier |
+
+The 4B and 9B failures are capability results, not low-context results. Both
+were run as analysis models at an 8,192-token qualified context with the
+qualified 30B verifier. Both repeatedly filled the 1,536-character grammar
+ceiling instead of returning a complete bounded paraphrase; their DOL runs
+failed before verification. NARA additionally showed extensive typed
+`ParaphraseUnrepairable` omissions. All loadable-candidate attempts used native
+structured output with zero schema-fallback attempts.
+
+The two 27B files are distinct candidates and were tested through Ollama, not
+the LM Studio runtime. `/api/show` reports `qwen35`, 27.3B parameters and a
+262,144-token model maximum for both. The base file is 16,810,714,604 bytes and
+the Jack file is 12,599,204,589 bytes. A minimal native structured `/api/chat`
+request fails for each before generation with `qwen3next: layer 64 missing
+attn_qkv/attn_gate projections`. This is an Ollama loader incompatibility, not a
+prompt, schema or corpus verdict.
+
+The three loadable model descriptors all report a 262,144-token maximum, but
+qualification intentionally retains an 8,192-token effective context. Every
+native request carries that `num_ctx`, its stage `num_predict`, `think: false`,
+temperature zero and the run-derived seed. Exact serialized request admission
+uses the pinned tokenizer versions `qwen3-qwen2-pre-f2ec4434-v2` and
+`qwen35-pre-cc5fb918-v2`; it does not infer compatibility from a model name.
+
+| Model / fixture | Analysis requests / completion tokens | Verification requests / completion tokens | Schema fallback attempts |
+| --- | ---: | ---: | ---: |
+| 30B / NARA | 20 / 341 | 1 / 84 | 0 |
+| 30B / DOL | 170 / 4,627 | 6 / 988 | 0 |
+| 4B / NARA | 29 / 3,092 | 1 / 18 | 0 |
+| 4B / DOL | 203 / 17,693 | 0 / 0 | 0 |
+| 9B / NARA | 28 / 5,865 | 1 / 40 | 0 |
+| 9B / DOL | 20 / 3,977 | 0 / 0 | 0 |
+
+The hoped-for small-model speedup did not materialize. On DOL, 4B ran about
+three times longer than the completed baseline before failing; 9B failed early
+and therefore is not a completed-work speed comparison. The accepted outcome is
+therefore a stronger Qwen-family runtime boundary with one qualified preset,
+not nominal multi-model support that weakens the product for the smaller files.
+
+Contract commits `76b209b` and `34f036b` precede native runtime/settings commit
+`3a75d04`; immutable run-profile persistence lands last in implementation commit
+`4d42890` as schema version 15. Discovery credential parity is hardened in
+`9bc9afc`. A cold-diff audit then found two implementation gaps before final
+review. An unreadable `/api/show` response for one installed model aborted the
+whole catalog instead of leaving that model visible but unqualified, and desktop
+retry/continuation rebuilt the current global preset before comparing it with
+the persisted run snapshot. The corrected boundary isolates only per-model
+metadata failures while keeping transport/authentication fatal, and reconstructs
+continuation/retry runtimes from the immutable admitted snapshot; new runs alone
+use the current setting.
+
+Review reconstruction found two further recovery defects before merge. The
+frontend treated "stored preset is valid" as "there is a selectable recovery
+preset," so a later runtime-status refresh disabled the recovery option. The
+settings writer also used plain `fs::rename`, which cannot replace an existing
+destination on Windows. Selection availability and selection-in-flight state are
+now distinct, and same-directory atomic persistence uses replacement semantics
+on Windows while retaining the exact private mode on Unix.
+
+Exact-head review then found two identity-boundary gaps. Pre-schema-v15 runs
+that had already persisted analysis or synthesis artifacts had no immutable
+model profile, yet history still advertised continuation and desktop admission
+could construct the current preset before later failing. Those model-artifact
+checkpoints are now non-continuable without a snapshot and are rejected before
+worker admission; pre-model checkpoints may still select the current qualified
+runtime. A reconstructed snapshot runtime is also health-checked before a
+continuation worker is spawned or a retry child is created, so an unavailable or
+repointed model leaves the durable checkpoint, events and retry lineage
+unchanged. Separately, an Ollama tag can be repointed after stage health succeeds.
+The first repair re-read authenticated `/api/tags` after each successful
+`/api/chat`, but exact-head review found that a tag could be repointed during
+generation and restored before that lookup. Qualified chat requests now retain
+their runner for 30 seconds, and the adapter reads authenticated `/api/ps`
+before parsing the response. It accepts output only when exactly one running
+record for the requested name reports the qualified digest; a missing,
+ambiguous or mismatched record fails closed. Request counts in the corpus tables
+remain model-call counts, not discovery or execution-provenance calls.
+
+The next exact-head review found two remaining admission-order gaps. Connect
+constructed its runtime only after committing the job, so worker scheduling
+could bind an accepted run to a preset selected later. It now constructs the
+runtime before the guarded acceptance transaction and moves that exact instance
+into the worker; construction failure removes the received import and persists
+no job. Desktop retry now performs the same read-only source-state, version,
+checkpoint and lineage checks used by the final transaction before model
+discovery and health preflight. The transaction repeats those checks, preserving
+race safety while stale or ineligible requests return retry errors rather than
+model errors.
+
+Final exact-head review found two related identity/error boundaries. Connect
+had selected and moved the exact runtime into its worker but did not persist the
+runtime profile until worker processing began, leaving a crash window in which
+an accepted ingested run had no immutable profile. The profile snapshot now
+commits in the same transaction as ingestion and Connect acceptance, and a
+snapshotless production runtime is rejected before acceptance. Separately,
+post-acceptance model failures were projected through a stale retryable-code
+allowlist. Connect job errors now preserve the typed summary-stage failure's
+`recoverable` value directly.
+
+A delayed security review found that the byte-bounded `/api/tags` response had
+no model-record cap and each sequential `/api/show` probe received a fresh
+five-second timeout. A hostile same-user loopback listener could therefore
+multiply startup delay by the number of records in one accepted response.
+Discovery now admits at most 256 records before issuing any metadata probe and
+shares one five-second deadline across tags and all show requests. Boundary
+tests admit 256, reject 257 without a show request, and prove a stalled metadata
+listener cannot multiply the aggregate deadline.
+
+A late prior-head review found that execution-provenance rejection discarded
+the response correctly but marked the run terminal. Both a mismatched digest
+and a missing or ambiguous running record are now recoverable failures: the
+current output remains rejected, while restoring the immutable snapshotted
+profile permits the normal retry preflight. Permanent unsupported-profile and
+configuration failures remain terminal.
+
+The next concurrency review found that a duplicate Connect request could pass
+the initial job lookup, then lose the race to an identical acceptance while it
+prepared the artifact, and still return a later runtime error without re-reading
+the winner. Runtime-construction, snapshot and guarded-admission failures now
+recheck the job before cleanup or error projection. A deterministic race test
+commits the identical job from the runtime factory, then proves the duplicate
+returns that stored job, preserves its source and removes only the losing import.
+
+A later exact-head review found two remaining desktop identity boundaries.
+Stage-boundary health rejected a repointed qualified tag as terminal even though
+restoring the immutable snapshotted model makes the normal retry safe. That
+`MODEL_PROFILE_STALE` path is now recoverable while the current stage remains
+rejected; a loopback boundary test proves both the unchanged and repointed
+digests. New desktop starts also used to persist the document and run before the
+runtime profile was written by worker processing, leaving a crash window in
+which a product-accepted run had no immutable execution identity. Desktop start
+now requires the runtime snapshot before opening its database and commits that
+snapshot in the same transaction as the initial document and run. A
+snapshotless product runtime persists nothing, while the legacy snapshotless
+ingestion path remains available only to non-product tests and pre-model
+checkpoints. Contract commit `75c7990` precedes implementation commit `93853d2`.
+
+The following exact-head review found two more recovery classification and UI
+gaps. If a snapshotted tag disappeared after `/api/tags` but before
+`/api/show`, the generic HTTP 404 mapping made the otherwise temporary outage
+terminal. Both profile and tokenizer metadata lookups now return recoverable
+`MODEL_NOT_AVAILABLE` for not-found while preserving authentication and other
+HTTP classifications. The selected global runtime status also disabled retry
+and runtime-required continuation even though those commands reconstruct and
+preflight the historical run's own snapshot. Current-preset readiness now gates
+new PDF selection only; history recovery remains actionable and lets the
+backend snapshot preflight accept or reject without prior mutation. Contract
+commit `8e03e79` precedes implementation commit `298c436`.
+
+The next exact-head review found that the pinned token counter normalized its
+input to NFC even though native chat transmitted the original serialized
+Unicode. Decomposed combining sequences could therefore cost more model tokens
+than admission counted. The counter no longer installs a Unicode normalizer,
+and both tokenizer profile versions advance to v2 rather than changing a
+persisted v1 meaning. A byte-complete regression fixture uses the production
+Qwen regex and byte-level pre-tokenizer: composed `é` counts as two byte tokens
+and decomposed `e` plus combining acute counts as three. Contract commit
+`7a64cd7` precedes implementation commit `4228031`.
+
+Final exact-head review found that execution provenance was still observed too
+late and that the running-model catalog had no record-count ceiling. Reading
+`/api/ps` only after a non-streaming chat completed allowed another local client
+to replace or evict the runner before the observation, while a byte-bounded
+response could still deserialize an excessive number of model records. Native
+chat now uses bounded NDJSON streaming: after the first non-final frame and
+before accepting the final frame, the adapter reads authenticated `/api/ps` and
+requires exactly one same-name runner at the snapshotted digest. The 256-record
+ceiling is applied before name filtering. Final-only, malformed, mid-stream
+error, missing-final and post-final streams fail without returning partial
+text. Contract commit `993b33a` precedes implementation commits `ccc8bf4` and
+`1d2b83a`.
+
+The next exact-head review found that a retryable pre-profile historical run
+could invoke the current-settings runtime path and create a child with no
+inherited profile. Such a retry silently changed model identity instead of
+preserving the source run. Snapshotless failed runs are now excluded from the
+history Retry affordance, rejected before desktop runtime construction, and
+rejected again inside the immediate retry-lineage transaction. The boundary
+test proves that a recoverable checkpoint alone is insufficient: no runtime
+factory call, child, lineage, source mutation or event mutation occurs when the
+profile is absent. Contract commit `2cc5e5f` precedes implementation commit
+`9fa1345`.
+
+The final exact-head catalog review found that multiple installed names could
+resolve to the same qualified immutable digest. The settings catalog then
+exposed duplicate product presets with the same stable ID, and selecting that
+ID depended on input order. Qualified aliases are now collapsed by digest
+after descriptor sorting: the lexicographically first installed name becomes
+the canonical runtime name while every alias remains visible in discovery.
+Reversed-order boundary coverage proves one preset is emitted and both analysis
+and verification use the same canonical alias. Contract commit `499566c`
+precedes implementation commit `408ae1a`.
+
+The exact-head security review then found that bounded individual metadata
+responses did not bound the strings retained across the installed-model
+catalog. In particular, up to 256 `/api/show` responses could each contribute
+an unbounded architecture value to the webview payload. Every external string
+retained in a descriptor is now limited to 512 UTF-8 bytes, their aggregate is
+limited to 256 KiB, and either maximum plus one rejects the catalog without
+truncation. Tag fields are checked before they can name a metadata request, and
+oversized show metadata is a catalog-wide resource failure. Contract commit
+`fbf8510` precedes implementation commit `de68963`.
+
+The local all-target gate passes with 314 library
+tests and six ignored, three acceptance tests and three ignored, and three
+release tests. Strict all-target/all-feature clippy with warnings denied,
+formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
+claimed; the operator requires local checks because private-repository Actions
+minutes are exhausted.
+
+Both corpus acceptances were rerun through the qualified streamed profile after
+the final execution-provenance change. NARA passed with six supported claims
+from seven retained evidence items, six of 11 raw pages and six of seven
+adjusted pages cited, 21 model requests, 425 completion tokens, and 23.07
+seconds wall time. DOL passed with 82 supported claims from 83 retained evidence
+items, 82 of 111 raw and adjusted pages cited, 176 model requests, 5,615
+completion tokens, and 102.77 seconds wall time. Every model attempt used
+primary structured transport, every in-flight digest proof succeeded, and no
+schema fallback ran. NARA remains robustness-only because its OCR-flattened
+table relationships are absent from the extracted text layer.
+
 ## Latest slice: both corpus acceptances pass; NARA remains robustness-only
 
 **Known fidelity limitation first: NARA is not OCR-table accuracy evidence.**

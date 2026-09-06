@@ -10,9 +10,11 @@ use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
     AnalysisPageOmission, ModelRuntime, ModelRuntimeFailure, NormalizedDocument, SummaryArtifacts,
 };
+#[cfg(test)]
+use crate::pipeline::contracts::{ModelProfileSnapshot, ModelStageProfileSnapshot};
 use crate::pipeline::db;
 use crate::pipeline::ingest::prepare_pdf_ingestion;
-use crate::pipeline::model::OllamaRuntime;
+use crate::pipeline::model_settings::{runtime_from_settings, settings_path};
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
 use crate::pipeline::service::{
@@ -21,6 +23,7 @@ use crate::pipeline::service::{
 use crate::pipeline::structure::DeterministicStructureInterpreter;
 use crate::pipeline::summary::{
     delivery_claim_prefix_coverage_satisfied, render_citation_claim_lines, SummaryDeliveryPolicy,
+    SummaryPipelineError,
 };
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -164,8 +167,9 @@ impl ConnectProvider {
                 .ok_or(ProviderStartError::InvalidMaxInputBytes)?,
             Err(_) => DEFAULT_MAX_INPUT_BYTES,
         };
-        let runtime_factory: RuntimeFactory = Arc::new(|| {
-            OllamaRuntime::from_environment()
+        let model_settings_path = settings_path(&app_data_dir);
+        let runtime_factory: RuntimeFactory = Arc::new(move || {
+            runtime_from_settings(&model_settings_path)
                 .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
         });
         let entitlement = EntitlementGate::from_installation()?;
@@ -727,6 +731,45 @@ async fn create_job_for(
             false,
         ));
     }
+    let runtime = match (state.runtime_factory)() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            if let Some(response) = idempotent_response_after_admission_race(
+                store::get_job(&conn, &request.job_id),
+                &request_hash,
+                version,
+                &import_path,
+            )
+            .await?
+            {
+                return Ok(response);
+            }
+            remove_file_quietly(&import_path).await;
+            return Err(ProviderHttpError::runtime(error));
+        }
+    };
+    let profile_snapshot = match runtime.profile_snapshot() {
+        Some(snapshot) => snapshot,
+        None => {
+            if let Some(response) = idempotent_response_after_admission_race(
+                store::get_job(&conn, &request.job_id),
+                &request_hash,
+                version,
+                &import_path,
+            )
+            .await?
+            {
+                return Ok(response);
+            }
+            remove_file_quietly(&import_path).await;
+            return Err(ProviderHttpError::runtime(ModelRuntimeFailure {
+                code: "MODEL_CONFIG_INVALID".to_string(),
+                message: "Connect runtime is missing its immutable model profile".to_string(),
+                recoverable: false,
+                request_attempts: Vec::new(),
+            }));
+        }
+    };
     let provider_instance_id = match version {
         WireVersion::V1 => &state.instance_id_v1,
         WireVersion::V2 => &state.instance_id_v2,
@@ -739,6 +782,7 @@ async fn create_job_for(
         provider_instance_id,
         &document,
         &run,
+        Some(&profile_snapshot),
         || state.entitlement.decision().is_active(),
     );
     let accepted = match accepted {
@@ -748,13 +792,15 @@ async fn create_job_for(
             return Err(entitlement_required_error());
         }
         Err(error) => {
-            if let Some(existing) =
-                store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
+            if let Some(response) = idempotent_response_after_admission_race(
+                store::get_job(&conn, &request.job_id),
+                &request_hash,
+                version,
+                &import_path,
+            )
+            .await?
             {
-                if !existing_job_owns_import_path(&existing.import_path, &import_path) {
-                    remove_file_quietly(&import_path).await;
-                }
-                return idempotent_response(existing, &request_hash, version);
+                return Ok(response);
             }
             remove_file_quietly(&import_path).await;
             if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
@@ -773,7 +819,7 @@ async fn create_job_for(
     let worker_job_id = request.job_id.clone();
     if let Err(error) = thread::Builder::new()
         .name(format!("connect-job-{}", &worker_job_id[..8]))
-        .spawn(move || process_job(worker_state, worker_job_id))
+        .spawn(move || process_job(worker_state, worker_job_id, runtime))
     {
         eprintln!("Connect provider worker could not start: {error}");
         let worker_error = job_error(
@@ -792,11 +838,10 @@ async fn create_job_for(
     job_response(version, StatusCode::ACCEPTED, &accepted)
 }
 
-fn process_job(state: ProviderState, job_id: String) {
+fn process_job(state: ProviderState, job_id: String, runtime: Box<dyn ModelRuntime>) {
     let result = (|| -> Result<(), ProcessJobError> {
         let conn = db::init_db(&state.db_path)?;
         let job = store::mark_processing(&conn, &job_id)?;
-        let runtime = (state.runtime_factory)()?;
         let mut pipeline_conn = db::init_db(&state.db_path)?;
         let parser = PdfExtractParser::new();
         let normalizer = CanonicalNormalizer::new();
@@ -880,8 +925,6 @@ enum ProcessJobError {
     PipelineStore(#[from] crate::pipeline::db::StoreError),
     #[error(transparent)]
     ConnectStore(#[from] ConnectStoreError),
-    #[error("Model runtime failure: {0:?}")]
-    Runtime(#[from] ModelRuntimeFailure),
     #[error(transparent)]
     Service(#[from] crate::pipeline::service::DocumentServiceError),
     #[error(transparent)]
@@ -891,9 +934,11 @@ enum ProcessJobError {
 impl ProcessJobError {
     fn public_error(&self) -> JobError {
         match self {
-            Self::Runtime(failure) => job_error(
+            Self::Service(crate::pipeline::service::DocumentServiceError::Summary(
+                SummaryPipelineError::StageFailed(failure),
+            )) => job_error(
                 &failure.code,
-                "The configured local model runtime is unavailable.",
+                "Document summarization failed in the provider.",
                 failure.recoverable,
             ),
             Self::Service(error) => job_error(
@@ -1101,6 +1146,28 @@ fn existing_job_owns_import_path(existing_import_path: &str, candidate: &Path) -
     Path::new(existing_import_path) == candidate
 }
 
+async fn idempotent_response_after_admission_race(
+    existing: Result<Option<StoredConnectJob>, ConnectStoreError>,
+    request_hash: &str,
+    version: WireVersion,
+    candidate_import_path: &Path,
+) -> Result<Option<Response>, ProviderHttpError> {
+    let existing = match existing {
+        Ok(existing) => existing,
+        Err(error) => {
+            remove_file_quietly(candidate_import_path).await;
+            return Err(ProviderHttpError::store(error));
+        }
+    };
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    if !existing_job_owns_import_path(&existing.import_path, candidate_import_path) {
+        remove_file_quietly(candidate_import_path).await;
+    }
+    idempotent_response(existing, request_hash, version).map(Some)
+}
+
 fn authorize(state: &ProviderState, headers: &HeaderMap) -> Result<(), ProviderHttpError> {
     if headers.contains_key(header::ORIGIN) {
         return Err(ProviderHttpError::new(
@@ -1206,6 +1273,15 @@ impl ProviderHttpError {
             "PROVIDER_OUTPUT_INVALID",
             "The provider result did not satisfy the Connect output contract.",
             false,
+        )
+    }
+
+    fn runtime(failure: ModelRuntimeFailure) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            failure.code,
+            "The configured local model runtime is unavailable.",
+            failure.recoverable,
         )
     }
 
@@ -1694,8 +1770,8 @@ mod tests {
     };
     use crate::connect::entitlement::{EntitlementGate, ENTITLEMENT_FILE_NAME, FEATURE_ID};
     use crate::pipeline::contracts::{
-        CitationArtifact, CitedClaim, EvidenceItem, ModelRequest, ModelResponse, SourceSpan,
-        SourceType, SummaryArtifact,
+        CitationArtifact, CitedClaim, EvidenceItem, ModelRequest, ModelResponse, PipelineFailure,
+        PipelineStage, SourceSpan, SourceType, SummaryArtifact,
     };
     use crate::pipeline::normalize::normalize_document;
     use crate::pipeline::parser::parse_document;
@@ -1708,7 +1784,7 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     #[cfg(unix)]
@@ -1838,6 +1914,22 @@ mod tests {
 
     struct FixtureRuntime;
 
+    fn fixture_profile_snapshot() -> ModelProfileSnapshot {
+        let stage = ModelStageProfileSnapshot {
+            profile_id: "connect-fixture-profile".to_string(),
+            model_name: "connect-fixture-model".to_string(),
+            model_digest: "connect-fixture-digest".to_string(),
+            context_tokens: 8_192,
+            tokenizer_version: "connect-fixture-tokenizer".to_string(),
+        };
+        ModelProfileSnapshot {
+            version: 1,
+            preset_id: "connect-fixture-preset".to_string(),
+            analysis: stage.clone(),
+            verification: stage,
+        }
+    }
+
     impl ModelRuntime for FixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             Ok(ModelResponse {
@@ -1858,6 +1950,30 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "connect-fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_profile_snapshot())
+        }
+    }
+
+    struct SnapshotlessFixtureRuntime;
+
+    impl ModelRuntime for SnapshotlessFixtureRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "snapshotless-fixture-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "snapshotless-fixture-model"
         }
     }
 
@@ -2805,6 +2921,266 @@ mod tests {
             result,
             Err(ProviderStartError::InvalidInstanceIdentity)
         ));
+    }
+
+    #[test]
+    fn connect_runtime_is_selected_before_job_acceptance() {
+        let root = TestDirectory::new("doc-sum-connect-runtime-admission");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(source).expect("fixture should read");
+        let request = fixture_request(&bytes);
+        let observed_before_acceptance = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&observed_before_acceptance);
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&factory_calls);
+        let factory_db_path = db_path.clone();
+        let job_id = request.job_id.clone();
+        let runtime_factory: RuntimeFactory = Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let conn = db::init_db(&factory_db_path).expect("provider database should open");
+            observed.store(
+                store::get_job(&conn, &job_id)
+                    .expect("job lookup should succeed")
+                    .is_none(),
+                Ordering::SeqCst,
+            );
+            Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)
+        });
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data,
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory,
+        )
+        .expect("provider should start");
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let http = client();
+
+        let accepted = http
+            .post(format!("{}v1/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form(&request, bytes))
+            .send()
+            .expect("job submission should succeed");
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+        assert!(observed_before_acceptance.load(Ordering::SeqCst));
+        let conn = db::init_db(&db_path).expect("provider database should reopen");
+        let accepted_job = store::get_job(&conn, &request.job_id)
+            .expect("accepted job should be readable")
+            .expect("accepted job should exist");
+        assert_eq!(
+            db::get_run_model_profile(&conn, &accepted_job.pipeline_run_id)
+                .expect("accepted profile should be readable"),
+            Some(fixture_profile_snapshot())
+        );
+        assert_eq!(
+            wait_for_terminal(
+                &http,
+                provider.base_url(),
+                &registration.auth.token,
+                &request.job_id,
+            )
+            .status,
+            JobState::Completed
+        );
+    }
+
+    #[test]
+    fn connect_rejects_a_snapshotless_runtime_before_job_acceptance() {
+        let root = TestDirectory::new("doc-sum-connect-snapshotless-runtime");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(SnapshotlessFixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .expect("provider should start");
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(source).expect("fixture should read");
+        let request = fixture_request(&bytes);
+
+        let response = client()
+            .post(format!("{}v1/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form(&request, bytes))
+            .send()
+            .expect("snapshot rejection should return a response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = response.json::<ErrorEnvelope>().unwrap().error;
+        assert_eq!(error.code, "MODEL_CONFIG_INVALID");
+        assert!(!error.retryable);
+        let conn = db::init_db(&db_path).expect("provider database should reopen");
+        assert!(store::get_job(&conn, &request.job_id).unwrap().is_none());
+        assert!(fs::read_dir(app_data.join("connect-imports"))
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn process_job_errors_preserve_typed_pipeline_recoverability() {
+        for (code, recoverable) in [
+            ("MODEL_NOT_AVAILABLE", true),
+            ("MODEL_TOKENIZER_INVALID", false),
+        ] {
+            let error =
+                ProcessJobError::Service(crate::pipeline::service::DocumentServiceError::Summary(
+                    SummaryPipelineError::StageFailed(PipelineFailure {
+                        code: code.to_string(),
+                        message: "fixture failure".to_string(),
+                        stage: Some(PipelineStage::Analyze),
+                        recoverable,
+                    }),
+                ))
+                .public_error();
+            assert_eq!(error.code, code);
+            assert_eq!(error.retryable, recoverable);
+        }
+    }
+
+    #[test]
+    fn connect_runtime_failure_precedes_admission_and_removes_the_import() {
+        let root = TestDirectory::new("doc-sum-connect-runtime-failure");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| {
+                Err(ModelRuntimeFailure {
+                    code: "MODEL_NOT_AVAILABLE".to_string(),
+                    message: "Fixture model is unavailable.".to_string(),
+                    recoverable: true,
+                    request_attempts: Vec::new(),
+                })
+            }),
+        )
+        .expect("provider should start");
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(source).expect("fixture should read");
+        let request = fixture_request(&bytes);
+
+        let response = client()
+            .post(format!("{}v1/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form(&request, bytes))
+            .send()
+            .expect("runtime rejection should return a response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.json::<ErrorEnvelope>().unwrap().error.code,
+            "MODEL_NOT_AVAILABLE"
+        );
+        let conn = db::init_db(&db_path).expect("provider database should reopen");
+        assert!(store::get_job(&conn, &request.job_id).unwrap().is_none());
+        assert!(fs::read_dir(app_data.join("connect-imports"))
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn concurrent_identical_acceptance_wins_over_a_late_runtime_failure() {
+        let root = TestDirectory::new("doc-sum-connect-runtime-idempotency-race");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(fixture).expect("fixture should read");
+        let request = fixture_request(&bytes);
+        let existing_import = root.0.join("accepted-source.pdf");
+        fs::write(&existing_import, &bytes).expect("accepted source should write");
+        let factory_db_path = db_path.clone();
+        let factory_request = request.clone();
+        let factory_import = existing_import.clone();
+        let runtime_factory: RuntimeFactory = Arc::new(move || {
+            let mut conn = db::init_db(&factory_db_path).expect("provider database should open");
+            let (document, run) = prepare_pdf_ingestion(
+                factory_import
+                    .to_str()
+                    .expect("accepted path should be UTF-8"),
+                Some(&factory_request.inputs[0].display_name),
+            )
+            .expect("concurrent ingestion should prepare");
+            store::accept_job_with_ingestion_guarded(
+                &mut conn,
+                &factory_request,
+                &factory_request.canonical_hash().unwrap(),
+                factory_import.to_str().unwrap(),
+                "concurrent-provider",
+                &document,
+                &run,
+                Some(&fixture_profile_snapshot()),
+                || true,
+            )
+            .expect("concurrent acceptance should persist")
+            .expect("concurrent acceptance should be admitted");
+            Err(ModelRuntimeFailure {
+                code: "MODEL_NOT_AVAILABLE".to_string(),
+                message: "late fixture model failure".to_string(),
+                recoverable: true,
+                request_attempts: Vec::new(),
+            })
+        });
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory,
+        )
+        .expect("provider should start");
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+
+        let response = client()
+            .post(format!("{}v1/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form(&request, bytes))
+            .send()
+            .expect("duplicate submission should return its stored job");
+        assert_eq!(response.status(), StatusCode::OK);
+        let status = response
+            .json::<JobStatus>()
+            .expect("job status should decode");
+        assert_eq!(status.job_id, request.job_id);
+        assert_eq!(status.status, JobState::Accepted);
+        assert!(existing_import.exists());
+        assert!(fs::read_dir(app_data.join("connect-imports"))
+            .unwrap()
+            .next()
+            .is_none());
+        let conn = db::init_db(&db_path).expect("provider database should reopen");
+        assert!(store::get_job(&conn, &request.job_id).unwrap().is_some());
     }
 
     #[test]

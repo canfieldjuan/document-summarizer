@@ -16,6 +16,10 @@ use pipeline::contracts::{
 };
 use pipeline::db::{init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, IngestError};
+use pipeline::model_settings::{
+    catalog as load_model_catalog, save_selected_preset, settings_path as model_settings_path,
+    ModelCatalog,
+};
 use pipeline::normalize::{
     normalize_document as normalize_pipeline_document, CanonicalNormalizer, NormalizePipelineError,
 };
@@ -41,6 +45,7 @@ use tauri::{Manager, State};
 
 struct AppState {
     jobs: DesktopJobManager,
+    model_settings_path: std::path::PathBuf,
     entitlement: Option<EntitlementGate>,
 }
 
@@ -234,8 +239,33 @@ fn cancel_document(
 }
 
 #[tauri::command]
-fn get_runtime_status() -> RuntimeStatus {
-    ollama_runtime_status()
+fn get_runtime_status(state: State<'_, AppState>) -> RuntimeStatus {
+    ollama_runtime_status(&state.model_settings_path)
+}
+
+#[tauri::command]
+fn get_model_catalog(state: State<'_, AppState>) -> Result<ModelCatalog, CommandError> {
+    load_model_catalog(&state.model_settings_path).map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn select_model_preset(
+    state: State<'_, AppState>,
+    preset_id: String,
+) -> Result<ModelCatalog, CommandError> {
+    let current = load_model_catalog(&state.model_settings_path).map_err(CommandError::from)?;
+    if !current
+        .presets
+        .iter()
+        .any(|preset| preset.preset_id == preset_id)
+    {
+        return Err(CommandError::new(
+            "MODEL_PRESET_UNAVAILABLE",
+            "Selected model preset is not installed and qualified",
+        ));
+    }
+    save_selected_preset(&state.model_settings_path, &preset_id).map_err(CommandError::from)?;
+    load_model_catalog(&state.model_settings_path).map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -313,6 +343,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
             let db_path = app_data_dir.join("summarizer.db");
+            let settings_path = model_settings_path(&app_data_dir);
             let mut conn = init_db(&db_path)?;
             let recovered = reconcile_interrupted_runs(&mut conn)?;
             if !recovered.is_empty() {
@@ -331,7 +362,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
             };
             app.manage(AppState {
-                jobs: DesktopJobManager::new(db_path.clone()),
+                jobs: DesktopJobManager::new(db_path.clone(), settings_path.clone()),
+                model_settings_path: settings_path,
                 entitlement,
             });
             match ConnectProvider::start(db_path, app_data_dir) {
@@ -357,6 +389,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             continue_document,
             cancel_document,
             get_runtime_status,
+            get_model_catalog,
+            select_model_preset,
             get_connect_entitlement_status,
             install_connect_entitlement,
             list_recent_runs,

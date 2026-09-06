@@ -49,6 +49,42 @@ interface RuntimeStatus {
   recoverable: boolean;
 }
 
+interface ModelPreset {
+  presetId: string;
+  label: string;
+  mode: "full" | "hybrid";
+  analysisModel: string;
+  analysisDigest: string;
+  analysisContextTokens: number;
+  verificationModel: string;
+  verificationDigest: string;
+  verificationContextTokens: number;
+}
+
+interface ModelCatalog {
+  selectedPresetId: string;
+  selectedPresetAvailable: boolean;
+  installedModels: ModelOption[];
+  presets: ModelPreset[];
+}
+
+interface ModelOption {
+  name: string;
+  digest: string;
+  sizeBytes: number;
+  architecture: string | null;
+  tokenizerFamily: "qwen3" | "qwen35" | null;
+  parameterSize: string | null;
+  quantizationLevel: string | null;
+  maximumContextTokens: number | null;
+  disabledReason: string | null;
+  profileId: string | null;
+  qualifiedContextTokens: number | null;
+  supportsAnalysis: boolean;
+  supportsVerification: boolean;
+  supportsFull: boolean;
+}
+
 type ConnectEntitlementState =
   | "active"
   | "authority_unavailable"
@@ -133,6 +169,7 @@ const runtimeDot = element<HTMLSpanElement>("#runtime-dot");
 const runtimeTitle = element<HTMLParagraphElement>("#runtime-title");
 const runtimeDetail = element<HTMLParagraphElement>("#runtime-detail");
 const runtimeRetry = element<HTMLButtonElement>("#runtime-retry");
+const modelPreset = element<HTMLSelectElement>("#model-preset");
 const connectMark = element<HTMLSpanElement>("#connect-mark");
 const connectTitle = element<HTMLParagraphElement>("#connect-title");
 const connectDetail = element<HTMLParagraphElement>("#connect-detail");
@@ -170,6 +207,9 @@ const retryButton = element<HTMLButtonElement>("#retry-btn");
 const retryHint = element<HTMLParagraphElement>("#retry-hint");
 
 let runtimeReady = false;
+let selectedModelLabel: string | null = null;
+let modelSelectionAvailable = false;
+let modelSelectionInFlight = false;
 let connectInstalling = false;
 let connectStatusRefreshInFlight = false;
 let processing = false;
@@ -197,6 +237,7 @@ function showStage(view: "empty" | "processing" | "summary" | "failure"): void {
 
 function syncPrimaryAction(): void {
   selectButton.disabled = !runtimeReady || processing;
+  modelPreset.disabled = !modelSelectionAvailable || modelSelectionInFlight || processing;
   const label = selectButton.querySelector<HTMLSpanElement>("span");
   if (!label) return;
 
@@ -212,22 +253,21 @@ function syncPrimaryAction(): void {
   }
 
   if (retrySourceRun) {
-    retryButton.disabled = !runtimeReady || processing;
+    retryButton.disabled = processing;
     retryHint.textContent = processing
       ? "Creating a separate retry attempt…"
       : runtimeReady
         ? "A new attempt will reuse the durable document identity. This failed record stays unchanged."
-        : "Start Ollama before retrying this document.";
+        : "Retry will check this run's saved model profile independently of the current selection.";
   }
 
   if (continuationRun) {
-    const runtimeAvailable = !continuationRun.continuationRequiresRuntime || runtimeReady;
-    continueButton.disabled = !runtimeAvailable || processing;
+    continueButton.disabled = processing;
     continueHint.textContent = processing
       ? "Continuing from the durable checkpoint…"
-      : runtimeAvailable
-        ? `Continue this run from ${stateLabel(continuationRun.state).toLowerCase()} without repeating completed stages.`
-        : "Start Ollama before continuing this checkpoint.";
+      : continuationRun.continuationRequiresRuntime && !runtimeReady
+        ? "Continue will check this run's saved model profile before changing the checkpoint."
+        : `Continue this run from ${stateLabel(continuationRun.state).toLowerCase()} without repeating completed stages.`;
   }
 
   cancelButton.hidden = !processing;
@@ -259,8 +299,10 @@ async function refreshRuntimeStatus(): Promise<void> {
     runtimeTitle.textContent = status.ready
       ? `${status.providerName} ready`
       : `${status.providerName} unavailable`;
-    runtimeDetail.textContent = status.ready && status.modelId
-      ? status.modelId
+    runtimeDetail.textContent = status.ready && selectedModelLabel
+      ? selectedModelLabel
+      : status.ready && status.modelId
+        ? status.modelId
       : status.message;
     runtimeRetry.hidden = status.ready;
   } catch (error) {
@@ -270,6 +312,108 @@ async function refreshRuntimeStatus(): Promise<void> {
     runtimeDetail.textContent = commandError.message;
     runtimeRetry.hidden = false;
   } finally {
+    syncPrimaryAction();
+  }
+}
+
+async function refreshModelCatalog(): Promise<void> {
+  modelSelectionAvailable = false;
+  modelPreset.disabled = true;
+  try {
+    const catalog = await invoke<ModelCatalog>("get_model_catalog");
+    modelPreset.replaceChildren();
+    const qualified = document.createElement("optgroup");
+    qualified.label = "Qualified presets";
+    for (const preset of catalog.presets) {
+      const installed = catalog.installedModels.find(
+        (model) => model.digest === preset.analysisDigest,
+      );
+      const option = document.createElement("option");
+      option.value = preset.presetId;
+      const safeContext = preset.mode === "hybrid"
+        ? preset.analysisContextTokens
+        : preset.verificationContextTokens;
+      const maximumContext = installed?.maximumContextTokens;
+      option.textContent = [
+        preset.label,
+        installed ? formatModelSize(installed.sizeBytes) : null,
+        `${safeContext.toLocaleString()} safe ctx`,
+        maximumContext ? `${maximumContext.toLocaleString()} max` : null,
+      ].filter(Boolean).join(" · ");
+      qualified.append(option);
+    }
+    if (qualified.children.length > 0) modelPreset.append(qualified);
+    const unavailable = document.createElement("optgroup");
+    unavailable.label = "Installed but unavailable";
+    for (const installed of catalog.installedModels.filter(
+      (model) => !model.profileId || model.disabledReason,
+    )) {
+      const option = document.createElement("option");
+      option.disabled = true;
+      option.textContent = [
+        installed.name,
+        formatModelSize(installed.sizeBytes),
+        installed.maximumContextTokens
+          ? `${installed.maximumContextTokens.toLocaleString()} max ctx`
+          : null,
+        installed.disabledReason ?? "Not qualified on the live corpus",
+      ].filter(Boolean).join(" · ");
+      unavailable.append(option);
+    }
+    if (unavailable.children.length > 0) modelPreset.append(unavailable);
+    modelPreset.value = catalog.selectedPresetId;
+    const selectedPreset = catalog.presets.find(
+      (preset) => preset.presetId === catalog.selectedPresetId,
+    );
+    const selectedInstalled = selectedPreset
+      ? catalog.installedModels.find((model) => model.digest === selectedPreset.analysisDigest)
+      : null;
+    selectedModelLabel = selectedPreset
+      ? [
+          selectedPreset.label,
+          selectedInstalled ? formatModelSize(selectedInstalled.sizeBytes) : null,
+          `${selectedPreset.analysisContextTokens.toLocaleString()} ctx`,
+        ].filter(Boolean).join(" · ")
+      : null;
+    modelSelectionAvailable = catalog.presets.length > 0;
+    modelPreset.disabled = !modelSelectionAvailable || modelSelectionInFlight || processing;
+    if (!catalog.selectedPresetAvailable && catalog.presets.length > 0) {
+      const recovery = document.createElement("option");
+      recovery.value = "";
+      recovery.textContent = "Select an available qualified model";
+      recovery.selected = true;
+      modelPreset.prepend(recovery);
+      modelPreset.disabled = modelSelectionInFlight || processing;
+    }
+  } catch (error) {
+    const commandError = normalizeCommandError(error);
+    selectedModelLabel = null;
+    modelSelectionAvailable = false;
+    modelPreset.replaceChildren();
+    const option = document.createElement("option");
+    option.textContent = commandError.message;
+    modelPreset.append(option);
+  }
+}
+
+function formatModelSize(bytes: number): string {
+  return `${(bytes / (1024 ** 3)).toFixed(1)} GiB`;
+}
+
+async function selectModelPreset(): Promise<void> {
+  const presetId = modelPreset.value;
+  if (!presetId || processing) return;
+  modelSelectionInFlight = true;
+  runtimeReady = false;
+  syncPrimaryAction();
+  try {
+    await invoke<ModelCatalog>("select_model_preset", { presetId });
+    await refreshModelCatalog();
+  } catch (error) {
+    runtimeDetail.textContent = normalizeCommandError(error).message;
+  } finally {
+    await refreshRuntimeStatus();
+    modelSelectionInFlight = false;
     syncPrimaryAction();
   }
 }
@@ -725,7 +869,7 @@ async function selectAndSummarize(): Promise<void> {
 
 async function retrySelectedRun(): Promise<void> {
   const source = retrySourceRun;
-  if (!source || !source.canRetry || !runtimeReady || processing) {
+  if (!source || !source.canRetry || processing) {
     return;
   }
 
@@ -763,9 +907,7 @@ async function retrySelectedRun(): Promise<void> {
 
 async function continueSelectedRun(): Promise<void> {
   const source = continuationRun;
-  const runtimeAvailable = source
-    && (!source.continuationRequiresRuntime || runtimeReady);
-  if (!source || !source.canContinue || !runtimeAvailable || processing) {
+  if (!source || !source.canContinue || processing) {
     return;
   }
 
@@ -993,7 +1135,10 @@ function historyStateLabel(run: RunHistoryItem): string {
 
 async function initialize(): Promise<void> {
   selectButton.addEventListener("click", () => void selectAndSummarize());
-  runtimeRetry.addEventListener("click", () => void refreshRuntimeStatus());
+  runtimeRetry.addEventListener("click", () => {
+    void refreshModelCatalog().then(refreshRuntimeStatus);
+  });
+  modelPreset.addEventListener("change", () => void selectModelPreset());
   connectActivate.addEventListener("click", () => void selectAndInstallConnectEntitlement());
   continueButton.addEventListener("click", () => void continueSelectedRun());
   retryButton.addEventListener("click", () => void retrySelectedRun());
@@ -1006,6 +1151,7 @@ async function initialize(): Promise<void> {
   window.setInterval(() => {
     if (document.visibilityState === "visible") void refreshConnectStatus();
   }, 30_000);
+  await refreshModelCatalog();
   await Promise.all([refreshRuntimeStatus(), refreshConnectStatus(), refreshHistory()]);
   const active = recentRuns.find(isMonitoredBackgroundRun);
   if (active) {
