@@ -1030,8 +1030,8 @@ fn classify_claim_support(
                 false,
             )
         })?;
-        let response = runtime
-            .generate(&ModelRequest {
+        let response = runtime.generate_with_control(
+            &ModelRequest {
                 stage: PipelineStage::Verify,
                 ordinal: request_ordinal,
                 system_prompt: VERIFICATION_SYSTEM_PROMPT.to_string(),
@@ -1042,10 +1042,13 @@ fn classify_claim_support(
                     name: VERIFICATION_SCHEMA_NAME.to_string(),
                     schema: verification_output_schema(batch.identifiers.vocabulary()),
                 },
-            })
-            .map_err(|failure| {
-                runtime_pipeline_failure(PipelineStage::Verify, "MODEL_VERIFICATION", failure)
-            })?;
+            },
+            control,
+        );
+        cancellation_checkpoint(control, PipelineStage::Verify)?;
+        let response = response.map_err(|failure| {
+            runtime_pipeline_failure(PipelineStage::Verify, "MODEL_VERIFICATION", failure)
+        })?;
         cancellation_checkpoint(control, PipelineStage::Verify)?;
         validate_runtime_response(runtime, &response, PipelineStage::Verify)?;
         claim_verifications.extend(parse_verification_response(

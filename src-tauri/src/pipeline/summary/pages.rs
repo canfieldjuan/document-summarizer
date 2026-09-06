@@ -619,8 +619,8 @@ fn generate(
             false,
         ));
     }
-    let response = runtime
-        .generate(&ModelRequest {
+    let response = runtime.generate_with_control(
+        &ModelRequest {
             stage: PipelineStage::Analyze,
             ordinal: reserve_model_request_ordinal(ordinal, PipelineStage::Analyze)?,
             system_prompt: system.to_string(),
@@ -631,10 +631,13 @@ fn generate(
                 name: name.to_string(),
                 schema,
             },
-        })
-        .map_err(|failure| {
-            runtime_pipeline_failure(PipelineStage::Analyze, "MODEL_ANALYSIS", failure)
-        })?;
+        },
+        control,
+    );
+    cancellation_checkpoint(control, PipelineStage::Analyze)?;
+    let response = response.map_err(|failure| {
+        runtime_pipeline_failure(PipelineStage::Analyze, "MODEL_ANALYSIS", failure)
+    })?;
     validate_runtime_response(runtime, &response, PipelineStage::Analyze)?;
     cancellation_checkpoint(control, PipelineStage::Analyze)?;
     Ok(response)

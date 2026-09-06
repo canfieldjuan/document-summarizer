@@ -2,6 +2,7 @@ use crate::pipeline::contracts::{
     ModelProfileSnapshot, ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
     ModelRuntimeKind, ModelStageProfileSnapshot, PipelineStage,
 };
+use crate::pipeline::control::ExecutionControl;
 use crate::pipeline::llama_cpp::{
     current_regular_file_identity, inspect_regular_file, prepare_for_ollama_runtime,
     qualified_runtime_available, FileIdentity, GgufRuntimeConfig, LlamaCppRuntime,
@@ -788,6 +789,17 @@ impl StageRuntime {
         }
     }
 
+    fn generate_with_control(
+        &self,
+        request: &ModelRequest,
+        control: &dyn ExecutionControl,
+    ) -> Result<ModelResponse, ModelRuntimeFailure> {
+        match self {
+            Self::Ollama(runtime) => runtime.generate_with_control(request, control),
+            Self::LlamaCpp(runtime) => runtime.generate_with_control(request, control),
+        }
+    }
+
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
         match self {
             Self::Ollama(runtime) => runtime.health(),
@@ -1115,6 +1127,15 @@ impl ModelRuntime for QwenProfileRuntime {
         self.runtime_for(&request.stage).generate(request)
     }
 
+    fn generate_with_control(
+        &self,
+        request: &ModelRequest,
+        control: &dyn ExecutionControl,
+    ) -> Result<ModelResponse, ModelRuntimeFailure> {
+        self.runtime_for(&request.stage)
+            .generate_with_control(request, control)
+    }
+
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
         self.analysis.health()?;
         if self.analysis.model_id() != self.verification.model_id() {
@@ -1160,6 +1181,7 @@ fn config_failure(message: impl Into<String>) -> ModelRuntimeFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::control::CancellationToken;
 
     fn qualified_snapshot() -> ModelProfileSnapshot {
         let profile = QUALIFIED_PROFILES[0];
@@ -1816,6 +1838,30 @@ mod tests {
         );
         assert_eq!(runtime.context_tokens(PipelineStage::Analyze), 8_192);
         assert_eq!(runtime.context_tokens(PipelineStage::Verify), 16_384);
+
+        let control = CancellationToken::new();
+        control.request();
+        for stage in [
+            PipelineStage::Analyze,
+            PipelineStage::Synthesize,
+            PipelineStage::Verify,
+        ] {
+            let failure = runtime
+                .generate_with_control(
+                    &ModelRequest {
+                        stage,
+                        ordinal: 0,
+                        system_prompt: "system".to_string(),
+                        user_prompt: "user".to_string(),
+                        seed: 42,
+                        max_output_tokens: 1,
+                        output_format: Default::default(),
+                    },
+                    &control,
+                )
+                .unwrap_err();
+            assert_eq!(failure.code, "MODEL_REQUEST_CANCELLED");
+        }
     }
 
     #[test]

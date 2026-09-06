@@ -2,6 +2,7 @@ use crate::pipeline::contracts::{
     ModelRequest, ModelRequestAttemptDiagnostic, ModelResponse, ModelRuntime, ModelRuntimeFailure,
     ModelTokenUsage, ModelTransportAttempt, PipelineStage,
 };
+use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::model::response_format;
 use crate::pipeline::qwen_tokenizer::{request_fits_context, TOKENIZER_FRAMING_RESERVE_TOKENS};
 use reqwest::blocking::{Client, Response};
@@ -16,7 +17,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -25,6 +26,7 @@ const RUNTIME_ID: &str = "llama.cpp-qwen-gguf";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(900);
+const INFERENCE_SLOT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOKENIZE_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_MODEL_RECORDS: usize = 8;
@@ -307,7 +309,7 @@ impl LlamaCppRuntime {
                 });
             }
         }
-        let mut child = command
+        command
             .env("LD_LIBRARY_PATH", runtime_library_directory.path())
             .args([
                 "--host",
@@ -332,15 +334,19 @@ impl LlamaCppRuntime {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| {
-                failure(
-                    "MODEL_RUNTIME_UNAVAILABLE",
-                    "Qualified llama-server could not be started",
-                    true,
-                )
-            })?;
+            .stderr(Stdio::null());
+        verify_parent_model_lease_before_spawn(
+            &model_file,
+            config.expected_size_bytes,
+            &config.expected_file_identity,
+        )?;
+        let mut child = command.spawn().map_err(|_| {
+            failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Qualified llama-server could not be started",
+                true,
+            )
+        })?;
         if MODEL_LEASE_BREAK_REQUESTED.swap(false, Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
@@ -575,15 +581,66 @@ fn prune_idle_runtimes(runtimes: &mut HashMap<String, Arc<LlamaCppRuntime>>) {
     runtimes.retain(|_, runtime| Arc::strong_count(runtime) > 1);
 }
 
+fn cancelled_model_request() -> ModelRuntimeFailure {
+    failure(
+        "MODEL_REQUEST_CANCELLED",
+        "Model request was cancelled before inference",
+        true,
+    )
+}
+
+impl LlamaCppRuntime {
+    fn wait_for_inference_slot(
+        &self,
+        control: &dyn ExecutionControl,
+    ) -> Result<MutexGuard<'_, ()>, ModelRuntimeFailure> {
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        loop {
+            if control.cancellation_requested() {
+                return Err(cancelled_model_request());
+            }
+            match self.inference_slot.try_lock() {
+                Ok(slot) => {
+                    if control.cancellation_requested() {
+                        drop(slot);
+                        return Err(cancelled_model_request());
+                    }
+                    return Ok(slot);
+                }
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(failure(
+                        "MODEL_RUNTIME_UNAVAILABLE",
+                        "Qualified llama-server inference slot is unavailable",
+                        true,
+                    ));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(failure(
+                            "MODEL_RUNTIME_BUSY",
+                            "Qualified llama-server inference slot remained busy",
+                            true,
+                        ));
+                    }
+                    thread::sleep(INFERENCE_SLOT_POLL_INTERVAL.min(deadline - now));
+                }
+            }
+        }
+    }
+}
+
 impl ModelRuntime for LlamaCppRuntime {
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
-        let _inference_slot = self.inference_slot.lock().map_err(|_| {
-            failure(
-                "MODEL_RUNTIME_UNAVAILABLE",
-                "Qualified llama-server inference slot is unavailable",
-                true,
-            )
-        })?;
+        self.generate_with_control(request, &UNCONTROLLED_EXECUTION)
+    }
+
+    fn generate_with_control(
+        &self,
+        request: &ModelRequest,
+        control: &dyn ExecutionControl,
+    ) -> Result<ModelResponse, ModelRuntimeFailure> {
+        let _inference_slot = self.wait_for_inference_slot(control)?;
         let started = Instant::now();
         let mut observed_usage = ModelTokenUsage::default();
         let result = (|| {
@@ -1314,6 +1371,88 @@ fn verify_registered_model_identity(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+const F_SETOWN_EX: libc::c_int = 15;
+#[cfg(all(target_os = "linux", test))]
+const F_GETOWN_EX: libc::c_int = 16;
+#[cfg(target_os = "linux")]
+const F_OWNER_TID: libc::c_int = 0;
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LeaseSignalOwner {
+    owner_type: libc::c_int,
+    pid: libc::pid_t,
+}
+
+#[cfg(target_os = "linux")]
+fn current_thread_id() -> libc::pid_t {
+    unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t }
+}
+
+#[cfg(target_os = "linux")]
+fn set_model_lease_owner_to_current_thread(descriptor: libc::c_int) -> std::io::Result<()> {
+    let owner = LeaseSignalOwner {
+        owner_type: F_OWNER_TID,
+        pid: current_thread_id(),
+    };
+    if unsafe { libc::fcntl(descriptor, F_SETOWN_EX, &owner) } < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn set_model_lease_owner_to_current_thread(_descriptor: libc::c_int) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "thread-directed file lease signals require Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn parent_model_lease_is_intact(file: &File) -> bool {
+    use std::os::fd::AsRawFd;
+
+    unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLEASE) == libc::F_RDLCK }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn parent_model_lease_is_intact(_file: &File) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn verify_parent_model_lease_before_spawn(
+    file: &File,
+    expected_size_bytes: u64,
+    expected_identity: &FileIdentity,
+) -> Result<(), ModelRuntimeFailure> {
+    if MODEL_LEASE_BREAK_REQUESTED.load(Ordering::SeqCst) || !parent_model_lease_is_intact(file) {
+        return Err(stale_model_failure());
+    }
+    verify_registered_model_identity(file, expected_size_bytes, expected_identity)?;
+    if MODEL_LEASE_BREAK_REQUESTED.load(Ordering::SeqCst) || !parent_model_lease_is_intact(file) {
+        return Err(stale_model_failure());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_parent_model_lease_before_spawn(
+    _file: &File,
+    _expected_size_bytes: u64,
+    _expected_identity: &FileIdentity,
+) -> Result<(), ModelRuntimeFailure> {
+    Err(failure(
+        "MODEL_RUNTIME_UNAVAILABLE",
+        "Direct GGUF execution is supported only on Linux",
+        false,
+    ))
+}
+
 #[cfg(unix)]
 fn unblock_model_lease_signal() -> std::io::Result<()> {
     let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -1362,7 +1501,7 @@ fn acquire_model_read_lease(file: &File) -> Result<(), ModelRuntimeFailure> {
     })?;
     MODEL_LEASE_BREAK_REQUESTED.store(false, Ordering::SeqCst);
     let descriptor = file.as_raw_fd();
-    if unsafe { libc::fcntl(descriptor, libc::F_SETOWN, libc::getpid()) } < 0
+    if set_model_lease_owner_to_current_thread(descriptor).is_err()
         || unsafe { libc::fcntl(descriptor, libc::F_SETLEASE, libc::F_RDLCK) } < 0
     {
         return Err(failure(
@@ -1751,6 +1890,7 @@ struct ModelMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::control::CancellationToken;
     use std::io::{Read, Write};
 
     static LEASE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -1921,6 +2061,48 @@ mod tests {
     }
 
     #[test]
+    fn queued_generation_observes_cancellation_before_any_model_request() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let runtime = Arc::new(LlamaCppRuntime::for_test(
+            format!("http://{address}"),
+            "secret".to_string(),
+        ));
+        let worker_runtime = Arc::clone(&runtime);
+        let token = CancellationToken::new();
+        let worker_token = token.clone();
+        let slot = runtime.inference_slot.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            worker_runtime.generate_with_control(
+                &ModelRequest {
+                    stage: PipelineStage::Analyze,
+                    ordinal: 0,
+                    system_prompt: "system".to_string(),
+                    user_prompt: "user".to_string(),
+                    seed: 42,
+                    max_output_tokens: 1,
+                    output_format: Default::default(),
+                },
+                &worker_token,
+            )
+        });
+        started_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(50));
+        token.request();
+
+        let failure = worker.join().unwrap().unwrap_err();
+        assert_eq!(failure.code, "MODEL_REQUEST_CANCELLED");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(slot);
+    }
+
+    #[test]
     fn regular_file_hashing_rejects_final_symlinks_and_detects_drift() {
         let directory = tempfile::tempdir().unwrap();
         let model = directory.path().join("model.gguf");
@@ -1993,7 +2175,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn parent_lease_ownership_unblocks_and_delivers_sigio() {
         let _lease_test = LEASE_TEST_LOCK.lock().unwrap();
@@ -2011,6 +2193,22 @@ mod tests {
         fs::write(&model, b"model").unwrap();
         let reader = open_regular_nofollow(&model).unwrap();
         acquire_model_read_lease(&reader).unwrap();
+        use std::os::fd::AsRawFd;
+        let mut owner = LeaseSignalOwner {
+            owner_type: -1,
+            pid: -1,
+        };
+        assert_eq!(
+            unsafe { libc::fcntl(reader.as_raw_fd(), F_GETOWN_EX, &mut owner) },
+            0
+        );
+        assert_eq!(
+            owner,
+            LeaseSignalOwner {
+                owner_type: F_OWNER_TID,
+                pid: current_thread_id(),
+            }
+        );
         let mut observed: libc::sigset_t = unsafe { std::mem::zeroed() };
         assert_eq!(
             unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut observed) },
@@ -2028,6 +2226,35 @@ mod tests {
 
         assert_eq!(sigio_blocked, 0);
         assert!(break_delivered);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pre_spawn_lease_guard_accepts_intact_and_rejects_signaled_or_released_lease() {
+        let _lease_test = LEASE_TEST_LOCK.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("model.gguf");
+        fs::write(&model, b"model").unwrap();
+        let reader = open_regular_nofollow(&model).unwrap();
+        let (_, size, _, identity) = inspect_regular_file(&model).unwrap();
+        acquire_model_read_lease(&reader).unwrap();
+
+        verify_parent_model_lease_before_spawn(&reader, size, &identity).unwrap();
+        MODEL_LEASE_BREAK_REQUESTED.store(true, Ordering::SeqCst);
+        assert_eq!(
+            verify_parent_model_lease_before_spawn(&reader, size, &identity)
+                .unwrap_err()
+                .code,
+            "MODEL_PROFILE_STALE"
+        );
+        MODEL_LEASE_BREAK_REQUESTED.store(false, Ordering::SeqCst);
+        release_model_read_lease(&reader);
+        assert_eq!(
+            verify_parent_model_lease_before_spawn(&reader, size, &identity)
+                .unwrap_err()
+                .code,
+            "MODEL_PROFILE_STALE"
+        );
     }
 
     #[cfg(unix)]
