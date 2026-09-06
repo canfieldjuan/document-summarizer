@@ -859,6 +859,7 @@ impl QwenProfileRuntime {
         }
         let analysis_profile = admitted_snapshot_profile(&snapshot.analysis, false)?;
         let verification_profile = admitted_snapshot_profile(&snapshot.verification, true)?;
+        validate_admitted_snapshot_preset(snapshot, analysis_profile, verification_profile)?;
         let requires_gguf_registration = [
             snapshot.analysis.runtime_kind,
             snapshot.verification.runtime_kind,
@@ -1079,6 +1080,36 @@ fn admitted_snapshot_profile(
     Ok(profile)
 }
 
+fn validate_admitted_snapshot_preset(
+    snapshot: &ModelProfileSnapshot,
+    analysis_profile: &'static QualifiedProfile,
+    verification_profile: &'static QualifiedProfile,
+) -> Result<(), ModelRuntimeFailure> {
+    let full_is_admitted = analysis_profile.full
+        && analysis_profile.profile_id == verification_profile.profile_id
+        && snapshot.analysis == snapshot.verification
+        && snapshot.preset_id == format!("full-{}", analysis_profile.profile_id);
+    let strongest_verifier_rank = QUALIFIED_PROFILES
+        .iter()
+        .filter_map(|profile| profile.verifier_rank)
+        .max();
+    let hybrid_is_admitted = analysis_profile.hybrid_analysis
+        && analysis_profile.profile_id != verification_profile.profile_id
+        && verification_profile.verifier_rank == strongest_verifier_rank
+        && snapshot.preset_id
+            == format!(
+                "hybrid-{}-{}",
+                analysis_profile.profile_id, verification_profile.profile_id
+            );
+    if full_is_admitted || hybrid_is_admitted {
+        Ok(())
+    } else {
+        Err(config_failure(
+            "Run model profile snapshot does not match an admitted preset",
+        ))
+    }
+}
+
 impl ModelRuntime for QwenProfileRuntime {
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
         self.runtime_for(&request.stage).generate(request)
@@ -1146,6 +1177,52 @@ mod tests {
             analysis: stage.clone(),
             verification: stage,
         }
+    }
+
+    #[test]
+    fn snapshot_admission_requires_one_exact_product_preset() {
+        let ollama = qualified_snapshot();
+        let ollama_profile = admitted_snapshot_profile(&ollama.analysis, false).unwrap();
+        let ollama_verifier = admitted_snapshot_profile(&ollama.verification, true).unwrap();
+        validate_admitted_snapshot_preset(&ollama, ollama_profile, ollama_verifier).unwrap();
+
+        let direct_profile = QUALIFIED_PROFILES
+            .iter()
+            .find(|profile| profile.runtime_kind == ModelRuntimeKind::LlamaCppGguf)
+            .unwrap();
+        let direct_stage = ModelStageProfileSnapshot {
+            runtime_kind: direct_profile.runtime_kind,
+            profile_id: direct_profile.profile_id.to_string(),
+            model_name: "jack.gguf".to_string(),
+            model_digest: direct_profile.digest.to_string(),
+            context_tokens: direct_profile.safe_context_tokens,
+            tokenizer_version: direct_profile.tokenizer_version.to_string(),
+        };
+        let direct = ModelProfileSnapshot {
+            version: 2,
+            preset_id: format!("full-{}", direct_profile.profile_id),
+            analysis: direct_stage.clone(),
+            verification: direct_stage,
+        };
+        validate_admitted_snapshot_preset(&direct, direct_profile, direct_profile).unwrap();
+
+        let mut cross_runtime = direct;
+        cross_runtime.verification = ollama.verification.clone();
+        assert_eq!(
+            validate_admitted_snapshot_preset(&cross_runtime, direct_profile, ollama_verifier)
+                .unwrap_err()
+                .code,
+            "MODEL_CONFIG_INVALID"
+        );
+
+        let mut wrong_preset = ollama;
+        wrong_preset.preset_id = "full-not-the-qualified-profile".to_string();
+        assert_eq!(
+            validate_admitted_snapshot_preset(&wrong_preset, ollama_profile, ollama_verifier)
+                .unwrap_err()
+                .code,
+            "MODEL_CONFIG_INVALID"
+        );
     }
 
     fn descriptor(

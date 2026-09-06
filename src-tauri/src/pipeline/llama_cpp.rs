@@ -199,23 +199,12 @@ impl LlamaCppRuntime {
         }
 
         let model_file = open_regular_nofollow(&config.model_path)?;
-        let model_metadata = model_file.metadata().map_err(|_| {
-            failure(
-                "MODEL_NOT_AVAILABLE",
-                "Registered GGUF metadata could not be read",
-                true,
-            )
-        })?;
-        if model_metadata.len() != config.expected_size_bytes
-            || file_identity(&model_metadata)? != config.expected_file_identity
-        {
-            return Err(failure(
-                "MODEL_PROFILE_STALE",
-                "Registered GGUF bytes no longer match the qualified profile",
-                true,
-            ));
-        }
         acquire_model_read_lease(&model_file)?;
+        verify_registered_model_identity(
+            &model_file,
+            config.expected_size_bytes,
+            &config.expected_file_identity,
+        )?;
 
         let server_path = resolve_server_path()?;
         let (server_file, mut runtime_libraries) = open_qualified_runtime_bundle(
@@ -278,18 +267,21 @@ impl LlamaCppRuntime {
             use std::os::fd::AsRawFd;
             model_file.as_raw_fd()
         };
+        #[cfg(unix)]
+        let expected_parent_process = unsafe { libc::getpid() };
         let mut command = Command::new(&executable_argument);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            // SAFETY: the callback invokes only async-signal-safe prctl/fcntl before exec.
-            // The parent descriptors retain CLOEXEC, so another concurrently spawned child
-            // cannot inherit the model or qualified runtime bundle.
+            // SAFETY: the callback invokes only async-signal-safe process/signal/fcntl
+            // operations before exec. The parent descriptors retain CLOEXEC, so another
+            // concurrently spawned child cannot inherit the model or runtime bundle.
             unsafe {
                 command.pre_exec(move || {
                     if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
+                    verify_expected_parent(expected_parent_process)?;
                     let mut default_action: libc::sigaction = std::mem::zeroed();
                     default_action.sa_sigaction = libc::SIG_DFL;
                     if libc::sigemptyset(&mut default_action.sa_mask) != 0
@@ -1263,6 +1255,24 @@ fn stale_model_failure() -> ModelRuntimeFailure {
     )
 }
 
+fn verify_registered_model_identity(
+    file: &File,
+    expected_size_bytes: u64,
+    expected_identity: &FileIdentity,
+) -> Result<(), ModelRuntimeFailure> {
+    let metadata = file.metadata().map_err(|_| {
+        failure(
+            "MODEL_NOT_AVAILABLE",
+            "Registered GGUF metadata could not be read",
+            true,
+        )
+    })?;
+    if metadata.len() != expected_size_bytes || file_identity(&metadata)? != *expected_identity {
+        return Err(stale_model_failure());
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn unblock_child_lease_signal() -> std::io::Result<()> {
     let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -1271,6 +1281,14 @@ fn unblock_child_lease_signal() -> std::io::Result<()> {
         || unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &signals, std::ptr::null_mut()) } != 0
     {
         return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_expected_parent(expected_parent: libc::pid_t) -> std::io::Result<()> {
+    if unsafe { libc::getppid() } != expected_parent {
+        return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
     }
     Ok(())
 }
@@ -1342,7 +1360,7 @@ fn open_regular_nofollow(path: &Path) -> Result<File, ModelRuntimeFailure> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        options.custom_flags(safe_model_open_flags());
     }
     let file = options.open(path).map_err(|_| {
         failure(
@@ -1363,6 +1381,11 @@ fn open_regular_nofollow(path: &Path) -> Result<File, ModelRuntimeFailure> {
         ));
     }
     Ok(file)
+}
+
+#[cfg(unix)]
+fn safe_model_open_flags() -> libc::c_int {
+    libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK
 }
 
 fn sha256_open_file(file: &mut File) -> Result<String, ModelRuntimeFailure> {
@@ -1865,6 +1888,67 @@ mod tests {
                 libc::F_UNLCK
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_identity_is_verified_while_the_read_lease_is_held() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("model.gguf");
+        fs::write(&model, b"model").unwrap();
+        let reader = open_regular_nofollow(&model).unwrap();
+        let (_, size, _, identity) = inspect_regular_file(&model).unwrap();
+        acquire_model_read_lease(&reader).unwrap();
+        verify_registered_model_identity(&reader, size, &identity).unwrap();
+        release_model_read_lease(&reader);
+
+        fs::write(&model, b"other").unwrap();
+        acquire_model_read_lease(&reader).unwrap();
+        assert_eq!(
+            verify_registered_model_identity(&reader, size, &identity)
+                .unwrap_err()
+                .code,
+            "MODEL_PROFILE_STALE"
+        );
+        release_model_read_lease(&reader);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_model_paths_are_opened_nonblocking_then_rejected() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        assert_ne!(safe_model_open_flags() & libc::O_NONBLOCK, 0);
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("model.gguf");
+        let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        let _guard = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .unwrap();
+        assert_eq!(
+            open_regular_nofollow(&fifo).unwrap_err().code,
+            "MODEL_CONFIG_INVALID"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_death_handoff_accepts_only_the_captured_parent() {
+        let parent = unsafe { libc::getppid() };
+        verify_expected_parent(parent).unwrap();
+        let different = if parent == 1 { 2 } else { 1 };
+        assert_eq!(
+            verify_expected_parent(different)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ESRCH)
+        );
     }
 
     #[cfg(unix)]
