@@ -138,7 +138,21 @@ recheck the job before cleanup or error projection. A deterministic race test
 commits the identical job from the runtime factory, then proves the duplicate
 returns that stored job, preserves its source and removes only the losing import.
 
-The local all-target gate passes with 303 library
+A later exact-head review found two remaining desktop identity boundaries.
+Stage-boundary health rejected a repointed qualified tag as terminal even though
+restoring the immutable snapshotted model makes the normal retry safe. That
+`MODEL_PROFILE_STALE` path is now recoverable while the current stage remains
+rejected; a loopback boundary test proves both the unchanged and repointed
+digests. New desktop starts also used to persist the document and run before the
+runtime profile was written by worker processing, leaving a crash window in
+which a product-accepted run had no immutable execution identity. Desktop start
+now requires the runtime snapshot before opening its database and commits that
+snapshot in the same transaction as the initial document and run. A
+snapshotless product runtime persists nothing, while the legacy snapshotless
+ingestion path remains available only to non-product tests and pre-model
+checkpoints. Contract commit `75c7990` precedes implementation commit `93853d2`.
+
+The local all-target gate passes with 305 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
