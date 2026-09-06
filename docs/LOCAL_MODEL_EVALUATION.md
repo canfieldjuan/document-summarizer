@@ -208,7 +208,17 @@ Reversed-order boundary coverage proves one preset is emitted and both analysis
 and verification use the same canonical alias. Contract commit `499566c`
 precedes implementation commit `408ae1a`.
 
-The local all-target gate passes with 311 library
+The exact-head security review then found that bounded individual metadata
+responses did not bound the strings retained across the installed-model
+catalog. In particular, up to 256 `/api/show` responses could each contribute
+an unbounded architecture value to the webview payload. Every external string
+retained in a descriptor is now limited to 512 UTF-8 bytes, their aggregate is
+limited to 256 KiB, and either maximum plus one rejects the catalog without
+truncation. Tag fields are checked before they can name a metadata request, and
+oversized show metadata is a catalog-wide resource failure. Contract commit
+`fbf8510` precedes implementation commit `de68963`.
+
+The local all-target gate passes with 314 library
 tests and six ignored, three acceptance tests and three ignored, and three
 release tests. Strict all-target/all-feature clippy with warnings denied,
 formatting, frontend TypeScript/Vite build and diff checks pass. Hosted CI is not
