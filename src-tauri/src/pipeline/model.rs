@@ -539,14 +539,14 @@ impl OllamaRuntime {
             return Err(runtime_failure(
                 "MODEL_EXECUTION_UNVERIFIED",
                 "Local model execution could not be bound to one running model record",
-                false,
+                true,
             ));
         }
         if &matching[0].digest != expected {
             return Err(runtime_failure(
                 "MODEL_PROFILE_STALE",
                 "Local model execution used a digest outside the qualified profile",
-                false,
+                true,
             ));
         }
         Ok(())
@@ -1549,6 +1549,7 @@ mod tests {
             .join()
             .expect("changed digest server should finish");
         assert_eq!(changed.code, "MODEL_PROFILE_STALE");
+        assert!(changed.recoverable);
         assert_eq!(changed.request_attempts.len(), 1);
         assert!(!changed.request_attempts[0].succeeded);
 
@@ -1561,6 +1562,7 @@ mod tests {
                 .join()
                 .expect("unproven digest server should finish");
             assert_eq!(unproven.code, "MODEL_EXECUTION_UNVERIFIED");
+            assert!(unproven.recoverable);
             assert!(!unproven.request_attempts[0].succeeded);
         }
     }
