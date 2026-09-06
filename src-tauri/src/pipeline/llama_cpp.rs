@@ -1662,7 +1662,7 @@ mod tests {
             let body = request.split("\r\n\r\n").nth(1).unwrap();
             let body: serde_json::Value = serde_json::from_str(body).unwrap();
             assert_eq!(body["prompt"], serde_json::json!([101, 202]));
-            let response = r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":2}"#;
+            let response = r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"word"}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
