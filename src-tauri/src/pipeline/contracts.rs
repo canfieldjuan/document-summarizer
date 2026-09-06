@@ -189,6 +189,10 @@ impl ContinuationCheckpoint {
     pub fn requires_runtime(self) -> bool {
         !matches!(self, Self::Verified)
     }
+
+    pub fn requires_existing_model_profile(self) -> bool {
+        matches!(self, Self::Analyzed | Self::Synthesized)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

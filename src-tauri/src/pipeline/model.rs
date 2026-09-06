@@ -491,6 +491,31 @@ impl OllamaRuntime {
             .map(|(status, body)| (status, body, elapsed))
             .map_err(|failure| (failure, elapsed))
     }
+
+    fn verify_expected_digest(&self) -> Result<(), ModelRuntimeFailure> {
+        let Some(expected) = self.expected_digest.as_ref() else {
+            return Ok(());
+        };
+        let actual = self
+            .installed_model_records()?
+            .into_iter()
+            .find(|model| model.name == self.model_id)
+            .ok_or_else(|| {
+                runtime_failure(
+                    "MODEL_NOT_AVAILABLE",
+                    "Configured local model is not currently available",
+                    true,
+                )
+            })?;
+        if &actual.digest != expected {
+            return Err(runtime_failure(
+                "MODEL_PROFILE_STALE",
+                "Configured local model digest changed while processing the request",
+                false,
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn model_timeout_seconds(value: Option<&str>) -> Result<u64, ModelRuntimeFailure> {
@@ -648,6 +673,17 @@ impl ModelRuntime for OllamaRuntime {
                 false,
             ));
             return Err(with_request_attempts(rejected_response(status), attempts));
+        }
+        if let Err(failure) = self.verify_expected_digest() {
+            attempts.push(request_attempt_diagnostic(
+                request,
+                attempt_ordinal,
+                transport_attempt.clone(),
+                elapsed,
+                usage.clone(),
+                false,
+            ));
+            return Err(with_request_attempts(failure, attempts));
         }
         let output: ChatResponse = serde_json::from_slice(&body).map_err(|_| {
             attempts.push(request_attempt_diagnostic(
@@ -1297,6 +1333,41 @@ mod tests {
         (format!("http://{address}/v1/"), handle)
     }
 
+    fn digest_guard_server(post_request_digest: &'static str) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback address should resolve");
+        let handle = thread::spawn(move || {
+            let (mut chat, _) = listener.accept().expect("chat request should arrive");
+            let _ = read_json_request(&mut chat);
+            write_json_response(
+                &mut chat,
+                "200 OK",
+                &serde_json::json!({
+                    "message": {"role": "assistant", "content": "bounded response"},
+                    "prompt_eval_count": 10,
+                    "eval_count": 2
+                }),
+            );
+            let (mut tags, _) = listener.accept().expect("digest check should arrive");
+            let _ = read_headers(&mut tags);
+            write_json_response(
+                &mut tags,
+                "200 OK",
+                &serde_json::json!({
+                    "models": [{
+                        "name": "fixture-model",
+                        "digest": post_request_digest,
+                        "size": 12345,
+                        "details": {"family": "qwen3"}
+                    }]
+                }),
+            );
+        });
+        (format!("http://{address}/"), handle)
+    }
+
     fn read_headers(stream: &mut TcpStream) -> String {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 1024];
@@ -1334,6 +1405,32 @@ mod tests {
         runtime
     }
 
+    fn digest_guard_runtime(base_url: &str) -> OllamaRuntime {
+        OllamaRuntime::new_internal(
+            base_url,
+            "fixture-model",
+            Some("qualified-digest"),
+            Some(QwenTokenizerFamily::Qwen3),
+            8_192,
+            Duration::from_secs(5),
+            None,
+            false,
+        )
+        .expect("digest guard runtime should configure")
+    }
+
+    fn digest_guard_request() -> ModelRequest {
+        ModelRequest {
+            stage: crate::pipeline::contracts::PipelineStage::Analyze,
+            ordinal: 0,
+            system_prompt: "system".to_string(),
+            user_prompt: "user".to_string(),
+            seed: 42,
+            max_output_tokens: 64,
+            output_format: ModelOutputFormat::Text,
+        }
+    }
+
     #[test]
     fn runtime_rejects_remote_credentials_and_invalid_limits() {
         for invalid in [
@@ -1361,6 +1458,30 @@ mod tests {
             OllamaRuntime::new("http://127.0.0.1:11434/v1", "model", Duration::ZERO, None,)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn request_output_is_accepted_only_while_the_qualified_digest_still_matches() {
+        let (matching_url, matching_server) = digest_guard_server("qualified-digest");
+        let matching = digest_guard_runtime(&matching_url)
+            .generate(&digest_guard_request())
+            .expect("an unchanged digest should admit the response");
+        matching_server
+            .join()
+            .expect("matching digest server should finish");
+        assert_eq!(matching.text, "bounded response");
+        assert!(matching.request_attempts[0].succeeded);
+
+        let (changed_url, changed_server) = digest_guard_server("repointed-digest");
+        let changed = digest_guard_runtime(&changed_url)
+            .generate(&digest_guard_request())
+            .expect_err("a repointed tag must reject the generated response");
+        changed_server
+            .join()
+            .expect("changed digest server should finish");
+        assert_eq!(changed.code, "MODEL_PROFILE_STALE");
+        assert_eq!(changed.request_attempts.len(), 1);
+        assert!(!changed.request_attempts[0].succeeded);
     }
 
     #[test]

@@ -49,6 +49,8 @@ pub enum DesktopJobError {
     Service(#[from] DocumentServiceError),
     #[error("Model runtime configuration failed: {0:?}")]
     Runtime(#[from] ModelRuntimeFailure),
+    #[error("Pipeline run {0} has no immutable model profile for continued model work")]
+    RuntimeProfileUnavailable(String),
     #[error("Pipeline run already has a desktop worker: {0}")]
     AlreadyRunning(String),
     #[error("Pipeline run does not have an active desktop worker: {0}")]
@@ -74,6 +76,7 @@ impl DesktopJobError {
             Self::Store(_) => "PIPELINE_STORE_ERROR",
             Self::Service(error) => error.code(),
             Self::Runtime(failure) => &failure.code,
+            Self::RuntimeProfileUnavailable(_) => "CONTINUATION_RUNTIME_PROFILE_UNAVAILABLE",
             Self::AlreadyRunning(_) => "BACKGROUND_JOB_ALREADY_RUNNING",
             Self::NotRunning(_) => "BACKGROUND_JOB_NOT_RUNNING",
             Self::RegistryUnavailable => "BACKGROUND_JOB_REGISTRY_UNAVAILABLE",
@@ -155,7 +158,11 @@ impl DesktopJobManager {
         let document = db::get_document(&conn, &run.document_id)?
             .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
         let runtime = if plan.requires_runtime {
-            let snapshot = db::get_run_model_profile(&conn, run_id)?;
+            let snapshot = continuation_runtime_snapshot(
+                run_id,
+                plan.checkpoint,
+                db::get_run_model_profile(&conn, run_id)?,
+            )?;
             Some((self.runtime_factory)(snapshot.as_ref())?)
         } else {
             None
@@ -368,6 +375,19 @@ impl DesktopJobManager {
         .map(|_| ())
         .map_err(DesktopJobError::WorkerStartFailurePersistence)
     }
+}
+
+fn continuation_runtime_snapshot(
+    run_id: &str,
+    checkpoint: crate::pipeline::contracts::ContinuationCheckpoint,
+    snapshot: Option<ModelProfileSnapshot>,
+) -> Result<Option<ModelProfileSnapshot>, DesktopJobError> {
+    if checkpoint.requires_existing_model_profile() && snapshot.is_none() {
+        return Err(DesktopJobError::RuntimeProfileUnavailable(
+            run_id.to_string(),
+        ));
+    }
+    Ok(snapshot)
 }
 
 #[derive(Clone, Copy)]
@@ -708,6 +728,33 @@ mod tests {
                 .is_active(&accepted.run_id)
                 .expect("registry should remain readable")
         });
+    }
+
+    #[test]
+    fn model_artifact_continuation_requires_a_snapshot_before_worker_admission() {
+        use crate::pipeline::contracts::ContinuationCheckpoint;
+
+        for checkpoint in [
+            ContinuationCheckpoint::Analyzed,
+            ContinuationCheckpoint::Synthesized,
+        ] {
+            let error = continuation_runtime_snapshot("legacy-run", checkpoint, None)
+                .expect_err("model artifacts without a profile must not be activated");
+            assert_eq!(error.code(), "CONTINUATION_RUNTIME_PROFILE_UNAVAILABLE");
+        }
+        for checkpoint in [
+            ContinuationCheckpoint::Ingested,
+            ContinuationCheckpoint::Parsed,
+            ContinuationCheckpoint::Normalized,
+            ContinuationCheckpoint::Structured,
+            ContinuationCheckpoint::Chunked,
+        ] {
+            assert_eq!(
+                continuation_runtime_snapshot("pre-model-run", checkpoint, None)
+                    .expect("pre-model checkpoints may select a runtime on continuation"),
+                None
+            );
+        }
     }
 
     #[test]

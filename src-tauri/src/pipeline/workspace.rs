@@ -178,6 +178,9 @@ fn run_history_item(
     let retry_child = db::get_retry_lineage_for_source(conn, &run.run_id)?;
     let can_retry = run.retry_checkpoint().is_some() && retry_child.is_none();
     let continuation_checkpoint = run.continuation_checkpoint();
+    let continuation_profile_available = !continuation_checkpoint
+        .is_some_and(ContinuationCheckpoint::requires_existing_model_profile)
+        || db::get_run_model_profile(conn, &run.run_id)?.is_some();
     Ok(RunHistoryItem {
         run_id: run.run_id,
         document_id: document.document_id,
@@ -195,7 +198,7 @@ fn run_history_item(
         retry_run_id: retry_child.map(|lineage| lineage.retry_run_id),
         can_retry,
         continuation_checkpoint,
-        can_continue: continuation_checkpoint.is_some(),
+        can_continue: continuation_checkpoint.is_some() && continuation_profile_available,
         continuation_requires_runtime: continuation_checkpoint
             .is_some_and(ContinuationCheckpoint::requires_runtime),
         cancellation_requested: run.cancellation_requested,

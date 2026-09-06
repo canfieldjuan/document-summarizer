@@ -806,6 +806,10 @@ mod tests {
         fn model_id(&self) -> &str {
             "fixture-model"
         }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_model_profile())
+        }
     }
 
     #[derive(Default)]
@@ -889,6 +893,8 @@ mod tests {
                 .expect("run should exist");
         }
 
+        ensure_runtime_profile(conn, &ingested.run_id, runtime)
+            .expect("first model work should persist its runtime profile");
         analyze_chunked_document(conn, runtime, &ingested.run_id)
             .expect("fixture should analyze to checkpoint");
         if checkpoint == ContinuationCheckpoint::Analyzed {
@@ -1147,6 +1153,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn legacy_model_artifact_without_a_profile_is_not_advertised_as_continuable() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let runtime = CountingFixtureRuntime::default();
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let chunked = prepare_checkpoint(
+            &mut conn,
+            &source,
+            &pipeline,
+            &runtime,
+            ContinuationCheckpoint::Chunked,
+        );
+        analyze_chunked_document(&mut conn, &runtime, &chunked.run_id)
+            .expect("legacy-shaped fixture should reach analyzed without a v15 profile");
+
+        let history = crate::pipeline::workspace::list_recent_runs(&conn)
+            .expect("legacy history should load without activating a runtime");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].continuation_checkpoint,
+            Some(ContinuationCheckpoint::Analyzed)
+        );
+        assert!(history[0].continuation_requires_runtime);
+        assert!(!history[0].can_continue);
     }
 
     #[test]
