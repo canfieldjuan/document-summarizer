@@ -295,10 +295,7 @@ impl LlamaCppRuntime {
             // concurrently spawned child cannot inherit the model or runtime bundle.
             unsafe {
                 command.pre_exec(move || {
-                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    verify_expected_parent(expected_parent_process)?;
+                    install_parent_death_signal(expected_parent_process)?;
                     let mut default_action: libc::sigaction = std::mem::zeroed();
                     default_action.sa_sigaction = libc::SIG_DFL;
                     if libc::sigemptyset(&mut default_action.sa_mask) != 0
@@ -1148,9 +1145,9 @@ fn prepare_private_runtime_root(runtime_parent: &Path) -> Result<PathBuf, ModelR
             )
         })?;
         let mode = metadata.mode();
-        let trusted_sticky_directory =
-            mode & libc::S_ISVTX != 0 && (metadata.uid() == 0 || metadata.uid() == effective_user);
-        if !metadata.file_type().is_dir() || mode & 0o022 != 0 && !trusted_sticky_directory {
+        if !metadata.file_type().is_dir()
+            || !runtime_ancestor_is_trusted(mode, metadata.uid(), effective_user)
+        {
             return Err(failure(
                 "MODEL_RUNTIME_UNAVAILABLE",
                 "Runtime staging requires a trusted directory ancestry",
@@ -1175,6 +1172,11 @@ fn prepare_private_runtime_root(runtime_parent: &Path) -> Result<PathBuf, ModelR
     }
     verify_private_runtime_root(&runtime_root)?;
     Ok(runtime_root)
+}
+
+#[cfg(unix)]
+fn runtime_ancestor_is_trusted(mode: u32, owner: u32, effective_user: u32) -> bool {
+    (owner == 0 || owner == effective_user) && (mode & 0o022 == 0 || mode & libc::S_ISVTX != 0)
 }
 
 #[cfg(not(unix))]
@@ -1601,6 +1603,23 @@ fn unblock_model_lease_signal() -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn install_parent_death_signal(expected_parent: libc::pid_t) -> std::io::Result<()> {
+    let mut default_action: libc::sigaction = unsafe { std::mem::zeroed() };
+    default_action.sa_sigaction = libc::SIG_DFL;
+    let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigemptyset(&mut default_action.sa_mask) } != 0
+        || unsafe { libc::sigaction(libc::SIGTERM, &default_action, std::ptr::null_mut()) } != 0
+        || unsafe { libc::sigemptyset(&mut signals) } != 0
+        || unsafe { libc::sigaddset(&mut signals, libc::SIGTERM) } != 0
+        || unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &signals, std::ptr::null_mut()) } != 0
+        || unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    verify_expected_parent(expected_parent)
 }
 
 #[cfg(unix)]
@@ -2033,6 +2052,18 @@ mod tests {
 
     static LEASE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(target_os = "linux")]
+    fn linux_process_is_running(pid: libc::pid_t) -> bool {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(status) => status
+                .rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().next())
+                .is_none_or(|state| state != "Z"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => true,
+        }
+    }
+
     fn generation_result_for_completion(
         response_body: &str,
     ) -> Result<ModelResponse, ModelRuntimeFailure> {
@@ -2456,12 +2487,7 @@ mod tests {
                 let mut command = Command::new("/bin/sleep");
                 command.arg("30");
                 unsafe {
-                    command.pre_exec(move || {
-                        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        verify_expected_parent(expected_parent)
-                    });
+                    command.pre_exec(move || install_parent_death_signal(expected_parent));
                 }
                 (supervisor_tid, command.spawn())
             })
@@ -2492,6 +2518,96 @@ mod tests {
                 .unwrap_err()
                 .raw_os_error(),
             Some(libc::ESRCH)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn isolated_parent_death_signal_owner() {
+        use std::os::unix::process::CommandExt;
+
+        let Ok(pid_path) = std::env::var("DOC_SUM_PDEATH_PROBE_PID_PATH") else {
+            return;
+        };
+        let mut ignored: libc::sigaction = unsafe { std::mem::zeroed() };
+        ignored.sa_sigaction = libc::SIG_IGN;
+        let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::sigemptyset(&mut ignored.sa_mask) }, 0);
+        assert_eq!(
+            unsafe { libc::sigaction(libc::SIGTERM, &ignored, std::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(unsafe { libc::sigemptyset(&mut blocked) }, 0);
+        assert_eq!(unsafe { libc::sigaddset(&mut blocked, libc::SIGTERM) }, 0);
+        assert_eq!(unsafe { libc::sigaddset(&mut blocked, libc::SIGUSR1) }, 0);
+        assert_eq!(
+            unsafe { libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) },
+            0
+        );
+
+        let expected_parent = unsafe { libc::getpid() };
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                install_parent_death_signal(expected_parent)?;
+                let mut observed_action: libc::sigaction = std::mem::zeroed();
+                let mut observed_mask: libc::sigset_t = std::mem::zeroed();
+                if libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut observed_action) != 0
+                    || libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut observed_mask)
+                        != 0
+                    || observed_action.sa_sigaction != libc::SIG_DFL
+                    || libc::sigismember(&observed_mask, libc::SIGTERM) != 0
+                    || libc::sigismember(&observed_mask, libc::SIGUSR1) != 1
+                {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        fs::write(pid_path, child.id().to_string()).unwrap();
+        std::mem::forget(child);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parent_death_signal_terminates_after_inherited_block_and_ignore() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_path = directory.path().join("child.pid");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("isolated_parent_death_signal_owner")
+            .arg("--nocapture")
+            .env("DOC_SUM_PDEATH_PROBE_PID_PATH", &pid_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated parent-death probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let pid: libc::pid_t = fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while linux_process_is_running(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let survived = linux_process_is_running(pid);
+        if survived {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(
+            !survived,
+            "parent-death child survived inherited SIGTERM state"
         );
     }
 
@@ -2583,6 +2699,30 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let safe_parent = tempfile::tempdir().unwrap();
+        let effective_user = unsafe { libc::geteuid() };
+        let foreign_user = if effective_user == 1 { 2 } else { 1 };
+        assert!(runtime_ancestor_is_trusted(
+            0o700,
+            effective_user,
+            effective_user
+        ));
+        assert!(runtime_ancestor_is_trusted(0o755, 0, effective_user));
+        assert!(runtime_ancestor_is_trusted(0o1777, 0, effective_user));
+        assert!(!runtime_ancestor_is_trusted(
+            0o777,
+            effective_user,
+            effective_user
+        ));
+        assert!(!runtime_ancestor_is_trusted(
+            0o555,
+            foreign_user,
+            effective_user
+        ));
+        assert!(!runtime_ancestor_is_trusted(
+            0o1777,
+            foreign_user,
+            effective_user
+        ));
         fs::set_permissions(safe_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let runtime_root = prepare_private_runtime_root(safe_parent.path()).unwrap();
         assert_eq!(
