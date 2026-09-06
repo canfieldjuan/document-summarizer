@@ -74,6 +74,20 @@ sticky ancestry while rejecting non-sticky writable ancestry, a broad-mode or
 symlink runtime root, and symlink/file app-data targets. A live probe observed
 `/tmp/llama-runtime` as mode `0700` and owned by the effective user.
 
+Review of that evidence head found two additional local-process boundary gaps.
+A foreign-owned mode-`0755` ancestor passed because admission checked only the
+group/other write bits, even though its owner could later make it writable and
+rename the admitted subtree. The child also installed `PR_SET_PDEATHSIG` without
+first resetting and unblocking `SIGTERM`, so an ignored or blocked disposition
+inherited from the supervisor could make the one-shot death notification inert.
+The corrected implementation accepts canonical ancestors only when root or the
+effective user owns them, with the existing sticky/write rules applied after
+that ownership check. Before parent-death installation the child now restores
+the default `SIGTERM` disposition and unblocks only that signal. Boundary probes
+reject foreign ownership even at mode `0555` and launch an isolated child from
+an ignored/blocked `SIGTERM` state, then prove it does not survive its parent.
+The corpus results below were rerun after both corrections.
+
 The first validation attempts on this revision correctly stopped before
 inference with `MODEL_RUNTIME_BUSY`: a Website Generator Connect provider kept
 reloading the qualified 30B Ollama runner after the first targeted unload. The
@@ -112,12 +126,12 @@ change was used for these results.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time | Schema fallback |
 | --- | --- | --- | ---: | ---: | ---: |
-| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 43.31 s | 0 |
-| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,954 | 294.75 s | 0 |
+| NARA robustness fixture | 8 supported claims / 8 evidence; 3 recorded omissions; complete with warnings | 8/11 raw (72.73%); 8/8 adjusted (100%) | 21 / 653 | 41.68 s | 0 |
+| DOL product fixture | 83 supported claims / 83 evidence; 3 recorded omissions; complete with warnings | 83/111 raw (74.77%); 83/108 adjusted (76.85%) | 180 / 6,948 | 261.77 s | 0 |
 
 NARA used 20 analysis requests and one verification request, with 438 and 215
 completion tokens respectively. DOL used 174 analysis requests and six
-verification requests, with 5,198 and 1,756 completion tokens respectively.
+verification requests, with 5,192 and 1,756 completion tokens respectively.
 Neither used synthesis or schema fallback, and every admitted request reported
 prompt and completion token accounting that matched the direct adapter's
 preflight. A live process-boundary probe during the NARA run found the socket in
