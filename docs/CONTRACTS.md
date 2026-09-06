@@ -1068,16 +1068,124 @@ base and Jack Qwen 3.8 27B digests remain installed but unqualified because the
 current Ollama loader cannot initialize either GGUF. They remain visible with an
 unavailable reason and cannot become a full or hybrid preset.
 
+#### Direct GGUF runtime extension (pending implementation)
+
+This subsection is the implementation contract for direct Qwen GGUF support. It
+must be folded into the current-behavior runtime, discovery, settings, identity,
+qualification and non-scope subsections, then deleted in the implementation
+commit. Until that separate commit lands, Ollama remains the only product
+runtime and the preceding current-registry paragraph remains authoritative.
+
+The application adds an app-managed llama.cpp runtime; it does not use LM
+Studio, Ollama import or a user-entered inference endpoint for a directly
+registered GGUF. The user explicitly chooses one `.gguf` file through the
+desktop file picker. The application never scans model directories. Registration
+opens the selected path without following a final symlink, requires one regular
+file, hashes bytes from that open descriptor and stores the canonical location,
+size and SHA-256 in private atomic settings. A new or historical run reopens and
+rehashes the file before inference. Missing, replaced, non-regular or
+digest-mismatched input is unavailable and never falls back to another model.
+The selected descriptor, rather than a later path lookup, is inherited by the
+spawned child through `/proc/self/fd` so a rename or replacement between hash and
+load cannot change the bytes executed. Direct GGUF support is therefore Linux
+only in this slice, matching the supported desktop bundle.
+
+The runtime executable is the canonical `llama-server` resolved from the
+deployment override or `PATH`. It is itself a qualified executable: the app
+hashes the opened executable and requires the exact registered runtime profile
+before spawning it through its descriptor. A changed binary is visible as an
+unavailable runtime until separately qualified. No shell interprets its path or
+arguments. The child binds a fresh exact-loopback port, uses an unpredictable
+per-process bearer token and digest alias, and starts with the qualified context,
+one parallel slot, reasoning disabled, web UI disabled, offline mode, no warmup
+and GPU layers enabled. Proxies and redirects remain disabled. Startup has a
+short aggregate deadline; health, model identity and trained context are checked
+before the first request. The app drains bounded diagnostic output without
+persisting prompts or source text, shares one live child for the same direct
+profile inside the process, and terminates/reaps its owned child after the final
+holder releases it. A port collision, early exit, startup timeout, changed alias
+or failed reap never admits generated output.
+
+Direct requests use llama.cpp `POST /completion`, not the GGUF's embedded chat
+template and not its OpenAI-compatible chat route. The app renders one pinned,
+minimal Qwen ChatML sequence containing only the existing system and user
+messages plus the assistant prefix, sends the projected schema as `json_schema`,
+and preserves temperature zero, the run-derived seed and the stage output
+allowance. The app asks the same private server's `/tokenize` endpoint to count
+that exact transmitted prompt before inference. Output plus the existing framing
+reserve must fit the qualified context; truncation is disabled and a response
+reporting prompt truncation is rejected. Response bodies, JSON, content, token
+usage and model identity remain bounded and fail closed. No schema fallback is
+introduced for this adapter. Provider prompt/completion counts and the concrete
+`llama.cpp-qwen-gguf` runtime identity flow through the existing request and run
+diagnostics without recording the file path, token or prompt.
+
+Model settings advance compatibly to store explicit GGUF registrations alongside
+the selected preset. Version-one settings load as the same selected Ollama
+preset with an empty registration list and are atomically upgraded on the next
+write. Registrations and every stored path/label are bounded; duplicate content
+digests collapse to one canonical registration. The catalog combines Ollama and
+registered-GGUF descriptors. Failure of one discovery source leaves qualified
+models from the other source selectable and labels the failed source rather than
+hiding the whole catalog. The UI shows runtime kind, basename, byte size, family,
+trained maximum, qualified context and disabled reason. It never exposes an
+absolute private path in routine diagnostics or run artifacts. Selection affects
+new runs only. Removing or changing a registration cannot relabel an existing
+run, and a selected unavailable profile remains explicit rather than silently
+reverting to the default.
+
+Stage snapshots advance with an explicit runtime kind while preserving
+version-one Ollama snapshots on reload. A direct snapshot contains the qualified
+profile, GGUF digest, context and tokenizer/runtime versions, but no mutable
+filesystem path. Runtime reconstruction resolves the current registration by
+that exact digest and repeats all file and executable admission checks before
+state changes. The exact Jack Qwen 3.8 27B Coder GGUF
+`e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041`
+is admitted as an opt-in full preset at an 8,192-token context when executed by
+the qualified llama-server binary
+`0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099`.
+The existing Qwen 3 30B-A3B Ollama preset remains the default and strongest
+verifier. Jack does not create a cross-runtime hybrid preset in this slice:
+holding both runners exceeds the qualified machine's GPU-memory envelope, and a
+weak or unavailable optional path must not reduce the default build.
+
+Qualification used the same prompts, validators, 900-second timeout, 8,192-token
+context and acceptance gates as the existing product path. Through the pinned
+minimal template, NARA delivered 8 supported claims from 8 retained evidence
+items, cited 8 of 11 native-text pages, used 21 requests and 653 completion
+tokens, and completed in 36.53 seconds with no schema fallback. The DOL deck
+delivered 83 supported claims from 83 retained evidence items, cited 83 of 111
+native-text pages, used 180 requests and 6,960 completion tokens, and completed
+in 283.14 seconds with no schema fallback. The GGUF embedded chat template is
+not admitted: a controlled structured-output probe consumed 3,761 prompt tokens
+for trivial content, while the pinned minimal sequence consumed 22. This result
+qualifies only the exact GGUF and runtime hashes above, not other Jack, Qwen 3.8,
+quantization or llama.cpp builds. The slower deck result is displayed honestly;
+it does not replace or weaken the existing default.
+
+Tests cover settings-version migration, registration count/path/label byte
+boundaries, duplicate digests, exact and changed file/runtime hashes, symlink and
+non-regular rejection, descriptor-bound spawn arguments, shell-free execution,
+random authentication, loopback/redirect/proxy rejection, startup timeout and
+early exit, exact prompt rendering and token admission on both sides, schema and
+usage parsing, truncation rejection, child sharing and cleanup, runtime-kind
+snapshot reload and unavailable-source catalog behavior. Guard-shaped tests
+exercise a good regular GGUF versus a replaced file, an admitted executable
+versus one-byte drift, a fitting prompt versus one token over, and a matching
+alias versus a forged response. Existing exactness, provenance, fail-closed,
+NARA, DOL, clippy and formatting gates remain unchanged.
+
 #### Explicit non-scope and deployment boundary
 
 This slice does not add non-Qwen providers, cloud inference, arbitrary endpoint
-entry, model downloading/importing from the UI, a context slider, automatic
+entry, model downloading/copying from the UI, a context slider, automatic
 quantization choice, OCR/vision, parser changes, prompt loosening, timeout
 increases, coverage reductions or verifier bypass. Ollama model-store relocation
 and GGUF import are operator deployment steps, documented and performed
-copy-first on the development machine; application code never scans arbitrary
-filesystem paths or mutates the Ollama store. Existing models are not deleted as
-part of migration or qualification.
+copy-first on the development machine; direct GGUF registration records only an
+explicitly selected existing file, never scans arbitrary filesystem paths and
+never mutates the Ollama store. Existing models are not deleted as part of
+migration or qualification.
 
 The application service composes ingestion, parsing, normalization, structural
 interpretation, chunking, analysis, synthesis, verification, and completion.
