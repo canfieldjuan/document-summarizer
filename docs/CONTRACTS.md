@@ -892,7 +892,10 @@ the registered-path and retained-descriptor checks; deleting, unlinking or
 replacing a registered path can therefore never revive a cached ghost runtime.
 Child output is discarded without persisting prompts or source text. One child
 is shared for the exact model/context/runtime-bundle identity; a different
-direct identity cannot coexist. Selection change and app exit clear the owned
+direct identity cannot coexist while the cached child is actively referenced.
+When a new direct identity is admitted, map-only idle children are terminated,
+reaped and evicted before startup; actively referenced children instead produce
+the recoverable busy result. Selection change and app exit clear the owned
 cache, while an active run retains its reference until it finishes. Any model
 identity failure atomically makes the cache entry unavailable and terminates
 and reaps the owned child even if another reference still exists. Every child
@@ -1071,8 +1074,11 @@ profile ID, immutable GGUF digest, qualified context and tokenizer/runtime
 versions, but no mutable path. Reconstruction resolves the current registration
 by exact digest and repeats file-identity and complete runtime-manifest admission
 before state changes. Version-one snapshots remain Ollama-only and reload under
-their historical semantics. A missing direct registration or changed file never
-falls back to Ollama or another GGUF.
+their historical semantics. An Ollama-only snapshot has no dependency on the
+mutable GGUF settings file: missing, malformed or future-version GGUF settings
+cannot block its reconstruction. Settings are loaded only when at least one
+direct stage needs a registration. A missing direct registration or changed
+file never falls back to Ollama or another GGUF.
 
 Connect runtime selection happens before admission, and the selected profile
 snapshot is inserted in the same SQLite transaction as ingestion and the
@@ -1201,7 +1207,8 @@ Direct-runtime tests cover settings migration and bounds, duplicate digest
 registration, regular/symlink/replaced files, cached registration deletion and
 replacement, exact and drifted runtime manifest members, sealed immutable
 runtime bytes, descriptor-backed library names, stale-child termination and
-eviction, shell-free loopback launch, private
+eviction, idle-versus-active cache replacement, Ollama-only snapshot recovery
+with malformed GGUF settings, shell-free loopback launch, private
 authentication, exact alias/context checks, prompt-token admission on both
 sides, control-token injection isolation, truncation, mismatched accounting and
 malformed response rejection, stage snapshot reload, cache identity and
