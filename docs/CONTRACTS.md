@@ -931,7 +931,10 @@ before inference; it also rechecks the retained model descriptor after load.
 
 The private runtime directory must not be created through ambient `TMPDIR` or
 the process-global temporary-directory resolver. Runtime construction receives
-the explicit model-settings directory, canonicalizes it, and rejects any
+the explicit model-settings directory. Product startup creates or tightens its
+app-data/model-settings directory to effective-user-owned mode `0700` before
+database, settings or runtime use; a foreign owner or non-directory fails
+startup. Runtime construction canonicalizes that directory and rejects any
 ancestor that is not a directory or is group/other writable without the sticky
 bit. Beneath that admitted location the application creates one dedicated
 runtime root with mode `0700`; an existing root is accepted only when it is a
