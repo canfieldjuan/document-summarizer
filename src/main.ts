@@ -1021,7 +1021,7 @@ function renderClaims(summary: SummaryArtifact): void {
   evidenceLabel.textContent = "";
   evidenceQuote.textContent = "";
 
-  if (summary.claims.length === 0) {
+  if (summary.claims.length === 0 && summary.presentationMode !== "coherent") {
     summaryText.hidden = false;
     summaryText.textContent = summary.text;
     return;
@@ -1032,10 +1032,12 @@ function renderClaims(summary: SummaryArtifact): void {
   if (summary.presentationMode === "coherent") {
     coherentSummarySection.hidden = false;
     renderProseList(summaryProse, summary.summaryClaims);
-    allClaimsCount.textContent = String(summary.claims.length);
-    allClaimsDisclosure.hidden = false;
-    allClaimsDisclosure.open = false;
-    renderClaimList(summaryClaims, summary.claims, "Claim");
+    if (summary.claims.length > 0) {
+      allClaimsCount.textContent = String(summary.claims.length);
+      allClaimsDisclosure.hidden = false;
+      allClaimsDisclosure.open = false;
+      renderClaimList(summaryClaims, summary.claims, "Claim");
+    }
     return;
   }
 

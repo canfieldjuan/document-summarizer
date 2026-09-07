@@ -577,10 +577,7 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
             ));
         }
     };
-    if verified.claims.is_empty()
-        || (verified.presentation_mode == SummaryPresentationMode::Coherent
-            && verified.summary_claims.is_empty())
-    {
+    if presented_claims_empty(&verified) {
         record_verification_attempt(conn, run_id, verifying_run.state_version, 0, &verified)?;
         return Err(persist_failure(
             conn,
@@ -647,10 +644,7 @@ pub(crate) fn complete_verified_document_with_delivery(
         ));
     }
 
-    if verified.claims.is_empty()
-        || (verified.presentation_mode == SummaryPresentationMode::Coherent
-            && verified.summary_claims.is_empty())
-    {
+    if presented_claims_empty(&verified) {
         return Err(persist_final_failure(
             conn,
             run_id,
@@ -2801,6 +2795,15 @@ fn no_supported_claims_failure() -> PipelineFailure {
     )
 }
 
+fn presented_claims_empty(verified: &VerifiedDocument) -> bool {
+    match verified.presentation_mode {
+        SummaryPresentationMode::Coherent => verified.summary_claims.is_empty(),
+        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList => {
+            verified.claims.is_empty()
+        }
+    }
+}
+
 fn validate_analyzed_document(
     analyzed: &AnalyzedDocument,
     chunked: &ChunkedDocument,
@@ -4449,6 +4452,7 @@ mod tests {
     enum VerificationFixtureMode {
         Mixed,
         AllUnsupported,
+        LedgerUnsupportedSummarySupported,
         ShortfallThenSupported,
         ShortfallThenUnsupported,
     }
@@ -4687,6 +4691,14 @@ mod tests {
                             verdict: match self.mode {
                                 VerificationFixtureMode::AllUnsupported => {
                                     ClaimVerdict::Unsupported
+                                }
+                                VerificationFixtureMode::LedgerUnsupportedSummarySupported
+                                    if verification_call == 0 =>
+                                {
+                                    ClaimVerdict::Unsupported
+                                }
+                                VerificationFixtureMode::LedgerUnsupportedSummarySupported => {
+                                    ClaimVerdict::Supported
                                 }
                                 VerificationFixtureMode::ShortfallThenSupported
                                     if verification_call > 0 =>
@@ -8746,6 +8758,32 @@ mod tests {
             get_pipeline_run(&conn, &run_id).unwrap().unwrap().state,
             PipelineState::Failed
         );
+    }
+
+    #[test]
+    fn supported_coherent_prose_ships_when_the_ledger_is_withheld() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = VerificationFixtureRuntime::new(
+            VerificationFixtureMode::LedgerUnsupportedSummarySupported,
+        );
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("supported coherent prose must not depend on the supporting ledger");
+        let verified = get_verified_document(&conn, &run_id)
+            .expect("verified document query should succeed")
+            .expect("supported coherent prose should complete verification");
+
+        assert!(verified.claims.is_empty());
+        assert!(!verified.summary_claims.is_empty());
+        assert!(completed.citations.claims.is_empty());
+        assert!(!completed.citations.summary_claims.is_empty());
+
+        drop(conn);
+        let reopened = init_db(&database.0).expect("summary database should reopen");
+        let persisted = crate::pipeline::workspace::get_persisted_summary(&reopened, &run_id)
+            .expect("coherent prose with an empty ledger should reload");
+        assert!(persisted.summary.claims.is_empty());
+        assert!(!persisted.summary.summary_claims.is_empty());
     }
 
     #[test]

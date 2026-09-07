@@ -176,12 +176,14 @@ verdict artifact and its runtime/model identity commit atomically with
 
 Only claims classified as `supported` enter the final summary and citation
 artifact. In coherent mode, supported prose units are the reader-facing summary
-and the supported source ledger remains available as supporting detail. In
+and any supported source-ledger claims remain available as supporting detail;
+coherent completion does not require the supporting ledger to be nonempty. In
 fallback and historical modes, supported ledger claims remain the rendered
-summary. Unsupported and ambiguous claims remain in the durable verification
-artifact and add `SEMANTIC_CLAIMS_WITHHELD`. This is an evidence-entailment
-classification, not certification that the source itself is factually true.
-If at least one presented claim is supported, the final summary artifact,
+summary and at least one is required. Unsupported and ambiguous claims remain in
+the durable verification artifact and add `SEMANTIC_CLAIMS_WITHHELD`. This is an
+evidence-entailment classification, not certification that the source itself is
+factually true. If at least one claim in the active presentation set is supported,
+the final summary artifact,
 independently persisted citation artifact, `VERIFIED -> COMPLETE` or
 `VERIFIED -> COMPLETE_WITH_WARNINGS` transition, state-version increment, and
 event append share one transaction. Warnings select `COMPLETE_WITH_WARNINGS`;

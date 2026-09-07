@@ -2157,7 +2157,9 @@ complete in PR #38
   General presentation.
 - The analyzed claim ledger remains durable for audit and fallback. Reader-facing
   prose is verified separately against the exact normalized source segments it
-  cited. Unsupported prose cannot ship merely because ledger claims pass.
+  cited. Unsupported prose cannot ship merely because ledger claims pass, and
+  supported coherent prose remains present when every independently verified
+  ledger paraphrase is withheld.
 - A deterministic modal guard catches a strong predicate where cited source
   states the same predicate with weaker modality. It permits one context-bounded
   regeneration with application feedback, then fails closed. Current-artifact
@@ -2166,12 +2168,12 @@ complete in PR #38
 - Current artifacts are synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
   citation 4.0.0. Historical direct and hierarchical artifacts keep their
   versioned validation. The desktop renders coherent prose first with exact
-  citation controls and keeps the full verified claim ledger in supporting
-  detail; fallback opens that ledger explicitly.
+  citation controls and keeps any supported claim ledger in supporting detail;
+  fallback opens that ledger explicitly.
 
 **Verification and representative output**:
 - `cargo fmt --all --check` and strict all-target/all-feature Clippy passed. The
-  locked Rust suite passed 398 library tests with 6 intentional ignores; the
+  locked Rust suite passed 399 library tests with 6 intentional ignores; the
   office target passed 3 local tests with 3 opt-in ignores, and all 3 release
   contract tests passed. The TypeScript/Vite production build transformed 7
   modules and completed successfully.
@@ -2184,6 +2186,11 @@ complete in PR #38
   direct claim-ledger synthesis and the actual delivered page-coverage
   predicate, preventing source-selective coherent prose from failing after
   otherwise successful model work.
+- A mode-boundary regression withheld every ledger paraphrase while supporting
+  the coherent prose, then proved completion, citation creation, SQLite reopen
+  and workspace projection all retained the reader-facing summary. Existing
+  opposite-side tests still require coherent prose itself, and fallback or
+  historical ledger presentation, to have at least one supported claim.
 - The first public `structured_report.pdf` live trace exposed five source-sized
   paragraphs and an unsupported claim that architecture verification would
   "ensure consistency and accuracy in system design." After compression

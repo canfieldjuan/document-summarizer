@@ -457,10 +457,13 @@ The durable direct claim ledger remains alongside coherent prose for audit and
 fallback. Verification classifies the ledger claims against their analysis
 evidence and separately classifies every prose unit against the exact source
 segments selected during synthesis. Unsupported prose is withheld from the
-rendered summary even when ledger claims remain supported. Citation format 4
-binds presentation mode, supported prose claims, ledger claims, their exact
-evidence and the canonical rendered text. The desktop shows coherent paragraphs
-first and keeps the complete verified ledger available as supporting detail.
+rendered summary even when ledger claims remain supported. Coherent completion
+depends on at least one supported prose unit; it does not require an independently
+verified ledger paraphrase to survive. Fallback and historical presentation still
+require at least one supported ledger claim. Citation format 4 binds presentation
+mode, supported prose claims, ledger claims, their exact evidence and the canonical
+rendered text. The desktop shows coherent paragraphs first and keeps any supported
+ledger claims available as supporting detail.
 
 Current artifacts use synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
 citation 4.0.0. Direct version-5 and older artifacts retain their original

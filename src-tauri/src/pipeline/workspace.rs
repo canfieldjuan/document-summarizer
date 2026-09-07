@@ -278,7 +278,8 @@ fn summary_view(
                     != Some(citations.citation_version.as_str())
                 || citations.summary_integrity_hash != summary.integrity_hash
                 || citations.rendered_text != summary.text
-                || citations.claims.is_empty()
+                || (citations.presentation_mode != SummaryPresentationMode::Coherent
+                    && citations.claims.is_empty())
                 || citations.evidence.is_empty()
                 || citations.calculate_integrity_hash().ok().as_deref()
                     != Some(citations.integrity_hash.as_str())
