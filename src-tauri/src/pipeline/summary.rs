@@ -2194,8 +2194,10 @@ fn safe_analysis_sentence_boundary(
     }
     let token = before_terminal
         .rsplit_once(char::is_whitespace)
-        .map_or(before_terminal, |(_, token)| token)
-        .trim_matches(['"', '\'', '“', '‘', '(', '[', '{', '«']);
+        .map_or(before_terminal, |(_, token)| token);
+    let token = token
+        .trim_start_matches(is_analysis_token_opener)
+        .trim_end_matches(is_analysis_sentence_closer);
     let lower = token.to_lowercase();
     let next_non_whitespace = source[proposed_end..source_end]
         .chars()
@@ -2227,6 +2229,14 @@ fn is_analysis_sentence_closer(character: char) -> bool {
         || matches!(
             character.general_category(),
             GeneralCategory::ClosePunctuation | GeneralCategory::FinalPunctuation
+        )
+}
+
+fn is_analysis_token_opener(character: char) -> bool {
+    matches!(character, '"' | '\'')
+        || matches!(
+            character.general_category(),
+            GeneralCategory::OpenPunctuation | GeneralCategory::InitialPunctuation
         )
 }
 
@@ -6373,14 +6383,28 @@ mod tests {
     #[test]
     fn unicode_opening_punctuation_cannot_hide_a_short_abbreviation() {
         let first = format!("{}.", "a".repeat(549));
-        let second =
-            "（Dept. Records officers completed the review and archived every source record.";
-        let source = format!("{first} {second}");
-        assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+        for wrapped in ["（Dept.", "【Dept】.", "「Dept」.", "“Dept”.", "\"Dept\"."] {
+            let second = format!(
+                "{wrapped} Records officers completed the review and archived every source record."
+            );
+            let source = format!("{first} {second}");
+            assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
 
-        let segmented = analysis_quote_segments_v13(&source);
-        assert_eq!(segmented.segments, vec![first, second.to_string()]);
-        assert_eq!(segmented.omitted_source_units, 0);
+            let segmented = analysis_quote_segments_v13(&source);
+            assert_eq!(segmented.segments, vec![first.clone(), second]);
+            assert_eq!(segmented.omitted_source_units, 0);
+        }
+
+        for non_delimiter in ["well-known", "™Dept"] {
+            let source = format!("{non_delimiter}. Records continue.");
+            let proposed_end = source.find(" Records").unwrap();
+            assert!(safe_analysis_sentence_boundary(
+                &source,
+                0,
+                proposed_end,
+                source.len()
+            ));
+        }
     }
 
     #[test]
