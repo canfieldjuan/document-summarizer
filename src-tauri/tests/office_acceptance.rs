@@ -256,6 +256,20 @@ fn reveal_model_text() -> bool {
     env::var("DOC_SUM_OFFICE_TRACE_MODEL_RESPONSES").as_deref() == Ok("1")
 }
 
+fn traced_evidence_pages() -> Option<HashSet<u32>> {
+    let configured = env::var("DOC_SUM_OFFICE_TRACE_EVIDENCE_PAGES").ok()?;
+    Some(
+        configured
+            .split(',')
+            .map(|page| {
+                page.trim()
+                    .parse::<u32>()
+                    .expect("traced evidence pages should be comma-separated positive integers")
+            })
+            .collect(),
+    )
+}
+
 fn add_optional_summary(report: &mut serde_json::Value, summary: &str, reveal_text: bool) {
     if reveal_text {
         report["summary"] = json!(summary);
@@ -892,6 +906,27 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .iter()
         .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
         .collect::<HashSet<_>>();
+    if let Some(traced_pages) = traced_evidence_pages() {
+        let traced = result
+            .citations
+            .evidence
+            .iter()
+            .filter(|evidence| {
+                (evidence.source_span.page_start..=evidence.source_span.page_end)
+                    .any(|page| traced_pages.contains(&page))
+            })
+            .map(|evidence| {
+                json!({
+                    "evidence": evidence,
+                    "claims": result.citations.claims.iter().filter(|claim| claim.evidence_ids.contains(&evidence.evidence_id)).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "OFFICE_LIVE_TRACED_EVIDENCE\n{}\nOFFICE_LIVE_TRACED_EVIDENCE_END",
+            serde_json::to_string_pretty(&traced).expect("traced evidence should serialize")
+        );
+    }
     let verified = get_verified_document(&conn, &result.run_id)
         .expect("verification should load")
         .expect("verification should exist");

@@ -1,5 +1,66 @@
 # Corpus and local Qwen runtime evaluation — updated 2026-09-06
 
+## Analysis 13 quote-boundary correction
+
+**Failure first.** The first live DOL run after the initial sentence-terminal
+implementation at `b0b8b45` failed the unchanged raw-page acceptance gate. It
+retained 56 validated items, but verification withheld one, leaving 55 cited
+pages out of 111 (49.55 percent) where the gate requires at least 50 percent.
+The run made 118 requests and recorded 55 `QuoteBoundaryUnusable` technical
+omissions. This was not a transport or verifier-capacity failure.
+
+Code and corpus tracing found that the initial version-13 rule was broader than
+the defect. The parser and normalizer preserve one complete normalized block per
+PDF page, but the first implementation rejected every block lacking terminal
+punctuation even when its complete trimmed text fit below the 600-character
+quote limit. The DOL deck has many bounded slide headings and lists of that
+shape. Rejecting them exhausted all 111 pages and removed the 16-page retention
+reserve. The original defect was catalog-created clipping of over-budget text,
+not the absence of punctuation in a complete bounded block.
+
+The corrected contract and implementation therefore admit an exact complete
+normalized block through 600 Unicode characters and invoke sentence-boundary
+splitting only above that limit. Over-budget sentences and unterminated tails
+still fail closed; no prefix or suffix becomes an ordinary quote candidate.
+Analysis version 13 remains distinct, and version-12 artifacts still reconstruct
+with the frozen version-12 splitter.
+
+All final live runs used native Ollama with `qwen3-30b-a3b:latest`, exact digest
+`1eda56426671cdf365913097543c2253a73c57e35b12741306689968d7f70292`,
+8,192 admitted context tokens, and the existing acceptance thresholds.
+
+| Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time |
+| --- | --- | --- | ---: | ---: |
+| NARA robustness fixture | 7 supported claims / 7 evidence; 4 material omissions; complete with warnings | 7/11 raw (63.64%); 7/7 adjusted (100%) | 22 / 638 | 21.54 s |
+| DOL product fixture | 82 supported claims / 83 evidence; no page omissions; complete with warnings | 82/111 raw and adjusted (73.87%) | 176 / 5,610 | 96.61 s |
+| Captured 134-page book | 96 supported claims / 97 evidence; 1 material and 2 technical omissions; complete with warnings | 96/134 raw (71.64%); 96/133 adjusted (72.18%) | 205 / 6,534 | 142.22 s |
+
+The book input was the exact 973,450-byte, 134-page native-text PDF with SHA-256
+`2678b69b32977459b9b77fa1bec88243f984afe857fa13144c614558f09990aa`.
+An opt-in persisted-evidence trace inspected the four captured failure pages:
+
+- Page 89 now includes the continuation through `The authors’ outlook is
+  grim.` rather than ending at `assert`.
+- Page 92 includes `we can do better.` and the following complete paragraph.
+- Page 98 includes the continuation about near-absolute authority in foreign
+  policy and war through the early 1970s.
+- Page 102 includes complete sentences through the EU's emergence as a digital
+  technology regulator.
+
+All four exact quotations were bound to supported, mechanically complete
+claims, and the complete delivered citation artifact passed source, identity,
+ordering, integrity and reopen validation. The test-only
+`DOC_SUM_OFFICE_TRACE_EVIDENCE_PAGES` diagnostic prints persisted evidence and
+bound claims only when explicitly configured; ordinary diagnostics remain
+content-free.
+
+Boundary probes cover 599/600/601-character terminal and no-terminal inputs,
+bounded DOL-style heading/list blocks, over-budget and unterminated units,
+safe recovery after an unsafe unit, ambiguous periods, Unicode terminals, the
+four captured cut positions, forged substrings and historical version-12
+reconstruction. The all-target/all-feature suite, strict Clippy and formatting
+are the local release gates; hosted CI is not implied.
+
 ## Direct Jack Qwen 3.8 27B qualification
 
 **Failure first.** The first read-lease-enabled NARA start exited before the
