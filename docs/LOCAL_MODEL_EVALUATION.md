@@ -30,10 +30,13 @@ segmentation proposed a split after the unlisted title-case abbreviation
 `Dept.` before `Records`, and the fixed abbreviation dictionary did not reject
 it. The failing regression reproduced the resulting candidate ending in
 `Dept.` and the following candidate beginning with `Records`. The final
-classifier conservatively coalesces a two-through-five-character alphabetic
-token whose casing is title-style or all capitals whenever source text
-continues after the period. A paired positive probe proves that an ordinary
-lowercase short word remains eligible at a real sentence boundary.
+classifier initially coalesced only title-style or all-capital shapes. A second
+exact-head review then reproduced the same defect with lowercase `dept.`. Casing
+cannot establish that a short token is not an abbreviation, so the final rule
+coalesces every two-through-five-character alphabetic token whenever source
+text continues after the period. Boundary probes cover one through six
+characters and source-final text; continuing six-character lowercase text
+remains eligible.
 
 All final live runs used native Ollama with `qwen3-30b-a3b:latest`, exact digest
 `1eda56426671cdf365913097543c2253a73c57e35b12741306689968d7f70292`,
@@ -41,21 +44,24 @@ All final live runs used native Ollama with `qwen3-30b-a3b:latest`, exact digest
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time |
 | --- | --- | --- | ---: | ---: |
-| NARA robustness fixture | 7 supported claims / 7 evidence; 4 material omissions; complete with warnings | 7/11 raw (63.64%); 7/7 adjusted (100%) | 22 / 643 | 21.27 s |
-| DOL product fixture | 82 supported claims / 83 evidence; no page omissions; complete with warnings | 82/111 raw and adjusted (73.87%) | 176 / 5,610 | 98.36 s |
-| Captured 134-page book | 96 supported claims / 97 evidence; 1 material and 2 technical omissions; complete with warnings | 96/134 raw (71.64%); 96/133 adjusted (72.18%) | 205 / 6,469 | 134.92 s |
+| NARA robustness fixture | 7 supported claims / 7 evidence; 4 material omissions; complete with warnings | 7/11 raw (63.64%); 7/7 adjusted (100%) | 21 / 474 | 20.84 s |
+| DOL product fixture | 82 supported claims / 83 evidence; no page omissions; complete with warnings | 82/111 raw and adjusted (73.87%) | 176 / 5,610 | 96.51 s |
+| Captured 134-page book | 95 supported claims / 97 evidence; 1 material and 3 technical omissions; complete with warnings | 95/134 raw (70.90%); 95/133 adjusted (71.43%) | 205 / 6,510 | 133.15 s |
 
 The book input was the exact 973,450-byte, 134-page native-text PDF with SHA-256
 `2678b69b32977459b9b77fa1bec88243f984afe857fa13144c614558f09990aa`.
 An opt-in persisted-evidence trace inspected the four captured failure pages:
 
-- Page 89 now includes the continuation through `The authors’ outlook is
-  grim.` rather than ending at `assert`.
+- Page 89 selected a different complete unit in this rerun, covering the
+  National Guard deployments and ending after the complete quoted assertion
+  about the destruction of state capacity. The captured `assert`/`grim.` shape
+  remains covered by the deterministic failing-before regression.
 - Page 92 includes `we can do better.` and the following complete paragraph.
 - Page 98 includes the continuation about near-absolute authority in foreign
   policy and war through the early 1970s.
 - Page 102 includes complete sentences through the EU's emergence as a digital
-  technology regulator.
+  technology regulator and the following complete sentence about Bradford's
+  comparative analysis.
 
 All four exact quotations were bound to supported, mechanically complete
 claims, and the complete delivered citation artifact passed source, identity,
