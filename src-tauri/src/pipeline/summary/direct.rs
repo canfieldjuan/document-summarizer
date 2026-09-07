@@ -62,7 +62,6 @@ pub(super) fn validate_claim_set(
     Ok(())
 }
 
-#[cfg(test)]
 pub(super) fn validate_claim_set_for_runtime(
     synthesized: &SynthesizedDocument,
     analyzed: &AnalyzedDocument,
@@ -87,7 +86,6 @@ pub(super) fn validate_claim_set_for_runtime(
     )
 }
 
-#[cfg(test)]
 pub(super) fn synthesize(
     runtime: &dyn ModelRuntime,
     analyzed: &AnalyzedDocument,

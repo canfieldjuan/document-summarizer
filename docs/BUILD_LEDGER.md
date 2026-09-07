@@ -2150,6 +2150,10 @@ complete in PR #38
   `claimLedgerFallback` mode plus
   `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`; invalid runtime or model output
   still fails rather than masquerading as fallback.
+- Connect delivery-policy runs retain the versioned direct claim-ledger
+  synthesis path. This preserves their distributed page coverage
+  contract and existing wire result while standalone summaries use coherent
+  General presentation.
 - The analyzed claim ledger remains durable for audit and fallback. Reader-facing
   prose is verified separately against the exact normalized source segments it
   cited. Unsupported prose cannot ship merely because ledger claims pass.
@@ -2166,7 +2170,7 @@ complete in PR #38
 
 **Verification and representative output**:
 - `cargo fmt --all --check` and strict all-target/all-feature Clippy passed. The
-  locked Rust suite passed 396 library tests with 6 intentional ignores; the
+  locked Rust suite passed 397 library tests with 6 intentional ignores; the
   office target passed 3 local tests with 3 opt-in ignores, and all 3 release
   contract tests passed. The TypeScript/Vite production build transformed 7
   modules and completed successfully.
@@ -2174,6 +2178,10 @@ complete in PR #38
   and over-limit source admission; exact and limit-plus-one paragraph counts;
   foreign and duplicate IDs; mixed weak and independently supported strong
   modality; a corrected retry; and rejection after one repeated violation.
+- A focused application-service test passed the Connect delivery path through
+  direct claim-ledger synthesis and the actual delivered page-coverage
+  predicate, preventing source-selective coherent prose from failing after
+  otherwise successful model work.
 - The first public `structured_report.pdf` live trace exposed five source-sized
   paragraphs and an unsupported claim that architecture verification would
   "ensure consistency and accuracy in system design." After compression

@@ -146,20 +146,20 @@ fully valid replacement advances analysis, and successful replacement is
 recorded as `MODEL_EVIDENCE_RESPONSE_REPAIRED`; a second invalid response or a
 repair-runtime failure follows the ordinary `ANALYZING -> FAILED` path.
 
-Current synthesis loads the persisted analysis, chunk and normalized artifacts.
-It retains the source-ordered analyzed claim ledger, then constructs an ordered
-catalog of exact normalized source segments for coherent General synthesis. The
-complete catalog and prompt must fit one bounded synthesis request. The model
-returns paragraph text plus only request-local source identifiers; Rust restores
-canonical order and owns durable claim, evidence and page-label identity. If a
-complete catalog cannot be constructed or cannot fit the request, the stage
-makes no prose-generation request and persists the verified-ledger fallback
-mode and warning. Malformed output, foreign or duplicate identifiers, invalid
-budgets and runtime failures still fail instead of degrading. A detected
-weak-to-strong modal change permits one bounded regeneration with
-application-generated feedback; an over-budget repair or a second violation
-fails the stage. Cancellation is observed before and after every model request.
-Only the validated final artifact,
+Current standalone synthesis loads the persisted analysis, chunk and normalized
+artifacts. It retains the source-ordered analyzed claim ledger, then constructs
+an ordered catalog of exact normalized source segments for coherent General
+synthesis. The complete catalog and prompt must fit one bounded synthesis
+request. The model returns paragraph text plus only request-local source
+identifiers; Rust restores canonical order and owns durable claim, evidence and
+page-label identity. If a complete catalog cannot be constructed or cannot fit
+the request, the stage makes no prose-generation request and persists the
+verified-ledger fallback mode and warning. Malformed output, foreign or
+duplicate identifiers, invalid budgets and runtime failures still fail instead
+of degrading. A detected weak-to-strong modal change permits one bounded
+regeneration with application-generated feedback; an over-budget repair or a
+second violation fails the stage. Cancellation is observed before and after
+every model request. Only the validated final artifact,
 `SYNTHESIZING -> SYNTHESIZED`, state-version update, and event append share the
 completion transaction. Historical synthesis artifacts retain their versioned
 load rules.
@@ -210,9 +210,12 @@ accepted -> processing -> completed | failed
 document, run through `INGESTED`, and job-to-run mapping commit in one SQLite
 transaction. A database uniqueness constraint enforces at most one
 accepted/processing Connect job. `processing` is a compare-and-set update made
-before the existing application service advances the mapped run. `completed`
-is written only after the durable summary exists; `failed` carries a bounded
-public error and never impersonates pipeline completion.
+before the existing application service advances the mapped run. Its delivery
+policy retains the versioned direct claim-ledger synthesis path because Connect
+requires distributed page coverage in its delivered claim prefix. `completed`
+is written only after the durable summary exists and that coverage predicate
+passes; `failed` carries a bounded public error and never impersonates pipeline
+completion.
 
 Connect job rows are status records rather than the immutable pipeline-event
 ledger. Their legal payload/state combinations are constrained by SQLite, and

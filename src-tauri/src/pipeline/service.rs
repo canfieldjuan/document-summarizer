@@ -18,9 +18,9 @@ use crate::pipeline::summary::{
 use crate::pipeline::summary::{
     analyze_chunked_document_controlled, analyze_chunked_document_controlled_with_delivery,
     complete_verified_document, complete_verified_document_with_delivery,
-    synthesize_analyzed_document_controlled, verify_synthesized_document_controlled,
-    verify_synthesized_document_controlled_with_delivery, SummaryDeliveryPolicy,
-    SummaryPipelineError,
+    synthesize_analyzed_document_controlled, synthesize_analyzed_document_controlled_with_delivery,
+    verify_synthesized_document_controlled, verify_synthesized_document_controlled_with_delivery,
+    SummaryDeliveryPolicy, SummaryPipelineError,
 };
 use chrono::Utc;
 use rusqlite::Connection;
@@ -484,11 +484,12 @@ pub fn process_ingested_to_summary_with_delivery_policy(
         &UNCONTROLLED_EXECUTION,
         Some(delivery_policy),
     )?;
-    synthesize_analyzed_document_controlled(
+    synthesize_analyzed_document_controlled_with_delivery(
         conn,
         components.runtime,
         run_id,
         &UNCONTROLLED_EXECUTION,
+        Some(delivery_policy),
     )?;
     verify_synthesized_document_controlled_with_delivery(
         conn,
@@ -609,6 +610,7 @@ mod tests {
     use crate::pipeline::contracts::{
         ModelProfileSnapshot, ModelRequest, ModelResponse, ModelRuntimeFailure,
         ModelStageProfileSnapshot, PipelineStage, PipelineState, PipelineWarning, RetryCheckpoint,
+        SummaryPresentationMode,
     };
     use crate::pipeline::db::{
         get_analyzed_document, get_chunked_document, get_citation_artifact, get_document,
@@ -1059,6 +1061,54 @@ mod tests {
                 .expect("citations should load")
                 .expect("citations should exist"),
             result.citations
+        );
+    }
+
+    #[test]
+    fn connect_delivery_policy_preserves_the_direct_claim_ledger_coverage_contract() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let (_, ingested) = ingest_pdf(
+            &mut conn,
+            source.0.to_str().expect("fixture path should be UTF-8"),
+        )
+        .expect("fixture should ingest");
+
+        let result = process_ingested_to_summary_with_delivery_policy(
+            &mut conn,
+            &ingested.run_id,
+            pipeline.components(&FixtureRuntime),
+            SummaryDeliveryPolicy::connect(),
+        )
+        .expect("Connect delivery should complete through the direct claim ledger");
+        let synthesized = get_synthesized_document(&conn, &ingested.run_id)
+            .expect("synthesis should load")
+            .expect("synthesis should exist");
+        let analyzed = get_analyzed_document(&conn, &ingested.run_id)
+            .expect("analysis should load")
+            .expect("analysis should exist");
+        let normalized = get_normalized_document(&conn, &ingested.run_id)
+            .expect("normalization should load")
+            .expect("normalization should exist");
+
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::LegacyClaimList
+        );
+        assert!(synthesized.summary_claims.is_empty());
+        assert_eq!(
+            result.citations.presentation_mode,
+            SummaryPresentationMode::LegacyClaimList
+        );
+        assert!(result.citations.summary_claims.is_empty());
+        assert!(
+            crate::pipeline::summary::delivery_claim_prefix_coverage_satisfied(
+                &result.citations,
+                result.citations.claims.len(),
+                &analyzed.omissions,
+                &normalized,
+            )
         );
     }
 

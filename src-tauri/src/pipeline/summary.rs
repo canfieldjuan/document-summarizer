@@ -462,6 +462,16 @@ pub(crate) fn synthesize_analyzed_document_controlled(
     run_id: &str,
     control: &dyn ExecutionControl,
 ) -> Result<SynthesizedDocument, SummaryPipelineError> {
+    synthesize_analyzed_document_controlled_with_delivery(conn, runtime, run_id, control, None)
+}
+
+pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
+    conn: &mut Connection,
+    runtime: &dyn ModelRuntime,
+    run_id: &str,
+    control: &dyn ExecutionControl,
+    delivery_policy: Option<SummaryDeliveryPolicy>,
+) -> Result<SynthesizedDocument, SummaryPipelineError> {
     let run = db::get_pipeline_run(conn, run_id)?
         .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
     let normalized = db::get_normalized_document(conn, run_id)?
@@ -471,14 +481,19 @@ pub(crate) fn synthesize_analyzed_document_controlled(
 
     let (synthesizing_run, persisted_analysis) =
         db::start_synthesis(conn, run_id, run.state_version)?;
-    let synthesized = match coherent::synthesize(
-        runtime,
-        &persisted_analysis,
-        &chunked,
-        &normalized,
-        generation_seed_for_run(run_id),
-        control,
-    ) {
+    let synthesis = if delivery_policy.is_some() {
+        direct::synthesize(runtime, &persisted_analysis, &chunked, &normalized, control)
+    } else {
+        coherent::synthesize(
+            runtime,
+            &persisted_analysis,
+            &chunked,
+            &normalized,
+            generation_seed_for_run(run_id),
+            control,
+        )
+    };
+    let synthesized = match synthesis {
         Ok(synthesized) => synthesized,
         Err(failure) if cancellation_observed(&failure) => {
             return Err(SummaryPipelineError::CancellationObserved);
@@ -3100,7 +3115,6 @@ fn validate_analyzed_content(
     Ok(())
 }
 
-#[cfg(test)]
 fn validate_synthesized_document(
     synthesized: &SynthesizedDocument,
     analyzed: &AnalyzedDocument,

@@ -420,10 +420,10 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ### Coherent General summary and verified ledger fallback
 
-Status: current runs use a bounded source-aware General synthesis path. This
-changes synthesis, verification, citation persistence, reopen validation and the
-desktop projection together; document profiles and automatic routing are not
-part of this contract.
+Status: current standalone runs use a bounded source-aware General synthesis
+path. This changes synthesis, verification, citation persistence, reopen
+validation and the desktop projection together; document profiles and automatic
+routing are not part of this contract.
 
 Synthesis constructs an ordered catalog of exact source segments from the
 normalized chunks, independent of the analyzed claim ledger. The complete
@@ -464,6 +464,12 @@ first and keeps the complete verified ledger available as supporting detail.
 Current artifacts use synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
 citation 4.0.0. Direct version-5 and older artifacts retain their original
 validation, rendering and citation contracts when loaded.
+
+Connect delivery-policy runs continue to use the version-5 direct claim-ledger
+synthesis path. Its delivered result has an independent distributed page
+coverage requirement, so a source-selective coherent draft cannot replace the
+coverage-preserving ledger in this slice. This preserves the existing Connect
+wire result while standalone summaries adopt coherent General presentation.
 
 ### Historical direct verified paraphrases and explicit omissions
 
