@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 use unicode_segmentation::UnicodeSegmentation;
 
 mod direct;
@@ -2168,9 +2169,8 @@ fn safe_analysis_sentence_boundary(
     proposed_end: usize,
     source_end: usize,
 ) -> bool {
-    let closers = ['"', '\'', '”', '’', ')', ']', '}', '»'];
     let candidate = source[unit_start..proposed_end].trim_end();
-    let without_closers = candidate.trim_end_matches(closers);
+    let without_closers = candidate.trim_end_matches(is_analysis_sentence_closer);
     let Some(terminal) = without_closers.chars().last() else {
         return false;
     };
@@ -2210,6 +2210,14 @@ fn safe_analysis_sentence_boundary(
     }
     !(before_terminal.chars().last().is_some_and(char::is_numeric)
         && next_non_whitespace.is_some_and(char::is_numeric))
+}
+
+fn is_analysis_sentence_closer(character: char) -> bool {
+    matches!(character, '"' | '\'')
+        || matches!(
+            character.general_category(),
+            GeneralCategory::ClosePunctuation | GeneralCategory::FinalPunctuation
+        )
 }
 
 #[cfg(test)]
@@ -6409,6 +6417,45 @@ mod tests {
         let segmented = analysis_quote_segments_v13(source);
         assert_eq!(segmented.segments, vec![source.to_string()]);
         assert_eq!(segmented.omitted_source_units, 0);
+    }
+
+    #[test]
+    fn unicode_sentence_closers_preserve_complete_cjk_candidates() {
+        let first = format!("{}.", "a".repeat(549));
+        let second = format!("彼は「{}。」", "記録".repeat(20));
+        let third = format!("担当者は【{}。】", "確認".repeat(20));
+        let source = format!("{first} {second} {third}");
+        assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+
+        let segmented = analysis_quote_segments_v13(&source);
+        assert_eq!(segmented.segments, vec![format!("{first} {second}"), third]);
+        assert_eq!(segmented.omitted_source_units, 0);
+    }
+
+    #[test]
+    fn unicode_sentence_closer_categories_do_not_strip_openers_or_symbols() {
+        for closer in ['"', '\'', '”', '’', '」', '】', ')', ']', '}', '»'] {
+            assert!(is_analysis_sentence_closer(closer));
+        }
+        for non_closer in ['「', '【', '™', ';'] {
+            assert!(!is_analysis_sentence_closer(non_closer));
+        }
+
+        let repeated_closers = "完全な文です。」】";
+        assert!(safe_analysis_sentence_boundary(
+            repeated_closers,
+            0,
+            repeated_closers.len(),
+            repeated_closers.len()
+        ));
+
+        let trailing_symbol = "完全な文です。™";
+        assert!(!safe_analysis_sentence_boundary(
+            trailing_symbol,
+            0,
+            trailing_symbol.len(),
+            trailing_symbol.len()
+        ));
     }
 
     #[test]
