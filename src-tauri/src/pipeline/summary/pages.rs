@@ -415,6 +415,27 @@ fn technical_omission(
     Ok(omission)
 }
 
+fn quote_boundary_omission(
+    page_number: u32,
+    chunk: &DocumentChunk,
+    normalized: &NormalizedDocument,
+) -> Result<AnalysisPageOmission, PipelineFailure> {
+    let page = normalized
+        .pages
+        .iter()
+        .find(|page| page.page_number == page_number)
+        .ok_or_else(|| invalid("Unknown quote-boundary omission page"))?;
+    Ok(AnalysisPageOmission {
+        page_number,
+        chunk_id: chunk.chunk_id.clone(),
+        reason: AnalysisOmissionReason::QuoteBoundaryUnusable,
+        origin: AnalysisOmissionOrigin::QuoteBoundaryUnusable,
+        filter_version: ANALYSIS_VERSION.to_string(),
+        source_fingerprint: fingerprint(&page.content)?,
+        catalog_fingerprint: None,
+    })
+}
+
 fn ocr_text_layer_structure_risk(normalized: &NormalizedDocument) -> bool {
     normalized.pages.iter().any(|page| {
         let native_text = page
@@ -481,11 +502,32 @@ fn versioned_plan(
     Ok((ordered, selected.len()))
 }
 
+#[cfg(test)]
 pub(super) fn page_scope(
     page_number: u32,
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(usize, AnalysisScope, Option<AnalysisPageOmission>, bool), PipelineFailure> {
+    let (chunk_index, scope, omission, heading, _) =
+        versioned_page_scope(ANALYSIS_VERSION, page_number, chunked, normalized)?;
+    Ok((chunk_index, scope, omission, heading))
+}
+
+pub(super) fn versioned_page_scope(
+    analysis_version: &str,
+    page_number: u32,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<
+    (
+        usize,
+        AnalysisScope,
+        Option<AnalysisPageOmission>,
+        bool,
+        usize,
+    ),
+    PipelineFailure,
+> {
     let page = normalized
         .pages
         .iter()
@@ -541,10 +583,26 @@ pub(super) fn page_scope(
         .flat_map(|p| &p.content)
         .map(|b| (b.block_id.as_str(), b))
         .collect();
-    let quote_candidates = if omission.is_some() {
-        Vec::new()
+    let catalog = if omission.is_some() {
+        AnalysisQuoteCatalog {
+            candidates: Vec::new(),
+            omitted_source_units: 0,
+        }
     } else {
-        build_analysis_quote_catalog_for_blocks(chunk, &blocks, &block_ids)?
+        build_versioned_analysis_quote_catalog_for_blocks(
+            analysis_version,
+            chunk,
+            &blocks,
+            &block_ids,
+        )?
+    };
+    let omission = if omission.is_none()
+        && analysis_version == ANALYSIS_VERSION
+        && catalog.candidates.is_empty()
+    {
+        Some(quote_boundary_omission(page_number, chunk, normalized)?)
+    } else {
+        omission
     };
     Ok((
         chunk_index,
@@ -553,10 +611,11 @@ pub(super) fn page_scope(
             block_ids,
             minimum_evidence: 1,
             maximum_evidence: 1,
-            quote_candidates,
+            quote_candidates: catalog.candidates,
         },
         omission,
         eligibility::heading_admitted(&text),
+        catalog.omitted_source_units,
     ))
 }
 
@@ -684,13 +743,22 @@ pub(super) fn analyze(
     let mut ordinal = 0;
     let mut count = 0;
     let mut projected_delivery_bytes = 0usize;
+    let mut quote_boundary_affected_pages = 0usize;
+    let mut quote_boundary_omitted_units = 0usize;
     for page in plan {
         if count == target {
             break;
         }
         cancellation_checkpoint(control, PipelineStage::Analyze)?;
-        let (chunk_index, scope, omission, heading) = page_scope(page, chunked, normalized)?;
+        let (chunk_index, scope, omission, heading, omitted_source_units) =
+            versioned_page_scope(ANALYSIS_VERSION, page, chunked, normalized)?;
         analyzed.inspected_pages.push(page);
+        if omitted_source_units > 0 {
+            quote_boundary_affected_pages += 1;
+            quote_boundary_omitted_units = quote_boundary_omitted_units
+                .checked_add(omitted_source_units)
+                .ok_or_else(|| invalid("Quote-boundary omission count exceeds its range"))?;
+        }
         if let Some(omission) = omission {
             analyzed.omissions.push(omission);
             continue;
@@ -858,7 +926,7 @@ pub(super) fn analyze(
         let paraphrase = accepted.ok_or_else(|| {
             invalid("Paraphrase did not produce a valid outcome after bounded repair")
         })?;
-        let materialized = parse_evidence_response(&json!({"evidence":[{"quote_id":selected.selection,"claim_text":paraphrase.claim_text}]}).to_string(),
+        let materialized = parse_evidence_response(ANALYSIS_VERSION, &json!({"evidence":[{"quote_id":selected.selection,"claim_text":paraphrase.claim_text}]}).to_string(),
             &chunked.document_id, &chunked.chunks[chunk_index], &blocks, &scope, analyzed.chunks[chunk_index].evidence.len())?;
         let evidence = materialized.first().ok_or_else(|| {
             invalid("A successful page paraphrase must materialize exactly one evidence item")
@@ -946,6 +1014,12 @@ pub(super) fn analyze(
             stage: Some(PipelineStage::Analyze),
         });
     }
+    if quote_boundary_omitted_units > 0 {
+        analyzed.warnings.push(quote_boundary_warning(
+            quote_boundary_affected_pages,
+            quote_boundary_omitted_units,
+        ));
+    }
     if ocr_text_layer_structure_risk(normalized) {
         analyzed.warnings.push(PipelineWarning {
             code: "OCR_TEXT_LAYER_STRUCTURE_RISK".to_string(),
@@ -975,6 +1049,26 @@ fn delivery_truncation_warning() -> PipelineWarning {
         code: SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE.to_string(),
         message: "Connect delivery byte ceiling reached; later page analysis was not scheduled"
             .to_string(),
+        stage: Some(PipelineStage::Analyze),
+    }
+}
+
+fn quote_boundary_warning(affected_pages: usize, omitted_source_units: usize) -> PipelineWarning {
+    let unit_label = if omitted_source_units == 1 {
+        "source unit"
+    } else {
+        "source units"
+    };
+    let page_label = if affected_pages == 1 {
+        "inspected page"
+    } else {
+        "inspected pages"
+    };
+    PipelineWarning {
+        code: QUOTE_BOUNDARY_OMITTED_WARNING_CODE.to_string(),
+        message: format!(
+            "{omitted_source_units} {unit_label} on {affected_pages} {page_label} had no safe complete quotation within the {MAX_ANALYSIS_QUOTE_CHARACTERS}-character limit and remain in coverage denominators"
+        ),
         stage: Some(PipelineStage::Analyze),
     }
 }
@@ -1031,7 +1125,8 @@ pub(super) fn validate_plan(
         {
             break;
         }
-        let (chunk_index, scope, deterministic, heading) = page_scope(page, chunked, normalized)?;
+        let (chunk_index, scope, deterministic, heading, _) =
+            versioned_page_scope(&analyzed.analysis_version, page, chunked, normalized)?;
         match (omitted.get(&page), deterministic) {
             (Some(actual), Some(required)) if **actual == required => {}
             (Some(actual), None)
@@ -1039,11 +1134,13 @@ pub(super) fn validate_plan(
                     && **actual
                         == heading_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
             (Some(actual), None)
-                if analyzed.analysis_version == ANALYSIS_VERSION
-                    && scope
-                        .quote_candidates
-                        .iter()
-                        .any(|c| model_omission_admitted(&scope, &c.exact_quote, normalized))
+                if matches!(
+                    analyzed.analysis_version.as_str(),
+                    ANALYSIS_VERSION | QUOTE_BOUNDARY_ANALYSIS_VERSION
+                ) && scope
+                    .quote_candidates
+                    .iter()
+                    .any(|c| model_omission_admitted(&scope, &c.exact_quote, normalized))
                     && **actual
                         == content_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
             (Some(actual), None)
@@ -1066,7 +1163,10 @@ pub(super) fn validate_plan(
             (Some(actual), None)
                 if matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION | PUNCTUATION_ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION
+                    ANALYSIS_VERSION
+                        | QUOTE_BOUNDARY_ANALYSIS_VERSION
+                        | PUNCTUATION_ANALYSIS_VERSION
+                        | TOLERANT_ANALYSIS_VERSION
                 ) && **actual
                     == technical_omission(&scope, &chunked.chunks[chunk_index], normalized)? => {}
             (None, None) if evidence_pages.contains(&page) => retained += 1,
@@ -1134,9 +1234,44 @@ pub(super) fn validate_plan(
             "Exhausted page plan requires a durable shortfall warning",
         ));
     }
+    let mut boundary_affected_pages = 0usize;
+    let mut boundary_omitted_units = 0usize;
+    if analyzed.analysis_version == ANALYSIS_VERSION {
+        for page in &analyzed.inspected_pages {
+            let (_, _, _, _, omitted_source_units) =
+                versioned_page_scope(&analyzed.analysis_version, *page, chunked, normalized)?;
+            if omitted_source_units > 0 {
+                boundary_affected_pages += 1;
+                boundary_omitted_units = boundary_omitted_units
+                    .checked_add(omitted_source_units)
+                    .ok_or_else(|| {
+                    invalid("Quote-boundary omission count exceeds its range")
+                })?;
+            }
+        }
+    }
+    let expected_boundary_warning = (boundary_omitted_units > 0)
+        .then(|| quote_boundary_warning(boundary_affected_pages, boundary_omitted_units));
+    let actual_boundary_warnings = analyzed
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE)
+        .collect::<Vec<_>>();
+    if actual_boundary_warnings.len() != usize::from(expected_boundary_warning.is_some())
+        || expected_boundary_warning
+            .as_ref()
+            .is_some_and(|expected| actual_boundary_warnings.first().copied() != Some(expected))
+    {
+        return Err(invalid(
+            "Quote-boundary omissions require one canonical source-derived warning",
+        ));
+    }
     if matches!(
         analyzed.analysis_version.as_str(),
-        ANALYSIS_VERSION | PUNCTUATION_ANALYSIS_VERSION | TOLERANT_ANALYSIS_VERSION
+        ANALYSIS_VERSION
+            | QUOTE_BOUNDARY_ANALYSIS_VERSION
+            | PUNCTUATION_ANALYSIS_VERSION
+            | TOLERANT_ANALYSIS_VERSION
     ) {
         let expected_long_warning = analyzed
             .chunks

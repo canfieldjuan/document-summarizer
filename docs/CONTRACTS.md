@@ -579,7 +579,10 @@ not repaired by relaxing coverage or retrying until a favorable run appears.
 
 ### Sentence-complete analysis quotation catalogs
 
-Status: contract only. No implementation or acceptance result is claimed here.
+Status: implemented. The locked all-target/all-feature Rust suite, strict Clippy
+with warnings denied and formatting gate pass locally. The opt-in NARA, DOL and
+captured 134-page live reruns are reported separately and are not implied by
+these deterministic gates.
 
 Root cause: analysis version 12 bounds a quotation by scanning the latter half
 of a 600-character window with one mutable preferred boundary. A later

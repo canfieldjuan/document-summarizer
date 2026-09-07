@@ -515,6 +515,7 @@ pub enum AnalysisOmissionOrigin {
     ModelBareHeading,
     ModelNoSubstantiveContent,
     ParaphraseUnrepairable,
+    QuoteBoundaryUnusable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -522,6 +523,7 @@ pub enum AnalysisOmissionReason {
     NonSubstantivePageFurniture,
     NoSubstantiveContent,
     ParaphraseUnrepairable,
+    QuoteBoundaryUnusable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -143,6 +143,9 @@ fn coverage_gate_separates_synthesized_and_supported_evidence() {
     assert!(!omission_reduces_adjusted_denominator(
         &AnalysisOmissionReason::ParaphraseUnrepairable
     ));
+    assert!(!omission_reduces_adjusted_denominator(
+        &AnalysisOmissionReason::QuoteBoundaryUnusable
+    ));
 }
 
 impl TestDatabase {

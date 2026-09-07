@@ -1098,6 +1098,7 @@ dependencies = [
  "tokenizers",
  "tokio",
  "unicode-properties",
+ "unicode-segmentation",
  "uuid",
 ]
 
