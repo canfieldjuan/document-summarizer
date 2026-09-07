@@ -2192,21 +2192,10 @@ fn safe_analysis_sentence_boundary(
     let next_non_whitespace = source[proposed_end..source_end]
         .chars()
         .find(|character| !character.is_whitespace());
-    let token_characters = token.chars().collect::<Vec<_>>();
-    let short_cased_abbreviation = next_non_whitespace.is_some()
-        && (2..=5).contains(&token_characters.len())
-        && token_characters
-            .iter()
-            .all(|character| character.is_alphabetic())
-        && (token_characters
-            .iter()
-            .all(|character| character.is_uppercase())
-            || token_characters
-                .first()
-                .is_some_and(|first| first.is_uppercase())
-                && token_characters[1..]
-                    .iter()
-                    .all(|character| character.is_lowercase()));
+    let token_character_count = token.chars().count();
+    let short_open_set_abbreviation = next_non_whitespace.is_some()
+        && (2..=5).contains(&token_character_count)
+        && token.chars().all(char::is_alphabetic);
     const AMBIGUOUS_ABBREVIATIONS: &[&str] = &[
         "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e", "no", "fig",
         "sec", "art", "inc", "ltd", "co", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep",
@@ -2215,7 +2204,7 @@ fn safe_analysis_sentence_boundary(
     if token.contains('.')
         || token.chars().count() == 1 && token.chars().all(char::is_alphabetic)
         || AMBIGUOUS_ABBREVIATIONS.contains(&lower.as_str())
-        || short_cased_abbreviation
+        || short_open_set_abbreviation
     {
         return false;
     }
@@ -6310,12 +6299,13 @@ mod tests {
 
     #[test]
     fn sentence_boundary_proposals_coalesce_ambiguous_periods() {
-        let source = "Dr. A. Smith measured 3.14 units. The U.S. office agreed! Wait... Continue?";
+        let source =
+            "Dr. A. Smith measured 3.14 readings. The U.S. office agreed! Wait... Continue?";
         let source_end = source.len();
         for unsafe_end in [
             source.find(" A.").unwrap(),
             source.find(" Smith").unwrap(),
-            source.find("14 units").unwrap(),
+            source.find("14 readings").unwrap(),
             source.find(" office").unwrap(),
             source.find(" Continue").unwrap(),
         ] {
@@ -6347,9 +6337,21 @@ mod tests {
     }
 
     #[test]
-    fn short_lowercase_word_remains_a_safe_sentence_boundary() {
+    fn unlisted_lowercase_abbreviation_cannot_create_a_partial_candidate() {
         let first = format!("{}.", "a".repeat(549));
-        let second = "The finding is safe.";
+        let second = "Department staff contacted the dept. Records officers completed the review.";
+        let source = format!("{first} {second}");
+        assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+
+        let segmented = analysis_quote_segments_v13(&source);
+        assert_eq!(segmented.segments, vec![first, second.to_string()]);
+        assert_eq!(segmented.omitted_source_units, 0);
+    }
+
+    #[test]
+    fn six_character_lowercase_word_remains_a_safe_sentence_boundary() {
+        let first = format!("{}.", "a".repeat(549));
+        let second = "The finding is secure.";
         let third = "Reviewers recorded the complete outcome without changing the source.";
         let source = format!("{first} {second} {third}");
         assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
@@ -6360,6 +6362,44 @@ mod tests {
             vec![format!("{first} {second}"), third.to_string()]
         );
         assert_eq!(segmented.omitted_source_units, 0);
+    }
+
+    #[test]
+    fn open_set_abbreviation_length_boundaries_are_both_sided() {
+        for token in ["xy", "xyz", "wxyz", "vwxyz"] {
+            let source = format!("{token}. Records continue.");
+            let proposed_end = source.find(" Records").unwrap();
+            assert!(!safe_analysis_sentence_boundary(
+                &source,
+                0,
+                proposed_end,
+                source.len()
+            ));
+        }
+
+        let one_character = "x. Records continue.";
+        assert!(!safe_analysis_sentence_boundary(
+            one_character,
+            0,
+            one_character.find(" Records").unwrap(),
+            one_character.len()
+        ));
+
+        let six_characters = "secure. Records continue.";
+        assert!(safe_analysis_sentence_boundary(
+            six_characters,
+            0,
+            six_characters.find(" Records").unwrap(),
+            six_characters.len()
+        ));
+
+        let source_final = "abcde.";
+        assert!(safe_analysis_sentence_boundary(
+            source_final,
+            0,
+            source_final.len(),
+            source_final.len()
+        ));
     }
 
     #[test]

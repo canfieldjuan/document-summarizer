@@ -620,10 +620,10 @@ Required behavior:
   continues after a period, conservatively coalesce every preceding alphabetic
   token of two through five characters regardless of casing. This treats
   unlisted shapes such as `Dept.`, `dept.` and `NASA.` as ambiguous; casing
-  cannot prove that a short token is not an abbreviation. A period at the end
-  of the complete source remains safe, and a continuing alphabetic token of
-  six or more characters remains eligible unless another ambiguity rule
-  applies.
+  cannot prove that a short token is not an abbreviation. This open-set rule
+  does not reject a period at the end of the complete source, and a continuing
+  alphabetic token of six or more characters remains eligible; independent
+  ambiguity rules still apply to both.
 - Within an over-budget block, a source sentence unit longer than 600
   characters or a nonempty source tail without a safe terminal boundary is
   unavailable to ordinary quote selection. A no-terminal whole block is
