@@ -2293,8 +2293,9 @@ PR #39
 
 ## Slice 24 — Manual Story Summary Profile (2026-09-07)
 
-**Status**: implementation and automated gates complete; live-model quality
-acceptance remains unverified under current local runtime contention
+**Status**: implementation and automated gates complete in draft PR #40;
+live-model quality acceptance remains unverified under current local runtime
+contention
 
 **Verified root cause and change boundary**:
 - Slice 23 persists an immutable application summary profile, but its typed
