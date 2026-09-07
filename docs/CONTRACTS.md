@@ -425,15 +425,16 @@ path. This changes synthesis, verification, citation persistence, reopen
 validation and the desktop projection together; document profiles and automatic
 routing are not part of this contract.
 
-Synthesis constructs an ordered catalog of exact source segments from the
-normalized chunks, independent of the analyzed claim ledger. The complete
-catalog and prompt must fit one request under the synthesis-stage context
-budget. The response ceiling grows by one unit for each three source segments
-and is capped at eight; it is a ceiling rather than a target. The model may cite
-only request-local source identifiers supplied in that request. Rust restores
-canonical source order and materializes durable claim, evidence and page-label
-identity; prose, source locations and durable IDs are never accepted from model
-output as authoritative metadata.
+Synthesis constructs a catalog of exact source segments from the normalized
+chunks, independent of the analyzed claim ledger. Segments retain canonical
+chunk, block and within-block order before request-local IDs are assigned. The
+complete catalog and prompt must fit one request under the synthesis-stage
+context budget. The response ceiling grows by one unit for each three source
+segments and is capped at eight; it is a ceiling rather than a target. The model
+may cite only request-local source identifiers supplied in that request. Rust
+restores canonical source order and materializes durable claim, evidence and
+page-label identity; prose, source locations and durable IDs are never accepted
+from model output as authoritative metadata.
 
 If the catalog is incomplete or the complete request exceeds the bound,
 synthesis makes no prose-generation request. It persists presentation mode

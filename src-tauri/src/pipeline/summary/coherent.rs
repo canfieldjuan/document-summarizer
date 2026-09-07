@@ -616,7 +616,28 @@ fn source_catalog(
                     false,
                 )
             })?;
+        let mut sources_by_block = HashMap::<String, Vec<AnalysisQuoteCandidate>>::new();
         for source in catalog.candidates {
+            sources_by_block
+                .entry(source.block_id.clone())
+                .or_default()
+                .push(source);
+        }
+        let mut ordered_sources = Vec::new();
+        for block_id in &chunk.block_ids {
+            if let Some(sources) = sources_by_block.remove(block_id) {
+                ordered_sources.extend(sources);
+            }
+        }
+        if !sources_by_block.is_empty() {
+            return Err(stage_failure(
+                PipelineStage::Synthesize,
+                "SYNTHESIS_SOURCE_CONTEXT_INVALID",
+                "General synthesis source segments must belong to the canonical chunk blocks",
+                false,
+            ));
+        }
+        for source in ordered_sources {
             let block = blocks.get(source.block_id.as_str()).ok_or_else(|| {
                 stage_failure(
                     PipelineStage::Synthesize,
@@ -839,7 +860,9 @@ fn invalid_document() -> PipelineFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::contracts::SourceType;
+    use crate::pipeline::contracts::{
+        DocumentChunk, NormalizedBlockKind, NormalizedPage, SourceType,
+    };
     use std::sync::Mutex;
 
     struct ModalRepairRuntime {
@@ -919,6 +942,84 @@ mod tests {
             ],
             omitted_source_units: 0,
         }
+    }
+
+    #[test]
+    fn source_catalog_keeps_split_segments_in_document_order() {
+        let first = format!("{}.", "A".repeat(399));
+        let second = format!("{}!", "B".repeat(399));
+        let first_block_text = format!("{first} {second}");
+        let later = "Later block sentence.".to_string();
+        let source_span = SourceSpan {
+            page_start: 1,
+            page_end: 1,
+            section_id: None,
+            source_type: SourceType::NativeText,
+        };
+        let normalized = NormalizedDocument {
+            document_id: "document-1".into(),
+            normalization_version: "test-normalization".into(),
+            pages: vec![NormalizedPage {
+                page_number: 1,
+                content: vec![
+                    NormalizedBlock {
+                        block_id: "block-a".into(),
+                        kind: NormalizedBlockKind::Text,
+                        text: first_block_text.clone(),
+                        source: source_span.clone(),
+                    },
+                    NormalizedBlock {
+                        block_id: "block-b".into(),
+                        kind: NormalizedBlockKind::Text,
+                        text: later.clone(),
+                        source: source_span.clone(),
+                    },
+                ],
+                warnings: Vec::new(),
+                requires_visual_processing: false,
+            }],
+            warnings: Vec::new(),
+        };
+        let chunked = ChunkedDocument {
+            document_id: normalized.document_id.clone(),
+            chunking_version: "test-chunking".into(),
+            chunks: vec![DocumentChunk {
+                chunk_id: "chunk-1".into(),
+                ordinal: 0,
+                structure_node_id: "node-1".into(),
+                text: format!("{first_block_text}\n\n{later}"),
+                block_ids: vec!["block-a".into(), "block-b".into()],
+                source_spans: vec![source_span.clone(), source_span],
+                warnings: Vec::new(),
+            }],
+            warnings: Vec::new(),
+        };
+
+        let catalog = source_catalog(&chunked, &normalized).unwrap();
+        assert_eq!(
+            catalog
+                .candidates
+                .iter()
+                .map(|candidate| candidate.evidence.block_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["block-a", "block-a", "block-b"]
+        );
+        assert_eq!(
+            catalog
+                .candidates
+                .iter()
+                .map(|candidate| candidate.evidence.exact_quote.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.as_str(), second.as_str(), later.as_str()]
+        );
+        assert_eq!(
+            catalog
+                .candidates
+                .iter()
+                .map(|candidate| candidate.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s1", "s2", "s3"]
+        );
     }
 
     #[test]

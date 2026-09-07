@@ -2141,10 +2141,11 @@ complete in PR #38
 
 **Implemented behavior**:
 - Current synthesis builds an ordered exact-source catalog from normalized
-  chunks, then asks for a bounded coherent overview with request-local source
-  IDs. Rust owns durable evidence, claim IDs, canonical source order and page
-  labels. The response ceiling grows by one paragraph per three source segments
-  and caps at eight, preventing a source-sized paragraph inventory.
+  chunks in canonical chunk, block and within-block segment order, then asks for
+  a bounded coherent overview with request-local source IDs. Rust owns durable
+  evidence, claim IDs, canonical source order and page labels. The response
+  ceiling grows by one paragraph per three source segments and caps at eight,
+  preventing a source-sized paragraph inventory.
 - The complete source catalog must fit one synthesis request. Incomplete or
   over-budget source context makes no prose request and persists the explicit
   `claimLedgerFallback` mode plus
@@ -2170,12 +2171,13 @@ complete in PR #38
 
 **Verification and representative output**:
 - `cargo fmt --all --check` and strict all-target/all-feature Clippy passed. The
-  locked Rust suite passed 397 library tests with 6 intentional ignores; the
+  locked Rust suite passed 398 library tests with 6 intentional ignores; the
   office target passed 3 local tests with 3 opt-in ignores, and all 3 release
   contract tests passed. The TypeScript/Vite production build transformed 7
   modules and completed successfully.
-- The modal-repair boundary suite passed 7 tests. It covers incomplete, exact-fit
-  and over-limit source admission; exact and limit-plus-one paragraph counts;
+- The coherent-summary boundary suite passed 8 tests. It covers canonical order
+  for split segments across multiple blocks; incomplete, exact-fit and
+  over-limit source admission; exact and limit-plus-one paragraph counts;
   foreign and duplicate IDs; mixed weak and independently supported strong
   modality; a corrected retry; and rejection after one repeated violation.
 - A focused application-service test passed the Connect delivery path through
