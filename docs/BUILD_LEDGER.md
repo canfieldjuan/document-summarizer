@@ -2290,3 +2290,107 @@ PR #39
 - Story and Contract behavior remain separate usable-output slices. Automatic
   suggestions, uncertain/mixed routing and bounded classification sampling
   follow working manual profiles and must not delay them.
+
+## Slice 24 — Manual Story Summary Profile (2026-09-07)
+
+**Status**: implementation and automated gates complete; live-model quality
+acceptance remains unverified under current local runtime contention
+
+**Verified root cause and change boundary**:
+- Slice 23 persists an immutable application summary profile, but its typed
+  boundary, desktop selector and synthesis dispatch admit only General. The
+  coherent synthesizer also uses one General-specific prompt and schema name.
+  No Story behavior is hidden by parsing, storage or rendering.
+- This slice extends the existing standalone source-aware synthesis path with an
+  explicit Story choice. It does not add Contract behavior, automatic routing,
+  document-type classification, long-document sampling, model adapters,
+  ingestion changes, Connect behavior or a UI redesign.
+
+**Required behavior**:
+- A new standalone run may explicitly persist `story`; General remains the
+  initial desktop choice. Retry, continuation, history and reopen retain and
+  display the stored selection through the existing immutable profile contract.
+- Story synthesis receives the same ordered exact source catalog as General and
+  returns the same bounded cited prose shape. Its instructions preserve sourced
+  characters, motivations, conflict, causal relationships, chronology, major
+  events and resolution, while forbidding invented motivations, internal states
+  and causal links inferred from sequence alone.
+- General continues to receive only its existing General instructions. Story
+  cannot change Connect's General-only delivery path. Unknown profiles and a
+  specialized profile presented to a Connect delivery policy fail closed.
+- Existing source-ID validation, exact citations, semantic verification,
+  modal-strengthening repair, context admission and verified-ledger fallback
+  remain shared and unchanged.
+
+**Acceptance and minimum verification**:
+- Opposite-side prompt tests prove General and Story select distinct named
+  schemas and instruction sets while using the same source payload and output
+  schema. Unknown profile JSON remains rejected.
+- Persistence tests prove Story admission and immutability, plus General/Story
+  mismatch rejection. Desktop tests prove explicit Story acceptance and
+  persisted history/reopen identity; retry and continuation continue to inherit
+  the stored value.
+- A focused source-aware pipeline test proves a Story run reaches Story
+  synthesis, keeps citations bound to exact normalized source, passes semantic
+  verification and renders coherent mode. A synthetic narrative example is
+  assessed for chronology, causality, character identity, sourced motivation,
+  conflict, major events, resolution and unsupported additions.
+- Required Rust, frontend and repository gates pass. The PR is complete when
+  this end-to-end manual Story behavior is usable and documented; Contract and
+  automatic suggestions remain deferred.
+
+**Implemented behavior**:
+- The typed profile now admits `story`; the existing immutable run row carries
+  it through desktop admission, retry, continuation, history and reopen. General
+  remains the initial selector value and Connect remains explicitly
+  General-only.
+- Standalone dispatch passes the stored profile into the existing coherent
+  synthesizer. General retains its prior prompt. Story selects a distinct named
+  schema and instructions for sourced character identity and motivation,
+  conflict, causality, chronology, major events and resolution. Both profiles
+  retain the same exact-source payload, response shape, request admission,
+  modal repair, semantic verification, persistence, citations and fallback.
+- A Story profile paired with a Connect delivery policy fails synthesis with
+  `SUMMARY_PROFILE_DELIVERY_UNSUPPORTED`; it cannot silently enter the direct
+  General delivery path.
+
+**Automated verification and representative contract output**:
+- `cargo test --all-targets` passed 406 library tests with 7 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting, the
+  TypeScript/Vite build and `git diff --check` passed. Focused tests also prove
+  General/Story prompt separation, Story persistence and mismatch rejection,
+  exact-source citation binding, retry inheritance, continuation identity and
+  the Connect opposite side.
+- The checked synthetic six-event story produces this authored contract
+  example through the same bounded response parser and citation materializer:
+
+  > Mara wants to reopen the mountain pass so winter medicine can reach Ivo,
+  > but a destroyed bridge and Soren's prohibition block the crossing. After
+  > she finds an old footpath, Ivo's worsening fever leads her to ask Len to
+  > test it before the next snowfall. [p. 1; p. 2; p. 3; p. 4]
+  >
+  > When a rockslide blocks their return, Len secures a rope, which lets them
+  > reach the clinic and bring the medicine back. Soren then reopens the marked
+  > path under a guide requirement, Ivo recovers, and Mara archives her mother's
+  > map. [p. 5; p. 6]
+
+  Manual comparison confirms that example retains the named characters and
+  relationships, stated motivation, conflict, event order, explicit causal
+  links and resolution without adding an internal state or invented motive.
+  The parser mechanically proves only bounded prose, valid source IDs, exact
+  source retrieval and modal preservation; it does not prove semantic support.
+- An ignored live Story harness uses the same non-private narrative and real
+  Ollama adapter. The attempted run produced no model response and was cancelled
+  with exit 130 after the provider stalled. At diagnosis, another LM Studio
+  process held 19,854 MiB of GPU memory and Ollama reported the selected
+  `qwen3-30b-a3b:latest` model running 84% CPU / 16% GPU. No model-produced Story
+  quality result is claimed from that attempt.
+
+**Remaining acceptance limit**:
+- An uncontended run of the ignored live Story harness is still needed to judge
+  whether the selected model's generated synopsis is useful and source-faithful
+  in practice. That judgment must examine chronology, causality, character
+  identity, sourced motivation, conflict, major events, resolution and invented
+  additions. Passing schema, source-ID and semantic-verdict checks alone does
+  not close this limit.

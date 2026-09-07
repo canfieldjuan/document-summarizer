@@ -2714,7 +2714,7 @@ fn transition_in_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::ingest::ingest_pdf;
+    use crate::pipeline::ingest::{ingest_pdf, ingest_pdf_with_profiles};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2804,6 +2804,10 @@ mod tests {
         );
         ensure_run_summary_profile(&conn, &run.run_id, SummaryProfile::General)
             .expect("the identical summary profile should pass");
+        assert!(matches!(
+            ensure_run_summary_profile(&conn, &run.run_id, SummaryProfile::Story),
+            Err(StoreError::SummaryProfileMismatch { .. })
+        ));
         assert!(conn
             .execute(
                 "UPDATE pipeline_run_summary_profiles SET summary_profile = '\"story\"'
@@ -2811,12 +2815,37 @@ mod tests {
                 [&run.run_id],
             )
             .is_err());
-        assert!(serde_json::from_str::<SummaryProfile>("\"story\"").is_err());
+        assert!(serde_json::from_str::<SummaryProfile>("\"contract\"").is_err());
         assert_eq!(
             serde_json::from_str::<SummaryProfile>("\"general\"")
                 .expect("General should be a valid explicit profile"),
             SummaryProfile::General
         );
+        assert_eq!(
+            serde_json::from_str::<SummaryProfile>("\"story\"")
+                .expect("Story should be a valid explicit profile"),
+            SummaryProfile::Story
+        );
+
+        let story_source = TestFile::new("pdf", b"%PDF-1.4\nSTORY_SUMMARY_PROFILE");
+        let (_, story_run) = ingest_pdf_with_profiles(
+            &mut conn,
+            story_source.0.to_str().expect("UTF-8 path"),
+            None,
+            SummaryProfile::Story,
+        )
+        .expect("Story candidate should ingest");
+        assert_eq!(
+            get_run_summary_profile(&conn, &story_run.run_id)
+                .expect("Story summary profile should load"),
+            Some(SummaryProfile::Story)
+        );
+        ensure_run_summary_profile(&conn, &story_run.run_id, SummaryProfile::Story)
+            .expect("the identical Story profile should pass");
+        assert!(matches!(
+            ensure_run_summary_profile(&conn, &story_run.run_id, SummaryProfile::General),
+            Err(StoreError::SummaryProfileMismatch { .. })
+        ));
     }
 
     #[test]

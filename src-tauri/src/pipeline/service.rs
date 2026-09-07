@@ -993,9 +993,20 @@ mod tests {
         source: &TestSource,
         pipeline: &TestPipeline,
     ) -> crate::pipeline::contracts::PipelineRun {
-        let (_, ingested) = ingest_pdf(
+        create_recoverable_failed_run_with_profile(conn, source, pipeline, SummaryProfile::General)
+    }
+
+    fn create_recoverable_failed_run_with_profile(
+        conn: &mut Connection,
+        source: &TestSource,
+        pipeline: &TestPipeline,
+        summary_profile: SummaryProfile,
+    ) -> crate::pipeline::contracts::PipelineRun {
+        let (_, ingested) = ingest_pdf_with_profiles(
             conn,
             source.0.to_str().expect("fixture path should be UTF-8"),
+            None,
+            summary_profile,
         )
         .expect("fixture should ingest");
         let failure = process_ingested_to_summary(
@@ -1621,7 +1632,12 @@ mod tests {
         let pipeline = TestPipeline::default();
         let (parent, parent_events, completed, completed_events) = {
             let mut conn = init_db(&database.0).expect("schema should initialize");
-            let parent = create_recoverable_failed_run(&mut conn, &source, &pipeline);
+            let parent = create_recoverable_failed_run_with_profile(
+                &mut conn,
+                &source,
+                &pipeline,
+                SummaryProfile::Story,
+            );
             let parent_events =
                 list_pipeline_events(&conn, &parent.run_id).expect("parent events should load");
             let before = crate::pipeline::workspace::list_recent_runs(&conn)
@@ -1695,12 +1711,12 @@ mod tests {
             assert_eq!(
                 db::get_run_summary_profile(&conn, &parent.run_id)
                     .expect("parent summary profile should load"),
-                Some(SummaryProfile::General)
+                Some(SummaryProfile::Story)
             );
             assert_eq!(
                 db::get_run_summary_profile(&conn, &completed.run_id)
                     .expect("retry summary profile should load"),
-                Some(SummaryProfile::General)
+                Some(SummaryProfile::Story)
             );
 
             let completed_events =
@@ -1742,8 +1758,8 @@ mod tests {
                 Some(parent.run_id.as_str())
             );
             assert!(!child_item.can_retry);
-            assert_eq!(parent_item.summary_profile, SummaryProfile::General);
-            assert_eq!(child_item.summary_profile, SummaryProfile::General);
+            assert_eq!(parent_item.summary_profile, SummaryProfile::Story);
+            assert_eq!(child_item.summary_profile, SummaryProfile::Story);
             (parent, parent_events, completed, completed_events)
         };
 
@@ -1778,7 +1794,7 @@ mod tests {
         assert_eq!(
             db::get_run_summary_profile(&reopened, &completed.run_id)
                 .expect("retry summary profile should survive reopen"),
-            Some(SummaryProfile::General)
+            Some(SummaryProfile::Story)
         );
     }
 

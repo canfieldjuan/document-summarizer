@@ -485,9 +485,12 @@ impl TerminalState for PipelineState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::contracts::{ModelRequest, ModelResponse, ModelStageProfileSnapshot};
+    use crate::pipeline::contracts::{
+        ModelRequest, ModelResponse, ModelStageProfileSnapshot, SummaryPresentationMode,
+    };
     use crate::pipeline::db::{
-        get_analyzed_document, get_pipeline_run, get_summary_artifact, list_pipeline_events,
+        get_analyzed_document, get_normalized_document, get_pipeline_run, get_summary_artifact,
+        get_synthesized_document, list_pipeline_events,
     };
     use crate::pipeline::service::ContinuationPipelineError;
     use crate::pipeline::state::TransitionError;
@@ -751,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn background_run_returns_before_completion_and_persists_after_reopen() {
+    fn story_background_run_returns_before_completion_and_persists_after_reopen() {
         let database = TestDatabase::new();
         let manager = fixture_manager(&database);
         let accepted = manager
@@ -759,11 +762,11 @@ mod tests {
                 fixture_path()
                     .to_str()
                     .expect("fixture path should be UTF-8"),
-                SummaryProfile::General,
+                SummaryProfile::Story,
             )
             .expect("background run should be accepted");
         assert_eq!(accepted.state, PipelineState::Parsing);
-        assert_eq!(accepted.summary_profile, SummaryProfile::General);
+        assert_eq!(accepted.summary_profile, SummaryProfile::Story);
         let admitted = db::init_db(&database.0).expect("admitted run should be observable");
         assert_eq!(
             db::get_run_model_profile(&admitted, &accepted.run_id)
@@ -773,7 +776,7 @@ mod tests {
         assert_eq!(
             db::get_run_summary_profile(&admitted, &accepted.run_id)
                 .expect("admitted summary profile should load"),
-            Some(SummaryProfile::General)
+            Some(SummaryProfile::Story)
         );
         drop(admitted);
 
@@ -791,13 +794,37 @@ mod tests {
             run.state,
             PipelineState::Complete | PipelineState::CompleteWithWarnings
         ));
-        assert!(get_summary_artifact(&reopened, &accepted.run_id)
+        let artifact = get_summary_artifact(&reopened, &accepted.run_id)
             .expect("summary query should succeed")
-            .is_some());
+            .expect("Story summary should persist");
+        assert!(!artifact.text.is_empty());
+        let synthesized = get_synthesized_document(&reopened, &accepted.run_id)
+            .expect("synthesis query should succeed")
+            .expect("Story synthesis should persist");
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert!(!synthesized.summary_claims.is_empty());
+        assert!(!synthesized.synthesis_evidence.is_empty());
+        let normalized = get_normalized_document(&reopened, &accepted.run_id)
+            .expect("normalized query should succeed")
+            .expect("normalized Story source should persist");
+        let normalized_text = normalized
+            .pages
+            .iter()
+            .flat_map(|page| &page.content)
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(synthesized
+            .synthesis_evidence
+            .iter()
+            .all(|evidence| normalized_text.contains(&evidence.exact_quote)));
         assert_eq!(
             db::get_run_summary_profile(&reopened, &accepted.run_id)
                 .expect("summary profile should survive reopen"),
-            Some(SummaryProfile::General)
+            Some(SummaryProfile::Story)
         );
         assert_eq!(
             reopened
@@ -927,13 +954,15 @@ mod tests {
     fn continuation_runtime_factory_receives_the_persisted_run_snapshot() {
         let database = TestDatabase::new();
         let mut conn = db::init_db(&database.0).expect("database should initialize");
-        let (_, ingested) = crate::pipeline::ingest::ingest_pdf(
+        let (_, ingested) = crate::pipeline::ingest::ingest_pdf_with_profiles(
             &mut conn,
             fixture_path()
                 .to_str()
                 .expect("fixture path should be UTF-8"),
+            None,
+            SummaryProfile::Story,
         )
-        .expect("fixture should ingest");
+        .expect("Story fixture should ingest");
         let snapshot = fixture_snapshot();
         conn.execute(
             "INSERT INTO pipeline_run_model_profiles (run_id, profile_snapshot, created_at)
@@ -964,7 +993,7 @@ mod tests {
         let accepted = manager
             .start_continuation(&ingested.run_id, ingested.state_version)
             .expect("continuation should be accepted");
-        assert_eq!(accepted.summary_profile, SummaryProfile::General);
+        assert_eq!(accepted.summary_profile, SummaryProfile::Story);
         assert_eq!(
             *observed
                 .lock()

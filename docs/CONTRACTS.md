@@ -505,12 +505,13 @@ wire result while standalone summaries adopt coherent General presentation.
 Status: current desktop runs have an explicit immutable summary profile. A
 summary profile controls application-level synthesis behavior and presentation;
 it is separate from both the document's type and the model runtime profile. The
-only admitted value is currently `general`. Unknown, malformed, or missing
-values fail at their typed boundary and never select a future specialized
-profile or silently default a current run.
+admitted values are `general` and `story`. Unknown, malformed, or missing values
+fail at their typed boundary and never select a specialized profile or silently
+default a current run.
 
-The desktop presents General before source admission and sends that selection
-with the start command. SQLite schema version 16 stores it in
+The desktop presents General and Story before source admission and sends the
+explicit selection with the start command. General remains the initial choice.
+SQLite schema version 16 stores the selected value in
 `pipeline_run_summary_profiles` in the same transaction that first persists the
 document and run. The row is immutable. The migration assigns General to every
 pre-version-16 run because General was the only product behavior available when
@@ -525,11 +526,24 @@ substitute a mutable current setting. A missing profile rejects synthesis,
 retry, continuation or workspace projection at the applicable boundary rather
 than permitting incompatible result reuse.
 
+Standalone General and Story runs share ingestion, normalization, bounded exact
+source catalogs, response shape, durable citations, semantic verification,
+fallback, retry, continuation and rendering. General synthesis preserves the
+main message, important support and qualifications. Story synthesis instead
+asks for a readable synopsis that preserves sourced character identity and
+motivation, conflict, causal relationships, major events, chronology and the
+resolution or explicitly unresolved ending. It must not infer a motivation,
+internal state or causal link from sequence alone. The existing source-backed
+verification and modal-strengthening guard apply to both profiles; profile
+instructions do not weaken support requirements.
+
 Connect admissions assign General explicitly in their existing acceptance
-transaction and retain the direct delivery-policy synthesis described above.
-This contract does not add Story or Contract prompts, document-type inference,
-automatic suggestions, classifier confidence, long-document sampling, trained
-adapters, or changes to summary quality.
+transaction and retain the direct delivery-policy synthesis described above. A
+specialized profile paired with a Connect delivery policy is rejected rather
+than silently sent through a different summary behavior. This contract does not
+add Contract prompts, document-type inference, automatic suggestions,
+classifier confidence, long-document sampling, trained adapters, a parallel
+synthesis framework or a renderer redesign.
 
 ### Historical direct verified paraphrases and explicit omissions
 

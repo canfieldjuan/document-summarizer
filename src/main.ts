@@ -128,7 +128,7 @@ interface RunHistoryItem {
   summaryProfile: SummaryProfile;
 }
 
-type SummaryProfile = "general";
+type SummaryProfile = "general" | "story";
 
 interface BackgroundRunAccepted {
   runId: string;
@@ -885,8 +885,8 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 function selectedSummaryProfile(): SummaryProfile {
-  if (summaryProfile.value === "general") {
-    return "general";
+  if (summaryProfile.value === "general" || summaryProfile.value === "story") {
+    return summaryProfile.value;
   }
   throw new Error(`Unsupported summary profile: ${summaryProfile.value}`);
 }
@@ -895,6 +895,8 @@ function summaryProfileLabel(profile: SummaryProfile): string {
   switch (profile) {
     case "general":
       return "General";
+    case "story":
+      return "Story";
   }
 }
 
