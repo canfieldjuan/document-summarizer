@@ -1079,6 +1079,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "icu_properties",
  "libc",
  "pdf-extract",
  "reqwest 0.12.28",
@@ -1098,6 +1099,7 @@ dependencies = [
  "tokenizers",
  "tokio",
  "unicode-properties",
+ "unicode-segmentation",
  "uuid",
 ]
 
