@@ -1,7 +1,7 @@
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
     CompletedSummary, ModelProfileSnapshot, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
-    PipelineRun, PipelineStage, PipelineState,
+    PipelineRun, PipelineStage, PipelineState, SummaryProfile,
 };
 use crate::pipeline::control::CancellationToken;
 use crate::pipeline::db::{self, StoreError};
@@ -39,6 +39,7 @@ pub struct BackgroundRunAccepted {
     pub byte_size: u64,
     pub state: PipelineState,
     pub state_version: u32,
+    pub summary_profile: SummaryProfile,
 }
 
 #[derive(Debug, Error)]
@@ -121,7 +122,11 @@ impl DesktopJobManager {
         &self.db_path
     }
 
-    pub fn start_pdf(&self, file_path: &str) -> Result<BackgroundRunAccepted, DesktopJobError> {
+    pub fn start_pdf(
+        &self,
+        file_path: &str,
+        summary_profile: SummaryProfile,
+    ) -> Result<BackgroundRunAccepted, DesktopJobError> {
         let runtime = (self.runtime_factory)(None)?;
         let profile_snapshot = runtime
             .profile_snapshot()
@@ -132,9 +137,13 @@ impl DesktopJobManager {
                 request_attempts: Vec::new(),
             })?;
         let mut conn = db::init_db(&self.db_path)?;
-        let (document, run) =
-            admit_pdf_for_background(&mut conn, file_path, Some(&profile_snapshot))?;
-        let accepted = accepted_view(&document, &run);
+        let (document, run) = admit_pdf_for_background(
+            &mut conn,
+            file_path,
+            Some(&profile_snapshot),
+            summary_profile,
+        )?;
+        let accepted = accepted_view(&document, &run, summary_profile);
         self.spawn(run.run_id, BackgroundWork::StartedParsing, Some(runtime))?;
         Ok(accepted)
     }
@@ -152,11 +161,19 @@ impl DesktopJobManager {
                 reason: "the failed run has no immutable model profile to inherit".to_string(),
             }
         })?;
+        let summary_profile =
+            db::get_run_summary_profile(&conn, source_run_id)?.ok_or_else(|| {
+                StoreError::InvalidRetrySource {
+                    run_id: source_run_id.to_string(),
+                    reason: "the failed run has no immutable summary profile to inherit"
+                        .to_string(),
+                }
+            })?;
         let runtime = (self.runtime_factory)(Some(&snapshot))?;
         runtime.health()?;
         let (document, run) =
             admit_retry_for_background(&mut conn, source_run_id, expected_source_version)?;
-        let accepted = accepted_view(&document, &run);
+        let accepted = accepted_view(&document, &run, summary_profile);
         self.spawn(run.run_id, BackgroundWork::StartedParsing, Some(runtime))?;
         Ok(accepted)
     }
@@ -173,6 +190,8 @@ impl DesktopJobManager {
             .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
         let document = db::get_document(&conn, &run.document_id)?
             .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
+        let summary_profile = db::get_run_summary_profile(&conn, run_id)?
+            .ok_or_else(|| StoreError::SummaryProfileUnavailable(run_id.to_string()))?;
         let runtime = if plan.requires_runtime {
             let snapshot = continuation_runtime_snapshot(
                 run_id,
@@ -185,7 +204,7 @@ impl DesktopJobManager {
         } else {
             None
         };
-        let accepted = accepted_view(&document, &run);
+        let accepted = accepted_view(&document, &run, summary_profile);
         self.spawn(
             run.run_id,
             BackgroundWork::Continue {
@@ -417,6 +436,7 @@ enum BackgroundWork {
 fn accepted_view(
     document: &crate::pipeline::contracts::IngestedDocument,
     run: &PipelineRun,
+    summary_profile: SummaryProfile,
 ) -> BackgroundRunAccepted {
     BackgroundRunAccepted {
         run_id: run.run_id.clone(),
@@ -425,6 +445,7 @@ fn accepted_view(
         byte_size: document.byte_size,
         state: run.state.clone(),
         state_version: run.state_version,
+        summary_profile,
     }
 }
 
@@ -738,14 +759,21 @@ mod tests {
                 fixture_path()
                     .to_str()
                     .expect("fixture path should be UTF-8"),
+                SummaryProfile::General,
             )
             .expect("background run should be accepted");
         assert_eq!(accepted.state, PipelineState::Parsing);
+        assert_eq!(accepted.summary_profile, SummaryProfile::General);
         let admitted = db::init_db(&database.0).expect("admitted run should be observable");
         assert_eq!(
             db::get_run_model_profile(&admitted, &accepted.run_id)
                 .expect("admitted profile should load"),
             Some(fixture_snapshot())
+        );
+        assert_eq!(
+            db::get_run_summary_profile(&admitted, &accepted.run_id)
+                .expect("admitted summary profile should load"),
+            Some(SummaryProfile::General)
         );
         drop(admitted);
 
@@ -766,6 +794,11 @@ mod tests {
         assert!(get_summary_artifact(&reopened, &accepted.run_id)
             .expect("summary query should succeed")
             .is_some());
+        assert_eq!(
+            db::get_run_summary_profile(&reopened, &accepted.run_id)
+                .expect("summary profile should survive reopen"),
+            Some(SummaryProfile::General)
+        );
         assert_eq!(
             reopened
                 .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -797,6 +830,7 @@ mod tests {
                 fixture_path()
                     .to_str()
                     .expect("fixture path should be UTF-8"),
+                SummaryProfile::General,
             )
             .expect_err("a product desktop start must require an immutable snapshot");
 
@@ -930,6 +964,7 @@ mod tests {
         let accepted = manager
             .start_continuation(&ingested.run_id, ingested.state_version)
             .expect("continuation should be accepted");
+        assert_eq!(accepted.summary_profile, SummaryProfile::General);
         assert_eq!(
             *observed
                 .lock()
@@ -1097,6 +1132,7 @@ mod tests {
                 fixture_path()
                     .to_str()
                     .expect("fixture path should be UTF-8"),
+                SummaryProfile::General,
             )
             .expect("background run should be accepted");
 
@@ -1201,6 +1237,7 @@ mod tests {
                 .to_str()
                 .expect("fixture path should be UTF-8"),
             None,
+            SummaryProfile::General,
         )
         .expect("newer caller should admit parsing work");
         let stale_version = parsing.state_version.saturating_sub(1);

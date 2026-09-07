@@ -12,7 +12,7 @@ use pipeline::chunk::{
 };
 use pipeline::contracts::{
     ChunkedDocument, IngestedDocument, ModelRuntimeFailure, NormalizedDocument, ParsedDocument,
-    PipelineRun, StructuredDocument,
+    PipelineRun, StructuredDocument, SummaryProfile,
 };
 use pipeline::db::{init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, IngestError};
@@ -231,8 +231,12 @@ fn chunk_document(
 fn summarize_document(
     state: State<'_, AppState>,
     file_path: String,
+    summary_profile: SummaryProfile,
 ) -> Result<BackgroundRunAccepted, CommandError> {
-    state.jobs.start_pdf(&file_path).map_err(CommandError::from)
+    state
+        .jobs
+        .start_pdf(&file_path, summary_profile)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]

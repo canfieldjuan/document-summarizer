@@ -118,6 +118,12 @@ impl fmt::Display for PipelineFailure {
 
 impl std::error::Error for PipelineFailure {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SummaryProfile {
+    General,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineRun {
     pub run_id: String,

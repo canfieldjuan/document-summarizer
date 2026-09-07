@@ -1,5 +1,6 @@
 use crate::pipeline::contracts::{
     IngestedDocument, ModelProfileSnapshot, PipelineProgress, PipelineRun, PipelineState,
+    SummaryProfile,
 };
 use crate::pipeline::db::{self, StoreError};
 use chrono::{DateTime, Utc};
@@ -49,14 +50,20 @@ pub fn ingest_pdf(
     Ok((document, ingested_run))
 }
 
-pub(crate) fn ingest_pdf_with_profile(
+pub(crate) fn ingest_pdf_with_profiles(
     conn: &mut Connection,
     file_path: &str,
-    profile_snapshot: &ModelProfileSnapshot,
+    profile_snapshot: Option<&ModelProfileSnapshot>,
+    summary_profile: SummaryProfile,
 ) -> Result<(IngestedDocument, PipelineRun), IngestError> {
     let (document, run) = prepare_pdf_ingestion(file_path, None)?;
-    let ingested_run =
-        db::persist_ingestion_with_profile(conn, &document, &run, Some(profile_snapshot))?;
+    let ingested_run = db::persist_ingestion_with_profiles(
+        conn,
+        &document,
+        &run,
+        profile_snapshot,
+        summary_profile,
+    )?;
     Ok((document, ingested_run))
 }
 

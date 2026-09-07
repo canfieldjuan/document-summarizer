@@ -204,6 +204,31 @@ h1 {
   font-size: 0.72rem;
 }
 
+.summary-profile-control {
+  width: min(420px, 100%);
+  margin-top: 22px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(249, 251, 252, 0.78);
+}
+
+.summary-profile-control label {
+  color: var(--lake);
+  font-family: "Arial Narrow", "Liberation Sans Narrow", sans-serif;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.summary-profile-control p {
+  margin: 8px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
 .model-register-button {
   margin-top: 7px;
 }

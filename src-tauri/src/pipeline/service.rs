@@ -2,12 +2,12 @@ use crate::pipeline::chunk::{chunk_document, ChunkPipelineError};
 use crate::pipeline::contracts::{
     CompletedSummary, ContinuationCheckpoint, DocumentChunker, DocumentNormalizer, DocumentParser,
     IngestedDocument, ModelProfileSnapshot, ModelRuntime, PipelineRun, PipelineState,
-    StructureInterpreter,
+    StructureInterpreter, SummaryProfile,
 };
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::ingest::prepare_received_run;
-use crate::pipeline::ingest::{ingest_pdf, ingest_pdf_with_profile, IngestError};
+use crate::pipeline::ingest::{ingest_pdf, ingest_pdf_with_profiles, IngestError};
 use crate::pipeline::normalize::{normalize_document, NormalizePipelineError};
 use crate::pipeline::parser::{parse_document, parse_started_document, ParsePipelineError};
 use crate::pipeline::structure::{structure_document, StructurePipelineError};
@@ -358,11 +358,10 @@ pub(crate) fn admit_pdf_for_background(
     conn: &mut Connection,
     file_path: &str,
     profile_snapshot: Option<&ModelProfileSnapshot>,
+    summary_profile: SummaryProfile,
 ) -> Result<(IngestedDocument, PipelineRun), DocumentServiceError> {
-    let (document, ingested) = match profile_snapshot {
-        Some(snapshot) => ingest_pdf_with_profile(conn, file_path, snapshot)?,
-        None => ingest_pdf(conn, file_path)?,
-    };
+    let (document, ingested) =
+        ingest_pdf_with_profiles(conn, file_path, profile_snapshot, summary_profile)?;
     let (parsing, persisted_document) =
         db::start_parsing(conn, &ingested.run_id, ingested.state_version)
             .map_err(ParsePipelineError::from)?;
@@ -1693,6 +1692,16 @@ mod tests {
                     .expect("retry profile should load"),
                 Some(fixture_model_profile())
             );
+            assert_eq!(
+                db::get_run_summary_profile(&conn, &parent.run_id)
+                    .expect("parent summary profile should load"),
+                Some(SummaryProfile::General)
+            );
+            assert_eq!(
+                db::get_run_summary_profile(&conn, &completed.run_id)
+                    .expect("retry summary profile should load"),
+                Some(SummaryProfile::General)
+            );
 
             let completed_events =
                 list_pipeline_events(&conn, &completed.run_id).expect("retry events should load");
@@ -1733,6 +1742,8 @@ mod tests {
                 Some(parent.run_id.as_str())
             );
             assert!(!child_item.can_retry);
+            assert_eq!(parent_item.summary_profile, SummaryProfile::General);
+            assert_eq!(child_item.summary_profile, SummaryProfile::General);
             (parent, parent_events, completed, completed_events)
         };
 
@@ -1764,6 +1775,11 @@ mod tests {
         assert!(get_retry_lineage_for_retry(&reopened, &completed.run_id)
             .expect("retry lineage should load after reopen")
             .is_some());
+        assert_eq!(
+            db::get_run_summary_profile(&reopened, &completed.run_id)
+                .expect("retry summary profile should survive reopen"),
+            Some(SummaryProfile::General)
+        );
     }
 
     #[test]

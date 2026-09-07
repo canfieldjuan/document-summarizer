@@ -3,7 +3,9 @@ use crate::connect::contracts::{
     JobStatus, ProviderRef, CAPABILITY_ID, CAPABILITY_VERSION, PROTOCOL_VERSION,
 };
 use crate::connect::v2;
-use crate::pipeline::contracts::{IngestedDocument, ModelProfileSnapshot, PipelineRun};
+use crate::pipeline::contracts::{
+    IngestedDocument, ModelProfileSnapshot, PipelineRun, SummaryProfile,
+};
 use crate::pipeline::db::{self, StoreError};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -116,7 +118,8 @@ where
         return Ok(None);
     }
     let now = Utc::now();
-    let ingested_run = db::persist_ingestion_in_transaction(&tx, document, run)?;
+    let ingested_run =
+        db::persist_ingestion_in_transaction(&tx, document, run, SummaryProfile::General)?;
     db::ensure_run_model_profile(&tx, &ingested_run.run_id, profile_snapshot)?;
     tx.execute(
         "INSERT INTO connect_jobs (

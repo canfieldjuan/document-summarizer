@@ -2245,3 +2245,48 @@ complete in PR #38
 - Documents whose complete source catalog cannot fit the bounded request receive
   the explicit verified-ledger fallback. A source-aware long-document synthesis
   strategy is future work and must not rephrase an already-lossy claim list.
+
+## Slice 23 — Explicit General Summary Profile Identity (2026-09-07)
+
+**Status**: implementation and local verification complete; hosted checks and
+review pending
+
+**Root cause and change boundary**:
+- General summary behavior existed only as an implicit synthesis branch. Runs
+  did not record an application-level summary profile, so a later manual choice
+  could not be carried independently through acceptance, retry, continuation,
+  history and synthesis.
+- This slice establishes only the minimum profile contract and explicit General
+  selection. It does not add Story or Contract behavior, automatic routing,
+  document-type classification, prompt changes, model adapters, long-document
+  sampling or a summary-quality change.
+
+**Implemented behavior**:
+- The typed `SummaryProfile` contract currently admits only `general`; invalid
+  values fail instead of selecting an arbitrary profile. The desktop exposes an
+  explicit General selector, sends it with new-run admission and displays the
+  persisted value in accepted history and reopened results.
+- SQLite schema version 16 adds one immutable summary-profile row per run. New
+  runs persist it atomically with ingestion, version-15 databases backfill
+  existing runs as General, retries copy it atomically with their lineage, and
+  continuations reuse the existing row.
+- Synthesis reads the stored value before selecting its existing standalone or
+  Connect delivery-policy path. A missing value fails; no synthesis path infers
+  a replacement from the document or current interface state. Connect assigns
+  General explicitly and retains its existing direct delivered-summary
+  behavior.
+
+**Verification**:
+- The focused profile suite passed 11 tests covering schema backfill,
+  immutability, explicit persistence and invalid-value rejection. Focused
+  desktop, retry and workspace tests passed, including reopen and continuation
+  identity.
+- The Rust library suite passed 402 tests with 6 intentional ignores, and the
+  office acceptance target passed 3 tests with 3 opt-in ignores. All 3 release
+  contract tests passed. Strict all-target/all-feature Clippy, Rust formatting,
+  the TypeScript/Vite production build and `git diff --check` passed.
+
+**Deferred**:
+- Story and Contract behavior remain separate usable-output slices. Automatic
+  suggestions, uncertain/mixed routing and bounded classification sampling
+  follow working manual profiles and must not delay them.

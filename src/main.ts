@@ -125,7 +125,10 @@ interface RunHistoryItem {
   cancellationRequested: boolean;
   backgroundActive: boolean;
   canCancel: boolean;
+  summaryProfile: SummaryProfile;
 }
+
+type SummaryProfile = "general";
 
 interface BackgroundRunAccepted {
   runId: string;
@@ -134,6 +137,7 @@ interface BackgroundRunAccepted {
   byteSize: number;
   state: PipelineState;
   stateVersion: number;
+  summaryProfile: SummaryProfile;
 }
 
 type SummaryPresentationMode = "legacyClaimList" | "coherent" | "claimLedgerFallback";
@@ -179,6 +183,7 @@ const runtimeTitle = element<HTMLParagraphElement>("#runtime-title");
 const runtimeDetail = element<HTMLParagraphElement>("#runtime-detail");
 const runtimeRetry = element<HTMLButtonElement>("#runtime-retry");
 const modelPreset = element<HTMLSelectElement>("#model-preset");
+const summaryProfile = element<HTMLSelectElement>("#summary-profile");
 const registerGguf = element<HTMLButtonElement>("#register-gguf");
 const connectMark = element<HTMLSpanElement>("#connect-mark");
 const connectTitle = element<HTMLParagraphElement>("#connect-title");
@@ -255,6 +260,7 @@ function showStage(view: "empty" | "processing" | "summary" | "failure"): void {
 function syncPrimaryAction(): void {
   selectButton.disabled = !runtimeReady || processing;
   modelPreset.disabled = !modelSelectionAvailable || modelSelectionInFlight || processing;
+  summaryProfile.disabled = processing;
   registerGguf.disabled = modelSelectionInFlight || processing;
   const label = selectButton.querySelector<HTMLSpanElement>("span");
   if (!label) return;
@@ -642,7 +648,7 @@ function renderHistory(): void {
 
     const detail = document.createElement("span");
     detail.className = "run-detail";
-    detail.textContent = `${formatBytes(run.byteSize)} · ${formatDate(run.completedAt ?? run.updatedAt)}`;
+    detail.textContent = `${summaryProfileLabel(run.summaryProfile)} · ${formatBytes(run.byteSize)} · ${formatDate(run.completedAt ?? run.updatedAt)}`;
 
     const state = document.createElement("span");
     state.className = "run-state";
@@ -705,6 +711,7 @@ async function openHistoryRun(run: RunHistoryItem): Promise<void> {
     renderSummary(
       persisted.run.originalFilename,
       persisted.run.byteSize,
+      persisted.run.summaryProfile,
       persisted.summary,
     );
   } catch (error) {
@@ -773,6 +780,7 @@ async function monitorBackgroundRun(runId: string, fallbackFilename: string): Pr
           renderSummary(
             persisted.run.originalFilename,
             persisted.run.byteSize,
+            persisted.run.summaryProfile,
             persisted.summary,
           );
         } catch (error) {
@@ -876,6 +884,20 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
+function selectedSummaryProfile(): SummaryProfile {
+  if (summaryProfile.value === "general") {
+    return "general";
+  }
+  throw new Error(`Unsupported summary profile: ${summaryProfile.value}`);
+}
+
+function summaryProfileLabel(profile: SummaryProfile): string {
+  switch (profile) {
+    case "general":
+      return "General";
+  }
+}
+
 async function selectAndSummarize(): Promise<void> {
   if (!runtimeReady || processing) {
     return;
@@ -902,8 +924,10 @@ async function selectAndSummarize(): Promise<void> {
   const filename = displayFilename(selected);
   beginProcessing(null, filename, "Preparing the durable pipeline run…");
   try {
+    const selectedProfile = selectedSummaryProfile();
     const accepted = await invoke<BackgroundRunAccepted>("summarize_document", {
       filePath: selected,
+      summaryProfile: selectedProfile,
     });
     await monitorBackgroundRun(accepted.runId, accepted.originalFilename);
   } catch (error) {
@@ -994,7 +1018,12 @@ async function continueSelectedRun(): Promise<void> {
   showFailure(source.originalFilename, failure.message, failure.code, source);
 }
 
-function renderSummary(filename: string, byteSize: number, summary: SummaryArtifact): void {
+function renderSummary(
+  filename: string,
+  byteSize: number,
+  profile: SummaryProfile,
+  summary: SummaryArtifact,
+): void {
   retrySourceRun = null;
   continuationRun = null;
   summaryFilename.textContent = filename;
@@ -1002,8 +1031,8 @@ function renderSummary(filename: string, byteSize: number, summary: SummaryArtif
     ? summary.summaryClaims.length
     : summary.claims.length;
   summaryMeta.textContent = citedClaimCount > 0
-    ? `${formatBytes(byteSize)} · ${formatDate(summary.createdAt)} · ${citedClaimCount} cited ${citedClaimCount === 1 ? "passage" : "passages"}`
-    : `${formatBytes(byteSize)} · ${formatDate(summary.createdAt)}`;
+    ? `${summaryProfileLabel(profile)} · ${formatBytes(byteSize)} · ${formatDate(summary.createdAt)} · ${citedClaimCount} cited ${citedClaimCount === 1 ? "passage" : "passages"}`
+    : `${summaryProfileLabel(profile)} · ${formatBytes(byteSize)} · ${formatDate(summary.createdAt)}`;
   renderClaims(summary);
   renderWarnings(summary.warnings);
   showStage("summary");
