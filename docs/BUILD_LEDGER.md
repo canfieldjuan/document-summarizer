@@ -2169,12 +2169,15 @@ complete in PR #38
   supported coherent prose remains present when every independently verified
   ledger paraphrase is withheld.
 - A deterministic modal guard catches a strong predicate where cited source
-  states the same predicate with weaker modality. It permits one context-bounded
-  regeneration with application feedback, then fails closed. Current-artifact
-  reload reruns the same source-backed check. Require-family normalization
-  detects both `should require` to `requires` and infinitive strengthening while
-  preserving already-strong source wording. Tests prove corrected second-request
-  behavior, repeated-invalid rejection and reload rejection.
+  states the same predicate with weaker modality in the matching bounded subject,
+  object and negation context. Strong wording about a different actor or object
+  does not suppress the check. It permits one context-bounded regeneration with
+  application feedback, then fails closed. Current-artifact reload reruns the
+  same source-backed check. Require-family normalization detects both `should
+  require` to `requires` and infinitive strengthening while preserving
+  already-strong source wording. Tests prove mixed-actor, mixed-object and
+  opposite-negation boundaries, corrected second-request behavior,
+  repeated-invalid rejection and reload rejection.
 - Current artifacts are synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
   citation 4.0.0. Historical direct and hierarchical artifacts keep their
   versioned validation. The desktop renders coherent prose first with exact
@@ -2218,7 +2221,7 @@ complete in PR #38
   retain`; prompt-only verification still marked it supported. Those findings
   produced the dynamic paragraph cap, exact modal instruction and deterministic
   repair guard rather than being accepted as model-verified truth.
-- The final live run passed in 13.21 seconds against
+- The final current-code live run passed in 15.56 seconds against
   `qwen3-30b-a3b:latest`. It delivered one 937-character overview citing native
   text pages 1, 2, 3, 4 and 6, excluded visual-only page 5, retained all 5 ledger
   claims, reached `CompleteWithWarnings` at state version 18, and survived the

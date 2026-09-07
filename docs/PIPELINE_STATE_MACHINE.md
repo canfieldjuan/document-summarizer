@@ -166,8 +166,10 @@ permits one bounded regeneration with application-generated feedback; an
 over-budget repair or runtime context rejection during repair fails the stage,
 as does a second violation. Require-family predicates cover both infinitive and
 non-infinitive strengthening without treating weakly governed source wording as
-strong. Cancellation is observed before and after every model request. Only the
-validated final artifact,
+strong. Predicate, bounded subject and object context, and negation bind each
+comparison to the matching source statement, so unrelated strong wording cannot
+mask a weak statement. Cancellation is observed before and after every model
+request. Only the validated final artifact,
 `SYNTHESIZING -> SYNTHESIZED`, state-version update, and event append share the
 completion transaction. Historical synthesis artifacts retain their versioned
 load rules.

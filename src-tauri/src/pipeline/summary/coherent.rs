@@ -345,6 +345,14 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModalPredicate {
+    predicate: String,
+    subject_context: Vec<String>,
+    object_context: Vec<String>,
+    negated: bool,
+}
+
 fn next_predicate_index(words: &[String], start: usize) -> Option<usize> {
     words
         .iter()
@@ -359,8 +367,8 @@ fn next_predicate_index(words: &[String], start: usize) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-fn next_predicate(words: &[String], start: usize) -> Option<String> {
-    let word = words.get(next_predicate_index(words, start)?)?;
+fn normalized_predicate(words: &[String], index: usize) -> Option<String> {
+    let word = words.get(index)?;
     if word.chars().count() > 64 {
         return None;
     }
@@ -377,44 +385,203 @@ fn next_predicate(words: &[String], start: usize) -> Option<String> {
     )
 }
 
-fn modal_predicates(text: &str, strong: bool) -> HashSet<String> {
-    let words = words(text);
-    let mut predicates = HashSet::new();
+fn is_weak_modal(word: &str) -> bool {
+    matches!(word, "may" | "might" | "can" | "could" | "should")
+}
+
+fn is_strong_modal(word: &str) -> bool {
+    matches!(word, "must" | "shall" | "will")
+}
+
+fn is_require_form(word: &str) -> bool {
+    matches!(word, "require" | "requires" | "required" | "requiring")
+}
+
+fn is_modal_anchor(word: &str) -> bool {
+    is_weak_modal(word) || is_strong_modal(word) || is_require_form(word)
+}
+
+fn is_context_word(word: &str) -> bool {
+    !matches!(
+        word,
+        "a" | "an"
+            | "the"
+            | "all"
+            | "and"
+            | "or"
+            | "but"
+            | "while"
+            | "whereas"
+            | "although"
+            | "be"
+            | "been"
+            | "being"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "have"
+            | "has"
+            | "had"
+            | "do"
+            | "does"
+            | "did"
+            | "to"
+            | "of"
+            | "for"
+            | "in"
+            | "on"
+            | "at"
+            | "by"
+            | "exactly"
+            | "not"
+            | "no"
+            | "never"
+    ) && !is_modal_anchor(word)
+}
+
+fn context_words(words: &[String]) -> Vec<String> {
+    words
+        .iter()
+        .filter(|word| is_context_word(word))
+        .cloned()
+        .collect()
+}
+
+fn trailing_context(words: &[String]) -> Vec<String> {
+    let mut context = context_words(words);
+    const CONTEXT_WORDS: usize = 6;
+    if context.len() > CONTEXT_WORDS {
+        context.drain(..context.len() - CONTEXT_WORDS);
+    }
+    context
+}
+
+fn leading_context(words: &[String]) -> Vec<String> {
+    let mut context = context_words(words);
+    const CONTEXT_WORDS: usize = 6;
+    context.truncate(CONTEXT_WORDS);
+    context
+}
+
+fn modal_clause_ranges(words: &[String]) -> Vec<&[String]> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for index in 0..words.len() {
+        if !matches!(words[index].as_str(), "and" | "but" | "while" | "whereas")
+            || !words[start..index].iter().any(|word| is_modal_anchor(word))
+            || !words[index + 1..].iter().any(|word| is_modal_anchor(word))
+        {
+            continue;
+        }
+        if start < index {
+            ranges.push(&words[start..index]);
+        }
+        start = index + 1;
+    }
+    if start < words.len() {
+        ranges.push(&words[start..]);
+    }
+    ranges
+}
+
+fn modal_occurrence(
+    words: &[String],
+    anchor_index: usize,
+    predicate_index: usize,
+    subject_context: Option<Vec<String>>,
+) -> Option<ModalPredicate> {
+    let predicate = normalized_predicate(words, predicate_index)?;
+    let negation_start = anchor_index.saturating_sub(2);
+    let negated = words[negation_start..=predicate_index]
+        .iter()
+        .any(|word| matches!(word.as_str(), "not" | "no" | "never"));
+    Some(ModalPredicate {
+        predicate,
+        subject_context: subject_context
+            .unwrap_or_else(|| trailing_context(&words[..anchor_index])),
+        object_context: leading_context(&words[predicate_index + 1..]),
+        negated,
+    })
+}
+
+fn clause_modal_predicates(words: &[String], strong: bool) -> Vec<ModalPredicate> {
+    let mut predicates = Vec::new();
     for (index, word) in words.iter().enumerate() {
         let selected = if strong {
-            matches!(word.as_str(), "must" | "shall" | "will")
+            is_strong_modal(word)
         } else {
-            matches!(word.as_str(), "may" | "might" | "can" | "could" | "should")
+            is_weak_modal(word)
         };
         if selected {
-            if let Some(predicate) = next_predicate(&words, index + 1) {
-                predicates.insert(predicate);
+            if let Some(predicate_index) = next_predicate_index(words, index + 1) {
+                if let Some(predicate) = modal_occurrence(words, index, predicate_index, None) {
+                    if !predicates.contains(&predicate) {
+                        predicates.push(predicate);
+                    }
+                }
             }
         }
         if strong
-            && matches!(
-                word.as_str(),
-                "require" | "requires" | "required" | "requiring"
-            )
+            && is_require_form(word)
             && !words
                 .iter()
                 .enumerate()
                 .take(index)
                 .any(|(modal_index, modal)| {
-                    matches!(modal.as_str(), "may" | "might" | "can" | "could" | "should")
-                        && next_predicate_index(&words, modal_index + 1) == Some(index)
+                    (is_weak_modal(modal) || is_strong_modal(modal))
+                        && next_predicate_index(words, modal_index + 1) == Some(index)
                 })
         {
-            predicates.insert("require".to_string());
+            if let Some(predicate) = modal_occurrence(words, index, index, None) {
+                if !predicates.contains(&predicate) {
+                    predicates.push(predicate);
+                }
+            }
             let end = (index + 8).min(words.len());
             if let Some(to_index) = (index + 1..end).find(|position| words[*position] == "to") {
-                if let Some(predicate) = next_predicate(&words, to_index + 1) {
-                    predicates.insert(predicate);
+                if let Some(predicate_index) = next_predicate_index(words, to_index + 1) {
+                    let subject = trailing_context(&words[index + 1..to_index]);
+                    let subject = (!subject.is_empty()).then_some(subject);
+                    if let Some(predicate) =
+                        modal_occurrence(words, index, predicate_index, subject)
+                    {
+                        if !predicates.contains(&predicate) {
+                            predicates.push(predicate);
+                        }
+                    }
                 }
             }
         }
     }
     predicates
+}
+
+fn modal_predicates(text: &str, strong: bool) -> Vec<ModalPredicate> {
+    text.split(['.', '?', '!', ';', ',', '\n', '\r'])
+        .flat_map(|clause| {
+            let clause_words = words(clause);
+            modal_clause_ranges(&clause_words)
+                .into_iter()
+                .flat_map(|range| clause_modal_predicates(range, strong))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn modal_statements_match(
+    draft: &ModalPredicate,
+    source: &ModalPredicate,
+    require_same_negation: bool,
+) -> bool {
+    if draft.predicate != source.predicate
+        || require_same_negation && draft.negated != source.negated
+    {
+        return false;
+    }
+    draft.subject_context == source.subject_context
+        && draft.object_context == source.object_context
+        && (!draft.subject_context.is_empty() || !draft.object_context.is_empty())
 }
 
 fn modal_strengthening_feedback(
@@ -436,14 +603,20 @@ fn modal_strengthening_feedback(
         let weak_source = cited
             .iter()
             .flat_map(|item| modal_predicates(&item.exact_quote, false))
-            .collect::<HashSet<_>>();
+            .collect::<Vec<_>>();
         let strong_source = cited
             .iter()
             .flat_map(|item| modal_predicates(&item.exact_quote, true))
-            .collect::<HashSet<_>>();
+            .collect::<Vec<_>>();
         for predicate in modal_predicates(&claim.text, true) {
-            if weak_source.contains(&predicate) && !strong_source.contains(&predicate) {
-                strengthened.push(predicate);
+            if weak_source
+                .iter()
+                .any(|source| modal_statements_match(&predicate, source, false))
+                && !strong_source
+                    .iter()
+                    .any(|source| modal_statements_match(&predicate, source, true))
+            {
+                strengthened.push(predicate.predicate);
             }
         }
     }
@@ -1337,6 +1510,81 @@ mod tests {
         assert!(feedback[0].contains("'retain'"));
         assert!(!feedback[0].contains("owned"));
         assert!(validate_modal_content(&claims, &evidence).is_err());
+
+        let mixed_actor_evidence = vec![
+            EvidenceItem {
+                exact_quote: "Managers should approve expenses.".into(),
+                ..catalog().candidates[0].evidence.clone()
+            },
+            EvidenceItem {
+                evidence_id: "evidence-2".into(),
+                exact_quote: "Auditors must approve exceptions.".into(),
+                ..catalog().candidates[1].evidence.clone()
+            },
+        ];
+        let wrong_actor_force = vec![CitedClaim {
+            claim_id: "claim-actors".into(),
+            text: "Managers must approve expenses.".into(),
+            evidence_ids: vec!["evidence-1".into(), "evidence-2".into()],
+        }];
+        let feedback =
+            modal_strengthening_feedback(&wrong_actor_force, &mixed_actor_evidence).unwrap();
+        assert_eq!(feedback.len(), 1);
+        assert!(feedback[0].contains("'approve'"));
+        assert!(validate_modal_content(&wrong_actor_force, &mixed_actor_evidence).is_err());
+
+        let wrong_object_evidence = vec![
+            mixed_actor_evidence[0].clone(),
+            EvidenceItem {
+                exact_quote: "Managers must approve exceptions.".into(),
+                ..mixed_actor_evidence[1].clone()
+            },
+        ];
+        assert!(validate_modal_content(&wrong_actor_force, &wrong_object_evidence).is_err());
+
+        let matching_statement_evidence = vec![
+            mixed_actor_evidence[0].clone(),
+            EvidenceItem {
+                exact_quote: "Managers must approve expenses.".into(),
+                ..mixed_actor_evidence[1].clone()
+            },
+        ];
+        assert!(validate_modal_content(&wrong_actor_force, &matching_statement_evidence).is_ok());
+
+        let opposite_negation_evidence = vec![
+            mixed_actor_evidence[0].clone(),
+            EvidenceItem {
+                exact_quote: "Managers must not approve expenses.".into(),
+                ..mixed_actor_evidence[1].clone()
+            },
+        ];
+        assert!(validate_modal_content(&wrong_actor_force, &opposite_negation_evidence).is_err());
+
+        let matching_strong_statement = vec![CitedClaim {
+            text: "Auditors must approve exceptions.".into(),
+            ..wrong_actor_force[0].clone()
+        }];
+        assert!(
+            modal_strengthening_feedback(&matching_strong_statement, &mixed_actor_evidence)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(validate_modal_content(&matching_strong_statement, &mixed_actor_evidence).is_ok());
+
+        let combined_statement_evidence = vec![EvidenceItem {
+            exact_quote: "Managers should approve expenses while auditors must approve exceptions."
+                .into(),
+            ..catalog().candidates[0].evidence.clone()
+        }];
+        let combined_wrong_actor_force = vec![CitedClaim {
+            claim_id: "claim-combined-actors".into(),
+            text: "Managers must approve expenses.".into(),
+            evidence_ids: vec!["evidence-1".into()],
+        }];
+        assert!(
+            validate_modal_content(&combined_wrong_actor_force, &combined_statement_evidence)
+                .is_err()
+        );
 
         let supported = vec![CitedClaim {
             text: "The interpreter should retain the section, and blocks must be owned once."

@@ -461,16 +461,19 @@ duplicate source identifiers and non-context runtime failures still fail the
 stage; they do not silently choose the fallback.
 
 A narrow deterministic guard compares modal predicates in each prose unit with
-its cited quotations. If a draft changes a predicate stated with `may`, `can` or
-`should` into `must`, `shall`, `will` or a requiring construction, one bounded
-request regenerates the summary with application-generated feedback. The source
-catalog and schema remain unchanged, the repair must fit the same context bound,
+matching statements in its cited quotations. Predicate, bounded subject context,
+bounded object context and negation distinguish statements, so strong wording
+about a different actor or object cannot authorize a draft's strengthening. If a
+draft changes a matching predicate stated with `may`, `can` or `should` into
+`must`, `shall`, `will` or a requiring construction, one bounded request
+regenerates the summary with application-generated feedback. The source catalog
+and schema remain unchanged, the repair must fit the same context bound,
 including runtime preflight. A context-rejected repair fails rather than changing
 presentation after a rejected draft, and a second strengthening also fails
 closed. Require-family predicates are normalized so both infinitive and
 non-infinitive strengthening are detected, while a require form governed by a
 weak source modal remains weak. Current-artifact reload reruns the same
-source-backed predicate check before presentation. This guard covers that
+source-backed statement check before presentation. This guard covers that
 mechanically detectable error class only; model verdicts still require semantic
 evaluation.
 
