@@ -116,7 +116,15 @@
                 </div>
                 <p id="summary-meta" class="summary-meta"></p>
               </header>
-              <div id="summary-claims" class="summary-claims" hidden></div>
+              <section id="key-points-section" class="key-points-section" hidden>
+                <p class="utility-label">Overview</p>
+                <h4>Key Points</h4>
+                <div id="key-point-claims" class="summary-claims"></div>
+              </section>
+              <details id="all-claims-disclosure" class="claim-ledger" hidden>
+                <summary>All cited claims (<span id="all-claims-count">0</span>)</summary>
+                <div id="summary-claims" class="summary-claims"></div>
+              </details>
               <pre id="summary-text" class="summary-text"></pre>
               <aside id="evidence-panel" class="evidence-panel" aria-live="polite" hidden>
                 <div>

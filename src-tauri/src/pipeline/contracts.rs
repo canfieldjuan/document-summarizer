@@ -567,6 +567,8 @@ pub struct VerifiedDocument {
     pub claims: Vec<CitedClaim>,
     #[serde(default)]
     pub claim_verifications: Vec<ClaimVerification>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_point_claim_ids: Vec<String>,
     pub warnings: Vec<PipelineWarning>,
 }
 

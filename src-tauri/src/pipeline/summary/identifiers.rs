@@ -68,6 +68,10 @@ impl RequestIds {
             .ok_or_else(|| self.invalid())
     }
 
+    pub(super) fn restore_many(&self, local: &[String]) -> Result<Vec<String>, PipelineFailure> {
+        local.iter().map(|id| self.restore(id)).collect()
+    }
+
     pub(super) fn verdict_response(&self, text: &str) -> Result<String, PipelineFailure> {
         let mut response: RawVerificationResponse =
             serde_json::from_str(text).map_err(|_| self.invalid())?;

@@ -829,9 +829,11 @@ New synthesis is deterministic materialization, not generation. It preserves
 every retained paraphrase, its single evidence binding and source order, with
 claim identifiers derived under version 5. Its validator reconstructs the
 expected set and rejects omission, reordering, rewritten text or rebound sources.
-No optional consolidation, assignment response or adjacency reduction is on
+No generated consolidation, assignment response or adjacency reduction is on
 the production path. Historical generation helpers are compiled only in tests
-to retain their negative regression fixtures.
+to retain their negative regression fixtures. Desktop Key Point selection runs
+only after this direct claim set passes semantic verification; it selects claim
+identifiers and cannot write, combine, reorder or rebind the underlying ledger.
 
 The complete verification plan must fit before any verifier inference.
 Requests use request-local `k1` claim IDs and local evidence metadata; the
@@ -858,18 +860,42 @@ verdicts remain auditable. Nonempty withholding produces durable warnings
 without another synthesis/verifier pass. Zero supported claims still fails
 closed. A supported verdict is the model's judgment, not human fact-checking.
 
+For a new desktop artifact, at most eight verified claims are exposed as Key
+Points. Catalogs of one through eight claims bypass inference and preserve source
+order. Larger catalogs use request-local `k1` identifiers in bounded ranking
+requests, restore durable claim identities in Rust, and persist exactly eight
+unique known identifiers in importance order. The ranking output schema and Rust
+parser both enforce exact cardinality, uniqueness and current-request membership;
+durable claim and evidence IDs are not sent to the ranker. Ranking uses a
+hierarchical shortlist for catalogs that do not fit one request, retains at least
+one candidate from every batch, strictly shrinks between rounds and performs the
+final importance ordering in one request.
+
+Each Key Point request contains at most 16 candidates and at most
+`min(16_000, 3*(C-256-512))` Unicode characters including its system prompt,
+where C is the verification-stage model context. Claim text is bounded for
+ranking by retaining both its beginning and end. At most 64 ranking requests are
+allowed. Impossible planning, invalid output and runtime failure do not discard
+the verified result: the persisted Key Point list is empty, a
+`KEY_POINTS_UNAVAILABLE` warning is added, and the complete cited-claim ledger
+remains available. Cancellation still cancels instead of degrading to a warning.
+
 Schema version 14 remains unchanged. Synthesis/verification attempt tables are
 append-only, keyed by run and ordinal, with immutable SQL triggers. New runs
 write the actual direct synthesis and single verification as ordinal zero.
 Historical ordinal-one attempts remain readable; new version-5 verification
-cannot claim ordinal one. The accepted verification names the exact synthesis
-attempt it filters. Expected-state/version checks, cancellation races,
-transactional transitions, immutable events, source identity, row hashes and
-independent-reopen validation remain authoritative.
+cannot claim ordinal one. Desktop version-6 ranking requests continue the same
+verification-stage ordinal sequence after semantic-verification requests; they
+do not create another verification attempt. The accepted verification names the
+exact synthesis attempt it filters. Expected-state/version checks, cancellation
+races, transactional transitions, immutable events, source identity, row hashes
+and independent-reopen validation remain authoritative.
 
-New artifacts use analysis 12.0.0 and synthesis/verification/summary 5.0.0,
-with citation format 3.0.0 unchanged. Historical analysis 11.0.0 retains its
-prior terminal-value and phone-token boundaries. Analysis 10.0.0 retains its
+New artifacts use analysis 13.0.0, synthesis 5.0.0, desktop verification 6.0.0
+and summary 5.0.0, with citation format 3.0.0 unchanged. Connect omits Key Point
+selection and continues to write direct verification 5.0.0. Historical analysis
+12.0.0 retains its prior punctuation boundary; analysis 11.0.0 retains its prior
+terminal-value and phone-token boundaries. Analysis 10.0.0 retains its
 complete-page-only model omission admission. Analysis 9.0.0 retains the
 384-character ceiling and its original omission admission; 8.0.0 retains its
 earlier retention formula; 7.1.0/7.0.0 retain the 384-character validation era;
@@ -1535,10 +1561,11 @@ currently verified Debian package; AppImage, RPM, macOS, and Windows packaging
 remain separate target-platform work. A supported Linux package must contain the
 desktop executable, desktop entry, and icons without legacy probe executables.
 
-Connect, entitlement, packaging, parsing, OCR/vision and customer-visible
-summary presentation changes remain outside this runtime slice. The UI
-continues to render cited claim cards; optional prose consolidation and
-PDF-viewer navigation are separate product decisions. GPU residency and
+Connect wire behavior, entitlement, packaging, parsing and OCR/vision changes
+remain outside this runtime slice. The desktop UI renders the selected Key Point
+claim cards first and keeps the complete cited-claim ledger in a native
+disclosure; the ledger is expanded when ranking is unavailable. Optional prose
+consolidation and PDF-viewer navigation remain separate product decisions. GPU residency and
 KV-cache cost at contexts above each profile's qualified value remain separate
 deployment evaluations; discovery of a larger model maximum does not qualify a
 larger effective context by itself.

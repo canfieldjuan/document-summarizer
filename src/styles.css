@@ -621,6 +621,40 @@ h1 {
   gap: 12px;
 }
 
+.key-points-section h4 {
+  margin: 7px 0 16px;
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.45rem, 2.5vw, 2rem);
+}
+
+.claim-ledger {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.claim-ledger > summary {
+  padding: 15px 18px;
+  color: var(--lake);
+  cursor: pointer;
+  font-family: "Arial Narrow", "Liberation Sans Narrow", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.claim-ledger > summary:focus-visible {
+  outline: 3px solid rgba(42, 111, 107, 0.3);
+  outline-offset: 3px;
+}
+
+.claim-ledger .summary-claims {
+  padding: 0 12px 12px;
+}
+
 .summary-claim {
   padding: clamp(18px, 3vw, 28px);
   border: 1px solid var(--line);

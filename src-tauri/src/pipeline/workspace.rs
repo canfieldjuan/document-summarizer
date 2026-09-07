@@ -64,6 +64,7 @@ pub struct SummaryView {
     pub warnings: Vec<PipelineWarning>,
     pub created_at: DateTime<Utc>,
     pub claims: Vec<CitedClaimView>,
+    pub key_point_claim_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -159,8 +160,9 @@ pub fn get_persisted_summary(
         .ok_or_else(|| WorkspaceError::SummaryNotFound(run_id.to_string()))?;
     let citations = db::get_citation_artifact(conn, run_id)?;
     validate_summary_state(&run, true)?;
-    validate_citations_against_sources(conn, run_id, &summary, citations.as_ref())?;
-    let summary = summary_view(summary, citations)?;
+    let key_point_claim_ids =
+        validate_citations_against_sources(conn, run_id, &summary, citations.as_ref())?;
+    let summary = summary_view(summary, citations, key_point_claim_ids)?;
 
     Ok(PersistedSummary {
         run: run_history_item(conn, run, document, true)?,
@@ -225,10 +227,10 @@ fn validate_citations_against_sources(
     run_id: &str,
     summary: &SummaryArtifact,
     citations: Option<&CitationArtifact>,
-) -> Result<(), WorkspaceError> {
+) -> Result<Vec<String>, WorkspaceError> {
     let Some(citations) = citations else {
         return if summary.summary_version == "1.0.0" {
-            Ok(())
+            Ok(Vec::new())
         } else {
             Err(WorkspaceError::CitationMismatch(
                 summary.document_id.clone(),
@@ -254,12 +256,14 @@ fn validate_citations_against_sources(
         &chunked,
         &normalized,
     )
-    .map_err(|_| WorkspaceError::CitationMismatch(summary.document_id.clone()))
+    .map_err(|_| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
+    Ok(verified.key_point_claim_ids)
 }
 
 fn summary_view(
     summary: SummaryArtifact,
     citations: Option<CitationArtifact>,
+    key_point_claim_ids: Vec<String>,
 ) -> Result<SummaryView, WorkspaceError> {
     if summary.calculate_integrity_hash().ok().as_deref() != Some(summary.integrity_hash.as_str()) {
         return Err(WorkspaceError::CitationMismatch(summary.document_id));
@@ -353,11 +357,27 @@ fn summary_view(
         None if summary.summary_version == "1.0.0" => Vec::new(),
         None => return Err(WorkspaceError::CitationMismatch(summary.document_id)),
     };
+    let known_claim_ids = claims
+        .iter()
+        .map(|claim| claim.claim_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if key_point_claim_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != key_point_claim_ids.len()
+        || key_point_claim_ids
+            .iter()
+            .any(|claim_id| !known_claim_ids.contains(claim_id.as_str()))
+    {
+        return Err(WorkspaceError::CitationMismatch(summary.document_id));
+    }
     Ok(SummaryView {
         text: summary.text,
         warnings: summary.warnings,
         created_at: summary.created_at,
         claims,
+        key_point_claim_ids,
     })
 }
 
@@ -432,6 +452,7 @@ mod tests {
     use crate::pipeline::structure::DeterministicStructureInterpreter;
     use rusqlite::params;
     use sha2::{Digest, Sha256};
+    use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -725,6 +746,19 @@ mod tests {
         assert!(serialized["summary"]["claims"]
             .as_array()
             .is_some_and(|claims| !claims.is_empty()));
+        let claim_ids = serialized["summary"]["claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|claim| claim["claimId"].as_str().unwrap())
+            .collect::<HashSet<_>>();
+        let key_point_claim_ids = serialized["summary"]["keyPointClaimIds"]
+            .as_array()
+            .expect("presentation result should include Key Point identifiers");
+        assert!(!key_point_claim_ids.is_empty());
+        assert!(key_point_claim_ids.iter().all(|claim_id| claim_id
+            .as_str()
+            .is_some_and(|claim_id| claim_ids.contains(claim_id))));
         assert_eq!(
             serialized["summary"]["claims"][0]["citations"][0]["label"],
             "p. 1"

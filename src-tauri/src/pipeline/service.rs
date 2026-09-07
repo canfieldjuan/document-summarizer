@@ -19,7 +19,8 @@ use crate::pipeline::summary::{
     analyze_chunked_document_controlled, analyze_chunked_document_controlled_with_delivery,
     complete_verified_document, complete_verified_document_with_delivery,
     synthesize_analyzed_document_controlled, verify_synthesized_document_controlled,
-    SummaryDeliveryPolicy, SummaryPipelineError,
+    verify_synthesized_document_controlled_with_delivery, SummaryDeliveryPolicy,
+    SummaryPipelineError,
 };
 use chrono::Utc;
 use rusqlite::Connection;
@@ -489,11 +490,12 @@ pub fn process_ingested_to_summary_with_delivery_policy(
         run_id,
         &UNCONTROLLED_EXECUTION,
     )?;
-    verify_synthesized_document_controlled(
+    verify_synthesized_document_controlled_with_delivery(
         conn,
         components.runtime,
         run_id,
         &UNCONTROLLED_EXECUTION,
+        Some(delivery_policy),
     )?;
     Ok(complete_verified_document_with_delivery(
         conn,
@@ -1491,6 +1493,7 @@ mod tests {
             legacy.summary_text = synthesized.summary_text.clone();
             legacy.claims = synthesized.claims.clone();
             legacy.claim_verifications.clear();
+            legacy.key_point_claim_ids.clear();
             legacy.warnings = synthesized.warnings.clone();
             legacy.warnings.push(PipelineWarning {
                 code: "SEMANTIC_VERIFICATION_DEFERRED".to_string(),
