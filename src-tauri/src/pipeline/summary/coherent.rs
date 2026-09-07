@@ -132,6 +132,18 @@ pub(super) fn synthesize(
         validate_for_runtime(&result, analyzed, chunked, normalized, runtime)?;
         return Ok(result);
     }
+    let initial_request = summary_request(&user_prompt, &output_schema, 0, generation_seed);
+    if request_exceeds_runtime_context(runtime, &initial_request)? {
+        let result = fallback_document(
+            runtime,
+            analyzed,
+            chunked,
+            ledger_claims,
+            FallbackReason::RequestTooLarge,
+        )?;
+        validate_for_runtime(&result, analyzed, chunked, normalized, runtime)?;
+        return Ok(result);
+    }
 
     runtime.health().map_err(|failure| {
         runtime_pipeline_failure(PipelineStage::Synthesize, "MODEL_HEALTH", failure)
@@ -188,21 +200,21 @@ fn generate_summary_with_modal_repair(
     let mut request_ordinal = 0;
     loop {
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
-        let response = runtime.generate_with_control(
-            &ModelRequest {
-                stage: PipelineStage::Synthesize,
-                ordinal: request_ordinal,
-                system_prompt: SYSTEM_PROMPT.to_string(),
-                user_prompt: request_prompt.clone(),
-                seed: generation_seed,
-                max_output_tokens: OUTPUT_TOKENS,
-                output_format: ModelOutputFormat::JsonSchema {
-                    name: SCHEMA_NAME.to_string(),
-                    schema: output_schema.clone(),
-                },
-            },
-            control,
+        let request = summary_request(
+            &request_prompt,
+            &output_schema,
+            request_ordinal,
+            generation_seed,
         );
+        if request_ordinal > 0 && request_exceeds_runtime_context(runtime, &request)? {
+            return Err(stage_failure(
+                PipelineStage::Synthesize,
+                "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
+                "The bounded modal-preservation repair cannot fit the synthesis context",
+                false,
+            ));
+        }
+        let response = runtime.generate_with_control(&request, control);
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
         let response = response.map_err(|failure| {
             runtime_pipeline_failure(PipelineStage::Synthesize, "MODEL_SYNTHESIS", failure)
@@ -227,6 +239,41 @@ fn generate_summary_with_modal_repair(
             ));
         }
         request_ordinal = 1;
+    }
+}
+
+fn summary_request(
+    user_prompt: &str,
+    output_schema: &Value,
+    ordinal: u32,
+    generation_seed: u64,
+) -> ModelRequest {
+    ModelRequest {
+        stage: PipelineStage::Synthesize,
+        ordinal,
+        system_prompt: SYSTEM_PROMPT.to_string(),
+        user_prompt: user_prompt.to_string(),
+        seed: generation_seed,
+        max_output_tokens: OUTPUT_TOKENS,
+        output_format: ModelOutputFormat::JsonSchema {
+            name: SCHEMA_NAME.to_string(),
+            schema: output_schema.clone(),
+        },
+    }
+}
+
+fn request_exceeds_runtime_context(
+    runtime: &dyn ModelRuntime,
+    request: &ModelRequest,
+) -> Result<bool, PipelineFailure> {
+    match runtime.preflight_request(request) {
+        Ok(()) => Ok(false),
+        Err(failure) if failure.code == "MODEL_CONTEXT_EXCEEDED" => Ok(true),
+        Err(failure) => Err(runtime_pipeline_failure(
+            PipelineStage::Synthesize,
+            "MODEL_SYNTHESIS_ADMISSION",
+            failure,
+        )),
     }
 }
 
@@ -778,6 +825,8 @@ pub(super) fn validate_for_runtime(
         (SummaryPresentationMode::Coherent, None) => {}
         (SummaryPresentationMode::ClaimLedgerFallback, Some(reason))
             if has_fallback_warning(synthesized, reason) => {}
+        (SummaryPresentationMode::ClaimLedgerFallback, None)
+            if has_fallback_warning(synthesized, FallbackReason::RequestTooLarge) => {}
         _ => {
             return Err(stage_failure(
                 PipelineStage::Synthesize,
@@ -901,6 +950,10 @@ mod tests {
         corrects_repair: bool,
     }
 
+    struct AdmissionRuntime {
+        failure_code: Option<&'static str>,
+    }
+
     impl ModalRepairRuntime {
         fn new(corrects_repair: bool) -> Self {
             Self {
@@ -942,6 +995,36 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "modal-repair-model"
+        }
+    }
+
+    impl ModelRuntime for AdmissionRuntime {
+        fn generate(&self, _request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            panic!("admission fixture must not generate")
+        }
+
+        fn preflight_request(&self, _request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            match self.failure_code {
+                None => Ok(()),
+                Some(code) => Err(ModelRuntimeFailure {
+                    code: code.to_string(),
+                    message: "fixture admission failure".to_string(),
+                    recoverable: false,
+                    request_attempts: Vec::new(),
+                }),
+            }
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "admission-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "admission-model"
         }
     }
 
@@ -1093,6 +1176,28 @@ mod tests {
             ),
             Some(FallbackReason::RequestTooLarge)
         );
+
+        let request = summary_request(&user_prompt, &output_schema, 0, 1);
+        assert!(!request_exceeds_runtime_context(
+            &AdmissionRuntime { failure_code: None },
+            &request
+        )
+        .unwrap());
+        assert!(request_exceeds_runtime_context(
+            &AdmissionRuntime {
+                failure_code: Some("MODEL_CONTEXT_EXCEEDED")
+            },
+            &request
+        )
+        .unwrap());
+        let failure = request_exceeds_runtime_context(
+            &AdmissionRuntime {
+                failure_code: Some("MODEL_CONFIG_INVALID"),
+            },
+            &request,
+        )
+        .expect_err("non-context admission failures must not become fallback");
+        assert_eq!(failure.code, "MODEL_CONFIG_INVALID");
     }
 
     #[test]

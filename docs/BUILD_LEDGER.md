@@ -2148,7 +2148,11 @@ complete in PR #38
   preventing a source-sized paragraph inventory.
 - The complete source catalog, prompts and serialized source-ID response schema
   must fit one synthesis request. Incomplete or over-budget source context makes
-  no prose request and persists the explicit `claimLedgerFallback` mode plus
+  no prose request and persists the explicit `claimLedgerFallback` mode. The
+  selected qualified runtime then preflights the exact generation request:
+  Ollama tokenizes the complete serialized payload and llama.cpp counts its
+  framed prompt. A runtime context rejection selects the same fallback before
+  inference. Other admission failures still fail. Fallback records
   `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`; invalid runtime or model output
   still fails rather than masquerading as fallback.
 - Connect delivery-policy runs retain the versioned direct claim-ledger
@@ -2186,6 +2190,11 @@ complete in PR #38
   weak and independently supported strong modality; infinitive and
   non-infinitive require-family strengthening; a corrected retry; and rejection
   after one repeated violation.
+- Runtime-admission tests count a structured Unicode Ollama request from the
+  complete serialized payload, reject max-plus-one before transport and admit the
+  exact adjacent limit. The full summary fallback test covers both the early
+  application bound and an exact runtime context rejection, proving neither path
+  makes a synthesis request; non-context preflight errors remain failures.
 - A focused application-service test passed the Connect delivery path through
   direct claim-ledger synthesis and the actual delivered page-coverage
   predicate, preventing source-selective coherent prose from failing after

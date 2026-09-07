@@ -718,6 +718,11 @@ pub trait DocumentChunker {
 /// not depend on a concrete server, model family, or SDK.
 pub trait ModelRuntime: Send + Sync {
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure>;
+    /// Runs runtime-specific request admission without starting generation.
+    /// Runtimes without a stricter admission boundary retain the caller's bound.
+    fn preflight_request(&self, _request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        Ok(())
+    }
     fn generate_with_control(
         &self,
         request: &ModelRequest,

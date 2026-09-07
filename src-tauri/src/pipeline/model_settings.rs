@@ -800,6 +800,13 @@ impl StageRuntime {
         }
     }
 
+    fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        match self {
+            Self::Ollama(runtime) => runtime.preflight_request(request),
+            Self::LlamaCpp(runtime) => runtime.preflight_request(request),
+        }
+    }
+
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
         match self {
             Self::Ollama(runtime) => runtime.health(),
@@ -1154,6 +1161,10 @@ impl ModelRuntime for QwenProfileRuntime {
     ) -> Result<ModelResponse, ModelRuntimeFailure> {
         self.runtime_for(&request.stage)
             .generate_with_control(request, control)
+    }
+
+    fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        self.runtime_for(&request.stage).preflight_request(request)
     }
 
     fn health(&self) -> Result<(), ModelRuntimeFailure> {

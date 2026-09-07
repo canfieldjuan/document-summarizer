@@ -156,14 +156,18 @@ returns paragraph text plus only request-local source identifiers; Rust restores
 canonical order and owns durable claim, evidence and page-label identity. If a
 complete catalog cannot be constructed or cannot fit the request, the stage
 makes no prose-generation request and persists the verified-ledger fallback mode
-and warning. Malformed output,
-foreign or duplicate identifiers, invalid budgets and runtime failures still
-fail instead of degrading. A detected weak-to-strong modal change permits one
-bounded regeneration with application-generated feedback; an over-budget repair
-or a second violation fails the stage. Require-family predicates cover both
-infinitive and non-infinitive strengthening without treating weakly governed
-source wording as strong. Cancellation is observed before and after every model
-request. Only the validated final artifact,
+and warning. The selected qualified runtime also preflights the same request used
+for generation: Ollama tokenizes its complete serialized chat payload and
+llama.cpp counts its exact framed prompt. A runtime context rejection becomes the
+same fallback before inference; other admission failures remain stage failures.
+Malformed output, foreign or duplicate identifiers, invalid budgets and runtime
+failures still fail instead of degrading. A detected weak-to-strong modal change
+permits one bounded regeneration with application-generated feedback; an
+over-budget repair or runtime context rejection during repair fails the stage,
+as does a second violation. Require-family predicates cover both infinitive and
+non-infinitive strengthening without treating weakly governed source wording as
+strong. Cancellation is observed before and after every model request. Only the
+validated final artifact,
 `SYNTHESIZING -> SYNTHESIZED`, state-version update, and event append share the
 completion transaction. Historical synthesis artifacts retain their versioned
 load rules.

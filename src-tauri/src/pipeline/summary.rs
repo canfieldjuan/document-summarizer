@@ -4465,12 +4465,27 @@ mod tests {
 
     struct LowSynthesisContextRuntime {
         requests: Mutex<Vec<PipelineStage>>,
+        preflight_calls: AtomicUsize,
+        synthesis_context_tokens: u32,
+        reject_synthesis_preflight: bool,
     }
 
     impl LowSynthesisContextRuntime {
         fn new() -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
+                preflight_calls: AtomicUsize::new(0),
+                synthesis_context_tokens: 3_000,
+                reject_synthesis_preflight: false,
+            }
+        }
+
+        fn rejecting_exact_synthesis_admission() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                preflight_calls: AtomicUsize::new(0),
+                synthesis_context_tokens: LEGACY_MODEL_CONTEXT_TOKENS,
+                reject_synthesis_preflight: true,
             }
         }
     }
@@ -4484,6 +4499,21 @@ mod tests {
                 model_id: self.model_id().to_string(),
                 request_attempts: Vec::new(),
             })
+        }
+
+        fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            if request.stage == PipelineStage::Synthesize {
+                self.preflight_calls.fetch_add(1, Ordering::SeqCst);
+                if self.reject_synthesis_preflight {
+                    return Err(ModelRuntimeFailure {
+                        code: "MODEL_CONTEXT_EXCEEDED".to_string(),
+                        message: "fixture exact context rejection".to_string(),
+                        recoverable: false,
+                        request_attempts: Vec::new(),
+                    });
+                }
+            }
+            Ok(())
         }
 
         fn health(&self) -> Result<(), ModelRuntimeFailure> {
@@ -4500,7 +4530,7 @@ mod tests {
 
         fn context_tokens(&self, stage: PipelineStage) -> u32 {
             if stage == PipelineStage::Synthesize {
-                3_000
+                self.synthesis_context_tokens
             } else {
                 LEGACY_MODEL_CONTEXT_TOKENS
             }
@@ -8514,43 +8544,54 @@ mod tests {
 
     #[test]
     fn oversized_complete_source_context_uses_verified_ledger_fallback_without_synthesis_call() {
-        let database = TestDatabase::new();
-        let (mut conn, run_id) = chunked_run(&database);
-        let runtime = LowSynthesisContextRuntime::new();
+        for (runtime, expected_preflight_calls) in [
+            (LowSynthesisContextRuntime::new(), 0),
+            (
+                LowSynthesisContextRuntime::rejecting_exact_synthesis_admission(),
+                1,
+            ),
+        ] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run(&database);
 
-        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
-            .expect("bounded source overflow should complete through the verified ledger");
-        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
-        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+            let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+                .expect("bounded source overflow should complete through the verified ledger");
+            let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+            let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
 
-        assert_eq!(
-            synthesized.presentation_mode,
-            SummaryPresentationMode::ClaimLedgerFallback
-        );
-        assert!(synthesized.summary_claims.is_empty());
-        assert!(synthesized.synthesis_evidence.is_empty());
-        assert!(synthesized.warnings.iter().any(|warning| {
-            warning.code == coherent::FALLBACK_WARNING_CODE
-                && warning.stage == Some(PipelineStage::Synthesize)
-        }));
-        assert!(runtime
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|stage| *stage != PipelineStage::Synthesize));
-        assert_eq!(
-            verified.presentation_mode,
-            SummaryPresentationMode::ClaimLedgerFallback
-        );
-        assert!(verified.summary_claim_verifications.is_empty());
-        assert_eq!(completed.summary.text, verified.summary_text);
-        assert_eq!(
-            completed.citations.presentation_mode,
-            verified.presentation_mode
-        );
-        assert!(completed.citations.summary_claims.is_empty());
-        assert!(!completed.citations.claims.is_empty());
+            assert_eq!(
+                synthesized.presentation_mode,
+                SummaryPresentationMode::ClaimLedgerFallback
+            );
+            assert!(synthesized.summary_claims.is_empty());
+            assert!(synthesized.synthesis_evidence.is_empty());
+            assert!(synthesized.warnings.iter().any(|warning| {
+                warning.code == coherent::FALLBACK_WARNING_CODE
+                    && warning.stage == Some(PipelineStage::Synthesize)
+            }));
+            assert!(runtime
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|stage| *stage != PipelineStage::Synthesize));
+            assert_eq!(
+                runtime.preflight_calls.load(Ordering::SeqCst),
+                expected_preflight_calls
+            );
+            assert_eq!(
+                verified.presentation_mode,
+                SummaryPresentationMode::ClaimLedgerFallback
+            );
+            assert!(verified.summary_claim_verifications.is_empty());
+            assert_eq!(completed.summary.text, verified.summary_text);
+            assert_eq!(
+                completed.citations.presentation_mode,
+                verified.presentation_mode
+            );
+            assert!(completed.citations.summary_claims.is_empty());
+            assert!(!completed.citations.claims.is_empty());
+        }
     }
 
     #[test]
