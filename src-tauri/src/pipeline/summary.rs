@@ -6459,6 +6459,20 @@ mod tests {
     }
 
     #[test]
+    fn unicode_sentence_terminal_scripts_are_complete_candidates() {
+        let first = format!("{}.", "a".repeat(549));
+        for terminal in ['؟', '۔', '։', '।'] {
+            let second = format!("{}{}", "क".repeat(60), terminal);
+            let source = format!("{first} {second}");
+            assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+
+            let segmented = analysis_quote_segments_v13(&source);
+            assert_eq!(segmented.segments, vec![first.clone(), second]);
+            assert_eq!(segmented.omitted_source_units, 0);
+        }
+    }
+
+    #[test]
     fn version_twelve_replays_all_four_captured_mid_sentence_shapes() {
         for terminal_characters in [444usize, 333, 455, 448] {
             let first = format!("{}.", "a".repeat(terminal_characters - 1));

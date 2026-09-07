@@ -621,6 +621,12 @@ Required behavior:
   admits complete forms such as `。」` and `。】` without a script-specific closer
   list. Do not strip opening punctuation, other punctuation or symbols merely
   because they follow sentence punctuation.
+- After stripping closers, admit every Unicode `Sentence_Terminal` character as
+  a complete terminal rather than maintaining a script-specific whitelist.
+  Preserve the separate conservative ambiguity checks for ASCII period; a
+  terminal-property match must not bypass the decimal, initial, acronym,
+  abbreviation or ellipsis defenses on that path. Do not admit other
+  punctuation or symbols solely because Unicode segmentation proposed a span.
 - The abbreviation defense is not only a fixed dictionary. When source text
   continues after a period, conservatively coalesce every preceding alphabetic
   token of two through five characters regardless of casing. This treats
@@ -665,13 +671,15 @@ a capitalized continuation, its lowercase equivalent, the one-through-six
 character length boundaries, a source-final short lowercase word and a
 continuing six-character lowercase word. Probe repeated Unicode close/final
 punctuation around CJK terminals and negative opening-mark/symbol controls.
-Prove exact source bytes, tail coverage, catalog order/uniqueness, request limits
-and deterministic identities. Prove a stored version-12 artifact still reloads
-with its original catalog while an equivalent version-13 artifact rejects every
-partial candidate. Run all-target tests, strict Clippy, formatting, NARA and DOL
-corpus acceptance, then rerun the captured 134-page PDF and inspect the four
-known pages plus the complete delivered artifact. Report coverage, warnings,
-claims, requests, completion tokens and wall time; hosted CI is not implied.
+Probe `Sentence_Terminal` marks from Arabic, Armenian and Devanagari alongside
+negative non-terminal punctuation and symbols. Prove exact source bytes, tail
+coverage, catalog order/uniqueness, request limits and deterministic identities.
+Prove a stored version-12 artifact still reloads with its original catalog while
+an equivalent version-13 artifact rejects every partial candidate. Run
+all-target tests, strict Clippy, formatting, NARA and DOL corpus acceptance, then
+rerun the captured 134-page PDF and inspect the four known pages plus the
+complete delivered artifact. Report coverage, warnings, claims, requests,
+completion tokens and wall time; hosted CI is not implied.
 
 Explicit non-scope: model family/size/runtime, context/output/temperature/
 timeout, page sampling and retention formulas, claim ceilings, verifier support
