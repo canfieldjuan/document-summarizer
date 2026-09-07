@@ -2152,9 +2152,13 @@ complete in PR #38
   selected qualified runtime then preflights the exact generation request:
   Ollama tokenizes the complete serialized payload and llama.cpp counts its
   framed prompt. A runtime context rejection selects the same fallback before
-  inference. Other admission failures still fail. Fallback records
-  `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`; invalid runtime or model output
-  still fails rather than masquerading as fallback.
+  inference. After a coherent draft validates, synthesis also materializes and
+  exact-preflights every downstream coherent-verification batch using the same
+  request constructor, request-local schemas, ordinals and seed as verification.
+  A planner or runtime context rejection discards that draft and persists the
+  verified-ledger fallback before synthesis completes. Other admission failures
+  still fail. Fallback records `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`;
+  invalid runtime or model output still fails rather than masquerading as fallback.
 - Connect delivery-policy runs retain the versioned direct claim-ledger
   synthesis path. This preserves their distributed page coverage
   contract and existing wire result while standalone summaries use coherent
@@ -2179,7 +2183,7 @@ complete in PR #38
 
 **Verification and representative output**:
 - `cargo fmt --all --check` and strict all-target/all-feature Clippy passed. The
-  locked Rust suite passed 399 library tests with 6 intentional ignores; the
+  locked Rust suite passed 400 library tests with 6 intentional ignores; the
   office target passed 3 local tests with 3 opt-in ignores, and all 3 release
   contract tests passed. The TypeScript/Vite production build transformed 7
   modules and completed successfully.
@@ -2194,7 +2198,10 @@ complete in PR #38
   complete serialized payload, reject max-plus-one before transport and admit the
   exact adjacent limit. The full summary fallback test covers both the early
   application bound and an exact runtime context rejection, proving neither path
-  makes a synthesis request; non-context preflight errors remain failures.
+  makes a synthesis request. A separate end-to-end boundary test generates a
+  coherent draft, rejects its exact verification preflight, and proves the
+  persisted and rendered result uses the verified ledger; its opposite side
+  proves a non-context verification admission error fails synthesis.
 - A focused application-service test passed the Connect delivery path through
   direct claim-ledger synthesis and the actual delivered page-coverage
   predicate, preventing source-selective coherent prose from failing after

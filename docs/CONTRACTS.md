@@ -442,11 +442,22 @@ canonical source order and materializes durable claim, evidence and page-label
 identity; prose, source locations and durable IDs are never accepted from model
 output as authoritative metadata.
 
-If the catalog is incomplete or the complete request exceeds the bound,
-synthesis makes no prose-generation request. It persists presentation mode
+Before coherent presentation is persisted, synthesis materializes the same
+semantic-verification batches, request-local identifiers, response schemas,
+request ordinals and generation seed that the verification stage will use. It
+preflights every coherent-prose batch through the selected verification runtime.
+If the bounded planner or exact runtime admission rejects one of those requests
+for context size, the generated draft is discarded and the verified-ledger
+fallback is persisted; a non-context admission failure still fails synthesis.
+
+If the catalog is incomplete or the complete synthesis request exceeds the
+bound, synthesis makes no prose-generation request. If the generated coherent
+claims cannot fit their exact downstream verification requests, synthesis
+discards them before persistence. Both cases persist presentation mode
 `claimLedgerFallback`, warning `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`, and
-the existing source-ordered claim ledger. Invalid budgets, invalid model output,
-unknown or duplicate source identifiers and runtime failures still fail the
+the existing source-ordered claim ledger, with the warning message identifying
+the applicable boundary. Invalid budgets, invalid model output, unknown or
+duplicate source identifiers and non-context runtime failures still fail the
 stage; they do not silently choose the fallback.
 
 A narrow deterministic guard compares modal predicates in each prose unit with
@@ -466,8 +477,9 @@ evaluation.
 The durable direct claim ledger remains alongside coherent prose for audit and
 fallback. Verification classifies the ledger claims against their analysis
 evidence and separately classifies every prose unit against the exact source
-segments selected during synthesis. Unsupported prose is withheld from the
-rendered summary even when ledger claims remain supported. Coherent completion
+segments selected during synthesis. The coherent requests have already passed
+exact runtime admission before the synthesis artifact commits. Unsupported prose
+is withheld from the rendered summary even when ledger claims remain supported. Coherent completion
 depends on at least one supported prose unit; it does not require an independently
 verified ledger paraphrase to survive. Fallback and historical presentation still
 require at least one supported ledger claim. Citation format 4 binds presentation

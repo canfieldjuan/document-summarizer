@@ -984,16 +984,7 @@ fn verify(
         .cloned()
         .collect::<Vec<_>>();
     let ledger_prompt = verification_prompt(&synthesized.claims, &ledger_evidence)?;
-    let verification_claim_budget = if matches!(
-        synthesized.synthesis_version.as_str(),
-        SYNTHESIS_VERSION | DIRECT_SYNTHESIS_VERSION
-    ) {
-        direct::MAX_CLAIMS
-    } else if synthesized.synthesis_version == HIERARCHICAL_SYNTHESIS_VERSION {
-        document_claim_budget(normalized)?
-    } else {
-        LEGACY_MAX_SUMMARY_CLAIMS
-    };
+    let verification_claim_budget = verification_claim_budget(synthesized, normalized)?;
     let mut next_request_ordinal = 0;
     let claim_verifications = classify_claim_support(
         runtime,
@@ -1167,11 +1158,7 @@ fn classify_claim_support(
     control: &dyn ExecutionControl,
 ) -> Result<Vec<ClaimVerification>, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Verify)?;
-    let request_character_limit = verification_request_character_limit(
-        runtime.context_tokens(PipelineStage::Verify),
-        VERIFICATION_OUTPUT_TOKENS,
-    )?;
-    let batches = plan_verification_batches(prompt, claims, claim_budget, request_character_limit)?;
+    let batches = verification_batches_for_runtime(runtime, prompt, claims, claim_budget)?;
     runtime.health().map_err(|failure| {
         runtime_pipeline_failure(PipelineStage::Verify, "MODEL_HEALTH", failure)
     })?;
@@ -1182,21 +1169,8 @@ fn classify_claim_support(
         cancellation_checkpoint(control, PipelineStage::Verify)?;
         let request_ordinal =
             reserve_model_request_ordinal(next_request_ordinal, PipelineStage::Verify)?;
-        let response = runtime.generate_with_control(
-            &ModelRequest {
-                stage: PipelineStage::Verify,
-                ordinal: request_ordinal,
-                system_prompt: VERIFICATION_SYSTEM_PROMPT.to_string(),
-                user_prompt: batch.user_prompt,
-                seed: generation_seed,
-                max_output_tokens: VERIFICATION_OUTPUT_TOKENS,
-                output_format: ModelOutputFormat::JsonSchema {
-                    name: VERIFICATION_SCHEMA_NAME.to_string(),
-                    schema: verification_output_schema(batch.identifiers.vocabulary()),
-                },
-            },
-            control,
-        );
+        let request = verification_request(&batch, request_ordinal, generation_seed);
+        let response = runtime.generate_with_control(&request, control);
         cancellation_checkpoint(control, PipelineStage::Verify)?;
         let response = response.map_err(|failure| {
             runtime_pipeline_failure(PipelineStage::Verify, "MODEL_VERIFICATION", failure)
@@ -1209,6 +1183,115 @@ fn classify_claim_support(
         )?);
     }
     Ok(claim_verifications)
+}
+
+fn verification_claim_budget(
+    synthesized: &SynthesizedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<usize, PipelineFailure> {
+    if matches!(
+        synthesized.synthesis_version.as_str(),
+        SYNTHESIS_VERSION | DIRECT_SYNTHESIS_VERSION
+    ) {
+        Ok(direct::MAX_CLAIMS)
+    } else if synthesized.synthesis_version == HIERARCHICAL_SYNTHESIS_VERSION {
+        document_claim_budget(normalized)
+    } else {
+        Ok(LEGACY_MAX_SUMMARY_CLAIMS)
+    }
+}
+
+fn verification_batches_for_runtime(
+    runtime: &dyn ModelRuntime,
+    prompt: &VerificationPrompt,
+    claims: &[CitedClaim],
+    claim_budget: usize,
+) -> Result<Vec<VerificationBatch>, PipelineFailure> {
+    let request_character_limit = verification_request_character_limit(
+        runtime.context_tokens(PipelineStage::Verify),
+        VERIFICATION_OUTPUT_TOKENS,
+    )?;
+    plan_verification_batches(prompt, claims, claim_budget, request_character_limit)
+}
+
+fn verification_request(
+    batch: &VerificationBatch,
+    ordinal: u32,
+    generation_seed: u64,
+) -> ModelRequest {
+    ModelRequest {
+        stage: PipelineStage::Verify,
+        ordinal,
+        system_prompt: VERIFICATION_SYSTEM_PROMPT.to_string(),
+        user_prompt: batch.user_prompt.clone(),
+        seed: generation_seed,
+        max_output_tokens: VERIFICATION_OUTPUT_TOKENS,
+        output_format: ModelOutputFormat::JsonSchema {
+            name: VERIFICATION_SCHEMA_NAME.to_string(),
+            schema: verification_output_schema(batch.identifiers.vocabulary()),
+        },
+    }
+}
+
+fn coherent_verification_exceeds_runtime_context(
+    runtime: &dyn ModelRuntime,
+    synthesized: &SynthesizedDocument,
+    analyzed: &AnalyzedDocument,
+    normalized: &NormalizedDocument,
+    generation_seed: u64,
+) -> Result<bool, PipelineFailure> {
+    if synthesized.presentation_mode != SummaryPresentationMode::Coherent {
+        return Ok(false);
+    }
+
+    let ledger_evidence = analyzed
+        .chunks
+        .iter()
+        .flat_map(|analysis| analysis.evidence.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let ledger_prompt = verification_prompt(&synthesized.claims, &ledger_evidence)?;
+    let ledger_batches = verification_batches_for_runtime(
+        runtime,
+        &ledger_prompt,
+        &synthesized.claims,
+        verification_claim_budget(synthesized, normalized)?,
+    )?;
+
+    let summary_prompt =
+        verification_prompt(&synthesized.summary_claims, &synthesized.synthesis_evidence)?;
+    let summary_batches = match verification_batches_for_runtime(
+        runtime,
+        &summary_prompt,
+        &synthesized.summary_claims,
+        coherent::MAX_SUMMARY_CLAIMS,
+    ) {
+        Ok(batches) => batches,
+        Err(failure) if failure.code == "VERIFICATION_INPUT_TOO_LARGE" => return Ok(true),
+        Err(failure) => return Err(failure),
+    };
+
+    let mut next_request_ordinal = 0;
+    for _ in ledger_batches {
+        reserve_model_request_ordinal(&mut next_request_ordinal, PipelineStage::Verify)?;
+    }
+    for batch in summary_batches {
+        let ordinal =
+            reserve_model_request_ordinal(&mut next_request_ordinal, PipelineStage::Verify)?;
+        let request = verification_request(&batch, ordinal, generation_seed);
+        match runtime.preflight_request(&request) {
+            Ok(()) => {}
+            Err(failure) if failure.code == "MODEL_CONTEXT_EXCEEDED" => return Ok(true),
+            Err(failure) => {
+                return Err(runtime_pipeline_failure(
+                    PipelineStage::Synthesize,
+                    "MODEL_VERIFICATION_ADMISSION",
+                    failure,
+                ));
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn verification_request_character_limit(
@@ -4466,8 +4549,10 @@ mod tests {
     struct LowSynthesisContextRuntime {
         requests: Mutex<Vec<PipelineStage>>,
         preflight_calls: AtomicUsize,
+        verification_preflight_calls: AtomicUsize,
         synthesis_context_tokens: u32,
         reject_synthesis_preflight: bool,
+        verification_preflight_failure: Option<&'static str>,
     }
 
     impl LowSynthesisContextRuntime {
@@ -4475,8 +4560,10 @@ mod tests {
             Self {
                 requests: Mutex::new(Vec::new()),
                 preflight_calls: AtomicUsize::new(0),
+                verification_preflight_calls: AtomicUsize::new(0),
                 synthesis_context_tokens: 3_000,
                 reject_synthesis_preflight: false,
+                verification_preflight_failure: None,
             }
         }
 
@@ -4484,8 +4571,21 @@ mod tests {
             Self {
                 requests: Mutex::new(Vec::new()),
                 preflight_calls: AtomicUsize::new(0),
+                verification_preflight_calls: AtomicUsize::new(0),
                 synthesis_context_tokens: LEGACY_MODEL_CONTEXT_TOKENS,
                 reject_synthesis_preflight: true,
+                verification_preflight_failure: None,
+            }
+        }
+
+        fn rejecting_exact_verification_admission(code: &'static str) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                preflight_calls: AtomicUsize::new(0),
+                verification_preflight_calls: AtomicUsize::new(0),
+                synthesis_context_tokens: LEGACY_MODEL_CONTEXT_TOKENS,
+                reject_synthesis_preflight: false,
+                verification_preflight_failure: Some(code),
             }
         }
     }
@@ -4508,6 +4608,18 @@ mod tests {
                     return Err(ModelRuntimeFailure {
                         code: "MODEL_CONTEXT_EXCEEDED".to_string(),
                         message: "fixture exact context rejection".to_string(),
+                        recoverable: false,
+                        request_attempts: Vec::new(),
+                    });
+                }
+            }
+            if request.stage == PipelineStage::Verify {
+                self.verification_preflight_calls
+                    .fetch_add(1, Ordering::SeqCst);
+                if let Some(code) = self.verification_preflight_failure {
+                    return Err(ModelRuntimeFailure {
+                        code: code.to_string(),
+                        message: "fixture exact verification context rejection".to_string(),
                         recoverable: false,
                         request_attempts: Vec::new(),
                     });
@@ -8592,6 +8704,67 @@ mod tests {
             assert!(completed.citations.summary_claims.is_empty());
             assert!(!completed.citations.claims.is_empty());
         }
+    }
+
+    #[test]
+    fn coherent_verification_admission_falls_back_only_for_context_overflow() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = LowSynthesisContextRuntime::rejecting_exact_verification_admission(
+            "MODEL_CONTEXT_EXCEEDED",
+        );
+
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("exact coherent-verification overflow should use the verified ledger");
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+
+        assert_eq!(
+            runtime
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|stage| **stage == PipelineStage::Synthesize)
+                .count(),
+            1
+        );
+        assert_eq!(runtime.preflight_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime.verification_preflight_calls.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(synthesized.summary_claims.is_empty());
+        assert!(synthesized.warnings.iter().any(|warning| {
+            warning.code == coherent::FALLBACK_WARNING_CODE
+                && warning.message.contains("bounded semantic verification")
+        }));
+        assert_eq!(
+            verified.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert_eq!(completed.summary.text, verified.summary_text);
+        assert!(completed.citations.summary_claims.is_empty());
+        assert!(!completed.citations.claims.is_empty());
+
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = LowSynthesisContextRuntime::rejecting_exact_verification_admission(
+            "MODEL_CONFIG_INVALID",
+        );
+        let error = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect_err("non-context verification admission must fail synthesis");
+        assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
+        assert_eq!(runtime.preflight_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime.verification_preflight_calls.load(Ordering::SeqCst),
+            1
+        );
+        assert!(get_synthesized_document(&conn, &run_id).unwrap().is_none());
     }
 
     #[test]

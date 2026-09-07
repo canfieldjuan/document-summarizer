@@ -172,13 +172,22 @@ validated final artifact,
 completion transaction. Historical synthesis artifacts retain their versioned
 load rules.
 
+After a coherent draft validates and before that completion transaction,
+synthesis constructs the exact downstream semantic-verification batches. The
+planner, request-local IDs, structured response schemas, request ordinals and
+seed are the same values verification will use. Every coherent-prose batch is
+preflighted through the selected verification runtime. A static or exact context
+rejection discards the draft and commits the verified-ledger fallback instead;
+other admission failures follow the ordinary `SYNTHESIZING -> FAILED` path.
+
 Verification uses `ModelRuntime` for two distinct evidence-entailment checks.
 The source ledger is classified against its analyzed exact quotations. Coherent
 prose units are separately classified against the exact normalized source
 segments selected during synthesis. Rust requires complete, unique claim-ID
 coverage for each set, restores evidence IDs from persisted artifacts, and
-rejects malformed, partial, duplicate, or foreign verdicts. The complete
-verdict artifact and its runtime/model identity commit atomically with
+rejects malformed, partial, duplicate, or foreign verdicts. Coherent-prose
+requests have passed exact runtime admission before synthesis persistence. The
+complete verdict artifact and its runtime/model identity commit atomically with
 `VERIFYING -> VERIFIED`.
 
 Only claims classified as `supported` enter the final summary and citation

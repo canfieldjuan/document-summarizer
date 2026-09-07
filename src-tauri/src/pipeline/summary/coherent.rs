@@ -70,6 +70,7 @@ struct SourceCatalog {
 enum FallbackReason {
     IncompleteCatalog,
     RequestTooLarge,
+    VerificationRequestTooLarge,
 }
 
 impl FallbackReason {
@@ -80,6 +81,9 @@ impl FallbackReason {
             }
             Self::RequestTooLarge => {
                 "The complete source context does not fit one bounded synthesis request; showing verified source claims instead"
+            }
+            Self::VerificationRequestTooLarge => {
+                "The coherent summary does not fit bounded semantic verification; showing verified source claims instead"
             }
         }
     }
@@ -179,6 +183,23 @@ pub(super) fn synthesize(
         synthesis_evidence,
         claims: ledger_claims,
         warnings: analyzed.warnings.clone(),
+    };
+    let result = if coherent_verification_exceeds_runtime_context(
+        runtime,
+        &result,
+        analyzed,
+        normalized,
+        generation_seed,
+    )? {
+        fallback_document(
+            runtime,
+            analyzed,
+            chunked,
+            result.claims,
+            FallbackReason::VerificationRequestTooLarge,
+        )?
+    } else {
+        result
     };
     validate_for_runtime(&result, analyzed, chunked, normalized, runtime)?;
     cancellation_checkpoint(control, PipelineStage::Synthesize)?;
@@ -826,7 +847,11 @@ pub(super) fn validate_for_runtime(
         (SummaryPresentationMode::ClaimLedgerFallback, Some(reason))
             if has_fallback_warning(synthesized, reason) => {}
         (SummaryPresentationMode::ClaimLedgerFallback, None)
-            if has_fallback_warning(synthesized, FallbackReason::RequestTooLarge) => {}
+            if has_fallback_warning(synthesized, FallbackReason::RequestTooLarge)
+                || has_fallback_warning(
+                    synthesized,
+                    FallbackReason::VerificationRequestTooLarge,
+                ) => {}
         _ => {
             return Err(stage_failure(
                 PipelineStage::Synthesize,
