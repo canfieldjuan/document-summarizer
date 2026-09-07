@@ -617,11 +617,13 @@ Required behavior:
   not a split. False negatives may reduce the candidate catalog and warn; false
   positives must not admit partial source assertions.
 - The abbreviation defense is not only a fixed dictionary. When source text
-  continues after a period, conservatively coalesce a preceding alphabetic
-  token of two through five characters whose casing is title-style or all
-  capitals. This treats unlisted shapes such as `Dept.` and `NASA.` as
-  ambiguous. A period at the end of the complete source remains safe, and an
-  ordinary lowercase sentence-ending word remains eligible.
+  continues after a period, conservatively coalesce every preceding alphabetic
+  token of two through five characters regardless of casing. This treats
+  unlisted shapes such as `Dept.`, `dept.` and `NASA.` as ambiguous; casing
+  cannot prove that a short token is not an abbreviation. A period at the end
+  of the complete source remains safe, and a continuing alphabetic token of
+  six or more characters remains eligible unless another ambiguity rule
+  applies.
 - Within an over-budget block, a source sentence unit longer than 600
   characters or a nonempty source tail without a safe terminal boundary is
   unavailable to ordinary quote selection. A no-terminal whole block is
@@ -654,15 +656,16 @@ no-terminal text at 599, 600 and 601; a bounded DOL-style heading/list block; a
 safe sentence before and after an unsafe unit; decimals,
 initials, acronyms, common abbreviations, ellipses, closing quotes/brackets and
 Unicode sentence punctuation. Probe an unlisted title-case abbreviation before
-a capitalized continuation and an ordinary lowercase short word at a real
-sentence boundary. Prove exact source bytes, tail coverage, catalog
-order/uniqueness, request limits and deterministic identities. Prove a stored
-version-12 artifact still reloads with its original catalog while an equivalent
-version-13 artifact rejects every partial candidate. Run all-target tests,
-strict Clippy, formatting, NARA and DOL corpus acceptance, then rerun the
-captured 134-page PDF and inspect the four known pages plus the complete
-delivered artifact. Report coverage, warnings, claims, requests, completion
-tokens and wall time; hosted CI is not implied.
+a capitalized continuation, its lowercase equivalent, the one-through-six
+character length boundaries, a source-final short lowercase word and a
+continuing six-character lowercase word. Prove exact source bytes, tail
+coverage, catalog order/uniqueness, request limits and deterministic identities.
+Prove a stored version-12 artifact still reloads with its original catalog while
+an equivalent version-13 artifact rejects every partial candidate. Run
+all-target tests, strict Clippy, formatting, NARA and DOL corpus acceptance,
+then rerun the captured 134-page PDF and inspect the four known pages plus the
+complete delivered artifact. Report coverage, warnings, claims, requests,
+completion tokens and wall time; hosted CI is not implied.
 
 Explicit non-scope: model family/size/runtime, context/output/temperature/
 timeout, page sampling and retention formulas, claim ceilings, verifier support
