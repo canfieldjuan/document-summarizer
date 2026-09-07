@@ -8,6 +8,7 @@ use crate::pipeline::contracts::{
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, StoreError};
 use chrono::Utc;
+use icu_properties::{props::SentenceBreak, CodePointMapData};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2174,14 +2175,21 @@ fn safe_analysis_sentence_boundary(
     let Some(terminal) = without_closers.chars().last() else {
         return false;
     };
-    if matches!(terminal, '!' | '?' | '。' | '！' | '？') {
+    let terminal_class = analysis_sentence_break(terminal);
+    if terminal_class == SentenceBreak::STerm {
         return true;
     }
-    if terminal != '.' {
+    if terminal_class != SentenceBreak::ATerm {
         return false;
     }
-    let before_terminal = without_closers[..without_closers.len() - 1].trim_end();
-    if before_terminal.ends_with('.') || before_terminal.ends_with('…') {
+    let terminal_start = without_closers.len() - terminal.len_utf8();
+    let before_terminal = without_closers[..terminal_start].trim_end();
+    if before_terminal.chars().last().is_some_and(|character| {
+        matches!(
+            analysis_sentence_break(character),
+            SentenceBreak::ATerm | SentenceBreak::SContinue
+        )
+    }) {
         return false;
     }
     let token = before_terminal
@@ -2201,7 +2209,9 @@ fn safe_analysis_sentence_boundary(
         "sec", "art", "inc", "ltd", "co", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep",
         "sept", "oct", "nov", "dec",
     ];
-    if token.contains('.')
+    if token
+        .chars()
+        .any(|character| analysis_sentence_break(character) == SentenceBreak::ATerm)
         || token.chars().count() == 1 && token.chars().all(char::is_alphabetic)
         || AMBIGUOUS_ABBREVIATIONS.contains(&lower.as_str())
         || short_open_set_abbreviation
@@ -2218,6 +2228,10 @@ fn is_analysis_sentence_closer(character: char) -> bool {
             character.general_category(),
             GeneralCategory::ClosePunctuation | GeneralCategory::FinalPunctuation
         )
+}
+
+fn analysis_sentence_break(character: char) -> SentenceBreak {
+    CodePointMapData::<SentenceBreak>::new().get(character)
 }
 
 #[cfg(test)]
@@ -6462,6 +6476,7 @@ mod tests {
     fn unicode_sentence_terminal_scripts_are_complete_candidates() {
         let first = format!("{}.", "a".repeat(549));
         for terminal in ['؟', '۔', '։', '।'] {
+            assert_eq!(analysis_sentence_break(terminal), SentenceBreak::STerm);
             let second = format!("{}{}", "क".repeat(60), terminal);
             let source = format!("{first} {second}");
             assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
@@ -6469,6 +6484,60 @@ mod tests {
             let segmented = analysis_quote_segments_v13(&source);
             assert_eq!(segmented.segments, vec![first.clone(), second]);
             assert_eq!(segmented.omitted_source_units, 0);
+        }
+
+        for non_terminal in [',', '؛', '¿', '™', '…'] {
+            assert!(!matches!(
+                analysis_sentence_break(non_terminal),
+                SentenceBreak::STerm | SentenceBreak::ATerm
+            ));
+            let second = format!("{}{}", "क".repeat(60), non_terminal);
+            let source = format!("{first} {second}");
+            let segmented = analysis_quote_segments_v13(&source);
+            assert_eq!(segmented.segments, vec![first.clone()]);
+            assert_eq!(segmented.omitted_source_units, 1);
+        }
+    }
+
+    #[test]
+    fn unicode_period_like_terminals_retain_ambiguity_guards() {
+        for terminal in ['.', '．', '﹒'] {
+            assert_eq!(analysis_sentence_break(terminal), SentenceBreak::ATerm);
+            let ambiguous = format!("dept{terminal} Records continue.");
+            let ambiguous_end = ambiguous.find(" Records").unwrap();
+            assert!(!safe_analysis_sentence_boundary(
+                &ambiguous,
+                0,
+                ambiguous_end,
+                ambiguous.len()
+            ));
+
+            let eligible = format!("secure{terminal} Records continue.");
+            let eligible_end = eligible.find(" Records").unwrap();
+            assert!(safe_analysis_sentence_boundary(
+                &eligible,
+                0,
+                eligible_end,
+                eligible.len()
+            ));
+
+            let repeated = format!("secure{terminal}{terminal} Records continue.");
+            let repeated_end = repeated.find(" Records").unwrap();
+            assert!(!safe_analysis_sentence_boundary(
+                &repeated,
+                0,
+                repeated_end,
+                repeated.len()
+            ));
+
+            let acronym = format!("U{terminal}S{terminal} Records continue.");
+            let acronym_end = acronym.find(" Records").unwrap();
+            assert!(!safe_analysis_sentence_boundary(
+                &acronym,
+                0,
+                acronym_end,
+                acronym.len()
+            ));
         }
     }
 
