@@ -61,15 +61,26 @@ other category remains unsafe. Positive script probes and negative comma,
 Arabic-semicolon, inverted-question-mark, symbol and ellipsis controls exercise
 the real catalog path.
 
+The following exact-head review found that Unicode opening punctuation could
+still hide a short abbreviation from that defense. The failing regression
+reproduced `（Dept.` as its own quote candidate because token cleanup knew only
+a fixed set of Western openers, leaving `（Dept` non-alphabetic and therefore
+outside the two-through-five-character guard. The final classifier strips
+Unicode `OpenPunctuation` and `InitialPunctuation`, plus ASCII straight quotes,
+only at a token's start, then applies the same ambiguity checks. Catalog probes
+cover fullwidth parentheses, corner and CJK quotation brackets, curly and
+straight quotes; dash-prefixed and symbol-prefixed tokens remain unstripped and
+eligible so the guard does not silently broaden beyond punctuation wrappers.
+
 All final live runs used native Ollama with `qwen3-30b-a3b:latest`, exact digest
 `1eda56426671cdf365913097543c2253a73c57e35b12741306689968d7f70292`,
 8,192 admitted context tokens, and the existing acceptance thresholds.
 
 | Fixture | Delivered result | Coverage | Requests / completion tokens | Wall time |
 | --- | --- | --- | ---: | ---: |
-| NARA robustness fixture | 7 supported claims / 7 evidence; 4 material omissions; complete with warnings | 7/11 raw (63.64%); 7/7 adjusted (100%) | 21 / 474 | 19.57 s |
-| DOL product fixture | 82 supported claims / 83 evidence; no page omissions; complete with warnings | 82/111 raw and adjusted (73.87%) | 176 / 5,610 | 96.82 s |
-| Captured 134-page book | 97 supported claims / 97 evidence; 1 material and 3 technical omissions; complete with warnings | 97/134 raw (72.39%); 97/133 adjusted (72.93%) | 205 / 6,560 | 133.09 s |
+| NARA robustness fixture | 7 supported claims / 7 evidence; 4 material omissions; complete with warnings | 7/11 raw (63.64%); 7/7 adjusted (100%) | 21 / 463 | 18.68 s |
+| DOL product fixture | 81 supported claims / 83 evidence; no page omissions; complete with warnings | 81/111 raw and adjusted (72.97%) | 176 / 5,632 | 102.31 s |
+| Captured 134-page book | 94 supported claims / 97 evidence; 1 material and 3 technical omissions; complete with warnings | 94/134 raw (70.15%); 94/133 adjusted (70.68%) | 205 / 6,494 | 130.38 s |
 
 The book input was the exact 973,450-byte, 134-page native-text PDF with SHA-256
 `2678b69b32977459b9b77fa1bec88243f984afe857fa13144c614558f09990aa`.
@@ -79,12 +90,14 @@ An opt-in persisted-evidence trace inspected the four captured failure pages:
   National Guard deployments and ending after the complete quoted assertion
   about the destruction of state capacity. The captured `assert`/`grim.` shape
   remains covered by the deterministic failing-before regression.
-- Page 92 includes `we can do better.` and the following complete paragraph.
-- Page 98 includes the continuation about near-absolute authority in foreign
-  policy and war through the early 1970s.
-- Page 102 selected a different complete unit in this rerun: the page heading
-  and full sentence introducing *Digital Empires*, followed by the complete
-  sentence identifying Bradford and her areas of specialization.
+- Page 92 includes the complete concluding-paragraph passage through `we can do
+  better.` and the following complete sentence about Scheindlin's consistently
+  high standard for Israel.
+- Page 98 includes the complete passage connecting the plebiscitary presidency
+  to presidential dominance, the Western Frontier and the Great Depression.
+- Page 102 includes the complete sentence attributing brief unipolarity to
+  China's ascent and the EU's regulatory role, followed by Bradford's complete
+  comparative-analysis sentence.
 
 All four exact quotations were bound to supported, mechanically complete
 claims, and the complete delivered citation artifact passed source, identity,
@@ -98,6 +111,7 @@ bounded DOL-style heading/list blocks, over-budget and unterminated units,
 safe recovery after an unsafe unit, ambiguous periods, Unicode terminals, the
 Unicode closer categories and their opener/symbol counterexamples, the four
 script-specific `STerm` marks, non-ASCII `ATerm` ambiguity on both sides,
+Unicode abbreviation wrappers and their dash/symbol non-stripping controls,
 captured cut positions, forged substrings and historical version-12
 reconstruction. The all-target/all-feature suite, strict Clippy and formatting
 are the local release gates; hosted CI is not implied.
