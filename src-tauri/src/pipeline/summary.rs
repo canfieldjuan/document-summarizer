@@ -3,8 +3,8 @@ use crate::pipeline::contracts::{
     CitationArtifact, CitedClaim, ClaimVerdict, ClaimVerification, EvidenceItem, ModelOutputFormat,
     ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure, NormalizedBlock,
     NormalizedDocument, PipelineFailure, PipelineStage, PipelineWarning, SourceSpan,
-    SummaryArtifact, SummaryArtifacts, SummaryPresentationMode, SynthesizedDocument,
-    VerifiedDocument,
+    SummaryArtifact, SummaryArtifacts, SummaryPresentationMode, SummaryProfile,
+    SynthesizedDocument, VerifiedDocument,
 };
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, StoreError};
@@ -478,20 +478,23 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
         .ok_or_else(|| StoreError::NormalizedArtifactNotFound(run_id.to_string()))?;
     let chunked = db::get_chunked_document(conn, run_id)?
         .ok_or_else(|| StoreError::ChunkedArtifactNotFound(run_id.to_string()))?;
+    let summary_profile = db::get_run_summary_profile(conn, run_id)?
+        .ok_or_else(|| StoreError::SummaryProfileUnavailable(run_id.to_string()))?;
 
     let (synthesizing_run, persisted_analysis) =
         db::start_synthesis(conn, run_id, run.state_version)?;
-    let synthesis = if delivery_policy.is_some() {
-        direct::synthesize(runtime, &persisted_analysis, &chunked, &normalized, control)
-    } else {
-        coherent::synthesize(
+    let synthesis = match (delivery_policy, summary_profile) {
+        (Some(_), SummaryProfile::General) => {
+            direct::synthesize(runtime, &persisted_analysis, &chunked, &normalized, control)
+        }
+        (None, SummaryProfile::General) => coherent::synthesize(
             runtime,
             &persisted_analysis,
             &chunked,
             &normalized,
             generation_seed_for_run(run_id),
             control,
-        )
+        ),
     };
     let synthesized = match synthesis {
         Ok(synthesized) => synthesized,

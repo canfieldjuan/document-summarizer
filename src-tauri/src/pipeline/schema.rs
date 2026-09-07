@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 15;
+pub const CURRENT_SCHEMA_VERSION: u32 = 16;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -367,6 +367,31 @@ BEGIN
 END;
 "#;
 
+const V15_TO_V16: &str = r#"
+CREATE TABLE pipeline_run_summary_profiles (
+    run_id TEXT PRIMARY KEY,
+    summary_profile TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id)
+);
+
+INSERT INTO pipeline_run_summary_profiles (run_id, summary_profile, created_at)
+SELECT run_id, '"general"', created_at
+FROM pipeline_runs;
+
+CREATE TRIGGER pipeline_run_summary_profiles_no_update
+BEFORE UPDATE ON pipeline_run_summary_profiles
+BEGIN
+    SELECT RAISE(ABORT, 'pipeline_run_summary_profiles are immutable');
+END;
+
+CREATE TRIGGER pipeline_run_summary_profiles_no_delete
+BEFORE DELETE ON pipeline_run_summary_profiles
+BEGIN
+    SELECT RAISE(ABORT, 'pipeline_run_summary_profiles are immutable');
+END;
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -552,6 +577,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V12_TO_V13)?;
         tx.execute_batch(V13_TO_V14)?;
         tx.execute_batch(V14_TO_V15)?;
+        tx.execute_batch(V15_TO_V16)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -611,6 +637,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 14 {
         migrate_v14_to_v15(conn)?;
+        current_version = 15;
+    }
+    if current_version == 15 {
+        migrate_v15_to_v16(conn)?;
     }
     validate(conn)
 }
@@ -698,6 +728,10 @@ fn migrate_v13_to_v14(conn: &mut Connection) -> Result<(), MigrationError> {
 
 fn migrate_v14_to_v15(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V14_TO_V15, 15)
+}
+
+fn migrate_v15_to_v16(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V15_TO_V16, 16)
 }
 
 fn migrate_additive(
@@ -912,6 +946,44 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         if present != 1 {
             return Err(MigrationError::Invariant(format!("{trigger} is missing")));
         }
+    }
+
+    for column in ["run_id", "summary_profile", "created_at"] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('pipeline_run_summary_profiles') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!(
+                "pipeline_run_summary_profiles.{column} is missing"
+            )));
+        }
+    }
+    for trigger in [
+        "pipeline_run_summary_profiles_no_update",
+        "pipeline_run_summary_profiles_no_delete",
+    ] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [trigger],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!("{trigger} is missing")));
+        }
+    }
+    let runs_without_summary_profile: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM pipeline_runs AS run
+         LEFT JOIN pipeline_run_summary_profiles AS profile USING (run_id)
+         WHERE profile.run_id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if runs_without_summary_profile != 0 {
+        return Err(MigrationError::Invariant(
+            "every pipeline run must have an immutable summary profile".to_string(),
+        ));
     }
 
     for (table, columns) in [
@@ -1144,6 +1216,74 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn schema_v15_backfills_general_summary_profiles_and_makes_them_immutable() {
+        let database = TestDatabase::new();
+        let mut conn = Connection::open(&database.0).expect("v15 database should open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        for migration in [
+            SCHEMA_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5, V5_TO_V6, V6_TO_V7, V7_TO_V8, V8_TO_V9,
+            V9_TO_V10, V10_TO_V11, V11_TO_V12, V12_TO_V13, V13_TO_V14, V14_TO_V15,
+        ] {
+            conn.execute_batch(migration)
+                .expect("v15 predecessor schema should initialize");
+        }
+        conn.pragma_update(None, "user_version", 15)
+            .expect("v15 version should persist");
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents VALUES (
+                'summary-profile-document', 'profile.pdf', 'pdf', 12, 'profile-hash',
+                '/profile.pdf', '2026-09-07T00:00:00+00:00'
+            );
+            INSERT INTO pipeline_runs VALUES (
+                'summary-profile-run', 'summary-profile-document', '"Complete"', 19, '1.0',
+                '2026-09-07T00:00:00+00:00', '2026-09-07T00:00:01+00:00',
+                '2026-09-07T00:00:02+00:00', '2026-09-07T00:00:03+00:00', NULL,
+                '{"total_units":0,"completed_units":0,"failed_units":0}',
+                '[]', NULL, 0, 0
+            );
+            "#,
+        )
+        .expect("v15 rows should persist");
+
+        migrate(&mut conn).expect("v15 schema should migrate");
+
+        assert_eq!(
+            version(&conn).expect("version should load"),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT summary_profile FROM pipeline_run_summary_profiles
+                 WHERE run_id = 'summary-profile-run'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("backfilled summary profile should load"),
+            "\"general\""
+        );
+        assert!(conn
+            .execute(
+                "UPDATE pipeline_run_summary_profiles SET summary_profile = '\"story\"'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute("DELETE FROM pipeline_run_summary_profiles", [])
+            .is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM pipeline_runs WHERE run_id = 'summary-profile-run'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("existing run should remain"),
+            "\"Complete\""
+        );
     }
 
     #[test]

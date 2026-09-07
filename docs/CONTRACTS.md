@@ -500,6 +500,37 @@ coverage requirement, so a source-selective coherent draft cannot replace the
 coverage-preserving ledger in this slice. This preserves the existing Connect
 wire result while standalone summaries adopt coherent General presentation.
 
+### Summary profile identity and explicit selection
+
+Status: current desktop runs have an explicit immutable summary profile. A
+summary profile controls application-level synthesis behavior and presentation;
+it is separate from both the document's type and the model runtime profile. The
+only admitted value is currently `general`. Unknown, malformed, or missing
+values fail at their typed boundary and never select a future specialized
+profile or silently default a current run.
+
+The desktop presents General before source admission and sends that selection
+with the start command. SQLite schema version 16 stores it in
+`pipeline_run_summary_profiles` in the same transaction that first persists the
+document and run. The row is immutable. The migration assigns General to every
+pre-version-16 run because General was the only product behavior available when
+those runs were created; this is historical compatibility, not inferred
+document classification.
+
+Synthesis reloads the run's stored profile and selects behavior from that value.
+Retry copies the source run's profile within the retry-lineage transaction, and
+continuation reuses the existing run's value. Accepted-run responses, saved-run
+history and reopened results expose the stored profile so the interface does not
+substitute a mutable current setting. A missing profile rejects synthesis,
+retry, continuation or workspace projection at the applicable boundary rather
+than permitting incompatible result reuse.
+
+Connect admissions assign General explicitly in their existing acceptance
+transaction and retain the direct delivery-policy synthesis described above.
+This contract does not add Story or Contract prompts, document-type inference,
+automatic suggestions, classifier confidence, long-document sampling, trained
+adapters, or changes to summary quality.
+
 ### Historical direct verified paraphrases and explicit omissions
 
 Status: the direct-summary and tolerant-paraphrase behavior is implemented by

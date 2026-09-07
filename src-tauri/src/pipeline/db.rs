@@ -2,7 +2,7 @@ use crate::pipeline::contracts::{
     AnalyzedDocument, ChunkedDocument, CitationArtifact, IngestedDocument, ModelProfileSnapshot,
     NormalizedDocument, ParsedDocument, PipelineEvent, PipelineFailure, PipelineRun, PipelineStage,
     PipelineState, PipelineWarning, RetryCheckpoint, RetryLineage, StructuredDocument,
-    SummaryArtifact, SynthesizedDocument, VerifiedDocument,
+    SummaryArtifact, SummaryProfile, SynthesizedDocument, VerifiedDocument,
 };
 use crate::pipeline::schema::{self, MigrationError};
 use crate::pipeline::state::{StateMachine, TransitionError};
@@ -118,6 +118,10 @@ pub enum StoreError {
     RetryLineageMismatch { retry_run_id: String },
     #[error("Pipeline run {run_id} model profile does not match its immutable snapshot")]
     ModelProfileMismatch { run_id: String },
+    #[error("Pipeline run {run_id} summary profile does not match its immutable selection")]
+    SummaryProfileMismatch { run_id: String },
+    #[error("Pipeline run {0} has no immutable summary profile")]
+    SummaryProfileUnavailable(String),
     #[error("Pipeline run {run_id} cannot be cancelled from {state:?}")]
     CancellationNotAllowed {
         run_id: String,
@@ -226,6 +230,61 @@ pub(crate) fn get_run_model_profile(
 ) -> Result<Option<ModelProfileSnapshot>, StoreError> {
     conn.query_row(
         "SELECT profile_snapshot FROM pipeline_run_model_profiles WHERE run_id = ?1",
+        [run_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| from_json(&value))
+    .transpose()
+}
+
+pub(crate) fn ensure_run_summary_profile(
+    conn: &Connection,
+    run_id: &str,
+    profile: SummaryProfile,
+) -> Result<(), StoreError> {
+    let persisted = conn
+        .query_row(
+            "SELECT summary_profile FROM pipeline_run_summary_profiles WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match persisted {
+        Some(persisted) => {
+            let persisted: SummaryProfile = from_json(&persisted)?;
+            if persisted != profile {
+                return Err(StoreError::SummaryProfileMismatch {
+                    run_id: run_id.to_string(),
+                });
+            }
+            Ok(())
+        }
+        None => {
+            let run_exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pipeline_runs WHERE run_id = ?1)",
+                [run_id],
+                |row| row.get(0),
+            )?;
+            if !run_exists {
+                return Err(StoreError::RunNotFound(run_id.to_string()));
+            }
+            conn.execute(
+                "INSERT INTO pipeline_run_summary_profiles (run_id, summary_profile, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![run_id, to_json(&profile)?, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn get_run_summary_profile(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<SummaryProfile>, StoreError> {
+    conn.query_row(
+        "SELECT summary_profile FROM pipeline_run_summary_profiles WHERE run_id = ?1",
         [run_id],
         |row| row.get::<_, String>(0),
     )
@@ -1120,14 +1179,15 @@ pub(super) fn persist_ingestion(
     document: &IngestedDocument,
     run: &PipelineRun,
 ) -> Result<PipelineRun, StoreError> {
-    persist_ingestion_with_profile(conn, document, run, None)
+    persist_ingestion_with_profiles(conn, document, run, None, SummaryProfile::General)
 }
 
-pub(crate) fn persist_ingestion_with_profile(
+pub(crate) fn persist_ingestion_with_profiles(
     conn: &mut Connection,
     document: &IngestedDocument,
     run: &PipelineRun,
     profile_snapshot: Option<&ModelProfileSnapshot>,
+    summary_profile: SummaryProfile,
 ) -> Result<PipelineRun, StoreError> {
     if run.document_id != document.document_id
         || run.state != PipelineState::Received
@@ -1139,7 +1199,7 @@ pub(crate) fn persist_ingestion_with_profile(
     }
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let ingested = persist_ingestion_in_transaction(&tx, document, run)?;
+    let ingested = persist_ingestion_in_transaction(&tx, document, run, summary_profile)?;
     ensure_run_model_profile(&tx, &ingested.run_id, profile_snapshot)?;
     tx.commit()?;
     Ok(ingested)
@@ -1149,6 +1209,7 @@ pub(crate) fn persist_ingestion_in_transaction(
     tx: &Transaction<'_>,
     document: &IngestedDocument,
     run: &PipelineRun,
+    summary_profile: SummaryProfile,
 ) -> Result<PipelineRun, StoreError> {
     if run.document_id != document.document_id
         || run.state != PipelineState::Received
@@ -1160,7 +1221,9 @@ pub(crate) fn persist_ingestion_in_transaction(
     }
 
     insert_document(tx, document)?;
-    persist_received_run_to_ingested(tx, run, "run_created", None)
+    let ingested = persist_received_run_to_ingested(tx, run, "run_created", None)?;
+    ensure_run_summary_profile(tx, &ingested.run_id, summary_profile)?;
+    Ok(ingested)
 }
 
 fn persist_received_run_to_ingested(
@@ -1242,6 +1305,12 @@ pub(crate) fn validate_retry_source(
             reason: "the failed run has no immutable model profile to inherit".to_string(),
         });
     }
+    if get_run_summary_profile(conn, source_run_id)?.is_none() {
+        return Err(StoreError::InvalidRetrySource {
+            run_id: source_run_id.to_string(),
+            reason: "the failed run has no immutable summary profile to inherit".to_string(),
+        });
+    }
     if let Some(existing) = get_retry_lineage_for_source(conn, source_run_id)? {
         return Err(StoreError::RetryAlreadyExists {
             source_run_id: source_run_id.to_string(),
@@ -1317,6 +1386,21 @@ pub(super) fn create_retry_run(
             source_run_id
         ],
     )?;
+    let copied_summary_profile = tx.execute(
+        "INSERT INTO pipeline_run_summary_profiles (run_id, summary_profile, created_at)
+         SELECT ?1, summary_profile, ?2
+         FROM pipeline_run_summary_profiles WHERE run_id = ?3",
+        params![
+            retry_run.run_id,
+            retry_run.created_at.to_rfc3339(),
+            source_run_id
+        ],
+    )?;
+    if copied_summary_profile != 1 {
+        return Err(StoreError::SummaryProfileUnavailable(
+            source_run_id.to_string(),
+        ));
+    }
     tx.commit()?;
     Ok((parsing, document, lineage))
 }
@@ -2705,6 +2789,34 @@ mod tests {
                 [&run.run_id],
             )
             .is_err());
+    }
+
+    #[test]
+    fn run_summary_profile_is_explicit_immutable_and_rejects_unknown_values() {
+        let source = TestFile::new("pdf", b"%PDF-1.4\nSUMMARY_PROFILE");
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let (_, run) = ingest_pdf(&mut conn, source.0.to_str().expect("UTF-8 path"))
+            .expect("candidate should ingest");
+
+        assert_eq!(
+            get_run_summary_profile(&conn, &run.run_id).expect("summary profile should load"),
+            Some(SummaryProfile::General)
+        );
+        ensure_run_summary_profile(&conn, &run.run_id, SummaryProfile::General)
+            .expect("the identical summary profile should pass");
+        assert!(conn
+            .execute(
+                "UPDATE pipeline_run_summary_profiles SET summary_profile = '\"story\"'
+                 WHERE run_id = ?1",
+                [&run.run_id],
+            )
+            .is_err());
+        assert!(serde_json::from_str::<SummaryProfile>("\"story\"").is_err());
+        assert_eq!(
+            serde_json::from_str::<SummaryProfile>("\"general\"")
+                .expect("General should be a valid explicit profile"),
+            SummaryProfile::General
+        );
     }
 
     #[test]

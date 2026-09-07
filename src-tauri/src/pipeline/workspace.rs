@@ -1,7 +1,7 @@
 use crate::pipeline::contracts::{
     CitationArtifact, CitedClaim, ContinuationCheckpoint, EvidenceItem, ModelRuntime,
     ModelRuntimeFailure, PipelineFailure, PipelineRun, PipelineState, PipelineWarning,
-    SummaryArtifact, SummaryPresentationMode,
+    SummaryArtifact, SummaryPresentationMode, SummaryProfile,
 };
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::model_settings::runtime_from_settings;
@@ -49,6 +49,7 @@ pub struct RunHistoryItem {
     pub cancellation_requested: bool,
     pub background_active: bool,
     pub can_cancel: bool,
+    pub summary_profile: SummaryProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -94,6 +95,7 @@ pub struct CompletedSummaryView {
     pub run_id: String,
     pub original_filename: String,
     pub byte_size: u64,
+    pub summary_profile: SummaryProfile,
     pub summary: SummaryView,
 }
 
@@ -103,6 +105,7 @@ impl From<PersistedSummary> for CompletedSummaryView {
             run_id: persisted.run.run_id,
             original_filename: persisted.run.original_filename,
             byte_size: persisted.run.byte_size,
+            summary_profile: persisted.run.summary_profile,
             summary: persisted.summary,
         }
     }
@@ -182,6 +185,8 @@ fn run_history_item(
     let retry_of = db::get_retry_lineage_for_retry(conn, &run.run_id)?;
     let retry_child = db::get_retry_lineage_for_source(conn, &run.run_id)?;
     let model_profile_available = db::get_run_model_profile(conn, &run.run_id)?.is_some();
+    let summary_profile = db::get_run_summary_profile(conn, &run.run_id)?
+        .ok_or_else(|| StoreError::SummaryProfileUnavailable(run.run_id.clone()))?;
     let can_retry =
         run.retry_checkpoint().is_some() && retry_child.is_none() && model_profile_available;
     let continuation_checkpoint = run.continuation_checkpoint();
@@ -211,6 +216,7 @@ fn run_history_item(
         cancellation_requested: run.cancellation_requested,
         background_active: false,
         can_cancel: false,
+        summary_profile,
     })
 }
 
@@ -757,6 +763,7 @@ mod tests {
         let history = list_recent_runs(&conn).expect("history should load");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].state, PipelineState::Ingested);
+        assert_eq!(history[0].summary_profile, SummaryProfile::General);
         assert!(!history[0].has_summary);
 
         let error = get_persisted_summary(&conn, &run.run_id)
@@ -780,6 +787,7 @@ mod tests {
         let serialized = serde_json::to_value(CompletedSummaryView::from(persisted))
             .expect("presentation result should serialize");
         assert_eq!(serialized["originalFilename"], expected_filename);
+        assert_eq!(serialized["summaryProfile"], "general");
         assert_eq!(serialized["summary"]["text"], expected_summary);
         assert!(serialized["summary"]["claims"]
             .as_array()
