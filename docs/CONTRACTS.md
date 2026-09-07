@@ -616,6 +616,11 @@ Required behavior:
   abbreviations and ellipses. A boundary that cannot be classified safely is
   not a split. False negatives may reduce the candidate catalog and warn; false
   positives must not admit partial source assertions.
+- Before classifying the terminal, strip repeated Unicode `Close_Punctuation`
+  and `Final_Punctuation` characters plus ASCII single and double quotes. This
+  admits complete forms such as `。」` and `。】` without a script-specific closer
+  list. Do not strip opening punctuation, other punctuation or symbols merely
+  because they follow sentence punctuation.
 - The abbreviation defense is not only a fixed dictionary. When source text
   continues after a period, conservatively coalesce every preceding alphabetic
   token of two through five characters regardless of casing. This treats
@@ -658,14 +663,15 @@ initials, acronyms, common abbreviations, ellipses, closing quotes/brackets and
 Unicode sentence punctuation. Probe an unlisted title-case abbreviation before
 a capitalized continuation, its lowercase equivalent, the one-through-six
 character length boundaries, a source-final short lowercase word and a
-continuing six-character lowercase word. Prove exact source bytes, tail
-coverage, catalog order/uniqueness, request limits and deterministic identities.
-Prove a stored version-12 artifact still reloads with its original catalog while
-an equivalent version-13 artifact rejects every partial candidate. Run
-all-target tests, strict Clippy, formatting, NARA and DOL corpus acceptance,
-then rerun the captured 134-page PDF and inspect the four known pages plus the
-complete delivered artifact. Report coverage, warnings, claims, requests,
-completion tokens and wall time; hosted CI is not implied.
+continuing six-character lowercase word. Probe repeated Unicode close/final
+punctuation around CJK terminals and negative opening-mark/symbol controls.
+Prove exact source bytes, tail coverage, catalog order/uniqueness, request limits
+and deterministic identities. Prove a stored version-12 artifact still reloads
+with its original catalog while an equivalent version-13 artifact rejects every
+partial candidate. Run all-target tests, strict Clippy, formatting, NARA and DOL
+corpus acceptance, then rerun the captured 134-page PDF and inspect the four
+known pages plus the complete delivered artifact. Report coverage, warnings,
+claims, requests, completion tokens and wall time; hosted CI is not implied.
 
 Explicit non-scope: model family/size/runtime, context/output/temperature/
 timeout, page sampling and retention formulas, claim ceilings, verifier support
