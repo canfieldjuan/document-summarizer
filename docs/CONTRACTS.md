@@ -577,7 +577,7 @@ styles, DB migration or broader unfinished attempt-audit work, Connect, OCR,
 vision, packaging and CI. Any residual factual or omission failure is reported,
 not repaired by relaxing coverage or retrying until a favorable run appears.
 
-### Sentence-complete analysis quotation catalogs
+### Boundary-safe analysis quotation catalogs
 
 Status: implemented. The locked all-target/all-feature Rust suite, strict Clippy
 with warnings denied and formatting gate pass locally. The opt-in NARA, DOL and
@@ -599,19 +599,27 @@ Required behavior:
   splitter and route version-12 reload through it; do not reinterpret stored
   version-12 quote signatures, evidence identities, omissions or warnings.
   Synthesis, verification, summary and citation versions remain unchanged.
-- An ordinary quote candidate consists only of one or more complete source
-  sentence units, in source order, and is at most 600 Unicode characters after
-  trimming. Greedily pack whole units until the next unit would exceed the
-  limit. Never expose a prefix or suffix of one unit as an ordinary candidate.
-  After an unsafe unit, resume at the next safe sentence boundary so a
-  substantive tail remains eligible.
+- A complete normalized source block whose trimmed text is at most 600 Unicode
+  characters is one ordinary quote candidate even when it has no terminal
+  punctuation. The catalog has removed no source context in that case; this
+  preserves bounded headings, labels and slide lists without claiming that
+  they are grammatical sentences.
+- Split only a source block whose trimmed text exceeds 600 characters. Each
+  resulting ordinary quote candidate consists only of one or more complete
+  source sentence units, in source order, and is at most 600 Unicode characters
+  after trimming. Greedily pack whole units until the next unit would exceed
+  the limit. Never expose a prefix or suffix of one unit as an ordinary
+  candidate. After an unsafe unit, resume at the next safe sentence boundary so
+  a substantive tail remains eligible.
 - Derive sentence-boundary proposals with Unicode sentence segmentation, then
   conservatively coalesce proposals at decimals, initials, acronyms,
   abbreviations and ellipses. A boundary that cannot be classified safely is
   not a split. False negatives may reduce the candidate catalog and warn; false
   positives must not admit partial source assertions.
-- A source unit longer than 600 characters, or a nonempty source tail without a
-  safe terminal boundary, is unavailable to ordinary quote selection. Record a
+- Within an over-budget block, a source sentence unit longer than 600
+  characters or a nonempty source tail without a safe terminal boundary is
+  unavailable to ordinary quote selection. A no-terminal whole block is
+  therefore admitted through 600 characters and omitted at 601. Record a
   durable `ANALYSIS_QUOTE_BOUNDARY_OMITTED` warning whenever a page loses any
   source unit for this reason. If that page has another safe candidate,
   selection proceeds over only the safe catalog. If it has none, make no model
@@ -620,12 +628,13 @@ Required behavior:
   This omission counts in both raw and omission-adjusted coverage denominators,
   does not count as retained evidence and remains eligible for ordinary
   backfill/exhaustion behavior.
-- Version-13 validation reconstructs the sentence-complete catalog and its
+- Version-13 validation reconstructs the boundary-safe catalog and its
   warning/omission state from normalized source. It rejects a candidate that is
-  not an exact bounded substring ending at a safe source-sentence boundary,
-  duplicate or reordered candidates, forged warnings/omissions, and any page
-  represented as both retained and omitted. Candidate and evidence identities
-  bind analysis version 13.0.0 and the exact sentence-complete bytes.
+  neither an exact complete bounded block nor an exact bounded substring ending
+  at a safe source-sentence boundary, duplicate or reordered candidates, forged
+  warnings/omissions, and any page represented as both retained and omitted.
+  Candidate and evidence identities bind analysis version 13.0.0 and the exact
+  admitted bytes.
 - Quote-boundary loss is deterministic source admission, not model judgment or
   paraphrase failure. Do not label it `ParaphraseUnrepairable`, permit the model
   to authorize it, remove it from the adjusted denominator or retry it with a
@@ -635,7 +644,8 @@ Verification requirements: add failing-before regressions for the four captured
 mid-sentence endings and assert that the following candidate begins at the full
 next sentence. Probe valid complete sentences at 599, 600 and 601 characters;
 punctuation followed by later whitespace; a single over-budget sentence;
-no-terminal text; a safe sentence before and after an unsafe unit; decimals,
+no-terminal text at 599, 600 and 601; a bounded DOL-style heading/list block; a
+safe sentence before and after an unsafe unit; decimals,
 initials, acronyms, common abbreviations, ellipses, closing quotes/brackets and
 Unicode sentence punctuation. Prove exact source bytes, tail coverage, catalog
 order/uniqueness, request limits and deterministic identities. Prove a stored
