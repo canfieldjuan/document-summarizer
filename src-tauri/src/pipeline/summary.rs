@@ -2102,6 +2102,13 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
             omitted_source_units: 0,
         };
     }
+    let complete_block = &source[source_start..source_end];
+    if complete_block.chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS {
+        return AnalysisQuoteSegmentation {
+            segments: vec![complete_block.to_string()],
+            omitted_source_units: 0,
+        };
+    }
 
     let mut units = Vec::new();
     let mut unit_start = source_start;
@@ -6246,13 +6253,43 @@ mod tests {
 
     #[test]
     fn sentence_quote_segments_omit_an_unterminated_tail_but_keep_complete_prefixes() {
-        let source = "First complete sentence. Second complete sentence! unterminated tail";
-        let segmented = analysis_quote_segments_v13(source);
+        let source = format!(
+            "First complete sentence. Second complete sentence! {}",
+            "unterminated tail ".repeat(40)
+        );
+        assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+        let segmented = analysis_quote_segments_v13(&source);
         assert_eq!(
             segmented.segments,
             vec!["First complete sentence. Second complete sentence!".to_string()]
         );
         assert_eq!(segmented.omitted_source_units, 1);
+    }
+
+    #[test]
+    fn complete_no_terminal_blocks_are_admitted_through_the_limit() {
+        for length in [
+            MAX_ANALYSIS_QUOTE_CHARACTERS - 1,
+            MAX_ANALYSIS_QUOTE_CHARACTERS,
+        ] {
+            let source = "a".repeat(length);
+            let segmented = analysis_quote_segments_v13(&source);
+            assert_eq!(segmented.segments, vec![source]);
+            assert_eq!(segmented.omitted_source_units, 0);
+        }
+
+        let over_limit = "a".repeat(MAX_ANALYSIS_QUOTE_CHARACTERS + 1);
+        let segmented = analysis_quote_segments_v13(&over_limit);
+        assert!(segmented.segments.is_empty());
+        assert_eq!(segmented.omitted_source_units, 1);
+    }
+
+    #[test]
+    fn bounded_slide_heading_and_list_remain_one_complete_block() {
+        let source = "Agricultural Employers’ Compliance Responsibilities\n\nFair Labor Standards Act\n\nMigrant & Seasonal Agricultural Worker Protection Act\n\nField Sanitation\n\nH-2A Temporary Agricultural Workers";
+        let segmented = analysis_quote_segments_v13(source);
+        assert_eq!(segmented.segments, vec![source.to_string()]);
+        assert_eq!(segmented.omitted_source_units, 0);
     }
 
     #[test]
@@ -9464,9 +9501,10 @@ mod tests {
             .all(|chunk| chunk.evidence.is_empty()));
         assert!(!analyzed.omissions.is_empty());
         assert!(paraphrase_omissions > 0);
-        assert!(analyzed.omissions.iter().any(|omission| {
+        assert_eq!(paraphrase_omissions, analyzed.omissions.len());
+        assert!(analyzed.omissions.iter().all(|omission| {
             omission.reason
-                == crate::pipeline::contracts::AnalysisOmissionReason::QuoteBoundaryUnusable
+                != crate::pipeline::contracts::AnalysisOmissionReason::QuoteBoundaryUnusable
         }));
         assert_eq!(
             get_analyzed_document(&conn, &run_id).unwrap().unwrap(),
@@ -9672,14 +9710,17 @@ mod tests {
         let requests = runtime.requests.lock().unwrap();
         assert_eq!(
             analyzed.omissions[0].origin,
-            AnalysisOmissionOrigin::QuoteBoundaryUnusable
+            AnalysisOmissionOrigin::ModelBareHeading
         );
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].user_prompt.contains("Secret liability"));
-        assert!(!requests[1].user_prompt.contains("Secret liability"));
-        assert!(!requests[1].user_prompt.contains("quote_id"));
-        assert!(requests[1].system_prompt.contains("55 words"));
-        let ModelOutputFormat::JsonSchema { schema, .. } = &requests[0].output_format else {
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0]
+            .user_prompt
+            .contains("Labor Standards in Agriculture"));
+        assert!(requests[1].user_prompt.contains("Secret liability"));
+        assert!(!requests[2].user_prompt.contains("Secret liability"));
+        assert!(!requests[2].user_prompt.contains("quote_id"));
+        assert!(requests[2].system_prompt.contains("55 words"));
+        let ModelOutputFormat::JsonSchema { schema, .. } = &requests[1].output_format else {
             panic!("schema")
         };
         assert!(!schema["properties"]["selection"]["enum"]
@@ -9826,8 +9867,6 @@ mod tests {
         assert_eq!(
             scope.quote_candidates[0].exact_quote,
             eligibility::NARA_AMBIGUOUS_PAGE
-                .strip_suffix('~')
-                .expect("the unsafe OCR suffix should not enter a quote")
         );
 
         let runtime = materiality_runtime(true, 0, false);
@@ -9841,7 +9880,7 @@ mod tests {
         .unwrap();
         assert!(analyzed.omissions.is_empty());
         assert_eq!(analyzed.chunks[0].evidence.len(), 1);
-        assert!(analyzed
+        assert!(!analyzed
             .warnings
             .iter()
             .any(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE));

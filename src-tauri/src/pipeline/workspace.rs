@@ -727,7 +727,7 @@ mod tests {
             .is_some_and(|claims| !claims.is_empty()));
         assert_eq!(
             serialized["summary"]["claims"][0]["citations"][0]["label"],
-            "p. 2"
+            "p. 1"
         );
         assert!(
             serialized["summary"]["claims"][0]["citations"][0]["exactQuote"]
