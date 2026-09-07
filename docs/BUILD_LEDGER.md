@@ -2129,7 +2129,7 @@ live pipeline persistence proof complete
 ## Slice 22 — Coherent Source-Aware General Summary (2026-09-07)
 
 **Status**: implementation, automated gates, and public-fixture live acceptance
-complete; publication pending
+complete in PR #38
 
 **Verified defect and change boundary**:
 - Current production synthesis copied every analyzed paraphrase into a rendered
