@@ -190,12 +190,15 @@ fn synthesize(
         synthesis_version: HIERARCHICAL_SYNTHESIS_VERSION.to_string(),
         runtime_id: runtime.runtime_id().to_string(),
         model_id: runtime.model_id().to_string(),
+        presentation_mode: SummaryPresentationMode::LegacyClaimList,
         summary_text,
         source_chunk_ids: analyzed
             .chunks
             .iter()
             .map(|chunk| chunk.chunk_id.clone())
             .collect(),
+        summary_claims: Vec::new(),
+        synthesis_evidence: Vec::new(),
         claims,
         warnings: analyzed.warnings.clone(),
     };

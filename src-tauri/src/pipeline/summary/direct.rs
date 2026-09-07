@@ -1,7 +1,7 @@
 //! Default summary: preserve quote-bound paraphrases, then verify once.
 use super::*;
 
-pub(super) const VERSION: &str = SYNTHESIS_VERSION;
+pub(super) const VERSION: &str = DIRECT_SYNTHESIS_VERSION;
 pub(super) const MAX_CLAIMS: usize = 512;
 
 pub(super) fn retention_target(pages: usize) -> Result<usize, PipelineFailure> {
@@ -62,6 +62,7 @@ pub(super) fn validate_claim_set(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn validate_claim_set_for_runtime(
     synthesized: &SynthesizedDocument,
     analyzed: &AnalyzedDocument,
@@ -86,6 +87,7 @@ pub(super) fn validate_claim_set_for_runtime(
     )
 }
 
+#[cfg(test)]
 pub(super) fn synthesize(
     runtime: &dyn ModelRuntime,
     analyzed: &AnalyzedDocument,
@@ -101,8 +103,11 @@ pub(super) fn synthesize(
         synthesis_version: VERSION.into(),
         runtime_id: runtime.runtime_id_for_stage(PipelineStage::Analyze).into(),
         model_id: runtime.model_id_for_stage(PipelineStage::Analyze).into(),
+        presentation_mode: SummaryPresentationMode::LegacyClaimList,
         summary_text: render_cited_summary(&claims, analyzed)?,
         source_chunk_ids: analyzed.chunks.iter().map(|c| c.chunk_id.clone()).collect(),
+        summary_claims: Vec::new(),
+        synthesis_evidence: Vec::new(),
         claims,
         warnings: analyzed.warnings.clone(),
     };

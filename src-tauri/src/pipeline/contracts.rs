@@ -538,14 +538,29 @@ pub struct AnalysisPageOmission {
     pub catalog_fingerprint: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SummaryPresentationMode {
+    #[default]
+    LegacyClaimList,
+    Coherent,
+    ClaimLedgerFallback,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SynthesizedDocument {
     pub document_id: String,
     pub synthesis_version: String,
     pub runtime_id: String,
     pub model_id: String,
+    #[serde(default)]
+    pub presentation_mode: SummaryPresentationMode,
     pub summary_text: String,
     pub source_chunk_ids: Vec<String>,
+    #[serde(default)]
+    pub summary_claims: Vec<CitedClaim>,
+    #[serde(default)]
+    pub synthesis_evidence: Vec<EvidenceItem>,
     #[serde(default)]
     pub claims: Vec<CitedClaim>,
     pub warnings: Vec<PipelineWarning>,
@@ -561,8 +576,16 @@ pub struct VerifiedDocument {
     pub runtime_id: String,
     #[serde(default)]
     pub model_id: String,
+    #[serde(default)]
+    pub presentation_mode: SummaryPresentationMode,
     pub summary_text: String,
     pub source_chunk_ids: Vec<String>,
+    #[serde(default)]
+    pub summary_claims: Vec<CitedClaim>,
+    #[serde(default)]
+    pub synthesis_evidence: Vec<EvidenceItem>,
+    #[serde(default)]
+    pub summary_claim_verifications: Vec<ClaimVerification>,
     #[serde(default)]
     pub claims: Vec<CitedClaim>,
     #[serde(default)]
@@ -578,6 +601,10 @@ pub struct CitationArtifact {
     pub citation_version: String,
     pub summary_integrity_hash: String,
     pub rendered_text: String,
+    #[serde(default)]
+    pub presentation_mode: SummaryPresentationMode,
+    #[serde(default)]
+    pub summary_claims: Vec<CitedClaim>,
     pub claims: Vec<CitedClaim>,
     pub evidence: Vec<EvidenceItem>,
     pub created_at: DateTime<Utc>,
@@ -623,15 +650,29 @@ impl SummaryArtifact {
 
 impl CitationArtifact {
     pub fn calculate_integrity_hash(&self) -> Result<String, serde_json::Error> {
-        let canonical = serde_json::to_vec(&(
-            &self.document_id,
-            &self.citation_version,
-            &self.summary_integrity_hash,
-            &self.rendered_text,
-            &self.claims,
-            &self.evidence,
-            self.created_at,
-        ))?;
+        let canonical = if self.citation_version == "4.0.0" {
+            serde_json::to_vec(&(
+                &self.document_id,
+                &self.citation_version,
+                &self.summary_integrity_hash,
+                &self.rendered_text,
+                &self.presentation_mode,
+                &self.summary_claims,
+                &self.claims,
+                &self.evidence,
+                self.created_at,
+            ))?
+        } else {
+            serde_json::to_vec(&(
+                &self.document_id,
+                &self.citation_version,
+                &self.summary_integrity_hash,
+                &self.rendered_text,
+                &self.claims,
+                &self.evidence,
+                self.created_at,
+            ))?
+        };
         Ok(format!("{:x}", Sha256::digest(canonical)))
     }
 }

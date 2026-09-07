@@ -2125,3 +2125,82 @@ live pipeline persistence proof complete
 - The vLLM/FlashInfer/CUDA setting proves only that the historical local
   experiment could run on this machine. This slice does not select vLLM, add a
   vLLM packaging requirement, or establish a cross-machine runtime path.
+
+## Slice 22 — Coherent Source-Aware General Summary (2026-09-07)
+
+**Status**: implementation, automated gates, and public-fixture live acceptance
+complete; publication pending
+
+**Verified defect and change boundary**:
+- Current production synthesis copied every analyzed paraphrase into a rendered
+  claim ledger. Exact citations survived, but no stage used the ordered
+  normalized source to compose a reader-facing overview.
+- This slice adds General synthesis only. Story, Contract, profile selection,
+  automatic routing, parser/OCR behavior, model selection, Connect wire
+  contracts, and unrelated UI redesign remain outside the boundary.
+
+**Implemented behavior**:
+- Current synthesis builds an ordered exact-source catalog from normalized
+  chunks, then asks for a bounded coherent overview with request-local source
+  IDs. Rust owns durable evidence, claim IDs, canonical source order and page
+  labels. The response ceiling grows by one paragraph per three source segments
+  and caps at eight, preventing a source-sized paragraph inventory.
+- The complete source catalog must fit one synthesis request. Incomplete or
+  over-budget source context makes no prose request and persists the explicit
+  `claimLedgerFallback` mode plus
+  `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`; invalid runtime or model output
+  still fails rather than masquerading as fallback.
+- The analyzed claim ledger remains durable for audit and fallback. Reader-facing
+  prose is verified separately against the exact normalized source segments it
+  cited. Unsupported prose cannot ship merely because ledger claims pass.
+- A deterministic modal guard catches a strong predicate where cited source
+  states the same predicate with weaker modality. It permits one context-bounded
+  regeneration with application feedback, then fails closed. Tests prove both
+  corrected second-request behavior and repeated-invalid rejection.
+- Current artifacts are synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
+  citation 4.0.0. Historical direct and hierarchical artifacts keep their
+  versioned validation. The desktop renders coherent prose first with exact
+  citation controls and keeps the full verified claim ledger in supporting
+  detail; fallback opens that ledger explicitly.
+
+**Verification and representative output**:
+- `cargo fmt --all --check` and strict all-target/all-feature Clippy passed. The
+  locked Rust suite passed 396 library tests with 6 intentional ignores; the
+  office target passed 3 local tests with 3 opt-in ignores, and all 3 release
+  contract tests passed. The TypeScript/Vite production build transformed 7
+  modules and completed successfully.
+- The modal-repair boundary suite passed 7 tests. It covers incomplete, exact-fit
+  and over-limit source admission; exact and limit-plus-one paragraph counts;
+  foreign and duplicate IDs; mixed weak and independently supported strong
+  modality; a corrected retry; and rejection after one repeated violation.
+- The first public `structured_report.pdf` live trace exposed five source-sized
+  paragraphs and an unsupported claim that architecture verification would
+  "ensure consistency and accuracy in system design." After compression
+  hardening, source comparison exposed `should retain` rewritten as `must
+  retain`; prompt-only verification still marked it supported. Those findings
+  produced the dynamic paragraph cap, exact modal instruction and deterministic
+  repair guard rather than being accepted as model-verified truth.
+- The final live run passed in 13.21 seconds against
+  `qwen3-30b-a3b:latest`. It delivered one 937-character overview citing native
+  text pages 1, 2, 3, 4 and 6, excluded visual-only page 5, retained all 5 ledger
+  claims, reached `CompleteWithWarnings` at state version 18, and survived the
+  harness's independent SQLite reopen checks. Its central wording was: "The
+  2027 OPERATIONS REPORT serves as a realistic fixture for deterministic
+  structure testing, prepared for internal architecture verification." It then
+  connected the planning context, authoritative source identity, cross-page
+  Section 1 rule, hierarchy requirements and final findings in one paragraph.
+- Human comparison against the extracted public-fixture text found the final
+  prose preserved `should close` and `must be owned`, introduced no unsupported
+  purpose or benefit, and maintained the source's actors and ordering. This is
+  one semantic acceptance example. Valid IDs, exact quotations, integrity hashes
+  and the model's supported verdicts are mechanical checks, not a general
+  guarantee that generated wording is faithful.
+
+**Deferred**:
+- Manual profile identity and selection, Story behavior, Contract behavior, and
+  uncertain/mixed automatic suggestions remain later slices. Automatic routing
+  must not delay evaluating General summaries on a broader representative
+  corpus.
+- Documents whose complete source catalog cannot fit the bounded request receive
+  the explicit verified-ledger fallback. A source-aware long-document synthesis
+  strategy is future work and must not rephrase an already-lossy claim list.

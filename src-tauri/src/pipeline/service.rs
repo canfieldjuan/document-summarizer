@@ -1155,12 +1155,12 @@ mod tests {
 
             match checkpoint {
                 ContinuationCheckpoint::Analyzed => {
-                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 1);
-                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 1);
+                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 3);
+                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 3);
                 }
                 ContinuationCheckpoint::Synthesized => {
-                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 1);
-                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 1);
+                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 2);
+                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 2);
                 }
                 ContinuationCheckpoint::Verified => {
                     assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 0);
@@ -1168,7 +1168,7 @@ mod tests {
                 }
                 _ => {
                     assert!(runtime.generate_calls.load(Ordering::Relaxed) > 1);
-                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 2);
+                    assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 4);
                 }
             }
         }
@@ -1417,8 +1417,8 @@ mod tests {
             )
             .expect("reopened synthesized checkpoint should verify with the runtime")
         };
-        assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 2);
 
         let reopened = init_db(&database.0).expect("completed database should reopen again");
         assert_eq!(
@@ -1493,6 +1493,7 @@ mod tests {
             legacy.summary_text = synthesized.summary_text.clone();
             legacy.claims = synthesized.claims.clone();
             legacy.claim_verifications.clear();
+            legacy.summary_claim_verifications.clear();
             legacy.key_point_claim_ids.clear();
             legacy.warnings = synthesized.warnings.clone();
             legacy.warnings.push(PipelineWarning {

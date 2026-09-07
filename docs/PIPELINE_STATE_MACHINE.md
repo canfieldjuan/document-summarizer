@@ -146,29 +146,42 @@ fully valid replacement advances analysis, and successful replacement is
 recorded as `MODEL_EVIDENCE_RESPONSE_REPAIRED`; a second invalid response or a
 repair-runtime failure follows the ordinary `ANALYZING -> FAILED` path.
 
-Synthesis loads the persisted analysis artifact. A small evidence catalog uses
-one request; a larger catalog is partitioned and reduced deterministically with
-bounded evidence and candidate requests. Each model response may cite only IDs
-supplied in that request. Candidate references are expanded back to bounded,
-canonically ordered original evidence IDs before final claim IDs and page labels
-are derived. Cancellation is observed before and after every model request.
-Intermediate reductions are not durable and cannot advance state. Only the
-validated final artifact, `SYNTHESIZING -> SYNTHESIZED`, state-version update,
-and event append share the completion transaction.
+Current synthesis loads the persisted analysis, chunk and normalized artifacts.
+It retains the source-ordered analyzed claim ledger, then constructs an ordered
+catalog of exact normalized source segments for coherent General synthesis. The
+complete catalog and prompt must fit one bounded synthesis request. The model
+returns paragraph text plus only request-local source identifiers; Rust restores
+canonical order and owns durable claim, evidence and page-label identity. If a
+complete catalog cannot be constructed or cannot fit the request, the stage
+makes no prose-generation request and persists the verified-ledger fallback
+mode and warning. Malformed output, foreign or duplicate identifiers, invalid
+budgets and runtime failures still fail instead of degrading. A detected
+weak-to-strong modal change permits one bounded regeneration with
+application-generated feedback; an over-budget repair or a second violation
+fails the stage. Cancellation is observed before and after every model request.
+Only the validated final artifact,
+`SYNTHESIZING -> SYNTHESIZED`, state-version update, and event append share the
+completion transaction. Historical synthesis artifacts retain their versioned
+load rules.
 
-Verification then uses `ModelRuntime` to classify every claim against only its
-validated exact quotations. Rust requires complete, unique claim-ID coverage;
-restores each claim's evidence IDs from the persisted synthesis; and rejects
-malformed, partial, duplicate, or foreign verdicts. The complete verdict
-artifact and its runtime/model identity commit atomically with `VERIFYING ->
-VERIFIED`.
+Verification uses `ModelRuntime` for two distinct evidence-entailment checks.
+The source ledger is classified against its analyzed exact quotations. Coherent
+prose units are separately classified against the exact normalized source
+segments selected during synthesis. Rust requires complete, unique claim-ID
+coverage for each set, restores evidence IDs from persisted artifacts, and
+rejects malformed, partial, duplicate, or foreign verdicts. The complete
+verdict artifact and its runtime/model identity commit atomically with
+`VERIFYING -> VERIFIED`.
 
 Only claims classified as `supported` enter the final summary and citation
-artifact. Unsupported and ambiguous claims remain in the durable verification
+artifact. In coherent mode, supported prose units are the reader-facing summary
+and the supported source ledger remains available as supporting detail. In
+fallback and historical modes, supported ledger claims remain the rendered
+summary. Unsupported and ambiguous claims remain in the durable verification
 artifact and add `SEMANTIC_CLAIMS_WITHHELD`. This is an evidence-entailment
 classification, not certification that the source itself is factually true.
-If at least one claim is supported, the final summary artifact, independently
-persisted citation artifact, `VERIFIED -> COMPLETE` or
+If at least one presented claim is supported, the final summary artifact,
+independently persisted citation artifact, `VERIFIED -> COMPLETE` or
 `VERIFIED -> COMPLETE_WITH_WARNINGS` transition, state-version increment, and
 event append share one transaction. Warnings select `COMPLETE_WITH_WARNINGS`;
 an otherwise warning-free result selects `COMPLETE`.
