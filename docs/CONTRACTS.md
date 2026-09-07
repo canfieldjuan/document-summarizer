@@ -577,6 +577,79 @@ styles, DB migration or broader unfinished attempt-audit work, Connect, OCR,
 vision, packaging and CI. Any residual factual or omission failure is reported,
 not repaired by relaxing coverage or retrying until a favorable run appears.
 
+### Sentence-complete analysis quotation catalogs
+
+Status: contract only. No implementation or acceptance result is claimed here.
+
+Root cause: analysis version 12 bounds a quotation by scanning the latter half
+of a 600-character window with one mutable preferred boundary. A later
+whitespace character overwrites an earlier terminal-punctuation boundary, so a
+prefix of the following sentence becomes an ordinary exact-quote candidate and
+the next candidate begins with its suffix. Exact-substring, provenance and
+mechanical claim-completeness checks all accept that construction, while the
+verifier sees only the clipped quotation and cannot recover source text omitted
+before inference.
+
+Required behavior:
+
+- New runs use analysis version 13.0.0. Preserve the exact version-12 quote
+  splitter and route version-12 reload through it; do not reinterpret stored
+  version-12 quote signatures, evidence identities, omissions or warnings.
+  Synthesis, verification, summary and citation versions remain unchanged.
+- An ordinary quote candidate consists only of one or more complete source
+  sentence units, in source order, and is at most 600 Unicode characters after
+  trimming. Greedily pack whole units until the next unit would exceed the
+  limit. Never expose a prefix or suffix of one unit as an ordinary candidate.
+  After an unsafe unit, resume at the next safe sentence boundary so a
+  substantive tail remains eligible.
+- Derive sentence-boundary proposals with Unicode sentence segmentation, then
+  conservatively coalesce proposals at decimals, initials, acronyms,
+  abbreviations and ellipses. A boundary that cannot be classified safely is
+  not a split. False negatives may reduce the candidate catalog and warn; false
+  positives must not admit partial source assertions.
+- A source unit longer than 600 characters, or a nonempty source tail without a
+  safe terminal boundary, is unavailable to ordinary quote selection. Record a
+  durable `ANALYSIS_QUOTE_BOUNDARY_OMITTED` warning whenever a page loses any
+  source unit for this reason. If that page has another safe candidate,
+  selection proceeds over only the safe catalog. If it has none, make no model
+  call and record a deterministic `QuoteBoundaryUnusable` technical page
+  omission with the existing page/chunk/source-fingerprint audit binding.
+  This omission counts in both raw and omission-adjusted coverage denominators,
+  does not count as retained evidence and remains eligible for ordinary
+  backfill/exhaustion behavior.
+- Version-13 validation reconstructs the sentence-complete catalog and its
+  warning/omission state from normalized source. It rejects a candidate that is
+  not an exact bounded substring ending at a safe source-sentence boundary,
+  duplicate or reordered candidates, forged warnings/omissions, and any page
+  represented as both retained and omitted. Candidate and evidence identities
+  bind analysis version 13.0.0 and the exact sentence-complete bytes.
+- Quote-boundary loss is deterministic source admission, not model judgment or
+  paraphrase failure. Do not label it `ParaphraseUnrepairable`, permit the model
+  to authorize it, remove it from the adjusted denominator or retry it with a
+  different seed.
+
+Verification requirements: add failing-before regressions for the four captured
+mid-sentence endings and assert that the following candidate begins at the full
+next sentence. Probe valid complete sentences at 599, 600 and 601 characters;
+punctuation followed by later whitespace; a single over-budget sentence;
+no-terminal text; a safe sentence before and after an unsafe unit; decimals,
+initials, acronyms, common abbreviations, ellipses, closing quotes/brackets and
+Unicode sentence punctuation. Prove exact source bytes, tail coverage, catalog
+order/uniqueness, request limits and deterministic identities. Prove a stored
+version-12 artifact still reloads with its original catalog while an equivalent
+version-13 artifact rejects every partial candidate. Run all-target tests,
+strict Clippy, formatting, NARA and DOL corpus acceptance, then rerun the
+captured 134-page PDF and inspect the four known pages plus the complete
+delivered artifact. Report coverage, warnings, claims, requests, completion
+tokens and wall time; hosted CI is not implied.
+
+Explicit non-scope: model family/size/runtime, context/output/temperature/
+timeout, page sampling and retention formulas, claim ceilings, verifier support
+rules, parser/OCR/vision, synthesis consolidation, database schema, Connect,
+packaging, citation rendering and the detailed-claims user experience. Do not
+special-case the four pages, truncate source or generated claims, weaken exact
+provenance or accept unsupported/ambiguous claims.
+
 ### Delivery-scoped Connect summary byte admission
 
 Connect v1's 1 MiB UTF-8 summary-text ceiling is an optional delivery policy,
