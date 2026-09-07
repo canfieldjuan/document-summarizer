@@ -2189,6 +2189,24 @@ fn safe_analysis_sentence_boundary(
         .map_or(before_terminal, |(_, token)| token)
         .trim_matches(['"', '\'', '“', '‘', '(', '[', '{', '«']);
     let lower = token.to_lowercase();
+    let next_non_whitespace = source[proposed_end..source_end]
+        .chars()
+        .find(|character| !character.is_whitespace());
+    let token_characters = token.chars().collect::<Vec<_>>();
+    let short_cased_abbreviation = next_non_whitespace.is_some()
+        && (2..=5).contains(&token_characters.len())
+        && token_characters
+            .iter()
+            .all(|character| character.is_alphabetic())
+        && (token_characters
+            .iter()
+            .all(|character| character.is_uppercase())
+            || token_characters
+                .first()
+                .is_some_and(|first| first.is_uppercase())
+                && token_characters[1..]
+                    .iter()
+                    .all(|character| character.is_lowercase()));
     const AMBIGUOUS_ABBREVIATIONS: &[&str] = &[
         "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e", "no", "fig",
         "sec", "art", "inc", "ltd", "co", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep",
@@ -2197,12 +2215,10 @@ fn safe_analysis_sentence_boundary(
     if token.contains('.')
         || token.chars().count() == 1 && token.chars().all(char::is_alphabetic)
         || AMBIGUOUS_ABBREVIATIONS.contains(&lower.as_str())
+        || short_cased_abbreviation
     {
         return false;
     }
-    let next_non_whitespace = source[proposed_end..source_end]
-        .chars()
-        .find(|character| !character.is_whitespace());
     !(before_terminal.chars().last().is_some_and(char::is_numeric)
         && next_non_whitespace.is_some_and(char::is_numeric))
 }
@@ -6315,6 +6331,34 @@ mod tests {
         ));
         let segmented = analysis_quote_segments_v13(source);
         assert_eq!(segmented.segments, vec![source.to_string()]);
+        assert_eq!(segmented.omitted_source_units, 0);
+    }
+
+    #[test]
+    fn unlisted_title_case_abbreviation_cannot_create_a_partial_candidate() {
+        let first = format!("{}.", "a".repeat(549));
+        let second = "Department staff contacted the Dept. Records officers completed the review.";
+        let source = format!("{first} {second}");
+        assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+
+        let segmented = analysis_quote_segments_v13(&source);
+        assert_eq!(segmented.segments, vec![first, second.to_string()]);
+        assert_eq!(segmented.omitted_source_units, 0);
+    }
+
+    #[test]
+    fn short_lowercase_word_remains_a_safe_sentence_boundary() {
+        let first = format!("{}.", "a".repeat(549));
+        let second = "The finding is safe.";
+        let third = "Reviewers recorded the complete outcome without changing the source.";
+        let source = format!("{first} {second} {third}");
+        assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+
+        let segmented = analysis_quote_segments_v13(&source);
+        assert_eq!(
+            segmented.segments,
+            vec![format!("{first} {second}"), third.to_string()]
+        );
         assert_eq!(segmented.omitted_source_units, 0);
     }
 
