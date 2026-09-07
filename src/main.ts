@@ -141,6 +141,7 @@ interface SummaryArtifact {
   warnings: PipelineWarning[];
   createdAt: string;
   claims: CitedClaim[];
+  keyPointClaimIds: string[];
 }
 
 interface CitedClaim {
@@ -197,6 +198,10 @@ const summaryFilename = element<HTMLHeadingElement>("#summary-filename");
 const summaryMeta = element<HTMLParagraphElement>("#summary-meta");
 const summaryText = element<HTMLPreElement>("#summary-text");
 const summaryClaims = element<HTMLDivElement>("#summary-claims");
+const keyPointsSection = element<HTMLElement>("#key-points-section");
+const keyPointClaims = element<HTMLDivElement>("#key-point-claims");
+const allClaimsDisclosure = element<HTMLDetailsElement>("#all-claims-disclosure");
+const allClaimsCount = element<HTMLSpanElement>("#all-claims-count");
 const evidencePanel = element<HTMLElement>("#evidence-panel");
 const evidenceLabel = element<HTMLParagraphElement>("#evidence-label");
 const evidenceQuote = element<HTMLQuoteElement>("#evidence-quote");
@@ -997,12 +1002,14 @@ function renderSummary(filename: string, byteSize: number, summary: SummaryArtif
 
 function renderClaims(summary: SummaryArtifact): void {
   summaryClaims.replaceChildren();
+  keyPointClaims.replaceChildren();
   evidencePanel.hidden = true;
   evidenceLabel.textContent = "";
   evidenceQuote.textContent = "";
 
   if (summary.claims.length === 0) {
-    summaryClaims.hidden = true;
+    keyPointsSection.hidden = true;
+    allClaimsDisclosure.hidden = true;
     summaryText.hidden = false;
     summaryText.textContent = summary.text;
     return;
@@ -1010,14 +1017,37 @@ function renderClaims(summary: SummaryArtifact): void {
 
   summaryText.textContent = "";
   summaryText.hidden = true;
-  summaryClaims.hidden = false;
-  summary.claims.forEach((claim, claimIndex) => {
+  const claimsById = new Map(summary.claims.map((claim) => [claim.claimId, claim]));
+  const keyPoints = summary.keyPointClaimIds.map((claimId) => {
+    const claim = claimsById.get(claimId);
+    if (!claim) {
+      throw new Error(`Validated Key Point claim is missing from the cited ledger: ${claimId}`);
+    }
+    return claim;
+  });
+
+  keyPointsSection.hidden = keyPoints.length === 0;
+  if (keyPoints.length > 0) {
+    renderClaimList(keyPointClaims, keyPoints, "Key Point");
+  }
+  allClaimsCount.textContent = String(summary.claims.length);
+  allClaimsDisclosure.hidden = false;
+  allClaimsDisclosure.open = keyPoints.length === 0;
+  renderClaimList(summaryClaims, summary.claims, "Claim");
+}
+
+function renderClaimList(
+  container: HTMLDivElement,
+  claims: CitedClaim[],
+  ordinalLabel: "Key Point" | "Claim",
+): void {
+  claims.forEach((claim, claimIndex) => {
     const item = document.createElement("section");
     item.className = "summary-claim";
 
     const ordinal = document.createElement("p");
     ordinal.className = "claim-ordinal";
-    ordinal.textContent = `Claim ${String(claimIndex + 1).padStart(2, "0")}`;
+    ordinal.textContent = `${ordinalLabel} ${String(claimIndex + 1).padStart(2, "0")}`;
 
     const text = document.createElement("p");
     text.className = "claim-text";
@@ -1025,7 +1055,7 @@ function renderClaims(summary: SummaryArtifact): void {
 
     const actions = document.createElement("div");
     actions.className = "citation-actions";
-    actions.setAttribute("aria-label", `Evidence for claim ${claimIndex + 1}`);
+    actions.setAttribute("aria-label", `Evidence for ${ordinalLabel.toLowerCase()} ${claimIndex + 1}`);
     for (const citation of claim.citations) {
       const button = document.createElement("button");
       button.type = "button";
@@ -1034,19 +1064,19 @@ function renderClaims(summary: SummaryArtifact): void {
       button.setAttribute("aria-pressed", "false");
       button.setAttribute(
         "aria-label",
-        `Show exact source excerpt from ${citation.label} for claim ${claimIndex + 1}`,
+        `Show exact source excerpt from ${citation.label} for ${ordinalLabel.toLowerCase()} ${claimIndex + 1}`,
       );
       button.addEventListener("click", () => showEvidence(citation, button));
       actions.append(button);
     }
 
     item.append(ordinal, text, actions);
-    summaryClaims.append(item);
+    container.append(item);
   });
 }
 
 function showEvidence(citation: Citation, selected: HTMLButtonElement): void {
-  for (const button of summaryClaims.querySelectorAll<HTMLButtonElement>(".citation-button")) {
+  for (const button of summaryView.querySelectorAll<HTMLButtonElement>(".citation-button")) {
     const isSelected = button === selected;
     button.classList.toggle("is-active", isSelected);
     button.setAttribute("aria-pressed", String(isSelected));

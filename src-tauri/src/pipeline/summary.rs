@@ -21,6 +21,7 @@ use unicode_segmentation::UnicodeSegmentation;
 mod direct;
 mod eligibility;
 mod identifiers;
+mod key_points;
 mod pages;
 #[cfg(test)]
 mod repair;
@@ -41,7 +42,7 @@ const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
 pub const SYNTHESIS_VERSION: &str = "5.0.0";
-pub const VERIFICATION_VERSION: &str = "5.0.0";
+pub const VERIFICATION_VERSION: &str = "6.0.0";
 pub const SUMMARY_VERSION: &str = "5.0.0";
 pub const CITATION_VERSION: &str = "3.0.0";
 
@@ -51,6 +52,7 @@ const HIERARCHICAL_SYNTHESIS_VERSION: &str = "4.0.0";
 const PREVIOUS_SYNTHESIS_VERSION: &str = "3.0.0";
 const LEGACY_SYNTHESIS_VERSION: &str = "2.0.0";
 const HIERARCHICAL_VERIFICATION_VERSION: &str = "4.0.0";
+const DIRECT_VERIFICATION_VERSION: &str = "5.0.0";
 const PREVIOUS_VERIFICATION_VERSION: &str = "3.0.0";
 const LEGACY_VERIFICATION_VERSION: &str = "2.0.0";
 const HIERARCHICAL_SUMMARY_VERSION: &str = "4.0.0";
@@ -97,12 +99,14 @@ pub const SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE: &str = "SUMMARY_TRUNCATED
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryDeliveryPolicy {
     max_summary_text_bytes: usize,
+    select_key_points: bool,
 }
 
 impl SummaryDeliveryPolicy {
     pub const fn connect() -> Self {
         Self {
             max_summary_text_bytes: MAX_DELIVERY_SUMMARY_TEXT_BYTES,
+            select_key_points: false,
         }
     }
 
@@ -110,10 +114,15 @@ impl SummaryDeliveryPolicy {
         self.max_summary_text_bytes
     }
 
+    const fn select_key_points(self) -> bool {
+        self.select_key_points
+    }
+
     #[cfg(test)]
     const fn for_test(max_summary_text_bytes: usize) -> Self {
         Self {
             max_summary_text_bytes,
+            select_key_points: false,
         }
     }
 }
@@ -490,6 +499,16 @@ pub(crate) fn verify_synthesized_document_controlled(
     run_id: &str,
     control: &dyn ExecutionControl,
 ) -> Result<VerifiedDocument, SummaryPipelineError> {
+    verify_synthesized_document_controlled_with_delivery(conn, runtime, run_id, control, None)
+}
+
+pub(crate) fn verify_synthesized_document_controlled_with_delivery(
+    conn: &mut Connection,
+    runtime: &dyn ModelRuntime,
+    run_id: &str,
+    control: &dyn ExecutionControl,
+    delivery_policy: Option<SummaryDeliveryPolicy>,
+) -> Result<VerifiedDocument, SummaryPipelineError> {
     let run = db::get_pipeline_run(conn, run_id)?
         .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
     let normalized = db::get_normalized_document(conn, run_id)?
@@ -514,6 +533,7 @@ pub(crate) fn verify_synthesized_document_controlled(
         &normalized,
         generation_seed_for_attempt(run_seed, 0),
         0,
+        delivery_policy.is_none_or(SummaryDeliveryPolicy::select_key_points),
         control,
     ) {
         Ok(verified) => verified,
@@ -614,7 +634,8 @@ pub(crate) fn complete_verified_document_with_delivery(
         LEGACY_VERIFICATION_VERSION => LEGACY_SUMMARY_VERSION,
         PREVIOUS_VERIFICATION_VERSION => PREVIOUS_SUMMARY_VERSION,
         HIERARCHICAL_VERIFICATION_VERSION => HIERARCHICAL_SUMMARY_VERSION,
-        _ => SUMMARY_VERSION,
+        DIRECT_VERIFICATION_VERSION | VERIFICATION_VERSION => SUMMARY_VERSION,
+        _ => unreachable!("verified document validation rejects unknown versions"),
     };
     let mut summary = SummaryArtifact {
         document_id: verified.document_id.clone(),
@@ -921,6 +942,7 @@ fn verify(
     normalized: &NormalizedDocument,
     generation_seed: u64,
     synthesis_attempt_ordinal: u32,
+    select_key_points: bool,
     control: &dyn ExecutionControl,
 ) -> Result<VerifiedDocument, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Verify)?;
@@ -971,12 +993,14 @@ fn verify(
     } else {
         LEGACY_MAX_SUMMARY_CLAIMS
     };
+    let mut next_request_ordinal = 0;
     let claim_verifications = classify_claim_support(
         runtime,
         &prompt,
         &synthesized.claims,
         verification_claim_budget,
         generation_seed,
+        &mut next_request_ordinal,
         control,
     )?;
     cancellation_checkpoint(control, PipelineStage::Verify)?;
@@ -988,15 +1012,40 @@ fn verify(
         .map(|(claim, _)| claim.clone())
         .collect::<Vec<_>>();
     let summary_text = render_cited_summary(&claims, analyzed)?;
-    let warnings = verification_warnings(
+    let mut warnings = verification_warnings(
         synthesized,
         &claim_verifications,
         synthesis_attempt_ordinal > 0,
     );
+    let key_point_claim_ids =
+        if synthesized.synthesis_version == SYNTHESIS_VERSION && select_key_points {
+            match key_points::select(
+                runtime,
+                &claims,
+                analyzed,
+                generation_seed,
+                &mut next_request_ordinal,
+                control,
+            ) {
+                Ok(claim_ids) => claim_ids,
+                Err(failure) if cancellation_observed(&failure) => return Err(failure),
+                Err(failure) if key_points::is_unavailable_failure(&failure) => {
+                    warnings.push(key_points::unavailable_warning());
+                    Vec::new()
+                }
+                Err(failure) => return Err(failure),
+            }
+        } else {
+            Vec::new()
+        };
     let verified = VerifiedDocument {
         document_id: synthesized.document_id.clone(),
         verification_version: if synthesized.synthesis_version == SYNTHESIS_VERSION {
-            VERIFICATION_VERSION.to_string()
+            if select_key_points {
+                VERIFICATION_VERSION.to_string()
+            } else {
+                DIRECT_VERIFICATION_VERSION.to_string()
+            }
         } else {
             HIERARCHICAL_VERIFICATION_VERSION.to_string()
         },
@@ -1011,6 +1060,7 @@ fn verify(
         source_chunk_ids: synthesized.source_chunk_ids.clone(),
         claims,
         claim_verifications,
+        key_point_claim_ids,
         warnings,
     };
     validate_verified_document(&verified, synthesized, analyzed, chunked, normalized)?;
@@ -1023,6 +1073,7 @@ fn classify_claim_support(
     claims: &[CitedClaim],
     claim_budget: usize,
     generation_seed: u64,
+    next_request_ordinal: &mut u32,
     control: &dyn ExecutionControl,
 ) -> Result<Vec<ClaimVerification>, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Verify)?;
@@ -1037,16 +1088,10 @@ fn classify_claim_support(
     cancellation_checkpoint(control, PipelineStage::Verify)?;
 
     let mut claim_verifications = Vec::with_capacity(claims.len());
-    for (batch_index, batch) in batches.into_iter().enumerate() {
+    for batch in batches {
         cancellation_checkpoint(control, PipelineStage::Verify)?;
-        let request_ordinal = u32::try_from(batch_index).map_err(|_| {
-            stage_failure(
-                PipelineStage::Verify,
-                "MODEL_REQUEST_INVALID",
-                "The verification request ordinal exceeded the supported range",
-                false,
-            )
-        })?;
+        let request_ordinal =
+            reserve_model_request_ordinal(next_request_ordinal, PipelineStage::Verify)?;
         let response = runtime.generate_with_control(
             &ModelRequest {
                 stage: PipelineStage::Verify,
@@ -3128,6 +3173,13 @@ fn validate_verified_document(
     if verified.verification_version == PREVIOUS_VERIFICATION_VERSION {
         return validate_previous_verified_document(verified, synthesized, analyzed);
     }
+    if verified.verification_version == DIRECT_VERIFICATION_VERSION {
+        return validate_direct_verified_document_without_key_points(
+            verified,
+            synthesized,
+            analyzed,
+        );
+    }
 
     let verification_metadata_valid = verified.document_id == synthesized.document_id
         && verified.verification_version
@@ -3157,18 +3209,28 @@ fn validate_verified_document(
         .map(|(claim, _)| claim.clone())
         .collect::<Vec<_>>();
     let expected_summary = render_cited_summary(&supported_claims, analyzed)?;
+    let expected_warnings = verification_warnings(
+        synthesized,
+        &verified.claim_verifications,
+        verified.synthesis_attempt_ordinal > 0,
+    );
+    let key_points_valid = if verified.verification_version == VERIFICATION_VERSION {
+        key_points::persisted_contract_valid(
+            &verified.claims,
+            &verified.key_point_claim_ids,
+            &verified.warnings,
+            &expected_warnings,
+        )
+    } else {
+        verified.key_point_claim_ids.is_empty() && verified.warnings == expected_warnings
+    };
     if !verification_coverage_valid
         || verified.claims != supported_claims
         || verified.summary_text != expected_summary
         || verified.synthesis_attempt_ordinal > 1
         || (verified.verification_version == VERIFICATION_VERSION
             && verified.synthesis_attempt_ordinal != 0)
-        || verified.warnings
-            != verification_warnings(
-                synthesized,
-                &verified.claim_verifications,
-                verified.synthesis_attempt_ordinal > 0,
-            )
+        || !key_points_valid
         || verified
             .warnings
             .iter()
@@ -3178,6 +3240,56 @@ fn validate_verified_document(
             PipelineStage::Verify,
             "INVALID_VERIFIED_DOCUMENT",
             "Semantic verification identity, verdict coverage, filtered claims, or warnings are invalid",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_direct_verified_document_without_key_points(
+    verified: &VerifiedDocument,
+    synthesized: &SynthesizedDocument,
+    analyzed: &AnalyzedDocument,
+) -> Result<(), PipelineFailure> {
+    let metadata_valid = synthesized.synthesis_version == SYNTHESIS_VERSION
+        && verified.document_id == synthesized.document_id
+        && verified.synthesis_attempt_ordinal == 0
+        && !verified.runtime_id.trim().is_empty()
+        && !verified.model_id.trim().is_empty()
+        && verified.source_chunk_ids == synthesized.source_chunk_ids
+        && verified.claim_verifications.len() == synthesized.claims.len();
+    let coverage_valid = metadata_valid
+        && verified
+            .claim_verifications
+            .iter()
+            .zip(&synthesized.claims)
+            .all(|(verification, claim)| {
+                verification.claim_id == claim.claim_id
+                    && verification.evidence_ids == claim.evidence_ids
+            });
+    let supported_claims = synthesized
+        .claims
+        .iter()
+        .zip(&verified.claim_verifications)
+        .filter(|(_, verification)| verification.verdict == ClaimVerdict::Supported)
+        .map(|(claim, _)| claim.clone())
+        .collect::<Vec<_>>();
+    let expected_summary = render_cited_summary(&supported_claims, analyzed)?;
+    if !coverage_valid
+        || verified.claims != supported_claims
+        || verified.summary_text != expected_summary
+        || !verified.key_point_claim_ids.is_empty()
+        || verified.warnings
+            != verification_warnings(synthesized, &verified.claim_verifications, false)
+        || verified
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "SEMANTIC_VERIFICATION_DEFERRED")
+    {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "INVALID_VERIFIED_DOCUMENT",
+            "Direct semantic verification without Key Points is inconsistent",
             false,
         ));
     }
@@ -3215,6 +3327,7 @@ fn validate_previous_verified_document(
     if !verification_coverage_valid
         || verified.claims != supported_claims
         || verified.summary_text != expected_summary
+        || !verified.key_point_claim_ids.is_empty()
         || verified.warnings
             != verification_warnings(synthesized, &verified.claim_verifications, false)
         || verified
@@ -3256,6 +3369,7 @@ fn validate_legacy_verified_document(
         || verified.source_chunk_ids != synthesized.source_chunk_ids
         || verified.claims != synthesized.claims
         || !verified.claim_verifications.is_empty()
+        || !verified.key_point_claim_ids.is_empty()
         || verified.summary_text.trim().is_empty()
         || verified.warnings != expected_warnings
     {
@@ -3948,6 +4062,7 @@ pub(crate) fn fixture_model_output(request: &ModelRequest) -> String {
             serde_json::to_string(&RawVerificationResponse { verdicts })
                 .expect("verification fixture response should serialize")
         }
+        key_points::SCHEMA_NAME => key_points::fixture_model_output(request),
         other => panic!("unexpected structured-output schema: {other}"),
     }
 }
@@ -4000,6 +4115,7 @@ mod tests {
         Analysis,
         Synthesis,
         Verification,
+        KeyPoints,
     }
 
     struct FakeRuntime {
@@ -4315,6 +4431,9 @@ mod tests {
                 }
                 ModelOutputFormat::JsonSchema { name, .. } if name == VERIFICATION_SCHEMA_NAME => {
                     FailurePoint::Verification
+                }
+                ModelOutputFormat::JsonSchema { name, .. } if name == key_points::SCHEMA_NAME => {
+                    FailurePoint::KeyPoints
                 }
                 _ => panic!("unexpected fixture model request"),
             };
@@ -4783,7 +4902,7 @@ mod tests {
         let verified = get_verified_document(&conn, &run_id)
             .expect("verification should load")
             .expect("verification should exist");
-        assert_eq!(verified.verification_version, direct::VERSION);
+        assert_eq!(verified.verification_version, VERIFICATION_VERSION);
         assert_eq!(verified.synthesis_attempt_ordinal, 0);
         assert_eq!(
             get_verification_attempt(&conn, &run_id, 0)
@@ -6060,6 +6179,7 @@ mod tests {
             source_chunk_ids: previous.source_chunk_ids.clone(),
             claims: previous.claims.clone(),
             claim_verifications: verifications.clone(),
+            key_point_claim_ids: Vec::new(),
             warnings: verification_warnings(&previous, &verifications, false),
         };
         validate_verified_document(
@@ -7126,6 +7246,7 @@ mod tests {
                 &normalized,
                 TEST_GENERATION_SEED,
                 0,
+                false,
                 &UNCONTROLLED_EXECUTION,
             )
             .unwrap();
@@ -7591,12 +7712,14 @@ mod tests {
             }
 
             let runtime = RecordingHierarchicalRuntime::healthy();
+            let mut next_request_ordinal = 0;
             let verdicts = classify_claim_support(
                 &runtime,
                 &prompt,
                 &claims,
                 budget,
                 TEST_GENERATION_SEED,
+                &mut next_request_ordinal,
                 &UNCONTROLLED_EXECUTION,
             )
             .expect("the maximum accepted claim catalog should verify in batches");
@@ -7787,12 +7910,14 @@ mod tests {
             );
             if count == 64 {
                 let runtime = RecordingHierarchicalRuntime::healthy();
+                let mut next_request_ordinal = 0;
                 let verdicts = classify_claim_support(
                     &runtime,
                     &prompt,
                     &claims,
                     64,
                     TEST_GENERATION_SEED,
+                    &mut next_request_ordinal,
                     &UNCONTROLLED_EXECUTION,
                 )
                 .unwrap();
@@ -7817,12 +7942,14 @@ mod tests {
         }
         let reject = |prompt: &VerificationPrompt, claims: &[CitedClaim], budget| {
             assert!(plan_verification_batches(prompt, claims, budget, 10_752).is_err());
+            let mut next_request_ordinal = 0;
             assert!(classify_claim_support(
                 &NoCalls,
                 prompt,
                 claims,
                 budget,
                 TEST_GENERATION_SEED,
+                &mut next_request_ordinal,
                 &UNCONTROLLED_EXECUTION
             )
             .is_err());
@@ -7985,6 +8112,7 @@ mod tests {
             &normalized,
             TEST_GENERATION_SEED,
             0,
+            true,
             &UNCONTROLLED_EXECUTION,
         )
         .expect_err("permanent input failure must take precedence over runtime health");
@@ -8096,7 +8224,8 @@ mod tests {
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
         assert_eq!(SYNTHESIS_VERSION, "5.0.0");
-        assert_eq!(VERIFICATION_VERSION, "5.0.0");
+        assert_eq!(DIRECT_VERIFICATION_VERSION, "5.0.0");
+        assert_eq!(VERIFICATION_VERSION, "6.0.0");
         assert_eq!(SUMMARY_VERSION, "5.0.0");
         assert_eq!(direct::VERSION, SYNTHESIS_VERSION);
         assert_eq!(HIERARCHICAL_SYNTHESIS_VERSION, "4.0.0");
@@ -8483,6 +8612,7 @@ mod tests {
             &normalized,
             generation_seed_for_run(&run_id),
             0,
+            true,
             &UNCONTROLLED_EXECUTION,
         )
         .expect("first verification should validate");
@@ -8494,6 +8624,7 @@ mod tests {
             &normalized,
             generation_seed_for_run(&run_id),
             0,
+            true,
             &UNCONTROLLED_EXECUTION,
         )
         .expect("second verification should validate");
@@ -9117,12 +9248,14 @@ mod tests {
         assert!(plan_verification_batches(&too_large, &claims, 64, 10_752).is_err());
         let (individually_fits, claims) = make(4, 2_000, 1);
         let runtime = RecordingHierarchicalRuntime::healthy();
+        let mut next_request_ordinal = 0;
         let verdicts = classify_claim_support(
             &runtime,
             &individually_fits,
             &claims,
             8,
             TEST_GENERATION_SEED,
+            &mut next_request_ordinal,
             &UNCONTROLLED_EXECUTION,
         )
         .expect("size-only partition must reach actual inference");
@@ -9893,6 +10026,141 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         (normalized, chunked)
+    }
+
+    fn direct_key_point_fixture() -> (
+        NormalizedDocument,
+        ChunkedDocument,
+        AnalyzedDocument,
+        SynthesizedDocument,
+    ) {
+        let texts = (1..=9)
+            .map(|page| format!("Page {page}: the organization must retain record set {page}."))
+            .collect::<Vec<_>>();
+        let (normalized, chunked) = materiality_fixture(&texts);
+        let runtime = materiality_runtime(false, 0, false);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let synthesized = direct::synthesize(
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(synthesized.claims.len(), 9);
+        (normalized, chunked, analyzed, synthesized)
+    }
+
+    #[test]
+    fn desktop_verification_persists_ranked_key_points_after_semantic_verification() {
+        let (normalized, chunked, analyzed, synthesized) = direct_key_point_fixture();
+        let runtime = materiality_runtime(false, 0, false);
+        let verified = verify(
+            &runtime,
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            0,
+            true,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+
+        assert_eq!(verified.verification_version, VERIFICATION_VERSION);
+        assert_eq!(verified.claims, synthesized.claims);
+        assert_eq!(verified.key_point_claim_ids.len(), key_points::TARGET_COUNT);
+        assert_eq!(
+            verified.key_point_claim_ids,
+            verified
+                .claims
+                .iter()
+                .take(key_points::TARGET_COUNT)
+                .map(|claim| claim.claim_id.clone())
+                .collect::<Vec<_>>()
+        );
+        let verification_requests = runtime
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.stage == PipelineStage::Verify)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            verification_requests
+                .iter()
+                .map(|request| request.ordinal)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(matches!(
+            &verification_requests[1].output_format,
+            ModelOutputFormat::JsonSchema { name, .. } if name == key_points::SCHEMA_NAME
+        ));
+    }
+
+    #[test]
+    fn key_point_ranking_failure_is_nonfatal_and_preserves_the_complete_ledger() {
+        let (normalized, chunked, analyzed, synthesized) = direct_key_point_fixture();
+        let runtime = FakeRuntime::failing(FailurePoint::KeyPoints);
+        let verified = verify(
+            &runtime,
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            0,
+            true,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+
+        assert_eq!(verified.verification_version, VERIFICATION_VERSION);
+        assert_eq!(verified.claims, synthesized.claims);
+        assert!(verified.key_point_claim_ids.is_empty());
+        assert!(verified
+            .warnings
+            .iter()
+            .any(|warning| warning.code == key_points::UNAVAILABLE_WARNING_CODE));
+        assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn connect_policy_keeps_version_five_and_never_requests_key_point_ranking() {
+        let (normalized, chunked, analyzed, synthesized) = direct_key_point_fixture();
+        let runtime = FakeRuntime::failing(FailurePoint::KeyPoints);
+        let verified = verify(
+            &runtime,
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            0,
+            false,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+
+        assert_eq!(verified.verification_version, DIRECT_VERIFICATION_VERSION);
+        assert_eq!(verified.claims, synthesized.claims);
+        assert!(verified.key_point_claim_ids.is_empty());
+        assert!(!verified
+            .warnings
+            .iter()
+            .any(|warning| warning.code == key_points::UNAVAILABLE_WARNING_CODE));
+        assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
