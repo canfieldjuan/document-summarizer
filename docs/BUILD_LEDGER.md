@@ -2248,8 +2248,8 @@ complete in PR #38
 
 ## Slice 23 — Explicit General Summary Profile Identity (2026-09-07)
 
-**Status**: implementation and local verification complete; hosted checks and
-review pending
+**Status**: implementation and local verification complete in PR #39; hosted
+checks and review pending
 
 **Root cause and change boundary**:
 - General summary behavior existed only as an implicit synthesis branch. Runs
