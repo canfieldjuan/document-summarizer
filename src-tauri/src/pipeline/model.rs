@@ -1058,6 +1058,18 @@ impl ModelRuntime for OllamaRuntime {
         })
     }
 
+    fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        let schema_format = response_format(&request.output_format)?;
+        let output_format = if schema_format.is_some()
+            && self.format_vocabulary_unavailable.load(Ordering::Relaxed)
+        {
+            Some(json_object_response_format())
+        } else {
+            schema_format
+        };
+        self.admit_request(request, output_format)
+    }
+
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
         let descriptor = self
             .installed_model_records()?
@@ -2754,13 +2766,26 @@ mod tests {
             stage: crate::pipeline::contracts::PipelineStage::Analyze,
             ordinal: 0,
             system_prompt: "system".to_string(),
-            user_prompt: "user".to_string(),
+            user_prompt: "政策による承認が必要です".to_string(),
             seed: 42,
             max_output_tokens: 7_000,
-            output_format: ModelOutputFormat::Text,
+            output_format: ModelOutputFormat::JsonSchema {
+                name: "fixture_v1".to_string(),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "source_id": {"type": "string", "enum": ["s1", "s2"]}
+                    },
+                    "required": ["source_id"],
+                    "additionalProperties": false
+                }),
+            },
         };
-        let counted_payload = serde_json::to_string(&blocked.chat_payload(&oversized, None))
-            .expect("counted payload should serialize");
+        let admitted_format =
+            response_format(&oversized.output_format).expect("fixture schema should be valid");
+        let counted_payload =
+            serde_json::to_string(&blocked.chat_payload(&oversized, admitted_format))
+                .expect("counted payload should serialize");
         let input_tokens = blocked
             .tokenizer
             .lock()
@@ -2774,8 +2799,8 @@ mod tests {
             - input_tokens;
         oversized.max_output_tokens = maximum_output + 1;
         let failure = blocked
-            .generate(&oversized)
-            .expect_err("one token above context must fail before transport");
+            .preflight_request(&oversized)
+            .expect_err("one token above context must fail during exact preflight");
         assert_eq!(failure.code, "MODEL_CONTEXT_EXCEEDED");
         assert!(matches!(
             blocked_listener.accept(),
@@ -2807,6 +2832,10 @@ mod tests {
         let sent = server.join().expect("admitted server should finish");
         assert_eq!(sent["options"]["num_ctx"], 8_192);
         assert_eq!(sent["options"]["num_predict"], maximum_output);
+        assert_eq!(
+            sent["format"]["properties"]["source_id"]["enum"],
+            serde_json::json!(["s1", "s2"])
+        );
     }
 
     #[test]

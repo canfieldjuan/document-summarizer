@@ -418,7 +418,89 @@ normal/unwind cleanup preserves a neighboring test directory.
 
 ## Local summary artifacts
 
-### Direct verified paraphrases and explicit omissions
+### Coherent General summary and verified ledger fallback
+
+Status: current standalone runs use a bounded source-aware General synthesis
+path. This changes synthesis, verification, citation persistence, reopen
+validation and the desktop projection together; document profiles and automatic
+routing are not part of this contract.
+
+Synthesis constructs a catalog of exact source segments from the normalized
+chunks, independent of the analyzed claim ledger. Segments retain canonical
+chunk, block and within-block order before request-local IDs are assigned. The
+complete catalog, prompts and serialized response schema, including its
+source-ID enum, must fit one request under the synthesis-stage context budget.
+After this conservative application bound, the selected qualified runtime
+preflights the exact request it will generate. Ollama tokenizes the complete
+serialized chat payload and llama.cpp counts its exact framed prompt; a runtime
+context rejection selects the same verified-ledger fallback before inference,
+while any other admission error fails the stage. The response ceiling grows by
+one unit for each three source segments and is
+capped at eight; it is a ceiling rather than a target. The model may cite only
+request-local source identifiers supplied in that request. Rust restores
+canonical source order and materializes durable claim, evidence and page-label
+identity; prose, source locations and durable IDs are never accepted from model
+output as authoritative metadata.
+
+Before coherent presentation is persisted, synthesis materializes the same
+semantic-verification batches, request-local identifiers, response schemas,
+request ordinals and generation seed that the verification stage will use. It
+preflights every coherent-prose batch through the selected verification runtime.
+If the bounded planner or exact runtime admission rejects one of those requests
+for context size, the generated draft is discarded and the verified-ledger
+fallback is persisted; a non-context admission failure still fails synthesis.
+
+If the catalog is incomplete or the complete synthesis request exceeds the
+bound, synthesis makes no prose-generation request. If the generated coherent
+claims cannot fit their exact downstream verification requests, synthesis
+discards them before persistence. Both cases persist presentation mode
+`claimLedgerFallback`, warning `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`, and
+the existing source-ordered claim ledger, with the warning message identifying
+the applicable boundary. Invalid budgets, invalid model output, unknown or
+duplicate source identifiers and non-context runtime failures still fail the
+stage; they do not silently choose the fallback.
+
+A narrow deterministic guard compares modal predicates in each prose unit with
+matching statements in its cited quotations. Predicate, bounded subject context,
+bounded object context and negation distinguish statements, so strong wording
+about a different actor or object cannot authorize a draft's strengthening. If a
+draft changes a matching predicate stated with `may`, `can` or `should` into
+`must`, `shall`, `will` or a requiring construction, one bounded request
+regenerates the summary with application-generated feedback. The source catalog
+and schema remain unchanged, the repair must fit the same context bound,
+including runtime preflight. A context-rejected repair fails rather than changing
+presentation after a rejected draft, and a second strengthening also fails
+closed. Require-family predicates are normalized so both infinitive and
+non-infinitive strengthening are detected, while a require form governed by a
+weak source modal remains weak. Current-artifact reload reruns the same
+source-backed statement check before presentation. This guard covers that
+mechanically detectable error class only; model verdicts still require semantic
+evaluation.
+
+The durable direct claim ledger remains alongside coherent prose for audit and
+fallback. Verification classifies the ledger claims against their analysis
+evidence and separately classifies every prose unit against the exact source
+segments selected during synthesis. The coherent requests have already passed
+exact runtime admission before the synthesis artifact commits. Unsupported prose
+is withheld from the rendered summary even when ledger claims remain supported. Coherent completion
+depends on at least one supported prose unit; it does not require an independently
+verified ledger paraphrase to survive. Fallback and historical presentation still
+require at least one supported ledger claim. Citation format 4 binds presentation
+mode, supported prose claims, ledger claims, their exact evidence and the canonical
+rendered text. The desktop shows coherent paragraphs first and keeps any supported
+ledger claims available as supporting detail.
+
+Current artifacts use synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
+citation 4.0.0. Direct version-5 and older artifacts retain their original
+validation, rendering and citation contracts when loaded.
+
+Connect delivery-policy runs continue to use the version-5 direct claim-ledger
+synthesis path. Its delivered result has an independent distributed page
+coverage requirement, so a source-selective coherent draft cannot replace the
+coverage-preserving ledger in this slice. This preserves the existing Connect
+wire result while standalone summaries adopt coherent General presentation.
+
+### Historical direct verified paraphrases and explicit omissions
 
 Status: the direct-summary and tolerant-paraphrase behavior is implemented by
 `2ed9c07` and `8b0d039`, after their separate documentation-only contracts

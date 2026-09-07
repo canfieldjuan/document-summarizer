@@ -136,10 +136,14 @@ interface BackgroundRunAccepted {
   stateVersion: number;
 }
 
+type SummaryPresentationMode = "legacyClaimList" | "coherent" | "claimLedgerFallback";
+
 interface SummaryArtifact {
   text: string;
   warnings: PipelineWarning[];
   createdAt: string;
+  presentationMode: SummaryPresentationMode;
+  summaryClaims: CitedClaim[];
   claims: CitedClaim[];
   keyPointClaimIds: string[];
 }
@@ -197,6 +201,9 @@ const cancelHint = element<HTMLParagraphElement>("#cancel-hint");
 const summaryFilename = element<HTMLHeadingElement>("#summary-filename");
 const summaryMeta = element<HTMLParagraphElement>("#summary-meta");
 const summaryText = element<HTMLPreElement>("#summary-text");
+const coherentSummarySection = element<HTMLElement>("#coherent-summary-section");
+const summaryProse = element<HTMLDivElement>("#summary-prose");
+const summaryFallbackNote = element<HTMLParagraphElement>("#summary-fallback-note");
 const summaryClaims = element<HTMLDivElement>("#summary-claims");
 const keyPointsSection = element<HTMLElement>("#key-points-section");
 const keyPointClaims = element<HTMLDivElement>("#key-point-claims");
@@ -991,9 +998,11 @@ function renderSummary(filename: string, byteSize: number, summary: SummaryArtif
   retrySourceRun = null;
   continuationRun = null;
   summaryFilename.textContent = filename;
-  const citedClaimCount = summary.claims.length;
+  const citedClaimCount = summary.presentationMode === "coherent"
+    ? summary.summaryClaims.length
+    : summary.claims.length;
   summaryMeta.textContent = citedClaimCount > 0
-    ? `${formatBytes(byteSize)} · ${formatDate(summary.createdAt)} · ${citedClaimCount} cited ${citedClaimCount === 1 ? "claim" : "claims"}`
+    ? `${formatBytes(byteSize)} · ${formatDate(summary.createdAt)} · ${citedClaimCount} cited ${citedClaimCount === 1 ? "passage" : "passages"}`
     : `${formatBytes(byteSize)} · ${formatDate(summary.createdAt)}`;
   renderClaims(summary);
   renderWarnings(summary.warnings);
@@ -1001,15 +1010,18 @@ function renderSummary(filename: string, byteSize: number, summary: SummaryArtif
 }
 
 function renderClaims(summary: SummaryArtifact): void {
+  summaryProse.replaceChildren();
   summaryClaims.replaceChildren();
   keyPointClaims.replaceChildren();
+  coherentSummarySection.hidden = true;
+  summaryFallbackNote.hidden = true;
+  keyPointsSection.hidden = true;
+  allClaimsDisclosure.hidden = true;
   evidencePanel.hidden = true;
   evidenceLabel.textContent = "";
   evidenceQuote.textContent = "";
 
-  if (summary.claims.length === 0) {
-    keyPointsSection.hidden = true;
-    allClaimsDisclosure.hidden = true;
+  if (summary.claims.length === 0 && summary.presentationMode !== "coherent") {
     summaryText.hidden = false;
     summaryText.textContent = summary.text;
     return;
@@ -1017,6 +1029,27 @@ function renderClaims(summary: SummaryArtifact): void {
 
   summaryText.textContent = "";
   summaryText.hidden = true;
+  if (summary.presentationMode === "coherent") {
+    coherentSummarySection.hidden = false;
+    renderProseList(summaryProse, summary.summaryClaims);
+    if (summary.claims.length > 0) {
+      allClaimsCount.textContent = String(summary.claims.length);
+      allClaimsDisclosure.hidden = false;
+      allClaimsDisclosure.open = false;
+      renderClaimList(summaryClaims, summary.claims, "Claim");
+    }
+    return;
+  }
+
+  if (summary.presentationMode === "claimLedgerFallback") {
+    summaryFallbackNote.hidden = false;
+    allClaimsCount.textContent = String(summary.claims.length);
+    allClaimsDisclosure.hidden = false;
+    allClaimsDisclosure.open = true;
+    renderClaimList(summaryClaims, summary.claims, "Claim");
+    return;
+  }
+
   const claimsById = new Map(summary.claims.map((claim) => [claim.claimId, claim]));
   const keyPoints = summary.keyPointClaimIds.map((claimId) => {
     const claim = claimsById.get(claimId);
@@ -1036,6 +1069,21 @@ function renderClaims(summary: SummaryArtifact): void {
   renderClaimList(summaryClaims, summary.claims, "Claim");
 }
 
+function renderProseList(container: HTMLDivElement, claims: CitedClaim[]): void {
+  claims.forEach((claim, claimIndex) => {
+    const item = document.createElement("section");
+    item.className = "summary-paragraph";
+
+    const text = document.createElement("p");
+    text.className = "claim-text";
+    text.textContent = claim.text;
+
+    const actions = citationActions(claim, "summary paragraph", claimIndex);
+    item.append(text, actions);
+    container.append(item);
+  });
+}
+
 function renderClaimList(
   container: HTMLDivElement,
   claims: CitedClaim[],
@@ -1053,26 +1101,34 @@ function renderClaimList(
     text.className = "claim-text";
     text.textContent = claim.text;
 
-    const actions = document.createElement("div");
-    actions.className = "citation-actions";
-    actions.setAttribute("aria-label", `Evidence for ${ordinalLabel.toLowerCase()} ${claimIndex + 1}`);
-    for (const citation of claim.citations) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "citation-button";
-      button.textContent = citation.label;
-      button.setAttribute("aria-pressed", "false");
-      button.setAttribute(
-        "aria-label",
-        `Show exact source excerpt from ${citation.label} for ${ordinalLabel.toLowerCase()} ${claimIndex + 1}`,
-      );
-      button.addEventListener("click", () => showEvidence(citation, button));
-      actions.append(button);
-    }
-
+    const actions = citationActions(claim, ordinalLabel.toLowerCase(), claimIndex);
     item.append(ordinal, text, actions);
     container.append(item);
   });
+}
+
+function citationActions(
+  claim: CitedClaim,
+  itemLabel: string,
+  claimIndex: number,
+): HTMLDivElement {
+  const actions = document.createElement("div");
+  actions.className = "citation-actions";
+  actions.setAttribute("aria-label", `Evidence for ${itemLabel} ${claimIndex + 1}`);
+  for (const citation of claim.citations) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "citation-button";
+    button.textContent = citation.label;
+    button.setAttribute("aria-pressed", "false");
+    button.setAttribute(
+      "aria-label",
+      `Show exact source excerpt from ${citation.label} for ${itemLabel} ${claimIndex + 1}`,
+    );
+    button.addEventListener("click", () => showEvidence(citation, button));
+    actions.append(button);
+  }
+  return actions;
 }
 
 function showEvidence(citation: Citation, selected: HTMLButtonElement): void {

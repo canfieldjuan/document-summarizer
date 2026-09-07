@@ -800,6 +800,37 @@ impl ModelRuntime for LlamaCppRuntime {
         }
     }
 
+    fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        response_format(&request.output_format)?;
+        let prompt_tokens = u32::try_from(
+            self.prompt_tokens(&request.system_prompt, &request.user_prompt)?
+                .len(),
+        )
+        .map_err(|_| {
+            failure(
+                "MODEL_CONTEXT_EXCEEDED",
+                "GGUF prompt token count exceeds the supported range",
+                false,
+            )
+        })?;
+        if request_fits_context(
+            prompt_tokens,
+            request.max_output_tokens,
+            self.context_tokens,
+        ) {
+            Ok(())
+        } else {
+            Err(failure(
+                "MODEL_CONTEXT_EXCEEDED",
+                format!(
+                    "Direct GGUF request needs {prompt_tokens} input tokens plus {} output tokens and {TOKENIZER_FRAMING_RESERVE_TOKENS} framing tokens, exceeding the qualified {}-token context",
+                    request.max_output_tokens, self.context_tokens
+                ),
+                false,
+            ))
+        }
+    }
+
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
         let result = (|| {
             if let Some(guard) = &self.model_identity_guard {

@@ -146,29 +146,63 @@ fully valid replacement advances analysis, and successful replacement is
 recorded as `MODEL_EVIDENCE_RESPONSE_REPAIRED`; a second invalid response or a
 repair-runtime failure follows the ordinary `ANALYZING -> FAILED` path.
 
-Synthesis loads the persisted analysis artifact. A small evidence catalog uses
-one request; a larger catalog is partitioned and reduced deterministically with
-bounded evidence and candidate requests. Each model response may cite only IDs
-supplied in that request. Candidate references are expanded back to bounded,
-canonically ordered original evidence IDs before final claim IDs and page labels
-are derived. Cancellation is observed before and after every model request.
-Intermediate reductions are not durable and cannot advance state. Only the
-validated final artifact, `SYNTHESIZING -> SYNTHESIZED`, state-version update,
-and event append share the completion transaction.
+Current standalone synthesis loads the persisted analysis, chunk and normalized
+artifacts. It retains the source-ordered analyzed claim ledger, then constructs
+an ordered catalog of exact normalized source segments for coherent General
+synthesis. Catalog order is canonical chunk order, then block order, then
+within-block segment order. The complete catalog, prompts and serialized
+source-ID response schema must fit one bounded synthesis request. The model
+returns paragraph text plus only request-local source identifiers; Rust restores
+canonical order and owns durable claim, evidence and page-label identity. If a
+complete catalog cannot be constructed or cannot fit the request, the stage
+makes no prose-generation request and persists the verified-ledger fallback mode
+and warning. The selected qualified runtime also preflights the same request used
+for generation: Ollama tokenizes its complete serialized chat payload and
+llama.cpp counts its exact framed prompt. A runtime context rejection becomes the
+same fallback before inference; other admission failures remain stage failures.
+Malformed output, foreign or duplicate identifiers, invalid budgets and runtime
+failures still fail instead of degrading. A detected weak-to-strong modal change
+permits one bounded regeneration with application-generated feedback; an
+over-budget repair or runtime context rejection during repair fails the stage,
+as does a second violation. Require-family predicates cover both infinitive and
+non-infinitive strengthening without treating weakly governed source wording as
+strong. Predicate, bounded subject and object context, and negation bind each
+comparison to the matching source statement, so unrelated strong wording cannot
+mask a weak statement. Cancellation is observed before and after every model
+request. Only the validated final artifact,
+`SYNTHESIZING -> SYNTHESIZED`, state-version update, and event append share the
+completion transaction. Historical synthesis artifacts retain their versioned
+load rules.
 
-Verification then uses `ModelRuntime` to classify every claim against only its
-validated exact quotations. Rust requires complete, unique claim-ID coverage;
-restores each claim's evidence IDs from the persisted synthesis; and rejects
-malformed, partial, duplicate, or foreign verdicts. The complete verdict
-artifact and its runtime/model identity commit atomically with `VERIFYING ->
-VERIFIED`.
+After a coherent draft validates and before that completion transaction,
+synthesis constructs the exact downstream semantic-verification batches. The
+planner, request-local IDs, structured response schemas, request ordinals and
+seed are the same values verification will use. Every coherent-prose batch is
+preflighted through the selected verification runtime. A static or exact context
+rejection discards the draft and commits the verified-ledger fallback instead;
+other admission failures follow the ordinary `SYNTHESIZING -> FAILED` path.
+
+Verification uses `ModelRuntime` for two distinct evidence-entailment checks.
+The source ledger is classified against its analyzed exact quotations. Coherent
+prose units are separately classified against the exact normalized source
+segments selected during synthesis. Rust requires complete, unique claim-ID
+coverage for each set, restores evidence IDs from persisted artifacts, and
+rejects malformed, partial, duplicate, or foreign verdicts. Coherent-prose
+requests have passed exact runtime admission before synthesis persistence. The
+complete verdict artifact and its runtime/model identity commit atomically with
+`VERIFYING -> VERIFIED`.
 
 Only claims classified as `supported` enter the final summary and citation
-artifact. Unsupported and ambiguous claims remain in the durable verification
-artifact and add `SEMANTIC_CLAIMS_WITHHELD`. This is an evidence-entailment
-classification, not certification that the source itself is factually true.
-If at least one claim is supported, the final summary artifact, independently
-persisted citation artifact, `VERIFIED -> COMPLETE` or
+artifact. In coherent mode, supported prose units are the reader-facing summary
+and any supported source-ledger claims remain available as supporting detail;
+coherent completion does not require the supporting ledger to be nonempty. In
+fallback and historical modes, supported ledger claims remain the rendered
+summary and at least one is required. Unsupported and ambiguous claims remain in
+the durable verification artifact and add `SEMANTIC_CLAIMS_WITHHELD`. This is an
+evidence-entailment classification, not certification that the source itself is
+factually true. If at least one claim in the active presentation set is supported,
+the final summary artifact,
+independently persisted citation artifact, `VERIFIED -> COMPLETE` or
 `VERIFIED -> COMPLETE_WITH_WARNINGS` transition, state-version increment, and
 event append share one transaction. Warnings select `COMPLETE_WITH_WARNINGS`;
 an otherwise warning-free result selects `COMPLETE`.
@@ -197,9 +231,12 @@ accepted -> processing -> completed | failed
 document, run through `INGESTED`, and job-to-run mapping commit in one SQLite
 transaction. A database uniqueness constraint enforces at most one
 accepted/processing Connect job. `processing` is a compare-and-set update made
-before the existing application service advances the mapped run. `completed`
-is written only after the durable summary exists; `failed` carries a bounded
-public error and never impersonates pipeline completion.
+before the existing application service advances the mapped run. Its delivery
+policy retains the versioned direct claim-ledger synthesis path because Connect
+requires distributed page coverage in its delivered claim prefix. `completed`
+is written only after the durable summary exists and that coverage predicate
+passes; `failed` carries a bounded public error and never impersonates pipeline
+completion.
 
 Connect job rows are status records rather than the immutable pipeline-event
 ledger. Their legal payload/state combinations are constrained by SQLite, and

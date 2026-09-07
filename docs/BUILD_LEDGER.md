@@ -2125,3 +2125,123 @@ live pipeline persistence proof complete
 - The vLLM/FlashInfer/CUDA setting proves only that the historical local
   experiment could run on this machine. This slice does not select vLLM, add a
   vLLM packaging requirement, or establish a cross-machine runtime path.
+
+## Slice 22 — Coherent Source-Aware General Summary (2026-09-07)
+
+**Status**: implementation, automated gates, and public-fixture live acceptance
+complete in PR #38
+
+**Verified defect and change boundary**:
+- Current production synthesis copied every analyzed paraphrase into a rendered
+  claim ledger. Exact citations survived, but no stage used the ordered
+  normalized source to compose a reader-facing overview.
+- This slice adds General synthesis only. Story, Contract, profile selection,
+  automatic routing, parser/OCR behavior, model selection, Connect wire
+  contracts, and unrelated UI redesign remain outside the boundary.
+
+**Implemented behavior**:
+- Current synthesis builds an ordered exact-source catalog from normalized
+  chunks in canonical chunk, block and within-block segment order, then asks for
+  a bounded coherent overview with request-local source IDs. Rust owns durable
+  evidence, claim IDs, canonical source order and page labels. The response
+  ceiling grows by one paragraph per three source segments and caps at eight,
+  preventing a source-sized paragraph inventory.
+- The complete source catalog, prompts and serialized source-ID response schema
+  must fit one synthesis request. Incomplete or over-budget source context makes
+  no prose request and persists the explicit `claimLedgerFallback` mode. The
+  selected qualified runtime then preflights the exact generation request:
+  Ollama tokenizes the complete serialized payload and llama.cpp counts its
+  framed prompt. A runtime context rejection selects the same fallback before
+  inference. After a coherent draft validates, synthesis also materializes and
+  exact-preflights every downstream coherent-verification batch using the same
+  request constructor, request-local schemas, ordinals and seed as verification.
+  A planner or runtime context rejection discards that draft and persists the
+  verified-ledger fallback before synthesis completes. Other admission failures
+  still fail. Fallback records `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`;
+  invalid runtime or model output still fails rather than masquerading as fallback.
+- Connect delivery-policy runs retain the versioned direct claim-ledger
+  synthesis path. This preserves their distributed page coverage
+  contract and existing wire result while standalone summaries use coherent
+  General presentation.
+- The analyzed claim ledger remains durable for audit and fallback. Reader-facing
+  prose is verified separately against the exact normalized source segments it
+  cited. Unsupported prose cannot ship merely because ledger claims pass, and
+  supported coherent prose remains present when every independently verified
+  ledger paraphrase is withheld.
+- A deterministic modal guard catches a strong predicate where cited source
+  states the same predicate with weaker modality in the matching bounded subject,
+  object and negation context. Strong wording about a different actor or object
+  does not suppress the check. It permits one context-bounded regeneration with
+  application feedback, then fails closed. Current-artifact reload reruns the
+  same source-backed check. Require-family normalization detects both `should
+  require` to `requires` and infinitive strengthening while preserving
+  already-strong source wording. Tests prove mixed-actor, mixed-object and
+  opposite-negation boundaries, corrected second-request behavior,
+  repeated-invalid rejection and reload rejection.
+- Current artifacts are synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
+  citation 4.0.0. Historical direct and hierarchical artifacts keep their
+  versioned validation. The desktop renders coherent prose first with exact
+  citation controls and keeps any supported claim ledger in supporting detail;
+  fallback opens that ledger explicitly.
+
+**Verification and representative output**:
+- `cargo fmt --all --check` and strict all-target/all-feature Clippy passed. The
+  locked Rust suite passed 400 library tests with 6 intentional ignores; the
+  office target passed 3 local tests with 3 opt-in ignores, and all 3 release
+  contract tests passed. The TypeScript/Vite production build transformed 7
+  modules and completed successfully.
+- The coherent-summary boundary suite passed 8 tests. It covers canonical order
+  for split segments across multiple blocks; incomplete, exact-fit and
+  over-limit source admission with the serialized response schema included;
+  exact and limit-plus-one paragraph counts; foreign and duplicate IDs; mixed
+  weak and independently supported strong modality; infinitive and
+  non-infinitive require-family strengthening; a corrected retry; and rejection
+  after one repeated violation.
+- Runtime-admission tests count a structured Unicode Ollama request from the
+  complete serialized payload, reject max-plus-one before transport and admit the
+  exact adjacent limit. The full summary fallback test covers both the early
+  application bound and an exact runtime context rejection, proving neither path
+  makes a synthesis request. A separate end-to-end boundary test generates a
+  coherent draft, rejects its exact verification preflight, and proves the
+  persisted and rendered result uses the verified ledger; its opposite side
+  proves a non-context verification admission error fails synthesis.
+- A focused application-service test passed the Connect delivery path through
+  direct claim-ledger synthesis and the actual delivered page-coverage
+  predicate, preventing source-selective coherent prose from failing after
+  otherwise successful model work.
+- A mode-boundary regression withheld every ledger paraphrase while supporting
+  the coherent prose, then proved completion, citation creation, SQLite reopen
+  and workspace projection all retained the reader-facing summary. Existing
+  opposite-side tests still require coherent prose itself, and fallback or
+  historical ledger presentation, to have at least one supported claim.
+- The first public `structured_report.pdf` live trace exposed five source-sized
+  paragraphs and an unsupported claim that architecture verification would
+  "ensure consistency and accuracy in system design." After compression
+  hardening, source comparison exposed `should retain` rewritten as `must
+  retain`; prompt-only verification still marked it supported. Those findings
+  produced the dynamic paragraph cap, exact modal instruction and deterministic
+  repair guard rather than being accepted as model-verified truth.
+- The final current-code live run passed in 15.56 seconds against
+  `qwen3-30b-a3b:latest`. It delivered one 937-character overview citing native
+  text pages 1, 2, 3, 4 and 6, excluded visual-only page 5, retained all 5 ledger
+  claims, reached `CompleteWithWarnings` at state version 18, and survived the
+  harness's independent SQLite reopen checks. Its central wording was: "The
+  2027 OPERATIONS REPORT serves as a realistic fixture for deterministic
+  structure testing, prepared for internal architecture verification." It then
+  connected the planning context, authoritative source identity, cross-page
+  Section 1 rule, hierarchy requirements and final findings in one paragraph.
+- Human comparison against the extracted public-fixture text found the final
+  prose preserved `should close` and `must be owned`, introduced no unsupported
+  purpose or benefit, and maintained the source's actors and ordering. This is
+  one semantic acceptance example. Valid IDs, exact quotations, integrity hashes
+  and the model's supported verdicts are mechanical checks, not a general
+  guarantee that generated wording is faithful.
+
+**Deferred**:
+- Manual profile identity and selection, Story behavior, Contract behavior, and
+  uncertain/mixed automatic suggestions remain later slices. Automatic routing
+  must not delay evaluating General summaries on a broader representative
+  corpus.
+- Documents whose complete source catalog cannot fit the bounded request receive
+  the explicit verified-ledger fallback. A source-aware long-document synthesis
+  strategy is future work and must not rephrase an already-lossy claim list.

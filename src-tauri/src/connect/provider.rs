@@ -2103,6 +2103,9 @@ mod tests {
                 citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
                 summary_integrity_hash: "summary-integrity".to_string(),
                 rendered_text,
+                presentation_mode:
+                    crate::pipeline::contracts::SummaryPresentationMode::LegacyClaimList,
+                summary_claims: Vec::new(),
                 claims,
                 evidence,
                 created_at: now,
@@ -2227,6 +2230,9 @@ mod tests {
                 citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
                 summary_integrity_hash: "summary-integrity".to_string(),
                 rendered_text,
+                presentation_mode:
+                    crate::pipeline::contracts::SummaryPresentationMode::LegacyClaimList,
+                summary_claims: Vec::new(),
                 claims,
                 evidence,
                 created_at: now,

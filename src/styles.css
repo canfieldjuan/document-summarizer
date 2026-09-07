@@ -621,6 +621,34 @@ h1 {
   gap: 12px;
 }
 
+.coherent-summary-section {
+  padding: clamp(22px, 4vw, 38px);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--lake);
+  border-radius: 4px 14px 14px 4px;
+  background: #ffffff;
+}
+
+.summary-prose {
+  display: grid;
+  gap: 1.35rem;
+  margin-top: 14px;
+}
+
+.summary-paragraph + .summary-paragraph {
+  padding-top: 1.35rem;
+  border-top: 1px solid var(--line);
+}
+
+.summary-fallback-note {
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--copper);
+  background: var(--copper-soft);
+  color: #70442f;
+  line-height: 1.5;
+}
+
 .key-points-section h4 {
   margin: 7px 0 16px;
   color: var(--ink);

@@ -1,6 +1,7 @@
 use crate::pipeline::contracts::{
-    CitationArtifact, ContinuationCheckpoint, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
-    PipelineRun, PipelineState, PipelineWarning, SummaryArtifact,
+    CitationArtifact, CitedClaim, ContinuationCheckpoint, EvidenceItem, ModelRuntime,
+    ModelRuntimeFailure, PipelineFailure, PipelineRun, PipelineState, PipelineWarning,
+    SummaryArtifact, SummaryPresentationMode,
 };
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::model_settings::runtime_from_settings;
@@ -63,6 +64,8 @@ pub struct SummaryView {
     pub text: String,
     pub warnings: Vec<PipelineWarning>,
     pub created_at: DateTime<Utc>,
+    pub presentation_mode: SummaryPresentationMode,
+    pub summary_claims: Vec<CitedClaimView>,
     pub claims: Vec<CitedClaimView>,
     pub key_point_claim_ids: Vec<String>,
 }
@@ -268,19 +271,32 @@ fn summary_view(
     if summary.calculate_integrity_hash().ok().as_deref() != Some(summary.integrity_hash.as_str()) {
         return Err(WorkspaceError::CitationMismatch(summary.document_id));
     }
-    let claims = match citations {
+    let (presentation_mode, summary_claims, claims) = match citations {
         Some(citations) => {
             if citations.document_id != summary.document_id
                 || crate::pipeline::summary::expected_citation_version(&summary.summary_version)
                     != Some(citations.citation_version.as_str())
                 || citations.summary_integrity_hash != summary.integrity_hash
                 || citations.rendered_text != summary.text
-                || citations.claims.is_empty()
+                || (citations.presentation_mode != SummaryPresentationMode::Coherent
+                    && citations.claims.is_empty())
                 || citations.evidence.is_empty()
                 || citations.calculate_integrity_hash().ok().as_deref()
                     != Some(citations.integrity_hash.as_str())
             {
                 return Err(WorkspaceError::CitationMismatch(summary.document_id));
+            }
+            match citations.presentation_mode {
+                SummaryPresentationMode::Coherent if citations.summary_claims.is_empty() => {
+                    return Err(WorkspaceError::CitationMismatch(summary.document_id));
+                }
+                SummaryPresentationMode::ClaimLedgerFallback
+                | SummaryPresentationMode::LegacyClaimList
+                    if !citations.summary_claims.is_empty() =>
+                {
+                    return Err(WorkspaceError::CitationMismatch(summary.document_id));
+                }
+                _ => {}
             }
             let evidence_count = citations.evidence.len();
             let evidence = citations
@@ -300,61 +316,30 @@ fn summary_view(
             }
             let mut claim_ids = std::collections::HashSet::new();
             let mut referenced_evidence = std::collections::HashSet::new();
-            let claims = citations
-                .claims
-                .into_iter()
-                .map(|claim| {
-                    let mut claim_evidence = std::collections::HashSet::new();
-                    if claim.claim_id.trim().is_empty()
-                        || claim.text.trim().is_empty()
-                        || !claim_ids.insert(claim.claim_id.clone())
-                        || claim
-                            .evidence_ids
-                            .iter()
-                            .any(|evidence_id| !claim_evidence.insert(evidence_id.clone()))
-                    {
-                        return Err(WorkspaceError::CitationMismatch(
-                            summary.document_id.clone(),
-                        ));
-                    }
-                    referenced_evidence.extend(claim.evidence_ids.iter().cloned());
-                    let citations = claim
-                        .evidence_ids
-                        .iter()
-                        .map(|evidence_id| {
-                            let item = evidence.get(evidence_id).ok_or_else(|| {
-                                WorkspaceError::CitationMismatch(summary.document_id.clone())
-                            })?;
-                            Ok(CitationView {
-                                evidence_id: item.evidence_id.clone(),
-                                label: source_label(
-                                    item.source_span.page_start,
-                                    item.source_span.page_end,
-                                ),
-                                page_start: item.source_span.page_start,
-                                page_end: item.source_span.page_end,
-                                exact_quote: item.exact_quote.clone(),
-                            })
-                        })
-                        .collect::<Result<Vec<_>, WorkspaceError>>()?;
-                    if citations.is_empty() {
-                        return Err(WorkspaceError::CitationMismatch(
-                            summary.document_id.clone(),
-                        ));
-                    }
-                    Ok(CitedClaimView {
-                        claim_id: claim.claim_id,
-                        text: claim.text,
-                        citations,
-                    })
-                })
-                .collect::<Result<Vec<_>, WorkspaceError>>()?;
+            let summary_claims = cited_claim_views(
+                citations.summary_claims,
+                &evidence,
+                &summary.document_id,
+                &mut claim_ids,
+                &mut referenced_evidence,
+            )?;
+            let claims = cited_claim_views(
+                citations.claims,
+                &evidence,
+                &summary.document_id,
+                &mut claim_ids,
+                &mut referenced_evidence,
+            )?;
             if referenced_evidence != evidence.keys().cloned().collect() {
                 return Err(WorkspaceError::CitationMismatch(summary.document_id));
             }
-            claims
+            (citations.presentation_mode, summary_claims, claims)
         }
-        None if summary.summary_version == "1.0.0" => Vec::new(),
+        None if summary.summary_version == "1.0.0" => (
+            SummaryPresentationMode::LegacyClaimList,
+            Vec::new(),
+            Vec::new(),
+        ),
         None => return Err(WorkspaceError::CitationMismatch(summary.document_id)),
     };
     let known_claim_ids = claims
@@ -369,6 +354,8 @@ fn summary_view(
         || key_point_claim_ids
             .iter()
             .any(|claim_id| !known_claim_ids.contains(claim_id.as_str()))
+        || (presentation_mode != SummaryPresentationMode::LegacyClaimList
+            && !key_point_claim_ids.is_empty())
     {
         return Err(WorkspaceError::CitationMismatch(summary.document_id));
     }
@@ -376,9 +363,61 @@ fn summary_view(
         text: summary.text,
         warnings: summary.warnings,
         created_at: summary.created_at,
+        presentation_mode,
+        summary_claims,
         claims,
         key_point_claim_ids,
     })
+}
+
+fn cited_claim_views(
+    claims: Vec<CitedClaim>,
+    evidence: &HashMap<String, EvidenceItem>,
+    document_id: &str,
+    claim_ids: &mut std::collections::HashSet<String>,
+    referenced_evidence: &mut std::collections::HashSet<String>,
+) -> Result<Vec<CitedClaimView>, WorkspaceError> {
+    claims
+        .into_iter()
+        .map(|claim| {
+            let mut claim_evidence = std::collections::HashSet::new();
+            if claim.claim_id.trim().is_empty()
+                || claim.text.trim().is_empty()
+                || !claim_ids.insert(claim.claim_id.clone())
+                || claim
+                    .evidence_ids
+                    .iter()
+                    .any(|evidence_id| !claim_evidence.insert(evidence_id.clone()))
+            {
+                return Err(WorkspaceError::CitationMismatch(document_id.to_string()));
+            }
+            referenced_evidence.extend(claim.evidence_ids.iter().cloned());
+            let citations = claim
+                .evidence_ids
+                .iter()
+                .map(|evidence_id| {
+                    let item = evidence
+                        .get(evidence_id)
+                        .ok_or_else(|| WorkspaceError::CitationMismatch(document_id.to_string()))?;
+                    Ok(CitationView {
+                        evidence_id: item.evidence_id.clone(),
+                        label: source_label(item.source_span.page_start, item.source_span.page_end),
+                        page_start: item.source_span.page_start,
+                        page_end: item.source_span.page_end,
+                        exact_quote: item.exact_quote.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, WorkspaceError>>()?;
+            if citations.is_empty() {
+                return Err(WorkspaceError::CitationMismatch(document_id.to_string()));
+            }
+            Ok(CitedClaimView {
+                claim_id: claim.claim_id,
+                text: claim.text,
+                citations,
+            })
+        })
+        .collect()
 }
 
 fn source_label(page_start: u32, page_end: u32) -> String {
@@ -452,7 +491,6 @@ mod tests {
     use crate::pipeline::structure::DeterministicStructureInterpreter;
     use rusqlite::params;
     use sha2::{Digest, Sha256};
-    use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -746,19 +784,19 @@ mod tests {
         assert!(serialized["summary"]["claims"]
             .as_array()
             .is_some_and(|claims| !claims.is_empty()));
-        let claim_ids = serialized["summary"]["claims"]
+        assert_eq!(serialized["summary"]["presentationMode"], "coherent");
+        assert!(serialized["summary"]["summaryClaims"]
             .as_array()
-            .unwrap()
-            .iter()
-            .map(|claim| claim["claimId"].as_str().unwrap())
-            .collect::<HashSet<_>>();
+            .is_some_and(|claims| !claims.is_empty()));
+        assert!(
+            serialized["summary"]["summaryClaims"][0]["citations"][0]["exactQuote"]
+                .as_str()
+                .is_some_and(|quote| !quote.is_empty())
+        );
         let key_point_claim_ids = serialized["summary"]["keyPointClaimIds"]
             .as_array()
-            .expect("presentation result should include Key Point identifiers");
-        assert!(!key_point_claim_ids.is_empty());
-        assert!(key_point_claim_ids.iter().all(|claim_id| claim_id
-            .as_str()
-            .is_some_and(|claim_id| claim_ids.contains(claim_id))));
+            .expect("presentation result should include the compatibility field");
+        assert!(key_point_claim_ids.is_empty());
         assert_eq!(
             serialized["summary"]["claims"][0]["citations"][0]["label"],
             "p. 1"
