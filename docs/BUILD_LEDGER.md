@@ -2155,8 +2155,9 @@ complete in PR #38
   cited. Unsupported prose cannot ship merely because ledger claims pass.
 - A deterministic modal guard catches a strong predicate where cited source
   states the same predicate with weaker modality. It permits one context-bounded
-  regeneration with application feedback, then fails closed. Tests prove both
-  corrected second-request behavior and repeated-invalid rejection.
+  regeneration with application feedback, then fails closed. Current-artifact
+  reload reruns the same source-backed check. Tests prove corrected
+  second-request behavior, repeated-invalid rejection and reload rejection.
 - Current artifacts are synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
   citation 4.0.0. Historical direct and hierarchical artifacts keep their
   versioned validation. The desktop renders coherent prose first with exact

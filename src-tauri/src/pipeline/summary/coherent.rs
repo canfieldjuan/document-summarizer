@@ -349,6 +349,17 @@ fn modal_strengthening_feedback(
         .collect())
 }
 
+fn validate_modal_content(
+    claims: &[CitedClaim],
+    evidence: &[EvidenceItem],
+) -> Result<(), PipelineFailure> {
+    if modal_strengthening_feedback(claims, evidence)?.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid_document())
+    }
+}
+
 fn modal_strengthening_failure() -> PipelineFailure {
     stage_failure(
         PipelineStage::Synthesize,
@@ -779,6 +790,7 @@ pub(super) fn validate_content(
                 &synthesized.document_id,
                 VERSION,
             )?;
+            validate_modal_content(&synthesized.summary_claims, &synthesized.synthesis_evidence)?;
             if render_cited_summary_with_evidence(
                 &synthesized.summary_claims,
                 &synthesized.synthesis_evidence,
@@ -1040,6 +1052,7 @@ mod tests {
         assert_eq!(feedback.len(), 1);
         assert!(feedback[0].contains("'retain'"));
         assert!(!feedback[0].contains("owned"));
+        assert!(validate_modal_content(&claims, &evidence).is_err());
 
         let supported = vec![CitedClaim {
             text: "The interpreter should retain the section, and blocks must be owned once."
@@ -1049,6 +1062,7 @@ mod tests {
         assert!(modal_strengthening_feedback(&supported, &evidence)
             .unwrap()
             .is_empty());
+        assert!(validate_modal_content(&supported, &evidence).is_ok());
 
         let requiring = vec![CitedClaim {
             text: "The policy requires the interpreter to retain the section.".into(),

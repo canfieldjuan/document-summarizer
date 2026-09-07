@@ -447,8 +447,10 @@ its cited quotations. If a draft changes a predicate stated with `may`, `can` or
 `should` into `must`, `shall`, `will` or a requiring construction, one bounded
 request regenerates the summary with application-generated feedback. The source
 catalog and schema remain unchanged, the repair must fit the same context bound,
-and a second strengthening fails closed. This guard covers that mechanically
-detectable error class only; model verdicts still require semantic evaluation.
+and a second strengthening fails closed. Current-artifact reload reruns the same
+source-backed predicate check before presentation. This guard covers that
+mechanically detectable error class only; model verdicts still require semantic
+evaluation.
 
 The durable direct claim ledger remains alongside coherent prose for audit and
 fallback. Verification classifies the ledger claims against their analysis
