@@ -6371,6 +6371,19 @@ mod tests {
     }
 
     #[test]
+    fn unicode_opening_punctuation_cannot_hide_a_short_abbreviation() {
+        let first = format!("{}.", "a".repeat(549));
+        let second =
+            "（Dept. Records officers completed the review and archived every source record.";
+        let source = format!("{first} {second}");
+        assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+
+        let segmented = analysis_quote_segments_v13(&source);
+        assert_eq!(segmented.segments, vec![first, second.to_string()]);
+        assert_eq!(segmented.omitted_source_units, 0);
+    }
+
+    #[test]
     fn six_character_lowercase_word_remains_a_safe_sentence_boundary() {
         let first = format!("{}.", "a".repeat(549));
         let second = "The finding is secure.";

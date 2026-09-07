@@ -636,6 +636,13 @@ Required behavior:
   does not reject a period at the end of the complete source, and a continuing
   alphabetic token of six or more characters remains eligible; independent
   ambiguity rules still apply to both.
+- Before applying abbreviation dictionary, length and alphabetic-shape checks,
+  remove repeated Unicode `Open_Punctuation` and `Initial_Punctuation` plus
+  ASCII straight quotes from the token start, and the already admitted
+  close/final delimiters from its end. Delimiter-wrapped forms such as `（Dept.`
+  and `（Dept）.` must not bypass the open-set defense. Do not strip dash
+  punctuation, symbols or arbitrary non-alphabetic prefixes as if they were
+  delimiters.
 - Within an over-budget block, a source sentence unit longer than 600
   characters or a nonempty source tail without a safe terminal boundary is
   unavailable to ordinary quote selection. A no-terminal whole block is
@@ -675,7 +682,9 @@ punctuation around CJK terminals and negative opening-mark/symbol controls.
 Probe `Sentence_Terminal` marks from Arabic, Armenian and Devanagari alongside
 negative non-terminal punctuation and symbols. Probe non-ASCII `ATerm`
 characters on both sides of the abbreviation defense, including repeated and
-internal period-like forms. Prove exact source bytes, tail coverage, catalog
+internal period-like forms. Probe short abbreviations behind repeated Unicode
+opening punctuation and inside paired Unicode delimiters, plus dash/symbol
+negative controls. Prove exact source bytes, tail coverage, catalog
 order/uniqueness, request limits and deterministic identities.
 Prove a stored version-12 artifact still reloads with its original catalog while
 an equivalent version-13 artifact rejects every partial candidate. Run
