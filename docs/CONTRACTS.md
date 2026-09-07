@@ -428,13 +428,14 @@ routing are not part of this contract.
 Synthesis constructs a catalog of exact source segments from the normalized
 chunks, independent of the analyzed claim ledger. Segments retain canonical
 chunk, block and within-block order before request-local IDs are assigned. The
-complete catalog and prompt must fit one request under the synthesis-stage
-context budget. The response ceiling grows by one unit for each three source
-segments and is capped at eight; it is a ceiling rather than a target. The model
-may cite only request-local source identifiers supplied in that request. Rust
-restores canonical source order and materializes durable claim, evidence and
-page-label identity; prose, source locations and durable IDs are never accepted
-from model output as authoritative metadata.
+complete catalog, prompts and serialized response schema, including its
+source-ID enum, must fit one request under the synthesis-stage context budget.
+The response ceiling grows by one unit for each three source segments and is
+capped at eight; it is a ceiling rather than a target. The model may cite only
+request-local source identifiers supplied in that request. Rust restores
+canonical source order and materializes durable claim, evidence and page-label
+identity; prose, source locations and durable IDs are never accepted from model
+output as authoritative metadata.
 
 If the catalog is incomplete or the complete request exceeds the bound,
 synthesis makes no prose-generation request. It persists presentation mode
@@ -448,10 +449,12 @@ its cited quotations. If a draft changes a predicate stated with `may`, `can` or
 `should` into `must`, `shall`, `will` or a requiring construction, one bounded
 request regenerates the summary with application-generated feedback. The source
 catalog and schema remain unchanged, the repair must fit the same context bound,
-and a second strengthening fails closed. Current-artifact reload reruns the same
-source-backed predicate check before presentation. This guard covers that
-mechanically detectable error class only; model verdicts still require semantic
-evaluation.
+and a second strengthening fails closed. Require-family predicates are normalized
+so both infinitive and non-infinitive strengthening are detected, while a require
+form governed by a weak source modal remains weak. Current-artifact reload reruns
+the same source-backed predicate check before presentation. This guard covers
+that mechanically detectable error class only; model verdicts still require
+semantic evaluation.
 
 The durable direct claim ledger remains alongside coherent prose for audit and
 fallback. Verification classifies the ledger claims against their analysis

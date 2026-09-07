@@ -124,7 +124,7 @@ pub(super) fn synthesize(
             false,
         )
     })?;
-    let request_characters = synthesis_request_characters(&user_prompt)?;
+    let request_characters = synthesis_request_characters(&user_prompt, &output_schema)?;
 
     let fallback_reason = source_context_fallback_reason(&catalog, request_characters, input_limit);
     if let Some(reason) = fallback_reason {
@@ -218,7 +218,7 @@ fn generate_summary_with_modal_repair(
             return Err(modal_strengthening_failure());
         }
         request_prompt = prompt_with_validation_feedback(&request_prompt, &feedback)?;
-        if synthesis_request_characters(&request_prompt)? > input_limit {
+        if synthesis_request_characters(&request_prompt, &output_schema)? > input_limit {
             return Err(stage_failure(
                 PipelineStage::Synthesize,
                 "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
@@ -230,11 +230,26 @@ fn generate_summary_with_modal_repair(
     }
 }
 
-fn synthesis_request_characters(user_prompt: &str) -> Result<usize, PipelineFailure> {
+fn synthesis_request_characters(
+    user_prompt: &str,
+    output_schema: &Value,
+) -> Result<usize, PipelineFailure> {
+    let schema_characters = serde_json::to_string(output_schema)
+        .map_err(|_| {
+            stage_failure(
+                PipelineStage::Synthesize,
+                "INVALID_SYNTHESIS_BUDGET",
+                "The synthesis response schema size could not be calculated",
+                false,
+            )
+        })?
+        .chars()
+        .count();
     SYSTEM_PROMPT
         .chars()
         .count()
         .checked_add(user_prompt.chars().count())
+        .and_then(|characters| characters.checked_add(schema_characters))
         .ok_or_else(|| {
             stage_failure(
                 PipelineStage::Synthesize,
@@ -262,18 +277,36 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn next_predicate(words: &[String], start: usize) -> Option<String> {
+fn next_predicate_index(words: &[String], start: usize) -> Option<usize> {
     words
         .iter()
+        .enumerate()
         .skip(start)
-        .find(|word| {
+        .find(|(_, word)| {
             !matches!(
                 word.as_str(),
                 "not" | "be" | "been" | "being" | "have" | "to"
             )
         })
-        .filter(|word| word.chars().count() <= 64)
-        .cloned()
+        .map(|(index, _)| index)
+}
+
+fn next_predicate(words: &[String], start: usize) -> Option<String> {
+    let word = words.get(next_predicate_index(words, start)?)?;
+    if word.chars().count() > 64 {
+        return None;
+    }
+    Some(
+        if matches!(
+            word.as_str(),
+            "require" | "requires" | "required" | "requiring"
+        ) {
+            "require"
+        } else {
+            word
+        }
+        .to_string(),
+    )
 }
 
 fn modal_predicates(text: &str, strong: bool) -> HashSet<String> {
@@ -295,7 +328,16 @@ fn modal_predicates(text: &str, strong: bool) -> HashSet<String> {
                 word.as_str(),
                 "require" | "requires" | "required" | "requiring"
             )
+            && !words
+                .iter()
+                .enumerate()
+                .take(index)
+                .any(|(modal_index, modal)| {
+                    matches!(modal.as_str(), "may" | "might" | "can" | "could" | "should")
+                        && next_predicate_index(&words, modal_index + 1) == Some(index)
+                })
         {
+            predicates.insert("require".to_string());
             let end = (index + 8).min(words.len());
             if let Some(to_index) = (index + 1..end).find(|position| words[*position] == "to") {
                 if let Some(predicate) = next_predicate(&words, to_index + 1) {
@@ -716,7 +758,7 @@ pub(super) fn validate_for_runtime(
     {
         Some(FallbackReason::IncompleteCatalog)
     } else {
-        let (user_prompt, _) = prompt_and_schema(&catalog)?;
+        let (user_prompt, output_schema) = prompt_and_schema(&catalog)?;
         let input_limit = generation_input_character_limit_for_context(
             runtime.context_tokens(PipelineStage::Synthesize),
             OUTPUT_TOKENS,
@@ -729,18 +771,7 @@ pub(super) fn validate_for_runtime(
                 false,
             )
         })?;
-        let request_characters = SYSTEM_PROMPT
-            .chars()
-            .count()
-            .checked_add(user_prompt.chars().count())
-            .ok_or_else(|| {
-                stage_failure(
-                    PipelineStage::Synthesize,
-                    "INVALID_SYNTHESIS_BUDGET",
-                    "The synthesis request size exceeds the supported range",
-                    false,
-                )
-            })?;
+        let request_characters = synthesis_request_characters(&user_prompt, &output_schema)?;
         source_context_fallback_reason(&catalog, request_characters, input_limit)
     };
     match (&synthesized.presentation_mode, expected_fallback) {
@@ -1040,6 +1071,28 @@ mod tests {
             source_context_fallback_reason(&incomplete, 0, usize::MAX),
             Some(FallbackReason::IncompleteCatalog)
         );
+
+        let (user_prompt, output_schema) = prompt_and_schema(&complete).unwrap();
+        let prompt_only_characters = SYSTEM_PROMPT.chars().count() + user_prompt.chars().count();
+        let complete_request_characters =
+            synthesis_request_characters(&user_prompt, &output_schema).unwrap();
+        assert!(complete_request_characters > prompt_only_characters);
+        assert_eq!(
+            source_context_fallback_reason(
+                &complete,
+                prompt_only_characters,
+                prompt_only_characters
+            ),
+            None
+        );
+        assert_eq!(
+            source_context_fallback_reason(
+                &complete,
+                complete_request_characters,
+                prompt_only_characters
+            ),
+            Some(FallbackReason::RequestTooLarge)
+        );
     }
 
     #[test]
@@ -1175,6 +1228,31 @@ mod tests {
                 .len(),
             1
         );
+
+        let requirement_evidence = vec![EvidenceItem {
+            exact_quote: "The policy should require approval.".into(),
+            ..catalog().candidates[0].evidence.clone()
+        }];
+        let requires = vec![CitedClaim {
+            claim_id: "claim-requires".into(),
+            text: "The policy requires approval.".into(),
+            evidence_ids: vec!["evidence-1".into()],
+        }];
+        let feedback = modal_strengthening_feedback(&requires, &requirement_evidence).unwrap();
+        assert_eq!(feedback.len(), 1);
+        assert!(feedback[0].contains("'require'"));
+        assert!(validate_modal_content(&requires, &requirement_evidence).is_err());
+
+        let strong_requirement_evidence = vec![EvidenceItem {
+            exact_quote: "The policy requires approval.".into(),
+            ..requirement_evidence[0].clone()
+        }];
+        assert!(
+            modal_strengthening_feedback(&requires, &strong_requirement_evidence)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(validate_modal_content(&requires, &strong_requirement_evidence).is_ok());
     }
 
     #[test]

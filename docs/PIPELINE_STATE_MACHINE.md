@@ -150,17 +150,20 @@ Current standalone synthesis loads the persisted analysis, chunk and normalized
 artifacts. It retains the source-ordered analyzed claim ledger, then constructs
 an ordered catalog of exact normalized source segments for coherent General
 synthesis. Catalog order is canonical chunk order, then block order, then
-within-block segment order. The complete catalog and prompt must fit one bounded
-synthesis request. The model returns paragraph text plus only request-local
-source identifiers; Rust restores canonical order and owns durable claim,
-evidence and page-label identity. If a complete catalog cannot be constructed
-or cannot fit the request, the stage makes no prose-generation request and
-persists the verified-ledger fallback mode and warning. Malformed output,
+within-block segment order. The complete catalog, prompts and serialized
+source-ID response schema must fit one bounded synthesis request. The model
+returns paragraph text plus only request-local source identifiers; Rust restores
+canonical order and owns durable claim, evidence and page-label identity. If a
+complete catalog cannot be constructed or cannot fit the request, the stage
+makes no prose-generation request and persists the verified-ledger fallback mode
+and warning. Malformed output,
 foreign or duplicate identifiers, invalid budgets and runtime failures still
 fail instead of degrading. A detected weak-to-strong modal change permits one
 bounded regeneration with application-generated feedback; an over-budget repair
-or a second violation fails the stage. Cancellation is observed before and
-after every model request. Only the validated final artifact,
+or a second violation fails the stage. Require-family predicates cover both
+infinitive and non-infinitive strengthening without treating weakly governed
+source wording as strong. Cancellation is observed before and after every model
+request. Only the validated final artifact,
 `SYNTHESIZING -> SYNTHESIZED`, state-version update, and event append share the
 completion transaction. Historical synthesis artifacts retain their versioned
 load rules.

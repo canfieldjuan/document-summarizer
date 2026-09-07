@@ -2146,9 +2146,9 @@ complete in PR #38
   evidence, claim IDs, canonical source order and page labels. The response
   ceiling grows by one paragraph per three source segments and caps at eight,
   preventing a source-sized paragraph inventory.
-- The complete source catalog must fit one synthesis request. Incomplete or
-  over-budget source context makes no prose request and persists the explicit
-  `claimLedgerFallback` mode plus
+- The complete source catalog, prompts and serialized source-ID response schema
+  must fit one synthesis request. Incomplete or over-budget source context makes
+  no prose request and persists the explicit `claimLedgerFallback` mode plus
   `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`; invalid runtime or model output
   still fails rather than masquerading as fallback.
 - Connect delivery-policy runs retain the versioned direct claim-ledger
@@ -2163,8 +2163,10 @@ complete in PR #38
 - A deterministic modal guard catches a strong predicate where cited source
   states the same predicate with weaker modality. It permits one context-bounded
   regeneration with application feedback, then fails closed. Current-artifact
-  reload reruns the same source-backed check. Tests prove corrected
-  second-request behavior, repeated-invalid rejection and reload rejection.
+  reload reruns the same source-backed check. Require-family normalization
+  detects both `should require` to `requires` and infinitive strengthening while
+  preserving already-strong source wording. Tests prove corrected second-request
+  behavior, repeated-invalid rejection and reload rejection.
 - Current artifacts are synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
   citation 4.0.0. Historical direct and hierarchical artifacts keep their
   versioned validation. The desktop renders coherent prose first with exact
@@ -2179,9 +2181,11 @@ complete in PR #38
   modules and completed successfully.
 - The coherent-summary boundary suite passed 8 tests. It covers canonical order
   for split segments across multiple blocks; incomplete, exact-fit and
-  over-limit source admission; exact and limit-plus-one paragraph counts;
-  foreign and duplicate IDs; mixed weak and independently supported strong
-  modality; a corrected retry; and rejection after one repeated violation.
+  over-limit source admission with the serialized response schema included;
+  exact and limit-plus-one paragraph counts; foreign and duplicate IDs; mixed
+  weak and independently supported strong modality; infinitive and
+  non-infinitive require-family strengthening; a corrected retry; and rejection
+  after one repeated violation.
 - A focused application-service test passed the Connect delivery path through
   direct claim-ledger synthesis and the actual delivered page-coverage
   predicate, preventing source-selective coherent prose from failing after
