@@ -4247,6 +4247,9 @@ mod tests {
         let mut coordinated_actors = catalog().candidates[1].evidence.clone();
         coordinated_actors.evidence_id = "coordinated-actors".into();
         coordinated_actors.exact_quote = "Farm labor contractors (FLCs) are subject to the rule if they recruit workers and agricultural employers (AGERs) are subject to the rule if they recruit for money.".into();
+        let mut negative_actor_condition = catalog().candidates[0].evidence.clone();
+        negative_actor_condition.evidence_id = "negative-actor-condition".into();
+        negative_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they do not recruit for compensation.".into();
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
         transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
@@ -4294,6 +4297,7 @@ mod tests {
             ager,
             combined_actors,
             coordinated_actors,
+            negative_actor_condition,
             transport,
             inverted_transport,
             explicit_evaluation,
@@ -4404,6 +4408,16 @@ mod tests {
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
+                claim_id: "supported-passive-bound-subject".into(),
+                text: "At most 900 applications are accepted by Plan A.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-passive-bound-subject".into(),
+                text: "At most 900 applications are accepted by Plan B.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-actors".into(),
                 text: "FLCs, AGERs, and AGAS are subject to MSPA if they recruit migrant workers."
                     .into(),
@@ -4446,6 +4460,17 @@ mod tests {
                 claim_id: "transferred-leading-condition".into(),
                 text: "If they recruit workers for money, AGERs are subject to MSPA.".into(),
                 evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-negative-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they do not recruit for compensation."
+                    .into(),
+                evidence_ids: vec!["negative-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negative-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
+                evidence_ids: vec!["negative-actor-condition".into()],
             },
             CitedClaim {
                 claim_id: "supported-endpoints".into(),
@@ -4575,9 +4600,11 @@ mod tests {
             "supported-maximum-of",
             "supported-minimum-of",
             "supported-bound-subject",
+            "supported-passive-bound-subject",
             "supported-actors",
             "supported-single-actor-condition",
             "supported-leading-condition",
+            "supported-negative-actor-condition",
             "supported-endpoints",
             "supported-inverted-source-endpoints",
             "supported-evaluation",
@@ -4601,11 +4628,13 @@ mod tests {
             "changed-formatted-decimal",
             "changed-negative-boundary",
             "transferred-bound-subject",
+            "transferred-passive-bound-subject",
             "transferred-condition",
             "transferred-condition-full-names",
             "transferred-condition-coordinated",
             "transferred-single-actor-condition",
             "transferred-leading-condition",
+            "changed-negative-actor-condition",
             "changed-endpoint",
             "changed-inverted-source-endpoints",
             "transferred-evaluation",

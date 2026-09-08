@@ -16,6 +16,13 @@ struct NumericConstraint {
     value: String,
     relation: NumericRelation,
     context: Vec<String>,
+    trailing_subject: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NumericReference {
+    context: Vec<String>,
+    trailing_subject: Vec<String>,
 }
 
 fn ends_with_words(words: &[String], suffix: &[&str]) -> bool {
@@ -374,6 +381,24 @@ fn numeric_context(tokens: &[String], index: usize) -> Vec<String> {
     tokens[end.saturating_sub(8)..end].to_vec()
 }
 
+fn numeric_trailing_subject(tokens: &[String], end: usize) -> Vec<String> {
+    let trailing = &tokens[end..];
+    let Some(by) = trailing.iter().position(|word| word == "by") else {
+        return Vec::new();
+    };
+    trailing[by + 1..]
+        .iter()
+        .take_while(|word| {
+            !matches!(
+                word.as_str(),
+                "and" | "or" | "when" | "if" | "unless" | "under" | "because" | "while"
+            )
+        })
+        .take(4)
+        .cloned()
+        .collect()
+}
+
 fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
     comparison_clauses(text)
         .into_iter()
@@ -386,6 +411,7 @@ fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
                             value: mention.value,
                             relation,
                             context: numeric_context(&tokens, mention.start),
+                            trailing_subject: numeric_trailing_subject(&tokens, mention.end),
                         }
                     })
                 })
@@ -394,17 +420,43 @@ fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
         .collect()
 }
 
-fn numeric_mention_contexts(text: &str) -> Vec<Vec<String>> {
+fn numeric_mention_contexts(text: &str) -> Vec<NumericReference> {
     comparison_clauses(text)
         .into_iter()
         .flat_map(|tokens| {
             numeric_mentions(&tokens)
                 .into_iter()
-                .map(|mention| numeric_context(&tokens, mention.start))
+                .map(|mention| NumericReference {
+                    context: numeric_context(&tokens, mention.start),
+                    trailing_subject: numeric_trailing_subject(&tokens, mention.end),
+                })
                 .collect::<Vec<_>>()
         })
-        .filter(|context| !context.is_empty())
+        .filter(|reference| !reference.context.is_empty() || !reference.trailing_subject.is_empty())
         .collect()
+}
+
+fn contains_sequence(haystack: &[String], needle: &[String]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn numeric_contexts_match(source: &NumericReference, claim: &NumericReference) -> bool {
+    (!source.context.is_empty() && source.context == claim.context)
+        || (!source.trailing_subject.is_empty()
+            && (source.trailing_subject == claim.trailing_subject
+                || contains_sequence(&claim.context, &source.trailing_subject)))
+        || (!claim.trailing_subject.is_empty()
+            && contains_sequence(&source.context, &claim.trailing_subject))
+}
+
+fn constraint_reference(constraint: &NumericConstraint) -> NumericReference {
+    NumericReference {
+        context: constraint.context.clone(),
+        trailing_subject: constraint.trailing_subject.clone(),
+    }
 }
 
 fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
@@ -417,6 +469,7 @@ fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
         .flat_map(|item| numeric_mention_contexts(&item.exact_quote))
         .collect::<Vec<_>>();
     numeric_constraints(claim).into_iter().all(|constraint| {
+        let claim_reference = constraint_reference(&constraint);
         let matching_relation = source_constraints
             .iter()
             .filter(|source| {
@@ -425,7 +478,7 @@ fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
             .collect::<Vec<_>>();
         if matching_relation
             .iter()
-            .any(|source| source.context == constraint.context)
+            .any(|source| numeric_contexts_match(&constraint_reference(source), &claim_reference))
         {
             return true;
         }
@@ -436,10 +489,10 @@ fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
         {
             return false;
         }
-        constraint.context.is_empty()
+        (constraint.context.is_empty() && constraint.trailing_subject.is_empty())
             || !source_contexts
                 .iter()
-                .any(|source| source == &constraint.context)
+                .any(|source| numeric_contexts_match(source, &claim_reference))
     })
 }
 
@@ -759,6 +812,29 @@ fn actor_relation_segments(
         .collect()
 }
 
+fn qualifier_polarities(tokens: &[String], concept: &[&str]) -> HashSet<bool> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| concept.contains(&word.as_str()))
+        .map(|(index, _)| {
+            tokens[index.saturating_sub(6)..index]
+                .iter()
+                .enumerate()
+                .any(|(relative, word)| {
+                    let absolute = index.saturating_sub(6) + relative;
+                    let additive_not = word == "not"
+                        && tokens.get(absolute + 1).is_some_and(|next| next == "only");
+                    !additive_not
+                        && matches!(
+                            word.as_str(),
+                            "not" | "no" | "never" | "without" | "isn" | "aren" | "wasn" | "weren"
+                        )
+                })
+        })
+        .collect()
+}
+
 fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     let claim_words = claim
         .split(|character: char| !character.is_alphanumeric())
@@ -846,8 +922,10 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         &["only", "solely", "exclusively"],
         &["unless", "except", "excluding", "absent", "without"],
     ];
+    let condition_tokens = words(&condition);
     QUALIFIER_CONCEPTS.iter().all(|concept| {
-        if !contains_any_word(&condition, concept) {
+        let claim_polarities = qualifier_polarities(&condition_tokens, concept);
+        if claim_polarities.is_empty() {
             return true;
         }
         let source_relations = actor_relation_segments(evidence, &source_actors, concept);
@@ -855,11 +933,16 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
             source_relations.iter().any(|relation| {
                 tokens_mention_actor(relation, actor, label)
                     && tokens_contain_any(relation, concept)
+                    && !qualifier_polarities(relation, concept).is_disjoint(&claim_polarities)
             })
         };
-        !source_actors
-            .iter()
-            .any(|(actor, label)| supports_actor(actor, label))
+        let source_has_actor_qualifier = source_relations.iter().any(|relation| {
+            tokens_contain_any(relation, concept)
+                && source_actors
+                    .iter()
+                    .any(|(actor, label)| tokens_mention_actor(relation, actor, label))
+        });
+        !source_has_actor_qualifier
             || claimed_actors
                 .iter()
                 .all(|(actor, label)| supports_actor(actor, label))
