@@ -123,6 +123,7 @@ impl std::error::Error for PipelineFailure {}
 pub enum SummaryProfile {
     General,
     Story,
+    Contract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -505,11 +505,11 @@ wire result while standalone summaries adopt coherent General presentation.
 Status: current desktop runs have an explicit immutable summary profile. A
 summary profile controls application-level synthesis behavior and presentation;
 it is separate from both the document's type and the model runtime profile. The
-admitted values are `general` and `story`. Unknown, malformed, or missing values
+admitted values are `general`, `story` and `contract`. Unknown, malformed, or missing values
 fail at their typed boundary and never select a specialized profile or silently
 default a current run.
 
-The desktop presents General and Story before source admission and sends the
+The desktop presents General, Story and Contract before source admission and sends the
 explicit selection with the start command. General remains the initial choice.
 SQLite schema version 16 stores the selected value in
 `pipeline_run_summary_profiles` in the same transaction that first persists the
@@ -526,22 +526,66 @@ substitute a mutable current setting. A missing profile rejects synthesis,
 retry, continuation or workspace projection at the applicable boundary rather
 than permitting incompatible result reuse.
 
-Standalone General and Story runs share ingestion, normalization, bounded exact
+Standalone General, Story and Contract runs share ingestion, normalization, bounded exact
 source catalogs, response shape, durable citations, semantic verification,
 fallback, retry, continuation and rendering. General synthesis preserves the
 main message, important support and qualifications. Story synthesis instead
 asks for a readable synopsis that preserves sourced character identity and
 motivation, conflict, causal relationships, major events, chronology and the
 resolution or explicitly unresolved ending. It must not infer a motivation,
-internal state or causal link from sequence alone. The existing source-backed
-verification and modal-strengthening guard apply to both profiles; profile
-instructions do not weaken support requirements.
+internal state or causal link from sequence alone. Contract synthesis produces a
+plain-language overview organized around parties and roles, scope and term,
+obligations, conditions, exceptions, deadlines, amounts, confidentiality,
+termination and remedies when present. It must retain who acts, what they do,
+the recipient, trigger, qualifications, timing and amount without adding legal
+advice, enforceability conclusions or judgments about a term.
+
+Contract clause references are application-owned provenance. The parser derives
+a reference only when a cited exact source segment begins with a number token
+ending in a period and the clause title itself ends immediately before a line
+break. That structural boundary supports simple and dotted identifiers while
+leaving same-line forms ambiguous instead of guessing whether `1.5` is a clause
+or a decimal quantity. Wrapped title lines are normalized, including an
+initialism-only line such as `U.S.` followed by the remainder of the title. For
+admitted headings, the application appends one canonical, source-derived
+`[Section …]` suffix before deterministic claim identity is materialized only
+when the cited source segment contains exactly that one leading heading. A
+multi-clause segment keeps page provenance without an inferred section suffix.
+An identical suffix already returned by the model is not duplicated. Persisted
+Contract validation recomputes the applicable suffix from each unit's cited
+evidence, so model-authored title punctuation cannot suppress or replace
+application-owned provenance.
+For a complete short catalog containing at most six source segments where every
+segment contains exactly one distinct numbered clause at its beginning,
+Contract validation also requires the result to retain evidence from every
+supplied clause. A segment containing multiple numbered clauses is ineligible
+for this completeness guarantee, including when headings are separated by
+punctuation instead of whitespace, because its single evidence identity cannot
+prove which embedded clause supports a summary unit. Mixed, incomplete and
+larger catalogs retain normal materiality-based selection; the short-contract
+rule does not turn long summaries into clause inventories.
+The same short-contract coverage rule is checked again after semantic
+verification. If withholding an unsupported or ambiguous unit would remove a
+required clause, verification fails instead of publishing a partial Contract
+overview. Evidence membership alone does not establish coverage: every cited
+summary-unit and required-clause pair receives an isolated materiality check.
+A clause number, title or topic without an operative fact is not material
+coverage. A non-material or ambiguous pair downgrades the owning summary unit
+before the post-verification coverage check. Pair isolation costs one bounded
+verification request per cited pair, avoiding the observed cross-pair leakage
+from batched judgments.
+Contract may use up to two bounded validation repairs after its initial response
+when a required short clause is omitted. General and Story retain the existing
+single modal-strengthening repair. All profiles retain the existing source-backed
+semantic verification and modal-strengthening guard; profile instructions do
+not weaken support requirements. Paragraph grouping is an output instruction
+and semantic acceptance criterion, not a mechanically measured quality score.
 
 Connect admissions assign General explicitly in their existing acceptance
 transaction and retain the direct delivery-policy synthesis described above. A
-specialized profile paired with a Connect delivery policy is rejected rather
+Story or Contract paired with a Connect delivery policy is rejected rather
 than silently sent through a different summary behavior. This contract does not
-add Contract prompts, document-type inference, automatic suggestions,
+add document-type inference, automatic suggestions,
 classifier confidence, long-document sampling, trained adapters, a parallel
 synthesis framework or a renderer redesign.
 
