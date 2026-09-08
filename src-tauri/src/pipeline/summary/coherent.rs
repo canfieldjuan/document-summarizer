@@ -129,6 +129,7 @@ struct SourceCandidate {
     evidence: EvidenceItem,
     chunk_ordinal: u32,
     selection_window: Option<usize>,
+    drafting_claim: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1672,8 +1673,7 @@ fn prompt_and_schema(catalog: &SourceCatalog) -> Result<(String, Value), Pipelin
                 chunk_ordinal: candidate.chunk_ordinal,
                 page_number: candidate.evidence.source_span.page_start,
                 selection_window: candidate.selection_window,
-                source_claim: (candidate.evidence.claim_text != candidate.evidence.exact_quote)
-                    .then(|| candidate.evidence.claim_text.clone()),
+                source_claim: candidate.drafting_claim.clone(),
                 exact_quote: candidate.evidence.exact_quote.clone(),
             })
             .collect(),
@@ -2037,7 +2037,7 @@ fn source_catalog(
                     false,
                 )
             })?;
-            let source_claim = analyzed
+            let drafting_claim = analyzed
                 .into_iter()
                 .flat_map(|document| &document.chunks)
                 .flat_map(|chunk| &chunk.evidence)
@@ -2046,19 +2046,20 @@ fn source_catalog(
                         && evidence.exact_quote == source.exact_quote
                 })
                 .map(|evidence| evidence.claim_text.clone())
-                .unwrap_or_else(|| source.exact_quote.clone());
+                .filter(|claim| claim != &source.exact_quote);
             candidates.push(SourceCandidate {
                 request_id: format!("s{ordinal}"),
                 evidence: EvidenceItem {
                     evidence_id,
                     chunk_id: chunk.chunk_id.clone(),
                     block_id: source.block_id,
-                    claim_text: source_claim,
+                    claim_text: source.exact_quote.clone(),
                     exact_quote: source.exact_quote,
                     source_span: block.source.clone(),
                 },
                 chunk_ordinal: chunk.ordinal,
                 selection_window: None,
+                drafting_claim,
             });
         }
     }
@@ -2571,6 +2572,7 @@ mod tests {
             },
             chunk_ordinal: page - 1,
             selection_window: None,
+            drafting_claim: Some(format!("Source statement {page}.")),
         }
     }
 
@@ -2614,6 +2616,7 @@ mod tests {
                         &format!("story-evidence-{}", index + 1),
                         page,
                     );
+                    source.drafting_claim = None;
                     source.evidence.claim_text = (*line).to_string();
                     source.evidence.exact_quote = (*line).to_string();
                     source
@@ -2635,6 +2638,7 @@ mod tests {
                         &format!("contract-evidence-{}", index + 1),
                         page,
                     );
+                    source.drafting_claim = None;
                     source.evidence.claim_text = (*line).to_string();
                     source.evidence.exact_quote = (*line).to_string();
                     source
@@ -2802,13 +2806,30 @@ mod tests {
         };
         let enriched = source_catalog(&chunked, &normalized, Some(&analyzed)).unwrap();
         assert_eq!(
+            enriched
+                .candidates
+                .iter()
+                .map(|candidate| &candidate.evidence)
+                .collect::<Vec<_>>(),
+            catalog
+                .candidates
+                .iter()
+                .map(|candidate| &candidate.evidence)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
             enriched.candidates[0].evidence.claim_text,
-            "A concise extracted claim."
+            enriched.candidates[0].evidence.exact_quote
+        );
+        assert_eq!(
+            enriched.candidates[0].drafting_claim.as_deref(),
+            Some("A concise extracted claim.")
         );
         assert_eq!(
             enriched.candidates[1].evidence.claim_text,
             enriched.candidates[1].evidence.exact_quote
         );
+        assert!(enriched.candidates[1].drafting_claim.is_none());
         let (prompt, _) = prompt_and_schema(&enriched).unwrap();
         let prompt: Value = serde_json::from_str(&prompt).unwrap();
         assert_eq!(

@@ -2594,8 +2594,10 @@ complete
   both the application character budget and the runtime's exact preflight.
 - A matching extraction claim may accompany an exact quotation as drafting
   guidance. Exact quotation remains authoritative; unmatched source segments
-  carry no duplicate claim field. Selection requests never receive extraction
-  claims, so selection remains grounded in source text.
+  carry no duplicate claim field. The guidance is prompt-only; persisted
+  synthesis evidence retains the historical v6 exact-quote representation, so
+  existing `6.0.0` artifacts reconstruct unchanged. Selection requests never
+  receive extraction claims, so selection remains grounded in source text.
 - Selected sources retain their original selection-window identity. A General
   summary unit cannot combine windowed and unwindowed sources or sources from
   two windows. One bounded structural repair is allowed independently of the
