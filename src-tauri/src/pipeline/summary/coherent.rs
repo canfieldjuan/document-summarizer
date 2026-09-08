@@ -4234,16 +4234,19 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
         let mut ager = catalog().candidates[0].evidence.clone();
         ager.evidence_id = "ager".into();
         ager.exact_quote = "Agricultural employers (AGERs) and agricultural associations (AGAS) are subject to MSPA if they recruit a migrant worker.".into();
+        let mut combined_actors = catalog().candidates[0].evidence.clone();
+        combined_actors.evidence_id = "combined-actors".into();
+        combined_actors.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration. Agricultural employers (AGERs) and agricultural associations (AGAS) are subject to MSPA if they recruit a migrant worker.".into();
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
-        transport.exact_quote = "The employer must provide transportation from living quarters to the place of recruitment by the most economical means. Trip records are retained.".into();
+        transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
         let mut explicit_evaluation = catalog().candidates[0].evidence.clone();
         explicit_evaluation.evidence_id = "evaluation".into();
         explicit_evaluation.exact_quote =
@@ -4259,6 +4262,7 @@ mod tests {
             first,
             flc,
             ager,
+            combined_actors,
             transport,
             explicit_evaluation,
             sentence_boundary,
@@ -4284,6 +4288,21 @@ mod tests {
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
+                claim_id: "supported-formatted-integer".into(),
+                text: "The separate threshold is at most 1000.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-formatted-decimal".into(),
+                text: "The ratio is at least 1.5.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-formatted-decimal".into(),
+                text: "The ratio is more than 1.5.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-actors".into(),
                 text: "FLCs, AGERs, and AGAS are subject to MSPA if they recruit migrant workers."
                     .into(),
@@ -4299,17 +4318,17 @@ mod tests {
                 claim_id: "transferred-condition-full-names".into(),
                 text: "Farm labor contractors, agricultural employers, and agricultural associations are subject to MSPA if they recruit migrant workers for money or valuable consideration."
                     .into(),
-                evidence_ids: vec!["flc".into(), "ager".into()],
+                evidence_ids: vec!["combined-actors".into()],
             },
             CitedClaim {
                 claim_id: "supported-endpoints".into(),
-                text: "The employer must provide transportation from the living quarters to the place of recruitment by the most economical means. The policy identifies this route."
+                text: "The employer must provide transportation from housing to the work site each morning. The policy identifies this route."
                     .into(),
                 evidence_ids: vec!["transport".into()],
             },
             CitedClaim {
                 claim_id: "changed-endpoint".into(),
-                text: "The employer must provide transportation from the worksite to the worker's home."
+                text: "The employer must provide transportation from the workplace to the living quarters."
                     .into(),
                 evidence_ids: vec!["transport".into()],
             },
@@ -4338,33 +4357,60 @@ mod tests {
                 text: "The transport rule is essential for worker safety and health.".into(),
                 evidence_ids: vec!["transport".into()],
             },
+            CitedClaim {
+                claim_id: "already-ambiguous".into(),
+                text: "The transport rule is essential for worker safety and health.".into(),
+                evidence_ids: vec!["transport".into()],
+            },
         ];
         let mut verifications = claims
             .iter()
             .map(|claim| ClaimVerification {
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
-                verdict: ClaimVerdict::Supported,
+                verdict: if claim.claim_id == "already-ambiguous" {
+                    ClaimVerdict::Ambiguous
+                } else {
+                    ClaimVerdict::Supported
+                },
             })
             .collect::<Vec<_>>();
-        verifications[12].verdict = ClaimVerdict::Ambiguous;
 
         apply_semantic_fidelity_guards(&claims, &evidence, &mut verifications).unwrap();
 
-        assert_eq!(verifications[0].verdict, ClaimVerdict::Supported);
-        assert_eq!(verifications[1].verdict, ClaimVerdict::Unsupported);
-        assert_eq!(verifications[2].verdict, ClaimVerdict::Unsupported);
-        assert_eq!(verifications[3].verdict, ClaimVerdict::Supported);
-        assert_eq!(verifications[4].verdict, ClaimVerdict::Unsupported);
-        assert_eq!(verifications[5].verdict, ClaimVerdict::Unsupported);
-        assert_eq!(verifications[6].verdict, ClaimVerdict::Supported);
-        assert_eq!(verifications[7].verdict, ClaimVerdict::Unsupported);
-        assert_eq!(verifications[8].verdict, ClaimVerdict::Supported);
-        assert_eq!(verifications[9].verdict, ClaimVerdict::Supported);
-        assert_eq!(verifications[10].verdict, ClaimVerdict::Supported);
-        assert_eq!(verifications[11].verdict, ClaimVerdict::Unsupported);
+        let verdict = |claim_id: &str| {
+            verifications
+                .iter()
+                .find(|verification| verification.claim_id == claim_id)
+                .map(|verification| verification.verdict.clone())
+                .expect("every fixture claim should have a verdict")
+        };
+        for claim_id in [
+            "supported-boundary",
+            "supported-formatted-integer",
+            "supported-formatted-decimal",
+            "supported-actors",
+            "supported-endpoints",
+            "supported-evaluation",
+            "supported-after-negative-sentence",
+            "supported-modal",
+        ] {
+            assert_eq!(verdict(claim_id), ClaimVerdict::Supported, "{claim_id}");
+        }
+        for claim_id in [
+            "changed-boundary",
+            "broadened-enumeration",
+            "changed-formatted-decimal",
+            "transferred-condition",
+            "transferred-condition-full-names",
+            "changed-endpoint",
+            "strengthened-modal",
+            "invented-evaluation",
+        ] {
+            assert_eq!(verdict(claim_id), ClaimVerdict::Unsupported, "{claim_id}");
+        }
         assert_eq!(
-            verifications[12].verdict,
+            verdict("already-ambiguous"),
             ClaimVerdict::Ambiguous,
             "a deterministic guard must not promote or relabel an existing non-passing verdict"
         );

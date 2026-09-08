@@ -20,10 +20,25 @@ fn ends_with_words(words: &[String], suffix: &[&str]) -> bool {
 }
 
 fn numeric_value(word: &str) -> Option<String> {
-    word.chars()
-        .all(|character| character.is_ascii_digit())
-        .then(|| word.to_string())
-        .filter(|value| !value.is_empty())
+    let mut parts = word.split('.');
+    let integer = parts.next()?;
+    let fraction = parts.next();
+    if parts.next().is_some()
+        || integer.is_empty()
+        || !integer.chars().all(|character| character.is_ascii_digit())
+        || fraction.is_some_and(|value| {
+            value.is_empty() || !value.chars().all(|character| character.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    let integer = integer.trim_start_matches('0');
+    let integer = if integer.is_empty() { "0" } else { integer };
+    let fraction = fraction.map(|value| value.trim_end_matches('0'));
+    Some(match fraction {
+        Some("") | None => integer.to_string(),
+        Some(value) => format!("{integer}.{value}"),
+    })
 }
 
 fn numeric_relation(words: &[String], index: usize) -> Option<NumericRelation> {
@@ -96,10 +111,49 @@ fn semantic_clauses(text: &str) -> impl Iterator<Item = &str> {
         .filter(|clause| !clause.is_empty())
 }
 
+fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
+    let characters = text.chars().collect::<Vec<_>>();
+    let mut clauses = Vec::new();
+    let mut clause = Vec::new();
+    let mut token = String::new();
+    let flush_token = |token: &mut String, clause: &mut Vec<String>| {
+        if !token.is_empty() {
+            clause.push(std::mem::take(token));
+        }
+    };
+    for (index, character) in characters.iter().copied().enumerate() {
+        if character.is_alphanumeric() {
+            token.extend(character.to_lowercase());
+            continue;
+        }
+        let inside_number = token.chars().all(|value| value.is_ascii_digit())
+            && !token.is_empty()
+            && characters
+                .get(index + 1)
+                .is_some_and(|value| value.is_ascii_digit());
+        if character == ',' && inside_number {
+            continue;
+        }
+        if character == '.' && inside_number {
+            token.push('.');
+            continue;
+        }
+        flush_token(&mut token, &mut clause);
+        if matches!(character, '.' | '?' | '!' | ';' | '\n' | '\r') && !clause.is_empty() {
+            clauses.push(std::mem::take(&mut clause));
+        }
+    }
+    flush_token(&mut token, &mut clause);
+    if !clause.is_empty() {
+        clauses.push(clause);
+    }
+    clauses
+}
+
 fn numeric_constraints(text: &str) -> Vec<(String, NumericRelation)> {
-    semantic_clauses(text)
-        .flat_map(|clause| {
-            let tokens = words(clause);
+    comparison_clauses(text)
+        .into_iter()
+        .flat_map(|tokens| {
             tokens
                 .iter()
                 .enumerate()
@@ -192,6 +246,46 @@ fn directional_relations_in_clause(clause: &str) -> Vec<(Vec<String>, Vec<String
     relations
 }
 
+fn normalized_endpoint(words: &[String]) -> Vec<String> {
+    let modifier_start = words.iter().position(|word| {
+        matches!(
+            word.as_str(),
+            "each" | "every" | "daily" | "weekly" | "monthly" | "annually"
+        )
+    });
+    let words = &words[..modifier_start.unwrap_or(words.len())];
+    let mut normalized = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        let remaining = &words[index..];
+        if remaining.starts_with(&["living".into(), "quarters".into()]) {
+            normalized.push("housing".into());
+            index += 2;
+        } else if remaining.starts_with(&["work".into(), "site".into()]) {
+            normalized.push("worksite".into());
+            index += 2;
+        } else if remaining.starts_with(&["place".into(), "of".into(), "employment".into()]) {
+            normalized.push("worksite".into());
+            index += 3;
+        } else {
+            normalized.push(match words[index].as_str() {
+                "workplace" => "worksite".into(),
+                other => other.to_string(),
+            });
+            index += 1;
+        }
+    }
+    normalized
+}
+
+fn endpoints_match(left: &[String], right: &[String]) -> bool {
+    normalized_endpoint(left) == normalized_endpoint(right)
+}
+
+fn relations_match(left: &(Vec<String>, Vec<String>), right: &(Vec<String>, Vec<String>)) -> bool {
+    endpoints_match(&left.0, &right.0) && endpoints_match(&left.1, &right.1)
+}
+
 fn directional_relations(text: &str) -> Vec<(Vec<String>, Vec<String>)> {
     semantic_clauses(text)
         .flat_map(directional_relations_in_clause)
@@ -203,9 +297,21 @@ fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
         .iter()
         .flat_map(|item| directional_relations(&item.exact_quote))
         .collect::<Vec<_>>();
-    directional_relations(claim)
-        .into_iter()
-        .all(|relation| source_relations.iter().any(|source| source == &relation))
+    directional_relations(claim).into_iter().all(|relation| {
+        if source_relations
+            .iter()
+            .any(|source| relations_match(source, &relation))
+        {
+            return true;
+        }
+        let known_origin = source_relations.iter().any(|source| {
+            endpoints_match(&source.0, &relation.0) || endpoints_match(&source.1, &relation.0)
+        });
+        let known_destination = source_relations.iter().any(|source| {
+            endpoints_match(&source.0, &relation.1) || endpoints_match(&source.1, &relation.1)
+        });
+        !(known_origin && known_destination)
+    })
 }
 
 fn acronym(word: &str) -> Option<String> {
@@ -300,32 +406,27 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         })
         .unwrap_or(condition_index);
     let subject = &claim_words[..subject_end];
-    let evidence_acronyms = evidence
-        .iter()
-        .map(|item| acronym_set(&item.exact_quote))
-        .collect::<Vec<_>>();
-    let mut actors = subject
+    let subject_acronyms = subject
         .iter()
         .filter_map(|word| acronym(word))
         .collect::<HashSet<_>>();
-    actors.retain(|actor| {
-        !evidence_acronyms
-            .iter()
-            .all(|source| source.contains(actor))
-    });
     let defined_labels = evidence
         .iter()
         .flat_map(|item| defined_actor_labels(&item.exact_quote))
         .collect::<HashMap<_, _>>();
-    actors.extend(
-        defined_labels
-            .iter()
-            .filter(|(_, label)| contains_word_sequence(subject, label))
-            .map(|(actor, _)| actor.clone()),
-    );
+    let actors = defined_labels
+        .iter()
+        .filter(|(actor, label)| {
+            subject_acronyms.contains(*actor) || contains_word_sequence(subject, label)
+        })
+        .collect::<Vec<_>>();
     if actors.len() < 2 {
         return true;
     }
+    let source_clauses = evidence
+        .iter()
+        .flat_map(|item| semantic_clauses(&item.exact_quote))
+        .collect::<Vec<_>>();
     const QUALIFIER_CONCEPTS: &[&[&str]] = &[
         &[
             "compensation",
@@ -340,18 +441,19 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         &["unless", "except", "excluding", "absent", "without"],
     ];
     QUALIFIER_CONCEPTS.iter().all(|concept| {
-        !contains_any_word(&condition, concept)
-            || actors.iter().all(|actor| {
-                evidence
-                    .iter()
-                    .filter(|item| {
-                        acronym_set(&item.exact_quote).contains(actor)
-                            || defined_labels
-                                .get(actor)
-                                .is_some_and(|label| contains_owned_words(&item.exact_quote, label))
-                    })
-                    .any(|item| contains_any_word(&item.exact_quote, concept))
+        if !contains_any_word(&condition, concept) {
+            return true;
+        }
+        let supported = actors
+            .iter()
+            .map(|(actor, label)| {
+                source_clauses.iter().any(|clause| {
+                    (acronym_set(clause).contains(*actor) || contains_owned_words(clause, label))
+                        && contains_any_word(clause, concept)
+                })
             })
+            .collect::<Vec<_>>();
+        !supported.iter().any(|value| *value) || supported.iter().all(|value| *value)
     })
 }
 

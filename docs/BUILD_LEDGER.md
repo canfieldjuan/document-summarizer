@@ -2673,10 +2673,11 @@ complete
   relationships.
 - Coherent summary verification now applies a deterministic post-verdict veto
   before filtering or rendering. It checks numeric comparison inclusivity,
-  broadened family enumerations, `from`/`to` endpoints, conditions transferred
-  across source-defined actors, unsupported evaluative conclusions, and modal
-  strengthening. The check can only retain or downgrade a model verdict; it
-  never promotes an unsupported or ambiguous verdict.
+  broadened family enumerations, mechanically identifiable `from`/`to`
+  reversals or recombinations, conditions transferred across source-defined
+  actors, unsupported evaluative conclusions, and modal strengthening. The
+  check can only retain or downgrade a model verdict; it never promotes an
+  unsupported or ambiguous verdict.
 - Actor matching supports both source-defined acronyms and their full labels.
   This matters because the live synthesizer sometimes writes `farm labor
   contractors` instead of `FLCs`. Relation parsing stays within sentence or
@@ -2689,12 +2690,14 @@ complete
 
 **Acceptance evidence so far**:
 - Paired deterministic probes preserve equivalent `at most 500` wording,
-  source-supported actor grouping, unchanged transport endpoints, explicit
-  evaluations and qualified modality. Opposite probes reject an exclusive
-  `fewer than 500` boundary, broader kinship label, acronym and full-name actor
-  transfer, changed endpoint, invented evaluation and `should`-to-`must`
-  strengthening. Separate probes reject partial verdict coverage, mismatched
-  identities and unknown evidence, and preserve an already-ambiguous verdict.
+  comma/decimal number formatting, source-supported actor grouping, synonymous
+  transport endpoints with a trailing time modifier, explicit evaluations and
+  qualified modality. Opposite probes reject an exclusive `fewer than 500`
+  boundary, broader kinship label, acronym and full-name actor transfer (also
+  when distinct actor clauses share one evidence item), an endpoint reversal,
+  invented evaluation and `should`-to-`must` strengthening. Separate probes
+  reject partial verdict coverage, mismatched identities and unknown evidence,
+  and preserve an already-ambiguous verdict.
 - An end-to-end fixture makes the model return `supported` for an invented
   evaluative conclusion. The production verification boundary downgrades it,
   persists the auditable failed attempt and creates no summary artifact.
