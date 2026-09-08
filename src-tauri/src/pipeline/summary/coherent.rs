@@ -423,7 +423,8 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
     let text = text.trim_start();
     let number_end = text.find(char::is_whitespace)?;
     let raw_number = &text[..number_end];
-    if !raw_number.ends_with('.') && !raw_number.contains('.') {
+    let dotted_without_terminal = raw_number.contains('.') && !raw_number.ends_with('.');
+    if !raw_number.ends_with('.') && !dotted_without_terminal {
         return None;
     }
     let number = raw_number.trim_end_matches('.');
@@ -437,11 +438,16 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
     }
 
     let remainder = text[number_end..].trim_start();
-    let title_end = remainder
-        .find(". ")
-        .unwrap_or_else(|| remainder.trim_end_matches('.').len());
+    let body_delimiter = remainder.find(". ");
+    if dotted_without_terminal && body_delimiter.is_none() {
+        return None;
+    }
+    let title_end = body_delimiter.unwrap_or_else(|| remainder.trim_end_matches('.').len());
     let title = remainder[..title_end].trim();
-    if title.is_empty() || title.chars().count() > 120 {
+    if title.is_empty()
+        || title.chars().count() > 120
+        || (dotted_without_terminal && !title.chars().next().is_some_and(char::is_uppercase))
+    {
         return None;
     }
     Some(ContractClauseReference {
@@ -475,6 +481,23 @@ fn contract_clause_mention(
                 if parenthesized
                     .find(')')
                     .is_some_and(|end| parenthesized[..end].trim() == title)
+                {
+                    accurate = true;
+                } else {
+                    inaccurate_title = true;
+                }
+            } else if suffix
+                .chars()
+                .next()
+                .is_some_and(|character| matches!(character, '—' | '–' | '-' | ':' | ','))
+            {
+                let delimiter = suffix.chars().next().expect("checked delimiter must exist");
+                let titled = suffix[delimiter.len_utf8()..].trim_start();
+                if titled.starts_with(&title)
+                    && titled[title.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|character| !character.is_alphanumeric())
                 {
                     accurate = true;
                 } else {
@@ -557,6 +580,24 @@ fn required_short_contract_clauses(catalog: &SourceCatalog) -> Option<Vec<Requir
         .map(|clause| clause.reference.number.as_str())
         .collect::<HashSet<_>>();
     (distinct_numbers.len() == clauses.len()).then_some(clauses)
+}
+
+pub(super) fn required_short_contract_evidence_ids(
+    profile: SummaryProfile,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<Option<Vec<String>>, PipelineFailure> {
+    if profile != SummaryProfile::Contract {
+        return Ok(None);
+    }
+    Ok(
+        required_short_contract_clauses(&source_catalog(chunked, normalized)?).map(|clauses| {
+            clauses
+                .into_iter()
+                .map(|clause| clause.evidence_id)
+                .collect()
+        }),
+    )
 }
 
 fn contract_clause_reference_feedback(
@@ -1589,12 +1630,12 @@ mod tests {
             let units = if is_repair && self.corrects_repair {
                 json!([
                     {
-                        "text": "The parties and term are summarized together.",
-                        "source_ids": ["s1"]
+                        "text": "Northstar Bakery LLC engages Rowan Lee from October 1, 2026 through March 31, 2027, and the Consultant must deliver monthly inventory reports to the Client by the fifth business day of each month. The Client must pay the Consultant $2,400 per month within 15 days after receiving an accurate invoice.",
+                        "source_ids": ["s1", "s2", "s3"]
                     },
                     {
-                        "text": "Services, fees, expenses, confidentiality, and termination are summarized together.",
-                        "source_ids": ["s2", "s3", "s4", "s5", "s6"]
+                        "text": "The Client will reimburse the Consultant for pre-approved travel up to $500 per month, excluding meals. The Consultant must keep the Client's recipes confidential during the term and for two years afterward unless disclosure is required by law. Either party may terminate with 30 days written notice, and the Client may terminate immediately if the Consultant does not cure a material breach within 10 days after written notice.",
+                        "source_ids": ["s4", "s5", "s6"]
                     }
                 ])
             } else {
@@ -2082,10 +2123,26 @@ mod tests {
             "2026 budget guidance explains common contract fees."
         )
         .is_none());
+        assert!(leading_contract_clause_reference("1.5 million shares are authorized.").is_none());
+        assert!(leading_contract_clause_reference(
+            "4.2 expenses. Client will reimburse approved travel."
+        )
+        .is_none());
         assert!(text_mentions_contract_clause(
             "Section 4.2 (Expenses) covers travel.",
             &clause
         ));
+        for accurate in [
+            "Section 4.2 — Expenses covers travel.",
+            "Section 4.2: Expenses covers travel.",
+            "Section 4.2, Expenses covers travel.",
+            "Section 4.2 covers travel.",
+        ] {
+            assert_eq!(
+                contract_clause_mention(accurate, &clause),
+                ContractClauseMention::Accurate
+            );
+        }
         assert!(!text_mentions_contract_clause(
             "Section 4.20 covers travel.",
             &clause
@@ -2098,6 +2155,16 @@ mod tests {
             contract_clause_mention("Section 4.2 (Termination) covers travel.", &clause),
             ContractClauseMention::InaccurateTitle
         );
+        for inaccurate in [
+            "Section 4.2 — Termination covers travel.",
+            "Section 4.2: Termination covers travel.",
+            "Section 4.2, Termination covers travel.",
+        ] {
+            assert_eq!(
+                contract_clause_mention(inaccurate, &clause),
+                ContractClauseMention::InaccurateTitle
+            );
+        }
         assert_eq!(
             contract_clause_mention(
                 "Section 4.2 (Expenses) applies, not Section 4.2 (Termination).",
@@ -2251,14 +2318,28 @@ mod tests {
             .iter()
             .zip(CONTRACT_SOURCE_LINES)
             .all(|(candidate, source)| candidate.evidence.exact_quote == source));
+        assert_eq!(
+            required_short_contract_evidence_ids(SummaryProfile::Contract, &chunked, &normalized,)
+                .unwrap()
+                .unwrap()
+                .len(),
+            CONTRACT_SOURCE_LINES.len()
+        );
+        assert!(required_short_contract_evidence_ids(
+            SummaryProfile::General,
+            &chunked,
+            &normalized,
+        )
+        .unwrap()
+        .is_none());
         let response = json!({
             "units": [
                 {
-                    "text": "Section 1 identifies the parties and term; Sections 2 and 3 state the services and fees.",
+                    "text": "Northstar Bakery LLC engages Rowan Lee from October 1, 2026 through March 31, 2027. The Consultant must deliver monthly inventory reports to the Client by the fifth business day of each month, and the Client must pay the Consultant $2,400 per month within 15 days after an accurate invoice.",
                     "source_ids": ["s1", "s2", "s3"]
                 },
                 {
-                    "text": "Sections 4, 5, and 6 state the expense, confidentiality, and termination terms.",
+                    "text": "The Client will reimburse the Consultant for pre-approved travel up to $500 per month, excluding meals. The Consultant must keep the Client's recipes confidential during the term and for two years afterward unless disclosure is required by law. Either party may terminate with 30 days written notice, and the Client may terminate immediately if the Consultant does not cure a material breach within 10 days after written notice.",
                     "source_ids": ["s4", "s5", "s6"]
                 }
             ]
@@ -2475,6 +2556,34 @@ mod tests {
         assert!(!claims.is_empty());
         assert!(claims.len() <= maximum_summary_units(CONTRACT_SOURCE_LINES.len()));
         assert_eq!(evidence.len(), CONTRACT_SOURCE_LINES.len());
+        let required_evidence_ids = required_short_contract_clauses(&catalog)
+            .unwrap()
+            .into_iter()
+            .map(|clause| clause.evidence_id)
+            .collect::<Vec<_>>();
+        let mut verifications = claims
+            .iter()
+            .map(|claim| ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            })
+            .collect::<Vec<_>>();
+        let mut next_request_ordinal = 0;
+        super::apply_contract_material_coverage(
+            &runtime,
+            &claims,
+            &evidence,
+            &required_evidence_ids,
+            &mut verifications,
+            25,
+            &mut next_request_ordinal,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("every live Contract clause should contribute a material term");
+        assert!(verifications
+            .iter()
+            .all(|verification| verification.verdict == ClaimVerdict::Supported));
         println!(
             "CONTRACT_LIVE_SOURCE\n{}\nCONTRACT_LIVE_SUMMARY\n{}",
             CONTRACT_SOURCE_LINES.join("\n"),
@@ -2603,10 +2712,12 @@ mod tests {
         .expect("one repair should restore every short-contract clause");
         assert_eq!(claims.len(), 2);
         assert_eq!(evidence.len(), CONTRACT_SOURCE_LINES.len());
-        assert!(claims[0].text.ends_with("[Section 1]"));
+        assert!(claims[0]
+            .text
+            .ends_with("[Section 1; Section 2; Section 3]"));
         assert!(claims[1]
             .text
-            .ends_with("[Section 2; Section 3; Section 4; Section 5; Section 6]"));
+            .ends_with("[Section 4; Section 5; Section 6]"));
         let requests = runtime.requests();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].ordinal, 0);

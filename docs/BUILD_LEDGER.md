@@ -2434,7 +2434,9 @@ complete
   preserves an accurate reference already in the model prose or appends the
   exact numbered section before materializing deterministic claim identity.
   Dotted identifiers are bounded exactly, so `4.20` does not satisfy `4.2`, and
-  year-led prose is not treated as a clause heading.
+  year-led prose and a leading decimal phrase such as `1.5 million shares` are
+  not treated as clause headings. Titles in parentheses or after a dash, colon
+  or comma must match the source title.
 - A complete catalog of at most six distinct numbered clauses must retain
   evidence from every supplied clause. Mixed, incomplete and larger catalogs
   keep materiality-based selection. Contract gets at most two bounded repair
@@ -2444,6 +2446,13 @@ complete
   ambiguous summary units are withheld. If filtering removes a required clause,
   the run fails at verification rather than publishing the remaining partial
   Contract overview.
+- Evidence IDs alone do not satisfy short-contract coverage. Verification checks
+  each cited summary-unit and required-clause pair in isolation and requires an
+  operative fact, rather than a clause number, title or topic. A non-material or
+  ambiguous pair downgrades that summary unit before final coverage is rechecked.
+  This adds one bounded model request per cited pair for qualifying short
+  Contracts; longer, mixed, incomplete, General, Story and fallback results do
+  not enter this material-coverage path.
 - Connect remains explicitly General-only. A Contract run paired with a Connect
   delivery policy fails with `SUMMARY_PROFILE_DELIVERY_UNSUPPORTED` rather than
   silently using General behavior.
@@ -2452,17 +2461,20 @@ complete
 - Focused tests cover typed admission and unknown-value rejection, immutable
   persistence, source-aware profile dispatch, exact source binding, Contract
   refusal on Connect, clause-reference pass/fail boundaries, short-contract
-  coverage boundaries, post-verification filtering, and the bounded repair
-  limit.
-- `cargo test --all-targets` passed 411 library tests with 8 intentional
+  coverage boundaries, decimal and title false positives, isolated material-term
+  verdicts, post-verification filtering, and the bounded repair limit.
+- `cargo test --all-targets` passed 412 library tests with 9 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the
   TypeScript/Vite production build and `git diff --check` passed.
 - The authored six-clause example passes the real response parser, deterministic
   identity, modal-force checks, exact evidence materialization, clause-reference
   validation and short-contract coverage validation.
+- A dedicated live materiality probe rejects the topic-only statement `The
+  agreement addresses services and fees.` while accepting the sourced service
+  and payment terms. The isolated four-pair probe passed in 6.07 seconds.
 - The ignored live harness used `qwen3-30b-a3b:latest` through Ollama and passed
-  in 8.14 seconds. The run produced:
+  synthesis plus clause-by-clause materiality in 9.85 seconds. The run produced:
 
   > Northstar Bakery LLC, referred to as the Client, has engaged Rowan Lee,
   > referred to as the Consultant, for a term beginning on October 1, 2026, and

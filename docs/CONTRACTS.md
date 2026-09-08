@@ -544,7 +544,11 @@ Contract clause references are application-owned provenance. When a cited exact
 source segment starts with a simple or dotted numbered clause, the parser keeps
 an accurate reference already present in the prose or appends the exact number
 before deterministic claim identity is materialized. A year-led prose sentence
-is not treated as a clause, and a reference such as `4.20` cannot satisfy `4.2`.
+or a leading decimal phrase such as `1.5 million shares` is not treated as a
+clause, and a reference such as `4.20` cannot satisfy `4.2`. A title supplied in
+parentheses or after a dash, colon or comma must match the source title; a wrong
+title is sent through bounded repair instead of being accepted or masked by an
+appended number.
 For a complete short catalog containing at most six source segments where every
 segment begins with a distinct numbered clause, Contract validation also
 requires the result to retain evidence from every supplied clause. Mixed,
@@ -553,7 +557,13 @@ short-contract rule does not turn long summaries into clause inventories.
 The same short-contract coverage rule is checked again after semantic
 verification. If withholding an unsupported or ambiguous unit would remove a
 required clause, verification fails instead of publishing a partial Contract
-overview.
+overview. Evidence membership alone does not establish coverage: every cited
+summary-unit and required-clause pair receives an isolated materiality check.
+A clause number, title or topic without an operative fact is not material
+coverage. A non-material or ambiguous pair downgrades the owning summary unit
+before the post-verification coverage check. Pair isolation costs one bounded
+verification request per cited pair, avoiding the observed cross-pair leakage
+from batched judgments.
 Contract may use up to two bounded validation repairs after its initial response
 when a required short clause is omitted. General and Story retain the existing
 single modal-strengthening repair. All profiles retain the existing source-backed
