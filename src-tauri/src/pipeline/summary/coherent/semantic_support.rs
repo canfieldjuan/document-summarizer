@@ -337,13 +337,27 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
         .last()
         .is_some_and(|word| matches!(word.as_str(), "under" | "below"))
     {
-        return Some(NumericRelation::LessThan);
+        let prefix = &before[..before.len().saturating_sub(1)];
+        return Some(
+            if negation_present(&prefix[prefix.len().saturating_sub(4)..]) {
+                NumericRelation::AtLeast
+            } else {
+                NumericRelation::LessThan
+            },
+        );
     }
     if before
         .last()
         .is_some_and(|word| matches!(word.as_str(), "over" | "above"))
     {
-        return Some(NumericRelation::GreaterThan);
+        let prefix = &before[..before.len().saturating_sub(1)];
+        return Some(
+            if negation_present(&prefix[prefix.len().saturating_sub(4)..]) {
+                NumericRelation::AtMost
+            } else {
+                NumericRelation::GreaterThan
+            },
+        );
     }
     if before.last().is_some_and(|word| word == "exactly") {
         return Some(NumericRelation::Equal);
@@ -1262,7 +1276,7 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
             .filter(|clause| contains_any_word(clause, concept))
             .collect::<Vec<_>>();
         if evaluated_source_clauses.is_empty() {
-            return false;
+            continue;
         }
         let evaluated_relations = evaluated_source_clauses
             .iter()

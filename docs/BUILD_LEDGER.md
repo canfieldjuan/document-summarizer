@@ -2671,11 +2671,13 @@ complete
   condition to AGERs/AGASs. It correctly rejected a changed transportation
   endpoint. Model verdicts alone therefore do not enforce these exact
   relationships.
-- Coherent summary verification now applies a deterministic post-verdict veto
-  before filtering or rendering. It checks numeric comparison inclusivity,
+- Current coherent verification now applies a deterministic post-verdict veto
+  before filtering or rendering to either coherent summary units or the claim
+  ledger when fallback mode presents that ledger. It checks numeric comparison inclusivity,
   broadened family enumerations, mechanically identifiable `from`/`to`
   reversals or recombinations, conditions transferred across source-defined
-  actors, unsupported evaluative conclusions, and modal strengthening. The
+  actors, literal evaluative concepts transferred across named subjects or
+  polarity, and modal strengthening. The
   check can only retain or downgrade a model verdict; it never promotes an
   unsupported or ambiguous verdict.
 - Actor matching supports both source-defined acronyms and their full labels.
@@ -2683,7 +2685,9 @@ complete
   contractors` instead of `FLCs`. Actor qualifiers are bound to their source
   relationship inside compound sentences and when a condition leads the main
   actor clause. Evaluative conclusions are bound to every named subject when
-  the cited text makes that comparison mechanical. Numeric relations retain
+  both claim and source expose the same literal concept; nonliteral evaluative
+  paraphrases remain for the model verifier rather than being mechanically
+  rejected. Numeric relations retain
   signs, normalize bounded English cardinal wording, and bind an explicit
   constraint to its nearby subject/predicate when cited text exposes the same
   context. Directional parsing accepts both `from … to …` and `to … from …`
@@ -2699,7 +2703,8 @@ complete
   to their zero-prefixed value. Numeric subject comparison accepts a shared
   prefix only when both following tokens begin the predicate, so auxiliaries do
   not hide a named-plan transfer and entities with shared name prefixes remain
-  distinct. Explicit negation inverts inclusive word or symbol comparators.
+  distinct. Explicit negation inverts inclusive word or symbol comparators and
+  `under`/`over` forms.
   Leading conditions accept either a comma or `then`, and compound claims check
   every completed actor-condition relation. Directional
   checks reject a known reversed endpoint even when the other endpoint is new,
@@ -2723,7 +2728,8 @@ complete
   relations in one claim,
   synonymous transport endpoints including `home`, inverted source-route syntax,
   comparative `relative to`, additive, subject-bound, shared-subject,
-  shared-copula, transitive, compound and negative evaluations, and qualified modality.
+  shared-copula, transitive, compound and negative evaluations, a nonliteral
+  safety paraphrase left to model verification, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a removed negative sign,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
@@ -2731,18 +2737,23 @@ complete
   another actor's qualifier, including a leading condition), an active or
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
-  affirmative, an explicitly negated inclusive comparator, a leading-decimal
+  affirmative, explicitly negated inclusive and `under` comparators, a leading-decimal
   bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
   prefix, comma-less and compound actor-condition transfers, endpoint reversal from
   either source-route syntax even with one newly worded endpoint, an evaluation
   moved between named procedures including shared-copula and transitive wording, removed
-  evaluation negation, an invented evaluation, and `should`-to-`must`
+  evaluation negation, and `should`-to-`must`
   strengthening. Separate probes
   reject partial verdict coverage, mismatched identities and unknown evidence,
   and preserve an already-ambiguous verdict.
-- An end-to-end fixture makes the model return `supported` for an invented
-  evaluative conclusion. The production verification boundary downgrades it,
+- An end-to-end fixture makes the model return `supported` for a mechanically
+  unsupported broadened family category. The production verification boundary downgrades it,
   persists the auditable failed attempt and creates no summary artifact.
+- A separate end-to-end fallback fixture makes the model return `supported` for
+  a broadened ledger claim, forces the verified-ledger presentation, and proves
+  the guard downgrades and omits that claim while rendering the remaining
+  supported ledger claims. An ordinary fallback control still retains its
+  supported source claims.
 - `cargo test --all-targets` passed 428 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the

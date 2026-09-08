@@ -1063,7 +1063,7 @@ fn verify(
     let ledger_prompt = verification_prompt(&synthesized.claims, &ledger_evidence)?;
     let verification_claim_budget = verification_claim_budget(synthesized, normalized)?;
     let mut next_request_ordinal = 0;
-    let claim_verifications = classify_claim_support(
+    let mut claim_verifications = classify_claim_support(
         runtime,
         &ledger_prompt,
         &synthesized.claims,
@@ -1072,6 +1072,16 @@ fn verify(
         &mut next_request_ordinal,
         control,
     )?;
+    if matches!(
+        synthesized.presentation_mode,
+        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList
+    ) {
+        coherent::apply_semantic_fidelity_guards(
+            &synthesized.claims,
+            &ledger_evidence,
+            &mut claim_verifications,
+        )?;
+    }
     cancellation_checkpoint(control, PipelineStage::Verify)?;
     let claims = synthesized
         .claims
@@ -4998,12 +5008,14 @@ mod tests {
         ShortfallThenSupported,
         ShortfallThenUnsupported,
         ModelSupportsSemanticallyInvalidSummary,
+        ModelSupportsSemanticallyInvalidFallback,
     }
 
     struct VerificationFixtureRuntime {
         mode: VerificationFixtureMode,
         verification_calls: AtomicUsize,
         synthesis_calls: AtomicUsize,
+        analysis_mutations: AtomicUsize,
     }
 
     struct LowSynthesisContextRuntime {
@@ -5122,6 +5134,7 @@ mod tests {
                 mode,
                 verification_calls: AtomicUsize::new(0),
                 synthesis_calls: AtomicUsize::new(0),
+                analysis_mutations: AtomicUsize::new(0),
             }
         }
     }
@@ -5299,7 +5312,8 @@ mod tests {
                                 VerificationFixtureMode::AllUnsupported => {
                                     ClaimVerdict::Unsupported
                                 }
-                                VerificationFixtureMode::ModelSupportsSemanticallyInvalidSummary => {
+                                VerificationFixtureMode::ModelSupportsSemanticallyInvalidSummary
+                                | VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback => {
                                     ClaimVerdict::Supported
                                 }
                                 VerificationFixtureMode::LedgerUnsupportedSummarySupported
@@ -5345,6 +5359,58 @@ mod tests {
                     serde_json::to_string(&RawVerificationResponse { verdicts })
                         .expect("verification fixture response should serialize")
                 }
+                ModelOutputFormat::JsonSchema { name, .. }
+                    if name == pages::PARAPHRASE_SCHEMA
+                        && matches!(
+                            self.mode,
+                            VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback
+                        ) =>
+                {
+                    if self.analysis_mutations.fetch_add(1, Ordering::SeqCst) == 0 {
+                        json!({
+                            "claim_text":
+                                "A family member of the owner qualifies for the exemption."
+                        })
+                        .to_string()
+                    } else {
+                        fixture_model_output(request)
+                    }
+                }
+                ModelOutputFormat::JsonSchema { name, .. }
+                    if name == ANALYSIS_SCHEMA_NAME
+                        && matches!(
+                            self.mode,
+                            VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback
+                        ) =>
+                {
+                    let prompt: AnalysisPrompt = serde_json::from_str(&request.user_prompt)
+                        .expect("analysis fixture prompt should deserialize");
+                    let mutate_first = self.analysis_mutations.fetch_add(1, Ordering::SeqCst) == 0;
+                    let evidence = prompt
+                        .quote_candidates
+                        .into_iter()
+                        .take(prompt.maximum_evidence)
+                        .enumerate()
+                        .map(|(index, candidate)| {
+                            let claim_text = if mutate_first && index == 0 {
+                                "A family member of the owner qualifies for the exemption."
+                                    .to_string()
+                            } else {
+                                candidate
+                                    .exact_quote
+                                    .chars()
+                                    .take(MAX_ANALYSIS_CLAIM_CHARACTERS)
+                                    .collect()
+                            };
+                            RawEvidenceItem {
+                                quote_id: candidate.quote_id,
+                                claim_text,
+                            }
+                        })
+                        .collect();
+                    serde_json::to_string(&RawEvidenceResponse { evidence })
+                        .expect("analysis fixture response should serialize")
+                }
                 ModelOutputFormat::JsonSchema { name, .. } if coherent::uses_schema_name(name) => {
                     self.synthesis_calls.fetch_add(1, Ordering::SeqCst);
                     if matches!(
@@ -5353,7 +5419,7 @@ mod tests {
                     ) {
                         json!({
                             "units": [{
-                                "text": "This finding is essential for safety.",
+                                "text": "A family member of the owner qualifies for the exemption.",
                                 "source_ids": ["s1"]
                             }]
                         })
@@ -5381,6 +5447,23 @@ mod tests {
                 model_id: self.model_id().to_string(),
                 request_attempts: Vec::new(),
             })
+        }
+
+        fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            if request.stage == PipelineStage::Synthesize
+                && matches!(
+                    self.mode,
+                    VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback
+                )
+            {
+                return Err(ModelRuntimeFailure {
+                    code: "MODEL_CONTEXT_EXCEEDED".to_string(),
+                    message: "fixture forces the verified-ledger fallback".to_string(),
+                    recoverable: false,
+                    request_attempts: Vec::new(),
+                });
+            }
+            Ok(())
         }
 
         fn health(&self) -> Result<(), ModelRuntimeFailure> {
@@ -9779,7 +9862,7 @@ mod tests {
         );
 
         let error = summarize_chunked_document(&mut conn, &runtime, &run_id)
-            .expect_err("an unsupported evaluative conclusion must not be published");
+            .expect_err("a mechanically unsupported relationship must not be published");
 
         assert_eq!(error.code(), "NO_SEMANTICALLY_SUPPORTED_CLAIMS");
         let verified = get_verification_attempt(&conn, &run_id, 0)
@@ -9797,6 +9880,41 @@ mod tests {
             .any(|warning| warning.code == "SEMANTIC_CLAIMS_WITHHELD"));
         assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
         assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn fallback_ledger_applies_semantic_guard_before_rendering() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = VerificationFixtureRuntime::new(
+            VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback,
+        );
+
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("other supported ledger claims should preserve a fallback summary");
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+        let unsupported = synthesized
+            .claims
+            .iter()
+            .zip(&verified.claim_verifications)
+            .find(|(claim, _)| claim.text.contains("A family member of the owner"))
+            .expect("the fixture must produce the model-supported broadened ledger claim");
+
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert_eq!(unsupported.1.verdict, ClaimVerdict::Unsupported);
+        assert!(verified
+            .claims
+            .iter()
+            .all(|claim| claim.claim_id != unsupported.0.claim_id));
+        assert!(!completed
+            .summary
+            .text
+            .contains("A family member of the owner"));
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
