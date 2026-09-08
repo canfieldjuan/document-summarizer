@@ -412,15 +412,12 @@ struct RequiredContractClause {
     reference: ContractClauseReference,
 }
 
-fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReference> {
-    let text = text.trim_start();
+fn contract_clause_number_token(text: &str) -> Option<(&str, usize)> {
     let number_end = text.find(char::is_whitespace)?;
     let raw_number = &text[..number_end];
-    if !raw_number.ends_with('.') {
-        return None;
-    }
-    let number = raw_number.trim_end_matches('.');
+    let number = raw_number.strip_suffix('.')?;
     if number.is_empty()
+        || number.ends_with('.')
         || number.len() > 24
         || !number.split('.').all(|part| {
             !part.is_empty()
@@ -430,6 +427,12 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
     {
         return None;
     }
+    Some((number, number_end))
+}
+
+fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReference> {
+    let text = text.trim_start();
+    let (number, number_end) = contract_clause_number_token(text)?;
 
     let remainder = text[number_end..].trim_start();
     let title_end = remainder.char_indices().find_map(|(index, character)| {
@@ -476,7 +479,10 @@ fn contract_clause_references_in_segment(text: &str) -> Option<Vec<ContractClaus
     let text = text.trim_start();
     let mut references = Vec::new();
     for (index, character) in text.char_indices() {
-        if character.is_ascii_digit() && contract_clause_candidate_start(text, index) {
+        if character.is_ascii_digit()
+            && contract_clause_candidate_start(text, index)
+            && contract_clause_number_token(&text[index..]).is_some()
+        {
             references.push(leading_contract_clause_reference(&text[index..])?);
         }
     }
@@ -503,10 +509,10 @@ fn contract_clause_candidate_start(text: &str, index: usize) -> bool {
         return before[..whitespace_start]
             .chars()
             .next_back()
-            .is_some_and(|character| matches!(character, '.' | ';'));
+            .is_some_and(|character| !character.is_alphanumeric());
     }
     if previous != '.' {
-        return previous == ';';
+        return !previous.is_alphanumeric();
     }
 
     let before_period = &before[..before.len() - 1];
@@ -2252,6 +2258,22 @@ mod tests {
             "2. Territory in U.S. Client Shall Comply With Export Restrictions.",
         ] {
             assert!(leading_contract_clause_reference(ambiguous_same_line).is_none());
+        }
+        assert_eq!(
+            sole_leading_contract_clause_reference(
+                "1. Term.\n30 days' written notice is required."
+            ),
+            Some(ContractClauseReference {
+                number: "1".into(),
+                title: "Term".into(),
+            })
+        );
+        for ambiguous_later_heading in [
+            "1. Parties.\nClient details follow:2. Services.\nConsultant shall report.",
+            "1. Parties.\nClient details follow: 2. Services.\nConsultant shall report.",
+            "1. Parties.\nClient details follow/2. Services.\nConsultant shall report.",
+        ] {
+            assert!(sole_leading_contract_clause_reference(ambiguous_later_heading).is_none());
         }
 
         let catalog = contract_catalog();
