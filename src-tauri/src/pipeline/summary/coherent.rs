@@ -2247,6 +2247,10 @@ mod tests {
             .expect("the six-clause fixture should require complete short-contract coverage");
         assert_eq!(required.len(), MAX_REQUIRED_SHORT_CONTRACT_CLAUSES);
 
+        let mut empty = contract_catalog();
+        empty.candidates.clear();
+        assert!(required_short_contract_clauses(&empty).is_none());
+
         let mut single_dotted_clause = contract_catalog();
         single_dotted_clause.candidates.truncate(1);
         single_dotted_clause.candidates[0].evidence.exact_quote =

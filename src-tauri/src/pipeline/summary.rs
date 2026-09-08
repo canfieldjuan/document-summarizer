@@ -9197,6 +9197,12 @@ mod tests {
         ));
         assert!(contract_material_coverage_request(&[], 0, TEST_GENERATION_SEED).is_err());
         assert!(contract_material_coverage_request(
+            &vec![pair("claim", "evidence"); MAX_CONTRACT_MATERIAL_COVERAGE_PAIRS],
+            0,
+            TEST_GENERATION_SEED,
+        )
+        .is_ok());
+        assert!(contract_material_coverage_request(
             &vec![pair("claim", "evidence"); MAX_CONTRACT_MATERIAL_COVERAGE_PAIRS + 1],
             0,
             TEST_GENERATION_SEED,
