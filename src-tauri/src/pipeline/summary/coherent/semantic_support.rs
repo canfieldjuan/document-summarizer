@@ -347,7 +347,14 @@ fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
         let next_is_digit = characters
             .get(index + 1)
             .is_some_and(|value| value.is_ascii_digit());
-        if matches!(character, '+' | '-' | '−') && token.is_empty() && next_is_digit {
+        let next_is_leading_decimal = characters.get(index + 1).is_some_and(|value| *value == '.')
+            && characters
+                .get(index + 2)
+                .is_some_and(|value| value.is_ascii_digit());
+        if matches!(character, '+' | '-' | '−')
+            && token.is_empty()
+            && (next_is_digit || next_is_leading_decimal)
+        {
             token.push(if character == '+' { '+' } else { '-' });
             continue;
         }
@@ -360,7 +367,11 @@ fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
         if character == ',' && inside_number {
             continue;
         }
-        if character == '.' && inside_number {
+        let leading_decimal = matches!(token.as_str(), "" | "+" | "-") && next_is_digit;
+        if character == '.' && (inside_number || leading_decimal) {
+            if leading_decimal {
+                token.push('0');
+            }
             token.push('.');
             continue;
         }
@@ -464,8 +475,27 @@ fn contains_sequence(haystack: &[String], needle: &[String]) -> bool {
             .any(|window| window == needle)
 }
 
+fn strip_leading_article(context: &[String]) -> &[String] {
+    if context
+        .first()
+        .is_some_and(|word| matches!(word.as_str(), "a" | "an" | "the"))
+    {
+        &context[1..]
+    } else {
+        context
+    }
+}
+
 fn numeric_contexts_match(source: &NumericReference, claim: &NumericReference) -> bool {
+    let source_context = strip_leading_article(&source.context);
+    let claim_context = strip_leading_article(&claim.context);
+    let shared_subject_prefix = source_context
+        .iter()
+        .zip(claim_context)
+        .take_while(|(source, claim)| source == claim)
+        .count();
     (!source.context.is_empty() && source.context == claim.context)
+        || shared_subject_prefix >= 2
         || (!source.trailing_subject.is_empty()
             && (source.trailing_subject == claim.trailing_subject
                 || contains_sequence(&claim.context, &source.trailing_subject)))
@@ -653,6 +683,7 @@ fn normalized_endpoint(words: &[String]) -> Vec<String> {
         } else {
             normalized.push(match words[index].as_str() {
                 "workplace" => "worksite".into(),
+                "home" => "housing".into(),
                 other => other.to_string(),
             });
             index += 1;
@@ -687,13 +718,23 @@ fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
         {
             return true;
         }
-        let known_origin = source_relations.iter().any(|source| {
-            endpoints_match(&source.0, &relation.0) || endpoints_match(&source.1, &relation.0)
-        });
-        let known_destination = source_relations.iter().any(|source| {
-            endpoints_match(&source.0, &relation.1) || endpoints_match(&source.1, &relation.1)
-        });
-        !(known_origin && known_destination)
+        let origin_is_source_origin = source_relations
+            .iter()
+            .any(|source| endpoints_match(&source.0, &relation.0));
+        let origin_is_source_destination = source_relations
+            .iter()
+            .any(|source| endpoints_match(&source.1, &relation.0));
+        let destination_is_source_origin = source_relations
+            .iter()
+            .any(|source| endpoints_match(&source.0, &relation.1));
+        let destination_is_source_destination = source_relations
+            .iter()
+            .any(|source| endpoints_match(&source.1, &relation.1));
+        let reversed_known_endpoint = (origin_is_source_destination && !origin_is_source_origin)
+            || (destination_is_source_origin && !destination_is_source_destination);
+        let both_endpoints_known = (origin_is_source_origin || origin_is_source_destination)
+            && (destination_is_source_origin || destination_is_source_destination);
+        !(reversed_known_endpoint || both_endpoints_known)
     })
 }
 
@@ -857,16 +898,25 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
     };
     let leading_condition = condition_index == 0;
     let (subject_words, condition) = if leading_condition {
-        let Some(comma) = claim.find(',') else {
+        if let Some(comma) = claim.find(',') {
+            (
+                claim[comma + 1..]
+                    .split(|character: char| !character.is_alphanumeric())
+                    .filter(|word| !word.is_empty())
+                    .collect::<Vec<_>>(),
+                claim[..comma].to_string(),
+            )
+        } else if let Some(then) = claim_words
+            .iter()
+            .position(|word| word.eq_ignore_ascii_case("then"))
+        {
+            (
+                claim_words[then + 1..].to_vec(),
+                claim_words[..then].join(" "),
+            )
+        } else {
             return true;
-        };
-        (
-            claim[comma + 1..]
-                .split(|character: char| !character.is_alphanumeric())
-                .filter(|word| !word.is_empty())
-                .collect::<Vec<_>>(),
-            claim[..comma].to_string(),
-        )
+        }
     } else {
         (
             claim_words[..condition_index].to_vec(),
@@ -1008,6 +1058,31 @@ fn is_evaluation_link(word: &str) -> bool {
     )
 }
 
+fn evaluation_subject_start(tokens: &[String], linking_index: usize) -> usize {
+    let Some(previous_evaluation) = tokens[..linking_index]
+        .iter()
+        .rposition(|word| is_evaluative_word(word))
+    else {
+        return 0;
+    };
+    let Some(conjunction) = tokens[previous_evaluation + 1..linking_index]
+        .iter()
+        .rposition(|word| matches!(word.as_str(), "and" | "or" | "but" | "while" | "whereas"))
+    else {
+        return 0;
+    };
+    let subject_start = previous_evaluation + conjunction + 2;
+    if subject_start < linking_index {
+        return subject_start;
+    }
+    tokens[..previous_evaluation]
+        .iter()
+        .rposition(|word| is_evaluation_link(word))
+        .map_or(0, |previous_link| {
+            evaluation_subject_start(tokens, previous_link)
+        })
+}
+
 fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelation> {
     let tokens = original_words(clause)
         .into_iter()
@@ -1025,19 +1100,7 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
             let linking_index = tokens[..concept_index]
                 .iter()
                 .rposition(|word| is_evaluation_link(word))?;
-            let previous_evaluation = tokens[..linking_index]
-                .iter()
-                .rposition(|word| is_evaluative_word(word));
-            let subject_start = previous_evaluation
-                .and_then(|previous| {
-                    tokens[previous + 1..linking_index]
-                        .iter()
-                        .rposition(|word| {
-                            matches!(word.as_str(), "and" | "or" | "but" | "while" | "whereas")
-                        })
-                        .map(|relative| previous + relative + 2)
-                })
-                .unwrap_or(0);
+            let subject_start = evaluation_subject_start(&tokens, linking_index);
             let mut subject = tokens[subject_start..linking_index].to_vec();
             if subject.first().is_some_and(|word| {
                 matches!(

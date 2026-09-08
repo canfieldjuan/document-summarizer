@@ -2695,7 +2695,12 @@ complete
   negation polarity. Shared negation normalization covers expanded and contracted
   auxiliary forms, and numeric comparator context ignores optional articles.
   Relation parsing stays within sentence or clause boundaries so a negation or
-  endpoint in one sentence cannot affect the next.
+  endpoint in one sentence cannot affect the next. Leading decimals normalize
+  to their zero-prefixed value. Numeric subject comparison uses a two-token
+  prefix after a leading article, so auxiliaries do not hide a named-plan
+  transfer. Leading conditions accept either a comma or `then`, directional
+  checks reject a known reversed endpoint even when the other endpoint is new,
+  and shared-copula evaluations inherit their prior concrete subject.
 - Verification artifacts now use version `8.0.0`. The previous coherent
   `7.0.0` contract remains readable, while new results cannot be mistaken for
   artifacts produced without the deterministic veto. Synthesis, summary,
@@ -2708,10 +2713,11 @@ complete
   grouping, a correctly qualified single actor, and a correctly bound leading
   condition, including a source-supported contracted negative condition. They
   also preserve a contracted inclusive numeric bound, an active bound paraphrased
-  with its correct passive `by …` subject, synonymous transport endpoints with a
-  trailing time modifier, inverted source-route syntax, comparative `relative
-  to`, additive, subject-bound, shared-subject, compound and negative evaluations,
-  and qualified modality.
+  with its correct passive `by …` subject, a harmless auxiliary change on the
+  same named plan, a leading decimal, comma- and `then`-delimited conditions,
+  synonymous transport endpoints including `home`, inverted source-route syntax,
+  comparative `relative to`, additive, subject-bound, shared-subject,
+  shared-copula, compound and negative evaluations, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a removed negative sign,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
@@ -2719,9 +2725,12 @@ complete
   another actor's qualifier, including a leading condition), an active or
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
-  affirmative, an endpoint reversal from either source-route syntax, an
-  evaluation moved between named procedures, removed evaluation negation, an
-  invented evaluation, and `should`-to-`must` strengthening. Separate probes
+  affirmative, a leading-decimal bound reversal, a named-plan transfer hidden by
+  an auxiliary, comma-less actor-condition transfer, endpoint reversal from
+  either source-route syntax even with one newly worded endpoint, an evaluation
+  moved between named procedures including shared-copula wording, removed
+  evaluation negation, an invented evaluation, and `should`-to-`must`
+  strengthening. Separate probes
   reject partial verdict coverage, mismatched identities and unknown evidence,
   and preserve an already-ambiguous verdict.
 - An end-to-end fixture makes the model return `supported` for an invented

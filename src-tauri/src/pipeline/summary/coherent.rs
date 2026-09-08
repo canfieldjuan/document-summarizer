@@ -4234,7 +4234,7 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. Plan A accepts at most 900 applications. Plan B accepts 300 applications.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
@@ -4253,6 +4253,9 @@ mod tests {
         let mut contracted_bound = catalog().candidates[1].evidence.clone();
         contracted_bound.evidence_id = "contracted-bound".into();
         contracted_bound.exact_quote = "The limit isn't more than 500 units.".into();
+        let mut leading_decimal = catalog().candidates[0].evidence.clone();
+        leading_decimal.evidence_id = "leading-decimal".into();
+        leading_decimal.exact_quote = "The fraction is at least 0.5.".into();
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
         transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
@@ -4291,6 +4294,11 @@ mod tests {
         additive_evaluation.evidence_id = "additive-evaluation".into();
         additive_evaluation.exact_quote =
             "Procedure F is not only essential but also effective.".into();
+        let mut shared_copula = catalog().candidates[0].evidence.clone();
+        shared_copula.evidence_id = "shared-copula".into();
+        shared_copula.exact_quote =
+            "Procedure G is essential and is effective. Procedure H is documented separately."
+                .into();
         let mut modal = catalog().candidates[0].evidence.clone();
         modal.evidence_id = "modal".into();
         modal.exact_quote = "The interpreter should retain the operating context.".into();
@@ -4302,6 +4310,7 @@ mod tests {
             coordinated_actors,
             negative_actor_condition,
             contracted_bound,
+            leading_decimal,
             transport,
             inverted_transport,
             explicit_evaluation,
@@ -4313,6 +4322,7 @@ mod tests {
             sentence_boundary,
             comparative_relative,
             additive_evaluation,
+            shared_copula,
             modal,
         ];
 
@@ -4370,6 +4380,16 @@ mod tests {
                 claim_id: "changed-contracted-boundary".into(),
                 text: "The limit is more than 500 units.".into(),
                 evidence_ids: vec!["contracted-bound".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-leading-decimal".into(),
+                text: "The fraction is at least .5.".into(),
+                evidence_ids: vec!["leading-decimal".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-leading-decimal".into(),
+                text: "The fraction is less than .5.".into(),
+                evidence_ids: vec!["leading-decimal".into()],
             },
             CitedClaim {
                 claim_id: "broadened-enumeration".into(),
@@ -4437,6 +4457,16 @@ mod tests {
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
+                claim_id: "supported-auxiliary-bound-subject".into(),
+                text: "Plan A can accept at most 900 applications.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-auxiliary-bound-subject".into(),
+                text: "Plan B can accept at most 900 applications.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-actors".into(),
                 text: "FLCs, AGERs, and AGAS are subject to MSPA if they recruit migrant workers."
                     .into(),
@@ -4481,6 +4511,16 @@ mod tests {
                 evidence_ids: vec!["combined-actors".into()],
             },
             CitedClaim {
+                claim_id: "supported-leading-then-condition".into(),
+                text: "If they recruit workers for money then FLCs are subject to MSPA.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-leading-then-condition".into(),
+                text: "If they recruit workers for money then AGERs are subject to MSPA.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-negative-actor-condition".into(),
                 text: "FLCs are subject to MSPA if they do not recruit for compensation."
                     .into(),
@@ -4514,6 +4554,18 @@ mod tests {
                 text: "The employer must transport workers from the workplace to living quarters."
                     .into(),
                 evidence_ids: vec!["inverted-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-home-endpoint".into(),
+                text: "The employer must provide transportation from home to the workplace."
+                    .into(),
+                evidence_ids: vec!["transport".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-one-known-endpoint".into(),
+                text: "The employer must provide transportation from the workplace to home."
+                    .into(),
+                evidence_ids: vec!["transport".into()],
             },
             CitedClaim {
                 claim_id: "supported-evaluation".into(),
@@ -4566,6 +4618,16 @@ mod tests {
                 evidence_ids: vec!["additive-evaluation".into()],
             },
             CitedClaim {
+                claim_id: "supported-shared-copula-evaluation".into(),
+                text: "Procedure G is effective.".into(),
+                evidence_ids: vec!["shared-copula".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-shared-copula-evaluation".into(),
+                text: "Procedure H is effective.".into(),
+                evidence_ids: vec!["shared-copula".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-modal".into(),
                 text: "The interpreter should retain the operating context.".into(),
                 evidence_ids: vec!["modal".into()],
@@ -4614,6 +4676,7 @@ mod tests {
             "supported-symbol-upper-boundary",
             "supported-symbol-lower-boundary",
             "supported-contracted-boundary",
+            "supported-leading-decimal",
             "supported-formatted-integer",
             "supported-formatted-decimal",
             "supported-negative-boundary",
@@ -4621,12 +4684,15 @@ mod tests {
             "supported-minimum-of",
             "supported-bound-subject",
             "supported-passive-bound-subject",
+            "supported-auxiliary-bound-subject",
             "supported-actors",
             "supported-single-actor-condition",
             "supported-leading-condition",
+            "supported-leading-then-condition",
             "supported-negative-actor-condition",
             "supported-endpoints",
             "supported-inverted-source-endpoints",
+            "supported-home-endpoint",
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
@@ -4635,6 +4701,7 @@ mod tests {
             "supported-after-negative-sentence",
             "supported-comparative-relative",
             "supported-additive-evaluation",
+            "supported-shared-copula-evaluation",
             "supported-modal",
         ] {
             assert_eq!(verdict(claim_id), ClaimVerdict::Supported, "{claim_id}");
@@ -4645,22 +4712,27 @@ mod tests {
             "changed-symbol-upper-boundary",
             "changed-symbol-lower-boundary",
             "changed-contracted-boundary",
+            "changed-leading-decimal",
             "broadened-enumeration",
             "changed-formatted-decimal",
             "changed-negative-boundary",
             "transferred-bound-subject",
             "transferred-passive-bound-subject",
             "transferred-article-bound-subject",
+            "transferred-auxiliary-bound-subject",
             "transferred-condition",
             "transferred-condition-full-names",
             "transferred-condition-coordinated",
             "transferred-single-actor-condition",
             "transferred-leading-condition",
+            "transferred-leading-then-condition",
             "changed-negative-actor-condition",
             "changed-endpoint",
             "changed-inverted-source-endpoints",
+            "changed-one-known-endpoint",
             "transferred-evaluation",
             "changed-evaluation-polarity",
+            "transferred-shared-copula-evaluation",
             "strengthened-modal",
             "invented-evaluation",
         ] {
