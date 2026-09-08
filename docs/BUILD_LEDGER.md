@@ -2437,12 +2437,14 @@ complete
   year-led prose and a leading decimal phrase such as `1.5 million shares` are
   not treated as clause headings. Titles in parentheses or after a dash, colon
   or comma must match the source title. A period plus any whitespace separates
-  a source title from its body, including native-text newlines.
+  a source title from its body, including native-text newlines, while uppercase
+  initialisms such as `U.S.` remain intact.
 - A complete catalog of at most six distinct numbered clauses must retain
-  evidence from every supplied clause. Mixed, incomplete and larger catalogs
-  keep materiality-based selection. Contract gets at most two bounded repair
-  attempts for an incomplete short result and then fails closed. General and
-  Story retain their existing repair behavior.
+  evidence from every supplied clause. Each source segment must contain exactly
+  one numbered clause at its beginning; multi-clause segments, mixed,
+  incomplete and larger catalogs keep materiality-based selection. Contract
+  gets at most two bounded repair attempts for an incomplete short result and
+  then fails closed. General and Story retain their existing repair behavior.
 - Verification rechecks short-contract clause coverage after unsupported or
   ambiguous summary units are withheld. If filtering removes a required clause,
   the run fails at verification rather than publishing the remaining partial

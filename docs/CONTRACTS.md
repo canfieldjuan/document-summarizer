@@ -550,12 +550,16 @@ parentheses or after a dash, colon or comma must match the source title; a wrong
 title is sent through bounded repair instead of being accepted or masked by an
 appended number. The source title boundary accepts a period followed by any
 whitespace so native-text line breaks do not absorb the clause body into its
-title.
+title, while periods inside uppercase initialisms such as `U.S.` remain part of
+the title.
 For a complete short catalog containing at most six source segments where every
-segment begins with a distinct numbered clause, Contract validation also
-requires the result to retain evidence from every supplied clause. Mixed,
-incomplete and larger catalogs retain normal materiality-based selection; the
-short-contract rule does not turn long summaries into clause inventories.
+segment contains exactly one distinct numbered clause at its beginning,
+Contract validation also requires the result to retain evidence from every
+supplied clause. A segment containing multiple numbered clauses is ineligible
+for this completeness guarantee because its single evidence identity cannot
+prove which embedded clause supports a summary unit. Mixed, incomplete and
+larger catalogs retain normal materiality-based selection; the short-contract
+rule does not turn long summaries into clause inventories.
 The same short-contract coverage rule is checked again after semantic
 verification. If withholding an unsupported or ambiguous unit would remove a
 required clause, verification fails instead of publishing a partial Contract

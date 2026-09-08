@@ -439,12 +439,22 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
 
     let remainder = text[number_end..].trim_start();
     let body_delimiter = remainder.char_indices().find_map(|(index, character)| {
-        (character == '.'
-            && remainder[index + character.len_utf8()..]
+        if character != '.'
+            || !remainder[index + character.len_utf8()..]
                 .chars()
                 .next()
-                .is_some_and(char::is_whitespace))
-        .then_some(index)
+                .is_some_and(char::is_whitespace)
+        {
+            return None;
+        }
+        let final_title_token = remainder[..index].split_whitespace().next_back()?;
+        let initialism_parts = final_title_token.split('.').collect::<Vec<_>>();
+        let ends_with_initialism = initialism_parts.len() > 1
+            && initialism_parts.iter().all(|part| {
+                part.chars().count() == 1
+                    && part.chars().all(|character| character.is_ascii_uppercase())
+            });
+        (!ends_with_initialism).then_some(index)
     });
     if dotted_without_terminal && body_delimiter.is_none() {
         return None;
@@ -461,6 +471,21 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
         number: number.to_string(),
         title: title.to_string(),
     })
+}
+
+fn contract_clause_references_in_segment(text: &str) -> Vec<ContractClauseReference> {
+    let text = text.trim_start();
+    let mut references = Vec::new();
+    let mut at_word_start = true;
+    for (index, character) in text.char_indices() {
+        if at_word_start && character.is_ascii_digit() {
+            if let Some(reference) = leading_contract_clause_reference(&text[index..]) {
+                references.push(reference);
+            }
+        }
+        at_word_start = character.is_whitespace();
+    }
+    references
 }
 
 fn contract_clause_mention(
@@ -574,11 +599,11 @@ fn required_short_contract_clauses(catalog: &SourceCatalog) -> Option<Vec<Requir
         .candidates
         .iter()
         .map(|candidate| {
-            leading_contract_clause_reference(&candidate.evidence.exact_quote).map(|reference| {
-                RequiredContractClause {
-                    evidence_id: candidate.evidence.evidence_id.clone(),
-                    reference,
-                }
+            let leading = leading_contract_clause_reference(&candidate.evidence.exact_quote)?;
+            let references = contract_clause_references_in_segment(&candidate.evidence.exact_quote);
+            (references.len() == 1 && references[0] == leading).then(|| RequiredContractClause {
+                evidence_id: candidate.evidence.evidence_id.clone(),
+                reference: leading,
             })
         })
         .collect::<Option<Vec<_>>>()?;
@@ -2144,6 +2169,15 @@ mod tests {
                 title: "Parties and Term".into(),
             })
         );
+        assert_eq!(
+            leading_contract_clause_reference(
+                "2. U.S. Export Controls. Client must comply with export restrictions."
+            ),
+            Some(ContractClauseReference {
+                number: "2".into(),
+                title: "U.S. Export Controls".into(),
+            })
+        );
         assert!(text_mentions_contract_clause(
             "Section 4.2 (Expenses) covers travel.",
             &clause
@@ -2322,6 +2356,13 @@ mod tests {
         let mut incomplete = contract_catalog();
         incomplete.omitted_source_units = 1;
         assert!(required_short_contract_clauses(&incomplete).is_none());
+
+        let mut multiple_clauses_per_segment = contract_catalog();
+        multiple_clauses_per_segment.candidates.truncate(1);
+        multiple_clauses_per_segment.candidates[0]
+            .evidence
+            .exact_quote = "1. Parties. Client engages Consultant.\n2. Services. Consultant shall deliver monthly reports.".into();
+        assert!(required_short_contract_clauses(&multiple_clauses_per_segment).is_none());
     }
 
     #[test]
