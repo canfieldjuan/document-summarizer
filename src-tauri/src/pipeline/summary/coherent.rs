@@ -4,6 +4,8 @@
 //! request-local source IDs. Rust owns durable evidence and claim identity.
 use super::*;
 
+mod semantic_support;
+
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
 pub(super) const MAX_SUMMARY_CLAIMS: usize = 8;
 pub(super) const FALLBACK_WARNING_CODE: &str = "COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE";
@@ -1579,6 +1581,8 @@ fn validate_modal_content(
         Err(invalid_document())
     }
 }
+
+pub(super) use semantic_support::apply_semantic_fidelity_guards;
 
 fn modal_strengthening_failure() -> PipelineFailure {
     stage_failure(
@@ -4224,6 +4228,194 @@ mod tests {
                 .is_empty()
         );
         assert!(validate_modal_content(&requires, &strong_requirement_evidence).is_ok());
+    }
+
+    #[test]
+    fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
+        let mut first = catalog().candidates[0].evidence.clone();
+        first.evidence_id = "flsa".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner.".into();
+        let mut flc = catalog().candidates[1].evidence.clone();
+        flc.evidence_id = "flc".into();
+        flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
+        let mut ager = catalog().candidates[0].evidence.clone();
+        ager.evidence_id = "ager".into();
+        ager.exact_quote = "Agricultural employers (AGERs) and agricultural associations (AGAS) are subject to MSPA if they recruit a migrant worker.".into();
+        let mut transport = catalog().candidates[1].evidence.clone();
+        transport.evidence_id = "transport".into();
+        transport.exact_quote = "The employer must provide transportation from living quarters to the place of recruitment by the most economical means. Trip records are retained.".into();
+        let mut explicit_evaluation = catalog().candidates[0].evidence.clone();
+        explicit_evaluation.evidence_id = "evaluation".into();
+        explicit_evaluation.exact_quote =
+            "These measures are essential for worker safety and health.".into();
+        let mut sentence_boundary = catalog().candidates[1].evidence.clone();
+        sentence_boundary.evidence_id = "sentence-boundary".into();
+        sentence_boundary.exact_quote =
+            "The result is not unusual. More than 500 cases trigger review.".into();
+        let mut modal = catalog().candidates[0].evidence.clone();
+        modal.evidence_id = "modal".into();
+        modal.exact_quote = "The interpreter should retain the operating context.".into();
+        let evidence = vec![
+            first,
+            flc,
+            ager,
+            transport,
+            explicit_evaluation,
+            sentence_boundary,
+            modal,
+        ];
+
+        let claims = vec![
+            CitedClaim {
+                claim_id: "supported-boundary".into(),
+                text: "The exemption applies when the employer used at most 500 man-days."
+                    .into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-boundary".into(),
+                text: "The exemption applies when the employer used fewer than 500 man-days."
+                    .into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "broadened-enumeration".into(),
+                text: "A family member of the owner qualifies for the exemption.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-actors".into(),
+                text: "FLCs, AGERs, and AGAS are subject to MSPA if they recruit migrant workers."
+                    .into(),
+                evidence_ids: vec!["flc".into(), "ager".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-condition".into(),
+                text: "FLCs, AGERs, and AGAS are subject to MSPA if they recruit migrant workers for compensation."
+                    .into(),
+                evidence_ids: vec!["flc".into(), "ager".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-condition-full-names".into(),
+                text: "Farm labor contractors, agricultural employers, and agricultural associations are subject to MSPA if they recruit migrant workers for money or valuable consideration."
+                    .into(),
+                evidence_ids: vec!["flc".into(), "ager".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-endpoints".into(),
+                text: "The employer must provide transportation from the living quarters to the place of recruitment by the most economical means. The policy identifies this route."
+                    .into(),
+                evidence_ids: vec!["transport".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-endpoint".into(),
+                text: "The employer must provide transportation from the worksite to the worker's home."
+                    .into(),
+                evidence_ids: vec!["transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-evaluation".into(),
+                text: "The measures are critical for worker safety and health.".into(),
+                evidence_ids: vec!["evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-after-negative-sentence".into(),
+                text: "More than 500 cases trigger review.".into(),
+                evidence_ids: vec!["sentence-boundary".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-modal".into(),
+                text: "The interpreter should retain the operating context.".into(),
+                evidence_ids: vec!["modal".into()],
+            },
+            CitedClaim {
+                claim_id: "strengthened-modal".into(),
+                text: "The interpreter must retain the operating context.".into(),
+                evidence_ids: vec!["modal".into()],
+            },
+            CitedClaim {
+                claim_id: "invented-evaluation".into(),
+                text: "The transport rule is essential for worker safety and health.".into(),
+                evidence_ids: vec!["transport".into()],
+            },
+        ];
+        let mut verifications = claims
+            .iter()
+            .map(|claim| ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            })
+            .collect::<Vec<_>>();
+        verifications[12].verdict = ClaimVerdict::Ambiguous;
+
+        apply_semantic_fidelity_guards(&claims, &evidence, &mut verifications).unwrap();
+
+        assert_eq!(verifications[0].verdict, ClaimVerdict::Supported);
+        assert_eq!(verifications[1].verdict, ClaimVerdict::Unsupported);
+        assert_eq!(verifications[2].verdict, ClaimVerdict::Unsupported);
+        assert_eq!(verifications[3].verdict, ClaimVerdict::Supported);
+        assert_eq!(verifications[4].verdict, ClaimVerdict::Unsupported);
+        assert_eq!(verifications[5].verdict, ClaimVerdict::Unsupported);
+        assert_eq!(verifications[6].verdict, ClaimVerdict::Supported);
+        assert_eq!(verifications[7].verdict, ClaimVerdict::Unsupported);
+        assert_eq!(verifications[8].verdict, ClaimVerdict::Supported);
+        assert_eq!(verifications[9].verdict, ClaimVerdict::Supported);
+        assert_eq!(verifications[10].verdict, ClaimVerdict::Supported);
+        assert_eq!(verifications[11].verdict, ClaimVerdict::Unsupported);
+        assert_eq!(
+            verifications[12].verdict,
+            ClaimVerdict::Ambiguous,
+            "a deterministic guard must not promote or relabel an existing non-passing verdict"
+        );
+    }
+
+    #[test]
+    fn semantic_fidelity_guard_fails_closed_on_partial_or_mismatched_inputs() {
+        let evidence = vec![catalog().candidates[0].evidence.clone()];
+        let claim = CitedClaim {
+            claim_id: "claim-1".into(),
+            text: "The source states a supported fact.".into(),
+            evidence_ids: vec![evidence[0].evidence_id.clone()],
+        };
+        let verification = ClaimVerification {
+            claim_id: claim.claim_id.clone(),
+            evidence_ids: claim.evidence_ids.clone(),
+            verdict: ClaimVerdict::Supported,
+        };
+
+        let length_error =
+            apply_semantic_fidelity_guards(std::slice::from_ref(&claim), &evidence, &mut [])
+                .expect_err("partial verdict coverage must fail closed");
+        assert_eq!(length_error.code, "INVALID_VERIFICATION_RESPONSE");
+
+        let mut mismatched = ClaimVerification {
+            claim_id: "different-claim".into(),
+            ..verification.clone()
+        };
+        let identity_error = apply_semantic_fidelity_guards(
+            std::slice::from_ref(&claim),
+            &evidence,
+            std::slice::from_mut(&mut mismatched),
+        )
+        .expect_err("mismatched verdict identity must fail closed");
+        assert_eq!(identity_error.code, "INVALID_VERIFICATION_RESPONSE");
+
+        let unknown_claim = CitedClaim {
+            evidence_ids: vec!["missing-evidence".into()],
+            ..claim
+        };
+        let mut unknown_verification = ClaimVerification {
+            evidence_ids: unknown_claim.evidence_ids.clone(),
+            ..verification
+        };
+        let evidence_error = apply_semantic_fidelity_guards(
+            std::slice::from_ref(&unknown_claim),
+            &evidence,
+            std::slice::from_mut(&mut unknown_verification),
+        )
+        .expect_err("unknown cited evidence must fail closed");
+        assert_eq!(evidence_error.code, "INVALID_SYNTHESIZED_DOCUMENT");
     }
 
     #[test]

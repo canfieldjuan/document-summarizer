@@ -44,7 +44,7 @@ const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
 pub const SYNTHESIS_VERSION: &str = "6.0.0";
-pub const VERIFICATION_VERSION: &str = "7.0.0";
+pub const VERIFICATION_VERSION: &str = "8.0.0";
 pub const SUMMARY_VERSION: &str = "6.0.0";
 pub const CITATION_VERSION: &str = "4.0.0";
 
@@ -59,6 +59,7 @@ const PREVIOUS_SYNTHESIS_VERSION: &str = "3.0.0";
 const LEGACY_SYNTHESIS_VERSION: &str = "2.0.0";
 const HIERARCHICAL_VERIFICATION_VERSION: &str = "4.0.0";
 const DIRECT_VERIFICATION_VERSION: &str = "5.0.0";
+const PREVIOUS_COHERENT_VERIFICATION_VERSION: &str = "7.0.0";
 const PREVIOUS_VERIFICATION_VERSION: &str = "3.0.0";
 const LEGACY_VERIFICATION_VERSION: &str = "2.0.0";
 const HIERARCHICAL_SUMMARY_VERSION: &str = "4.0.0";
@@ -739,7 +740,7 @@ pub(crate) fn complete_verified_document_with_delivery(
         DIRECT_VERIFICATION_VERSION | DIRECT_KEY_POINTS_VERIFICATION_VERSION => {
             DIRECT_SUMMARY_VERSION
         }
-        VERIFICATION_VERSION => SUMMARY_VERSION,
+        PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION => SUMMARY_VERSION,
         _ => unreachable!("verified document validation rejects unknown versions"),
     };
     let mut summary = SummaryArtifact {
@@ -1095,6 +1096,11 @@ fn verify(
             control,
         )?
     };
+    coherent::apply_semantic_fidelity_guards(
+        &synthesized.summary_claims,
+        &synthesized.synthesis_evidence,
+        &mut summary_claim_verifications,
+    )?;
     if let Some(required_evidence_ids) =
         coherent::required_short_contract_evidence_ids(summary_profile, chunked, normalized)?
     {
@@ -3800,7 +3806,10 @@ fn validate_verified_document(
             analyzed,
         );
     }
-    if verified.verification_version == VERIFICATION_VERSION {
+    if matches!(
+        verified.verification_version.as_str(),
+        PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION
+    ) {
         return validate_coherent_verified_document(verified, synthesized, analyzed);
     }
 
@@ -3881,7 +3890,10 @@ fn validate_coherent_verified_document(
 ) -> Result<(), PipelineFailure> {
     let metadata_valid = synthesized.synthesis_version == SYNTHESIS_VERSION
         && verified.document_id == synthesized.document_id
-        && verified.verification_version == VERIFICATION_VERSION
+        && matches!(
+            verified.verification_version.as_str(),
+            PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION
+        )
         && verified.synthesis_attempt_ordinal == 0
         && verified.presentation_mode == synthesized.presentation_mode
         && verified.synthesis_evidence == synthesized.synthesis_evidence
@@ -3950,7 +3962,10 @@ fn validate_coherent_verified_document(
             "coherent validation: metadata={metadata_valid} synth_version={} document={} verify_version={} ordinal={} mode={} evidence={} runtime={} model={} chunks={} ledger_verdicts={} summary_verdicts={} ledger_coverage={ledger_coverage_valid} summary_coverage={summary_coverage_valid} ledger_claims={} summary_claims={} text={} key_points={} warnings={}",
             synthesized.synthesis_version == SYNTHESIS_VERSION,
             verified.document_id == synthesized.document_id,
-            verified.verification_version == VERIFICATION_VERSION,
+            matches!(
+                verified.verification_version.as_str(),
+                PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION
+            ),
             verified.synthesis_attempt_ordinal == 0,
             verified.presentation_mode == synthesized.presentation_mode,
             verified.synthesis_evidence == synthesized.synthesis_evidence,
@@ -4982,6 +4997,7 @@ mod tests {
         LedgerUnsupportedSummarySupported,
         ShortfallThenSupported,
         ShortfallThenUnsupported,
+        ModelSupportsSemanticallyInvalidSummary,
     }
 
     struct VerificationFixtureRuntime {
@@ -5283,6 +5299,9 @@ mod tests {
                                 VerificationFixtureMode::AllUnsupported => {
                                     ClaimVerdict::Unsupported
                                 }
+                                VerificationFixtureMode::ModelSupportsSemanticallyInvalidSummary => {
+                                    ClaimVerdict::Supported
+                                }
                                 VerificationFixtureMode::LedgerUnsupportedSummarySupported
                                     if verification_call == 0 =>
                                 {
@@ -5328,7 +5347,20 @@ mod tests {
                 }
                 ModelOutputFormat::JsonSchema { name, .. } if coherent::uses_schema_name(name) => {
                     self.synthesis_calls.fetch_add(1, Ordering::SeqCst);
-                    coherent::fixture_model_output(request)
+                    if matches!(
+                        self.mode,
+                        VerificationFixtureMode::ModelSupportsSemanticallyInvalidSummary
+                    ) {
+                        json!({
+                            "units": [{
+                                "text": "This finding is essential for safety.",
+                                "source_ids": ["s1"]
+                            }]
+                        })
+                        .to_string()
+                    } else {
+                        coherent::fixture_model_output(request)
+                    }
                 }
                 ModelOutputFormat::JsonSchema { name, .. } if name == SYNTHESIS_SCHEMA_NAME => {
                     let synthesis_call = self.synthesis_calls.fetch_add(1, Ordering::SeqCst);
@@ -9660,7 +9692,8 @@ mod tests {
         assert_eq!(DIRECT_SYNTHESIS_VERSION, "5.0.0");
         assert_eq!(DIRECT_VERIFICATION_VERSION, "5.0.0");
         assert_eq!(DIRECT_KEY_POINTS_VERIFICATION_VERSION, "6.0.0");
-        assert_eq!(VERIFICATION_VERSION, "7.0.0");
+        assert_eq!(PREVIOUS_COHERENT_VERIFICATION_VERSION, "7.0.0");
+        assert_eq!(VERIFICATION_VERSION, "8.0.0");
         assert_eq!(SUMMARY_VERSION, "6.0.0");
         assert_eq!(direct::VERSION, DIRECT_SYNTHESIS_VERSION);
         assert_eq!(HIERARCHICAL_SYNTHESIS_VERSION, "4.0.0");
@@ -9735,6 +9768,53 @@ mod tests {
             get_pipeline_run(&conn, &run_id).unwrap().unwrap().state,
             PipelineState::Failed
         );
+    }
+
+    #[test]
+    fn deterministic_semantic_guard_overrides_a_false_positive_model_verdict() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = VerificationFixtureRuntime::new(
+            VerificationFixtureMode::ModelSupportsSemanticallyInvalidSummary,
+        );
+
+        let error = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect_err("an unsupported evaluative conclusion must not be published");
+
+        assert_eq!(error.code(), "NO_SEMANTICALLY_SUPPORTED_CLAIMS");
+        let verified = get_verification_attempt(&conn, &run_id, 0)
+            .unwrap()
+            .expect("the rejected verification attempt must remain auditable");
+        assert_eq!(verified.summary_claim_verifications.len(), 1);
+        assert_eq!(
+            verified.summary_claim_verifications[0].verdict,
+            ClaimVerdict::Unsupported
+        );
+        assert!(verified.summary_claims.is_empty());
+        assert!(verified
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "SEMANTIC_CLAIMS_WITHHELD"));
+        assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn previous_coherent_verification_version_remains_readable() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        summarize_chunked_document(&mut conn, &FakeRuntime::healthy(), &run_id)
+            .expect("the current coherent fixture should summarize");
+        let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
+        let chunked = get_chunked_document(&conn, &run_id).unwrap().unwrap();
+        let analyzed = get_analyzed_document(&conn, &run_id).unwrap().unwrap();
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let mut verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+        assert_eq!(verified.verification_version, VERIFICATION_VERSION);
+
+        verified.verification_version = PREVIOUS_COHERENT_VERIFICATION_VERSION.into();
+        validate_verified_document(&verified, &synthesized, &analyzed, &chunked, &normalized)
+            .expect("the prior coherent verification contract must remain readable");
     }
 
     #[test]

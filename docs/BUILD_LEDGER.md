@@ -2657,3 +2657,70 @@ complete
   not establish semantic support; representative output still requires the
   documented human comparison. This is one public document on one qualified
   local model, not a measured reliability result.
+
+## Slice 28 — Semantic Support Hardening (2026-09-08)
+
+**Status**: implementation, automated gates and focused live-model acceptance
+complete
+
+**Verified root cause and implemented behavior**:
+- The shared semantic prompt was already explicit, but the qualified
+  `qwen3-30b-a3b:latest` verifier still returned `supported` for isolated probes
+  that changed `no more than 500` to `fewer than 500`, replaced five named
+  relationships with `family member`, and transferred the FLC consideration
+  condition to AGERs/AGASs. It correctly rejected a changed transportation
+  endpoint. Model verdicts alone therefore do not enforce these exact
+  relationships.
+- Coherent summary verification now applies a deterministic post-verdict veto
+  before filtering or rendering. It checks numeric comparison inclusivity,
+  broadened family enumerations, `from`/`to` endpoints, conditions transferred
+  across source-defined actors, unsupported evaluative conclusions, and modal
+  strengthening. The check can only retain or downgrade a model verdict; it
+  never promotes an unsupported or ambiguous verdict.
+- Actor matching supports both source-defined acronyms and their full labels.
+  This matters because the live synthesizer sometimes writes `farm labor
+  contractors` instead of `FLCs`. Relation parsing stays within sentence or
+  clause boundaries so a negation or endpoint in one sentence cannot affect the
+  next.
+- Verification artifacts now use version `8.0.0`. The previous coherent
+  `7.0.0` contract remains readable, while new results cannot be mistaken for
+  artifacts produced without the deterministic veto. Synthesis, summary,
+  citation, database and UI schemas are unchanged.
+
+**Acceptance evidence so far**:
+- Paired deterministic probes preserve equivalent `at most 500` wording,
+  source-supported actor grouping, unchanged transport endpoints, explicit
+  evaluations and qualified modality. Opposite probes reject an exclusive
+  `fewer than 500` boundary, broader kinship label, acronym and full-name actor
+  transfer, changed endpoint, invented evaluation and `should`-to-`must`
+  strengthening. Separate probes reject partial verdict coverage, mismatched
+  identities and unknown evidence, and preserve an already-ambiguous verdict.
+- An end-to-end fixture makes the model return `supported` for an invented
+  evaluative conclusion. The production verification boundary downgrades it,
+  persists the auditable failed attempt and creates no summary artifact.
+- `cargo test --all-targets` passed 428 library tests with 10 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting, the
+  TypeScript/Vite production build and `git diff --check` passed.
+- A temporary 25-page public DOL excerpt completed through Ollama on the
+  qualified model. The pre-fix run published the transferred FLC consideration
+  condition. The post-fix run withheld that unit, retained the supported FLSA
+  and H-2A prose, cited 24 of 25 native-text pages, and completed with the
+  existing `SEMANTIC_CLAIMS_WITHHELD` and `SUMMARY_COVERAGE_SHORTFALL` warnings.
+  It used 59 bounded model requests and reported a 0.96 supported-evidence
+  fraction.
+
+**Non-scope and remaining limits**:
+- This is a high-precision backstop for relationships that can be compared
+  mechanically. It is not a general entailment proof; manual semantic review
+  remains necessary for representative output, and future failure classes need
+  their own evidence before expanding the guard.
+- Two attempts to rerun the complete 111-page fixture produced the same
+  unfinished synthesis response and failed before verification with
+  `MODEL_SUMMARY_RESPONSE_INVALID`. The captured synthesis response hash was
+  `063ce498b825257f26d8a4ed5599abc66076daac4e86e6780ccbddce762d0cb8`.
+  That pre-verification output-budget behavior is deferred rather than folded
+  into this slice.
+- Long Story and Contract synthesis, automatic routing, ingestion, OCR,
+  persistence schema, UI, model training and unrelated synthesis repair remain
+  outside this slice.
