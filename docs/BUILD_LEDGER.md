@@ -2431,14 +2431,14 @@ complete
   confidentiality, termination and remedies while rejecting invented legal
   advice or evaluations.
 - Clause references come from cited exact source headings. The application
-  preserves an accurate reference already in the model prose or appends the
-  exact numbered section before materializing deterministic claim identity.
-  Admission requires a number token ending in a period and a clause-title period
-  immediately before a line break. This deterministic structure supports simple
-  and dotted identifiers, preserves title periods such as `U.S.`, and leaves
-  ambiguous same-line decimal prose unclassified. Dotted identifiers remain
-  bounded exactly, so `4.20` does not satisfy `4.2`. Titles in parentheses or
-  after a dash, colon or comma must match the source title.
+  appends one canonical source-derived section suffix before materializing
+  deterministic claim identity and does not duplicate an identical suffix.
+  Persisted validation recomputes that suffix from the cited evidence instead
+  of parsing model-authored title punctuation. Admission requires a number token
+  ending in a period and a clause-title period immediately before a line break.
+  This deterministic structure supports simple and dotted identifiers,
+  lowercase titles and wrapped initialisms such as `U.S.` while leaving
+  ambiguous same-line decimal prose unclassified.
 - A complete catalog of at most six distinct numbered clauses must retain
   evidence from every supplied clause. Each source segment must contain exactly
   one numbered clause at its beginning; multi-clause segments are detected
@@ -2464,9 +2464,10 @@ complete
 **Acceptance evidence so far**:
 - Focused tests cover typed admission and unknown-value rejection, immutable
   persistence, source-aware profile dispatch, exact source binding, Contract
-  refusal on Connect, clause-reference pass/fail boundaries, short-contract
-  coverage boundaries, decimal and title false positives, isolated material-term
-  verdicts, post-verification filtering, and the bounded repair limit.
+  refusal on Connect, authoritative clause-suffix attachment and validation,
+  short-contract coverage boundaries, decimal and heading false positives,
+  wrapped and lowercase titles, isolated material-term verdicts,
+  post-verification filtering, and the bounded repair limit.
 - `cargo test --all-targets` passed 412 library tests with 9 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the
@@ -2477,25 +2478,25 @@ complete
 - A dedicated live materiality probe rejects the topic-only statement `The
   agreement addresses services and fees.` while accepting the sourced service
   and payment terms. The isolated four-pair probe passed in 6.07 seconds.
-- The ignored live harness used `qwen3-30b-a3b:latest` through Ollama and passed
-  synthesis plus clause-by-clause materiality in 11.71 seconds. The run produced:
+- The ignored live harness used `qwen3-30b-a3b:latest` through Ollama at 100% GPU
+  and passed synthesis plus clause-by-clause materiality in 11.64 seconds. The
+  run produced:
 
-  > Northstar Bakery LLC, referred to as the Client, has engaged Rowan Lee,
-  > referred to as the Consultant, for a term beginning on October 1, 2026, and
-  > ending on March 31, 2027. [Section 1] [p. 1]
+  > Northstar Bakery LLC, referred to as Client, has engaged Rowan Lee, referred
+  > to as Consultant, to provide services from October 1, 2026, through March
+  > 31, 2027. [Section 1] [p. 1]
   >
-  > The Consultant must provide monthly inventory reports to the Client by the
-  > fifth business day of each month. The Client must pay the Consultant $2,400
-  > each month within 15 days after receiving an accurate invoice. The Client
-  > will reimburse the Consultant for travel expenses that are pre-approved and
-  > do not exceed $500 per month, but meals are not eligible for reimbursement.
-  > The Consultant must not disclose the Client’s recipes during the term or for
-  > two years after it ends, unless disclosure is required by law. Either party
-  > may terminate the agreement with 30 days of written notice; however, the
-  > Client may terminate immediately if the Consultant fails to cure a material
-  > breach within 10 days after receiving written notice of the breach. [Section
-  > 2; Section 3; Section 4; Section 5; Section 6] [p. 2; p. 3; p. 4; p. 5; p.
-  > 6]
+  > Consultant must deliver monthly inventory reports to Client by the fifth
+  > business day of each month. Client must pay Consultant $2,400 per month
+  > within 15 days after receiving an accurate invoice. Client will reimburse
+  > Consultant for travel expenses that are pre-approved and do not exceed $500
+  > per month; meals are not eligible for reimbursement. Consultant must not
+  > disclose Client recipes during the term or for two years after it ends,
+  > unless disclosure is required by law. Either party may terminate the
+  > agreement with 30 days of written notice; however, Client may terminate
+  > immediately if Consultant fails to cure a material breach within 10 days
+  > after receiving written notice of the breach. [Section 2; Section 3; Section
+  > 4; Section 5; Section 6] [p. 2; p. 3; p. 4; p. 5; p. 6]
 
   Manual source comparison confirms that the model output preserves every
   party, actor, recipient, condition, exception, deadline, date, amount,
