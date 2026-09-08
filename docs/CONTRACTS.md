@@ -548,11 +548,13 @@ leaving same-line forms ambiguous instead of guessing whether `1.5` is a clause
 or a decimal quantity. Wrapped title lines are normalized, including an
 initialism-only line such as `U.S.` followed by the remainder of the title. For
 admitted headings, the application appends one canonical, source-derived
-`[Section …]` suffix before deterministic claim identity is materialized; an
-identical suffix already returned by the model is not duplicated. Persisted
-Contract validation recomputes that suffix from each unit's cited evidence, so
-model-authored title punctuation cannot suppress or replace application-owned
-provenance.
+`[Section …]` suffix before deterministic claim identity is materialized only
+when the cited source segment contains exactly that one leading heading. A
+multi-clause segment keeps page provenance without an inferred section suffix.
+An identical suffix already returned by the model is not duplicated. Persisted
+Contract validation recomputes the applicable suffix from each unit's cited
+evidence, so model-authored title punctuation cannot suppress or replace
+application-owned provenance.
 For a complete short catalog containing at most six source segments where every
 segment contains exactly one distinct numbered clause at its beginning,
 Contract validation also requires the result to retain evidence from every

@@ -2438,7 +2438,10 @@ complete
   ending in a period and a clause-title period immediately before a line break.
   This deterministic structure supports simple and dotted identifiers,
   lowercase titles and wrapped initialisms such as `U.S.` while leaving
-  ambiguous same-line decimal prose unclassified.
+  ambiguous same-line decimal prose unclassified. A suffix is emitted only when
+  the cited segment contains exactly one heading and it is the leading heading;
+  multi-clause evidence keeps page provenance without a potentially incorrect
+  section number.
 - A complete catalog of at most six distinct numbered clauses must retain
   evidence from every supplied clause. Each source segment must contain exactly
   one numbered clause at its beginning; multi-clause segments are detected
@@ -2479,7 +2482,7 @@ complete
   agreement addresses services and fees.` while accepting the sourced service
   and payment terms. The isolated four-pair probe passed in 6.07 seconds.
 - The ignored live harness used `qwen3-30b-a3b:latest` through Ollama at 100% GPU
-  and passed synthesis plus clause-by-clause materiality in 11.64 seconds. The
+  and passed synthesis plus clause-by-clause materiality in 10.20 seconds. The
   run produced:
 
   > Northstar Bakery LLC, referred to as Client, has engaged Rowan Lee, referred

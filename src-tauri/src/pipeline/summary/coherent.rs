@@ -491,11 +491,26 @@ fn contract_clause_candidate_start(text: &str, index: usize) -> bool {
     let Some(previous) = before.chars().next_back() else {
         return true;
     };
+    if previous.is_whitespace() {
+        let whitespace_start = before.trim_end_matches(char::is_whitespace).len();
+        let whitespace = &before[whitespace_start..];
+        if whitespace
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r'))
+        {
+            return true;
+        }
+        return before[..whitespace_start]
+            .chars()
+            .next_back()
+            .is_some_and(|character| matches!(character, '.' | ';'));
+    }
     if previous != '.' {
-        return !previous.is_alphanumeric();
+        return previous == ';';
     }
 
-    let token_before_period = before[..before.len() - 1]
+    let before_period = &before[..before.len() - 1];
+    let token_before_period = before_period
         .rsplit(|character: char| !character.is_alphanumeric() && character != '.')
         .next()
         .unwrap_or_default();
@@ -503,7 +518,17 @@ fn contract_clause_candidate_start(text: &str, index: usize) -> bool {
         && token_before_period.split('.').all(|part| {
             !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
         });
-    !period_ends_numeric_component
+    if !period_ends_numeric_component {
+        return true;
+    }
+    let token_start = before_period.len() - token_before_period.len();
+    !contract_clause_candidate_start(text, token_start)
+}
+
+fn sole_leading_contract_clause_reference(text: &str) -> Option<ContractClauseReference> {
+    let leading = leading_contract_clause_reference(text)?;
+    let references = contract_clause_references_in_segment(text);
+    (references.len() == 1 && references[0] == leading).then_some(leading)
 }
 
 fn contract_clause_references_for_evidence(
@@ -516,7 +541,7 @@ fn contract_clause_references_for_evidence(
         let item = evidence
             .get(evidence_id.as_str())
             .ok_or_else(invalid_response)?;
-        if let Some(reference) = leading_contract_clause_reference(&item.exact_quote) {
+        if let Some(reference) = sole_leading_contract_clause_reference(&item.exact_quote) {
             if seen_numbers.insert(reference.number.clone()) {
                 references.push(reference);
             }
@@ -572,9 +597,8 @@ fn required_short_contract_clauses(catalog: &SourceCatalog) -> Option<Vec<Requir
         .candidates
         .iter()
         .map(|candidate| {
-            let leading = leading_contract_clause_reference(&candidate.evidence.exact_quote)?;
-            let references = contract_clause_references_in_segment(&candidate.evidence.exact_quote);
-            (references.len() == 1 && references[0] == leading).then(|| RequiredContractClause {
+            let leading = sole_leading_contract_clause_reference(&candidate.evidence.exact_quote)?;
+            Some(RequiredContractClause {
                 evidence_id: candidate.evidence.evidence_id.clone(),
                 reference: leading,
             })
@@ -2204,6 +2228,31 @@ mod tests {
                 .is_empty()
         );
 
+        let mut multi_clause_catalog = contract_catalog();
+        multi_clause_catalog.candidates.truncate(1);
+        multi_clause_catalog.candidates[0].evidence.exact_quote =
+            "1. Parties.\nClient engages Consultant.\n2. Fees.\nClient shall pay Consultant $2,400."
+                .into();
+        let multi_clause_response = json!({
+            "units": [{
+                "text": "The Client must pay the Consultant $2,400.",
+                "source_ids": ["s1"]
+            }]
+        });
+        let (multi_clause_claims, multi_clause_evidence) = parse_response(
+            SummaryProfile::Contract,
+            &multi_clause_response.to_string(),
+            "contract-document",
+            &multi_clause_catalog,
+        )
+        .unwrap();
+        assert!(!multi_clause_claims[0].text.contains("[Section"));
+        assert!(
+            contract_clause_reference_feedback(&multi_clause_claims, &multi_clause_evidence,)
+                .unwrap()
+                .is_empty()
+        );
+
         let mut already_canonical = vec![ValidatedClaim {
             text: "Northstar Bakery LLC engages Rowan Lee. [Section 1]".into(),
             evidence_ids: vec![catalog.candidates[0].evidence.evidence_id.clone()],
@@ -2259,6 +2308,14 @@ mod tests {
             .expect("one structurally delimited dotted clause should remain eligible");
         assert_eq!(dotted_required.len(), 1);
         assert_eq!(dotted_required[0].reference.number, "4.2");
+
+        let mut body_ending_number = contract_catalog();
+        body_ending_number.candidates.truncate(1);
+        body_ending_number.candidates[0].evidence.exact_quote = "1. Term.\nThe agreement expires in 2026.\nIt renews automatically.\nNotice is required.".into();
+        let body_number_required = required_short_contract_clauses(&body_ending_number)
+            .expect("a body-ending number must not fabricate a second clause heading");
+        assert_eq!(body_number_required.len(), 1);
+        assert_eq!(body_number_required[0].reference.number, "1");
 
         let evidence_ids = required
             .iter()
