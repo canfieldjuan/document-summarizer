@@ -528,7 +528,13 @@ fn contract_clause_mention(
             }
         }
     }
-    accurate |= text.contains(&format!("{number}. {title}"));
+    let raw_reference = format!("{number}. {title}");
+    accurate |= text.match_indices(&raw_reference).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + raw_reference.len()..].chars().next();
+        before.is_none_or(|character| !character.is_alphanumeric() && character != '.')
+            && after.is_none_or(|character| !character.is_alphanumeric())
+    });
     if inaccurate_title {
         ContractClauseMention::InaccurateTitle
     } else if accurate {
@@ -2194,6 +2200,7 @@ mod tests {
             "Section 4.2: Expenses covers travel.",
             "Section 4.2, Expenses covers travel.",
             "Section 4.2 covers travel.",
+            "4.2. Expenses covers travel.",
         ] {
             assert_eq!(
                 contract_clause_mention(accurate, &clause),
@@ -2208,6 +2215,13 @@ mod tests {
             "Section 4.2a covers travel.",
             &clause
         ));
+        for inaccurate_raw in [
+            "Section 14.2. Expenses covers travel.",
+            "A4.2. Expenses covers travel.",
+            "4.2. ExpensesPlus covers travel.",
+        ] {
+            assert!(!text_mentions_contract_clause(inaccurate_raw, &clause));
+        }
         assert_eq!(
             contract_clause_mention("Section 4.2 (Termination) covers travel.", &clause),
             ContractClauseMention::InaccurateTitle
