@@ -471,9 +471,21 @@ fn contract_clause_references_in_segment(text: &str) -> Vec<ContractClauseRefere
                 references.push(reference);
             }
         }
-        at_word_start = !character.is_alphanumeric();
+        at_word_start = !character.is_alphanumeric() && character != '.';
     }
     references
+}
+
+fn raw_contract_reference_ends_here(suffix: &str) -> bool {
+    for character in suffix.chars() {
+        if character.is_whitespace() {
+            return true;
+        }
+        if character.is_alphanumeric() {
+            return false;
+        }
+    }
+    true
 }
 
 fn contract_clause_mention(
@@ -531,9 +543,9 @@ fn contract_clause_mention(
     let raw_reference = format!("{number}. {title}");
     accurate |= text.match_indices(&raw_reference).any(|(index, _)| {
         let before = text[..index].chars().next_back();
-        let after = text[index + raw_reference.len()..].chars().next();
+        let after = &text[index + raw_reference.len()..];
         before.is_none_or(|character| !character.is_alphanumeric() && character != '.')
-            && after.is_none_or(|character| !character.is_alphanumeric())
+            && raw_contract_reference_ends_here(after)
     });
     if inaccurate_title {
         ContractClauseMention::InaccurateTitle
@@ -2201,6 +2213,7 @@ mod tests {
             "Section 4.2, Expenses covers travel.",
             "Section 4.2 covers travel.",
             "4.2. Expenses covers travel.",
+            "4.2. Expenses, covering travel.",
         ] {
             assert_eq!(
                 contract_clause_mention(accurate, &clause),
@@ -2219,6 +2232,8 @@ mod tests {
             "Section 14.2. Expenses covers travel.",
             "A4.2. Expenses covers travel.",
             "4.2. ExpensesPlus covers travel.",
+            "4.2. Expenses.Termination covers travel.",
+            "4.2. Expenses/Termination covers travel.",
         ] {
             assert!(!text_mentions_contract_clause(inaccurate_raw, &clause));
         }
@@ -2339,6 +2354,15 @@ mod tests {
         let required = required_short_contract_clauses(&catalog)
             .expect("the six-clause fixture should require complete short-contract coverage");
         assert_eq!(required.len(), MAX_REQUIRED_SHORT_CONTRACT_CLAUSES);
+
+        let mut single_dotted_clause = contract_catalog();
+        single_dotted_clause.candidates.truncate(1);
+        single_dotted_clause.candidates[0].evidence.exact_quote =
+            "4.2. Expenses.\nClient will reimburse approved travel.".into();
+        let dotted_required = required_short_contract_clauses(&single_dotted_clause)
+            .expect("one structurally delimited dotted clause should remain eligible");
+        assert_eq!(dotted_required.len(), 1);
+        assert_eq!(dotted_required[0].reference.number, "4.2");
 
         let evidence_ids = required
             .iter()
