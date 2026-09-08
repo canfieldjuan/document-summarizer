@@ -2440,6 +2440,10 @@ complete
   keep materiality-based selection. Contract gets at most two bounded repair
   attempts for an incomplete short result and then fails closed. General and
   Story retain their existing repair behavior.
+- Verification rechecks short-contract clause coverage after unsupported or
+  ambiguous summary units are withheld. If filtering removes a required clause,
+  the run fails at verification rather than publishing the remaining partial
+  Contract overview.
 - Connect remains explicitly General-only. A Contract run paired with a Connect
   delivery policy fails with `SUMMARY_PROFILE_DELIVERY_UNSUPPORTED` rather than
   silently using General behavior.
@@ -2448,8 +2452,9 @@ complete
 - Focused tests cover typed admission and unknown-value rejection, immutable
   persistence, source-aware profile dispatch, exact source binding, Contract
   refusal on Connect, clause-reference pass/fail boundaries, short-contract
-  coverage boundaries and the bounded repair limit.
-- `cargo test --all-targets` passed 410 library tests with 8 intentional
+  coverage boundaries, post-verification filtering, and the bounded repair
+  limit.
+- `cargo test --all-targets` passed 411 library tests with 8 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the
   TypeScript/Vite production build and `git diff --check` passed.

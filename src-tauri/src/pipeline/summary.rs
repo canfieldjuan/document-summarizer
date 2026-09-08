@@ -558,6 +558,8 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
             run_id: run_id.to_string(),
         }
     })?;
+    let summary_profile = db::get_run_summary_profile(conn, run_id)?
+        .ok_or_else(|| StoreError::SummaryProfileUnavailable(run_id.to_string()))?;
 
     let (verifying_run, persisted_synthesis) =
         db::start_verification(conn, run_id, run.state_version)?;
@@ -572,7 +574,11 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
         0,
         delivery_policy.is_none_or(SummaryDeliveryPolicy::select_key_points),
         control,
-    ) {
+    )
+    .and_then(|verified| {
+        coherent::validate_verified_profile(summary_profile, &verified, &chunked, &normalized)?;
+        Ok(verified)
+    }) {
         Ok(verified) => verified,
         Err(failure) if cancellation_observed(&failure) => {
             return Err(SummaryPipelineError::CancellationObserved);

@@ -1357,6 +1357,34 @@ pub(super) fn validate_for_runtime(
     Ok(())
 }
 
+pub(super) fn validate_verified_profile(
+    profile: SummaryProfile,
+    verified: &VerifiedDocument,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<(), PipelineFailure> {
+    if profile != SummaryProfile::Contract
+        || verified.presentation_mode != SummaryPresentationMode::Coherent
+    {
+        return Ok(());
+    }
+    let catalog = source_catalog(chunked, normalized)?;
+    let required_clauses = required_short_contract_clauses(&catalog);
+    if !contract_clause_reference_feedback(&verified.summary_claims, &verified.synthesis_evidence)?
+        .is_empty()
+        || !contract_clause_coverage_feedback(&verified.summary_claims, required_clauses.as_deref())
+            .is_empty()
+    {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "CONTRACT_SUMMARY_INCOMPLETE_AFTER_VERIFICATION",
+            "Semantic verification removed content required for a complete source-referenced Contract summary",
+            true,
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_content(
     synthesized: &SynthesizedDocument,
     analyzed: &AnalyzedDocument,
@@ -1748,6 +1776,63 @@ mod tests {
                 .collect(),
             omitted_source_units: 0,
         }
+    }
+
+    fn contract_documents() -> (NormalizedDocument, ChunkedDocument) {
+        let pages = CONTRACT_SOURCE_LINES
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let page_number = u32::try_from(index + 1).unwrap();
+                NormalizedPage {
+                    page_number,
+                    content: vec![NormalizedBlock {
+                        block_id: format!("contract-block-{page_number}"),
+                        kind: NormalizedBlockKind::Text,
+                        text: (*line).to_string(),
+                        source: SourceSpan {
+                            page_start: page_number,
+                            page_end: page_number,
+                            section_id: None,
+                            source_type: SourceType::NativeText,
+                        },
+                    }],
+                    warnings: Vec::new(),
+                    requires_visual_processing: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        let normalized = NormalizedDocument {
+            document_id: "contract-document".into(),
+            normalization_version: "test-normalization".into(),
+            pages,
+            warnings: Vec::new(),
+        };
+        let block_ids = normalized
+            .pages
+            .iter()
+            .flat_map(|page| page.content.iter().map(|block| block.block_id.clone()))
+            .collect::<Vec<_>>();
+        let source_spans = normalized
+            .pages
+            .iter()
+            .flat_map(|page| page.content.iter().map(|block| block.source.clone()))
+            .collect::<Vec<_>>();
+        let chunked = ChunkedDocument {
+            document_id: normalized.document_id.clone(),
+            chunking_version: "test-chunking".into(),
+            chunks: vec![DocumentChunk {
+                chunk_id: "contract-chunk".into(),
+                ordinal: 0,
+                structure_node_id: "contract-node".into(),
+                text: CONTRACT_SOURCE_LINES.join("\n\n"),
+                block_ids,
+                source_spans,
+                warnings: Vec::new(),
+            }],
+            warnings: Vec::new(),
+        };
+        (normalized, chunked)
     }
 
     #[test]
@@ -2154,6 +2239,85 @@ mod tests {
         let mut incomplete = contract_catalog();
         incomplete.omitted_source_units = 1;
         assert!(required_short_contract_clauses(&incomplete).is_none());
+    }
+
+    #[test]
+    fn semantic_filtering_cannot_publish_an_incomplete_short_contract() {
+        let (normalized, chunked) = contract_documents();
+        let catalog = source_catalog(&chunked, &normalized).unwrap();
+        assert_eq!(catalog.candidates.len(), CONTRACT_SOURCE_LINES.len());
+        assert!(catalog
+            .candidates
+            .iter()
+            .zip(CONTRACT_SOURCE_LINES)
+            .all(|(candidate, source)| candidate.evidence.exact_quote == source));
+        let response = json!({
+            "units": [
+                {
+                    "text": "Section 1 identifies the parties and term; Sections 2 and 3 state the services and fees.",
+                    "source_ids": ["s1", "s2", "s3"]
+                },
+                {
+                    "text": "Sections 4, 5, and 6 state the expense, confidentiality, and termination terms.",
+                    "source_ids": ["s4", "s5", "s6"]
+                }
+            ]
+        });
+        let (claims, evidence) = parse_response(
+            SummaryProfile::Contract,
+            &response.to_string(),
+            "contract-document",
+            &catalog,
+        )
+        .unwrap();
+        let mut verified = VerifiedDocument {
+            document_id: "contract-document".into(),
+            verification_version: VERIFICATION_VERSION.into(),
+            synthesis_attempt_ordinal: 0,
+            runtime_id: "test-runtime".into(),
+            model_id: "test-model".into(),
+            presentation_mode: SummaryPresentationMode::Coherent,
+            summary_text: "Contract summary.".into(),
+            source_chunk_ids: vec!["contract-chunk".into()],
+            summary_claims: claims,
+            synthesis_evidence: evidence,
+            summary_claim_verifications: Vec::new(),
+            claims: Vec::new(),
+            claim_verifications: Vec::new(),
+            key_point_claim_ids: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        validate_verified_profile(SummaryProfile::Contract, &verified, &chunked, &normalized)
+            .unwrap();
+
+        verified.summary_claims.truncate(1);
+        let failure =
+            validate_verified_profile(SummaryProfile::Contract, &verified, &chunked, &normalized)
+                .expect_err(
+                    "withholding one unit must not publish a partial short Contract summary",
+                );
+        assert_eq!(
+            failure.code,
+            "CONTRACT_SUMMARY_INCOMPLETE_AFTER_VERIFICATION"
+        );
+        assert_eq!(failure.stage, Some(PipelineStage::Verify));
+        assert!(validate_verified_profile(
+            SummaryProfile::General,
+            &verified,
+            &chunked,
+            &normalized,
+        )
+        .is_ok());
+
+        verified.presentation_mode = SummaryPresentationMode::ClaimLedgerFallback;
+        assert!(validate_verified_profile(
+            SummaryProfile::Contract,
+            &verified,
+            &chunked,
+            &normalized,
+        )
+        .is_ok());
     }
 
     #[test]

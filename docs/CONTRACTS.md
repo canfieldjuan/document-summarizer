@@ -550,6 +550,10 @@ segment begins with a distinct numbered clause, Contract validation also
 requires the result to retain evidence from every supplied clause. Mixed,
 incomplete and larger catalogs retain normal materiality-based selection; the
 short-contract rule does not turn long summaries into clause inventories.
+The same short-contract coverage rule is checked again after semantic
+verification. If withholding an unsupported or ambiguous unit would remove a
+required clause, verification fails instead of publishing a partial Contract
+overview.
 Contract may use up to two bounded validation repairs after its initial response
 when a required short clause is omitted. General and Story retain the existing
 single modal-strengthening repair. All profiles retain the existing source-backed
