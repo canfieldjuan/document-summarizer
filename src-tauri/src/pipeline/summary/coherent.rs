@@ -4278,6 +4278,13 @@ mod tests {
         sentence_boundary.evidence_id = "sentence-boundary".into();
         sentence_boundary.exact_quote =
             "The result is not unusual. More than 500 cases trigger review.".into();
+        let mut comparative_relative = catalog().candidates[0].evidence.clone();
+        comparative_relative.evidence_id = "comparative-relative".into();
+        comparative_relative.exact_quote = "Costs fell compared with last year.".into();
+        let mut additive_evaluation = catalog().candidates[1].evidence.clone();
+        additive_evaluation.evidence_id = "additive-evaluation".into();
+        additive_evaluation.exact_quote =
+            "Procedure F is not only essential but also effective.".into();
         let mut modal = catalog().candidates[0].evidence.clone();
         modal.evidence_id = "modal".into();
         modal.exact_quote = "The interpreter should retain the operating context.".into();
@@ -4296,6 +4303,8 @@ mod tests {
             negative_evaluation,
             compound_evaluations,
             sentence_boundary,
+            comparative_relative,
+            additive_evaluation,
             modal,
         ];
 
@@ -4322,6 +4331,26 @@ mod tests {
                 claim_id: "changed-spelled-boundary".into(),
                 text: "The exemption applies when the employer used more than five hundred man-days."
                     .into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-symbol-upper-boundary".into(),
+                text: "The exemption applies when the employer used ≤ 500 man-days.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-symbol-upper-boundary".into(),
+                text: "The exemption applies when the employer used > 500 man-days.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-symbol-lower-boundary".into(),
+                text: "Eligibility requires ≥ 18 years.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-symbol-lower-boundary".into(),
+                text: "Eligibility requires < 18 years.".into(),
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
@@ -4483,6 +4512,16 @@ mod tests {
                 evidence_ids: vec!["sentence-boundary".into()],
             },
             CitedClaim {
+                claim_id: "supported-comparative-relative".into(),
+                text: "Costs fell relative to last year.".into(),
+                evidence_ids: vec!["comparative-relative".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-additive-evaluation".into(),
+                text: "Procedure F is essential.".into(),
+                evidence_ids: vec!["additive-evaluation".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-modal".into(),
                 text: "The interpreter should retain the operating context.".into(),
                 evidence_ids: vec!["modal".into()],
@@ -4528,6 +4567,8 @@ mod tests {
         for claim_id in [
             "supported-boundary",
             "supported-spelled-boundary",
+            "supported-symbol-upper-boundary",
+            "supported-symbol-lower-boundary",
             "supported-formatted-integer",
             "supported-formatted-decimal",
             "supported-negative-boundary",
@@ -4545,6 +4586,8 @@ mod tests {
             "supported-negative-evaluation",
             "supported-compound-evaluation",
             "supported-after-negative-sentence",
+            "supported-comparative-relative",
+            "supported-additive-evaluation",
             "supported-modal",
         ] {
             assert_eq!(verdict(claim_id), ClaimVerdict::Supported, "{claim_id}");
@@ -4552,6 +4595,8 @@ mod tests {
         for claim_id in [
             "changed-boundary",
             "changed-spelled-boundary",
+            "changed-symbol-upper-boundary",
+            "changed-symbol-lower-boundary",
             "broadened-enumeration",
             "changed-formatted-decimal",
             "changed-negative-boundary",

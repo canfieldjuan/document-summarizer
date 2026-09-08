@@ -2687,9 +2687,11 @@ complete
   signs, normalize bounded English cardinal wording, and bind an explicit
   constraint to its nearby subject/predicate when cited text exposes the same
   context. Directional parsing accepts both `from … to …` and `to … from …`
-  syntax. Evaluative relations retain negation. Relation parsing stays within
-  sentence or clause boundaries so a negation or endpoint in one sentence
-  cannot affect the next.
+  syntax. Evaluative relations retain negation while treating additive
+  `not only … but also` wording as affirmative. The kinship backstop recognizes
+  clear noun uses such as `relative of` without treating comparative `relative
+  to` as a family enumeration. Relation parsing stays within sentence or clause
+  boundaries so a negation or endpoint in one sentence cannot affect the next.
 - Verification artifacts now use version `8.0.0`. The previous coherent
   `7.0.0` contract remains readable, while new results cannot be mistaken for
   artifacts produced without the deterministic veto. Synthesis, summary,
@@ -2697,15 +2699,16 @@ complete
 
 **Acceptance evidence so far**:
 - Paired deterministic probes preserve equivalent `at most 500` wording,
-  spelled-out cardinal values, comma/decimal and signed number formatting,
-  `maximum of`/`minimum of` wording, source-supported actor grouping, a correctly
-  qualified single actor, and a correctly bound leading condition. They also
-  preserve synonymous transport endpoints with a trailing time modifier,
-  inverted source-route syntax, subject-bound, shared-subject, compound and
-  negative evaluations, and qualified modality.
+  spelled-out cardinal values, symbolic `≤`/`≥` bounds, comma/decimal and signed
+  number formatting, `maximum of`/`minimum of` wording, source-supported actor
+  grouping, a correctly qualified single actor, and a correctly bound leading
+  condition. They also preserve synonymous transport endpoints with a trailing
+  time modifier, inverted source-route syntax, comparative `relative to`,
+  additive, subject-bound, shared-subject, compound and negative evaluations,
+  and qualified modality.
   Opposite probes reject an exclusive
-  `fewer than 500` boundary, a removed negative sign, a bound moved between named
-  plans, broader kinship label, acronym and full-name actor transfer (including
+  `fewer than 500` boundary, symbolic `>`/`<` opposites, a removed negative sign,
+  a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
   distinct rules in one item or compound sentence, and a single actor borrowing
   another actor's qualifier, including a leading condition), an endpoint
   reversal from either source-route syntax, an evaluation moved between named

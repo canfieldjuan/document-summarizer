@@ -220,6 +220,18 @@ fn numeric_mentions(tokens: &[String]) -> Vec<NumericMention> {
 fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<NumericRelation> {
     let before = &words[..start];
     let after = &words[end..];
+    if before.last().is_some_and(|word| word == "__lt") {
+        return Some(NumericRelation::LessThan);
+    }
+    if before.last().is_some_and(|word| word == "__le") {
+        return Some(NumericRelation::AtMost);
+    }
+    if before.last().is_some_and(|word| word == "__gt") {
+        return Some(NumericRelation::GreaterThan);
+    }
+    if before.last().is_some_and(|word| word == "__ge") {
+        return Some(NumericRelation::AtLeast);
+    }
     if ends_with_words(before, &["no", "more", "than"])
         || ends_with_words(before, &["not", "more", "than"])
         || ends_with_words(before, &["at", "most"])
@@ -325,6 +337,20 @@ fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
             continue;
         }
         flush_token(&mut token, &mut clause);
+        if matches!(character, '<' | '>' | '≤' | '≥') {
+            let followed_by_equals = characters.get(index + 1).is_some_and(|value| *value == '=');
+            clause.push(
+                match (character, followed_by_equals) {
+                    ('<', false) => "__lt",
+                    ('<', true) | ('≤', _) => "__le",
+                    ('>', false) => "__gt",
+                    ('>', true) | ('≥', _) => "__ge",
+                    _ => unreachable!("comparison operator is exhaustively matched"),
+                }
+                .into(),
+            );
+            continue;
+        }
         if matches!(character, '.' | '?' | '!' | ';' | '\n' | '\r') && !clause.is_empty() {
             clauses.push(std::mem::take(&mut clause));
         }
@@ -425,12 +451,7 @@ fn contains_words(text: &str, phrase: &[&str]) -> bool {
 }
 
 fn broader_enumeration_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
-    for phrase in [
-        &["family", "member"][..],
-        &["family", "members"][..],
-        &["relative"][..],
-        &["relatives"][..],
-    ] {
+    for phrase in [&["family", "member"][..], &["family", "members"][..]] {
         if contains_words(claim, phrase)
             && !evidence
                 .iter()
@@ -438,6 +459,26 @@ fn broader_enumeration_supported(claim: &str, evidence: &[&EvidenceItem]) -> boo
         {
             return false;
         }
+    }
+    let kinship_relative = |text: &str| {
+        let tokens = words(text);
+        tokens.iter().enumerate().any(|(index, word)| {
+            matches!(word.as_str(), "relative" | "relatives")
+                && (tokens.get(index + 1).is_some_and(|next| next == "of")
+                    || tokens.get(index.wrapping_sub(1)).is_some_and(|previous| {
+                        matches!(
+                            previous.as_str(),
+                            "his" | "her" | "their" | "our" | "your" | "s"
+                        )
+                    }))
+        })
+    };
+    if kinship_relative(claim)
+        && !evidence
+            .iter()
+            .any(|item| kinship_relative(&item.exact_quote))
+    {
+        return false;
     }
     true
 }
@@ -923,12 +964,20 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                 );
             subject_is_concrete.then(|| EvaluationRelation {
                 subject,
-                negated: tokens[linking_index..=concept_index].iter().any(|word| {
-                    matches!(
-                        word.as_str(),
-                        "not" | "no" | "never" | "t" | "isn" | "aren" | "wasn" | "weren"
-                    )
-                }),
+                negated: tokens[linking_index..=concept_index]
+                    .iter()
+                    .enumerate()
+                    .any(|(relative, word)| {
+                        let additive_not = word == "not"
+                            && tokens
+                                .get(linking_index + relative + 1)
+                                .is_some_and(|next| next == "only");
+                        !additive_not
+                            && matches!(
+                                word.as_str(),
+                                "not" | "no" | "never" | "t" | "isn" | "aren" | "wasn" | "weren"
+                            )
+                    }),
             })
         })
         .collect()
