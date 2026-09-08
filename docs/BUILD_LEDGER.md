@@ -2436,7 +2436,8 @@ complete
   Dotted identifiers are bounded exactly, so `4.20` does not satisfy `4.2`, and
   year-led prose and a leading decimal phrase such as `1.5 million shares` are
   not treated as clause headings. Titles in parentheses or after a dash, colon
-  or comma must match the source title.
+  or comma must match the source title. A period plus any whitespace separates
+  a source title from its body, including native-text newlines.
 - A complete catalog of at most six distinct numbered clauses must retain
   evidence from every supplied clause. Mixed, incomplete and larger catalogs
   keep materiality-based selection. Contract gets at most two bounded repair

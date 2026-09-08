@@ -438,7 +438,14 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
     }
 
     let remainder = text[number_end..].trim_start();
-    let body_delimiter = remainder.find(". ");
+    let body_delimiter = remainder.char_indices().find_map(|(index, character)| {
+        (character == '.'
+            && remainder[index + character.len_utf8()..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace))
+        .then_some(index)
+    });
     if dotted_without_terminal && body_delimiter.is_none() {
         return None;
     }
@@ -2128,6 +2135,15 @@ mod tests {
             "4.2 expenses. Client will reimburse approved travel."
         )
         .is_none());
+        assert_eq!(
+            leading_contract_clause_reference(
+                "1. Parties and Term.\nClient engages Consultant for six months."
+            ),
+            Some(ContractClauseReference {
+                number: "1".into(),
+                title: "Parties and Term".into(),
+            })
+        );
         assert!(text_mentions_contract_clause(
             "Section 4.2 (Expenses) covers travel.",
             &clause

@@ -548,7 +548,9 @@ or a leading decimal phrase such as `1.5 million shares` is not treated as a
 clause, and a reference such as `4.20` cannot satisfy `4.2`. A title supplied in
 parentheses or after a dash, colon or comma must match the source title; a wrong
 title is sent through bounded repair instead of being accepted or masked by an
-appended number.
+appended number. The source title boundary accepts a period followed by any
+whitespace so native-text line breaks do not absorb the clause body into its
+title.
 For a complete short catalog containing at most six source segments where every
 segment begins with a distinct numbered clause, Contract validation also
 requires the result to retain evidence from every supplied clause. Mixed,
