@@ -521,15 +521,15 @@ fn contract_clause_mention(
     for label in ["section", "clause", "article"] {
         let prefix = format!("{label} {number}");
         for (index, _) in text.match_indices(&prefix) {
-            let suffix = &text[index + prefix.len()..];
-            if suffix
+            let raw_suffix = &text[index + prefix.len()..];
+            if raw_suffix
                 .chars()
                 .next()
                 .is_some_and(|character| character.is_alphanumeric() || character == '.')
             {
                 continue;
             }
-            let suffix = suffix.trim_start();
+            let suffix = raw_suffix.trim_start();
             if let Some(parenthesized) = suffix.strip_prefix('(') {
                 if parenthesized.find(')').is_some_and(|end| {
                     parenthesized[..end].trim() == title
@@ -542,7 +542,7 @@ fn contract_clause_mention(
             } else if suffix
                 .chars()
                 .next()
-                .is_some_and(|character| matches!(character, '—' | '–' | '-' | ':' | ','))
+                .is_some_and(|character| matches!(character, '—' | '–' | '-' | ':'))
             {
                 let delimiter = suffix.chars().next().expect("checked delimiter must exist");
                 let titled = suffix[delimiter.len_utf8()..].trim_start();
@@ -553,8 +553,10 @@ fn contract_clause_mention(
                 } else {
                     inaccurate_title = true;
                 }
-            } else {
+            } else if raw_contract_reference_ends_here(raw_suffix) {
                 accurate = true;
+            } else {
+                inaccurate_title = true;
             }
         }
     }
@@ -2230,6 +2232,7 @@ mod tests {
             "Section 4.2: Expenses covers travel.",
             "Section 4.2, Expenses covers travel.",
             "Section 4.2 covers travel.",
+            "Under Section 4.2, the Client reimburses approved travel.",
             "4.2. Expenses covers travel.",
             "4.2. Expenses, covering travel.",
         ] {
@@ -2262,7 +2265,7 @@ mod tests {
         for inaccurate in [
             "Section 4.2 — Termination covers travel.",
             "Section 4.2: Termination covers travel.",
-            "Section 4.2, Termination covers travel.",
+            "Section 4.2/Termination covers travel.",
         ] {
             assert_eq!(
                 contract_clause_mention(inaccurate, &clause),
@@ -2370,6 +2373,7 @@ mod tests {
             "Section 4.2: Expenses/Termination covers travel.",
             "Section 4.2 (Expenses)Termination covers travel.",
             "Section 4.2 (Expenses)/Termination covers travel.",
+            "Section 4.2/Termination covers travel.",
         ] {
             let malformed_title = vec![CitedClaim {
                 claim_id: "contract-malformed-title".into(),
