@@ -563,6 +563,21 @@ fn contract_clause_reference_suffix(references: &[ContractClauseReference]) -> O
     })
 }
 
+fn contract_clause_reference_before_terminal<'a>(
+    text: &'a str,
+    suffix: &str,
+) -> Option<(&'a str, char)> {
+    let suffix_start = text.rfind(suffix)?;
+    let mut trailing = text[suffix_start + suffix.len()..].chars();
+    let terminal = trailing.next()?;
+    if !matches!(terminal, '.' | '!' | '?' | '。' | '！' | '？')
+        || !trailing.all(|character| matches!(character, '"' | '\'' | '”' | '’' | ')' | ']' | '}'))
+    {
+        return None;
+    }
+    Some((&text[..suffix_start], terminal))
+}
+
 fn attach_contract_clause_references(
     claims: &mut [ValidatedClaim],
     catalog: &SourceCatalog,
@@ -575,7 +590,22 @@ fn attach_contract_clause_references(
     for claim in claims {
         let references = contract_clause_references_for_evidence(&claim.evidence_ids, &evidence)?;
         if let Some(suffix) = contract_clause_reference_suffix(&references) {
-            if !claim.text.ends_with(&suffix) {
+            if claim.text.ends_with(&suffix) {
+                // The application already owns the exact source-derived suffix.
+            } else if let Some((prefix, terminal)) =
+                contract_clause_reference_before_terminal(&claim.text, &suffix)
+            {
+                let prefix = prefix.trim_end();
+                if prefix.is_empty() {
+                    return Err(invalid_response());
+                }
+                let mut canonical = prefix.to_owned();
+                if !pages::completion_valid(prefix) {
+                    canonical.push(terminal);
+                }
+                canonical.push_str(&suffix);
+                claim.text = canonical;
+            } else {
                 claim.text.push_str(&suffix);
             }
             if !canonical_bounded_text(&claim.text, MAX_CLAIM_CHARACTERS) {
@@ -2259,6 +2289,30 @@ mod tests {
         }];
         attach_contract_clause_references(&mut already_canonical, &catalog).unwrap();
         assert_eq!(already_canonical[0].text.matches("[Section 1]").count(), 1);
+
+        for punctuated in [
+            "Northstar Bakery LLC engages Rowan Lee. [Section 1].",
+            "Northstar Bakery LLC engages Rowan Lee [Section 1].\"",
+        ] {
+            let response = json!({
+                "units": [{
+                    "text": punctuated,
+                    "source_ids": ["s1"]
+                }]
+            });
+            let (canonicalized, _) = parse_response(
+                SummaryProfile::Contract,
+                &response.to_string(),
+                "contract-document",
+                &catalog,
+            )
+            .unwrap();
+            assert_eq!(canonicalized[0].text.matches("[Section 1]").count(), 1);
+            assert_eq!(
+                canonicalized[0].text,
+                "Northstar Bakery LLC engages Rowan Lee. [Section 1]"
+            );
+        }
 
         let evidence = catalog
             .candidates
