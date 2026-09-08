@@ -122,6 +122,7 @@ impl std::error::Error for PipelineFailure {}
 #[serde(rename_all = "camelCase")]
 pub enum SummaryProfile {
     General,
+    Story,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

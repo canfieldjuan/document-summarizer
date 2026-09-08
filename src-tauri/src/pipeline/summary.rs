@@ -487,7 +487,14 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
         (Some(_), SummaryProfile::General) => {
             direct::synthesize(runtime, &persisted_analysis, &chunked, &normalized, control)
         }
-        (None, SummaryProfile::General) => coherent::synthesize(
+        (Some(_), SummaryProfile::Story) => Err(stage_failure(
+            PipelineStage::Synthesize,
+            "SUMMARY_PROFILE_DELIVERY_UNSUPPORTED",
+            "Connect delivery supports only the General summary profile",
+            false,
+        )),
+        (None, profile) => coherent::synthesize(
+            profile,
             runtime,
             &persisted_analysis,
             &chunked,
@@ -3227,7 +3234,14 @@ fn validate_synthesized_document(
         ));
     }
     if synthesized.synthesis_version == SYNTHESIS_VERSION {
-        coherent::validate_for_runtime(synthesized, analyzed, chunked, normalized, runtime)?;
+        coherent::validate_for_runtime(
+            SummaryProfile::General,
+            synthesized,
+            analyzed,
+            chunked,
+            normalized,
+            runtime,
+        )?;
     } else if synthesized.synthesis_version == DIRECT_SYNTHESIS_VERSION {
         direct::validate_claim_set_for_runtime(synthesized, analyzed, runtime)?;
     }
@@ -4454,7 +4468,7 @@ pub(crate) fn fixture_model_output(request: &ModelRequest) -> String {
             fixture_pair_output(claims)
                 .expect("hierarchical synthesis fixture response should serialize")
         }
-        coherent::SCHEMA_NAME => coherent::fixture_model_output(request),
+        name if coherent::uses_schema_name(name) => coherent::fixture_model_output(request),
         VERIFICATION_SCHEMA_NAME => {
             let prompt: VerificationPrompt = serde_json::from_str(&request.user_prompt)
                 .expect("verification fixture prompt should deserialize");
@@ -4486,7 +4500,7 @@ mod tests {
         get_synthesized_document, get_verification_attempt, get_verified_document, init_db,
         list_pipeline_events,
     };
-    use crate::pipeline::ingest::ingest_pdf;
+    use crate::pipeline::ingest::ingest_pdf_with_profiles;
     use crate::pipeline::model::OllamaRuntime;
     use crate::pipeline::normalize::{normalize_document, CanonicalNormalizer};
     use crate::pipeline::parser::{parse_document, PdfExtractParser};
@@ -4528,6 +4542,35 @@ mod tests {
     struct FakeRuntime {
         calls: AtomicUsize,
         failure: Option<FailurePoint>,
+    }
+
+    #[derive(Default)]
+    struct ProfileRecordingRuntime {
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl ModelRuntime for ProfileRecordingRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(ModelResponse {
+                text: fixture_model_output(request),
+                runtime_id: self.runtime_id().to_string(),
+                model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
+            })
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "profile-recording-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "profile-recording-model"
+        }
     }
 
     struct MalformedEvidenceRuntime {
@@ -4787,10 +4830,8 @@ mod tests {
                 ModelOutputFormat::JsonSchema { name, .. }
                     if matches!(
                         name.as_str(),
-                        SYNTHESIS_SCHEMA_NAME
-                            | HIERARCHICAL_SYNTHESIS_SCHEMA_NAME
-                            | coherent::SCHEMA_NAME
-                    )
+                        SYNTHESIS_SCHEMA_NAME | HIERARCHICAL_SYNTHESIS_SCHEMA_NAME
+                    ) || coherent::uses_schema_name(name)
             ) {
                 let call = self.synthesis_calls.fetch_add(1, Ordering::SeqCst);
                 if call == 0 {
@@ -4880,7 +4921,7 @@ mod tests {
                     serde_json::to_string(&RawVerificationResponse { verdicts })
                         .expect("verification fixture response should serialize")
                 }
-                ModelOutputFormat::JsonSchema { name, .. } if name == coherent::SCHEMA_NAME => {
+                ModelOutputFormat::JsonSchema { name, .. } if coherent::uses_schema_name(name) => {
                     self.synthesis_calls.fetch_add(1, Ordering::SeqCst);
                     coherent::fixture_model_output(request)
                 }
@@ -4949,10 +4990,8 @@ mod tests {
                 ModelOutputFormat::JsonSchema { name, .. }
                     if matches!(
                         name.as_str(),
-                        SYNTHESIS_SCHEMA_NAME
-                            | HIERARCHICAL_SYNTHESIS_SCHEMA_NAME
-                            | coherent::SCHEMA_NAME
-                    ) =>
+                        SYNTHESIS_SCHEMA_NAME | HIERARCHICAL_SYNTHESIS_SCHEMA_NAME
+                    ) || coherent::uses_schema_name(name) =>
                 {
                     FailurePoint::Synthesis
                 }
@@ -5003,12 +5042,21 @@ mod tests {
     }
 
     fn chunked_run(database: &TestDatabase) -> (Connection, String) {
+        chunked_run_with_profile(database, SummaryProfile::General)
+    }
+
+    fn chunked_run_with_profile(
+        database: &TestDatabase,
+        summary_profile: SummaryProfile,
+    ) -> (Connection, String) {
         let mut conn = init_db(&database.0).expect("test database should initialize");
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
-        let (_, run) = ingest_pdf(
+        let (_, run) = ingest_pdf_with_profiles(
             &mut conn,
             source.to_str().expect("fixture path should be UTF-8"),
+            None,
+            summary_profile,
         )
         .expect("fixture should ingest");
         parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id)
@@ -8655,6 +8703,93 @@ mod tests {
         .expect_err("permanent input failure must take precedence over runtime health");
         assert_eq!(error.code, "VERIFICATION_INPUT_TOO_LARGE");
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn story_profile_uses_source_aware_synthesis_and_exact_citation_context() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Story);
+        let runtime = ProfileRecordingRuntime::default();
+
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("Story summary should complete through the shared pipeline");
+        assert_eq!(
+            db::get_run_summary_profile(&conn, &run_id).expect("profile should load"),
+            Some(SummaryProfile::Story)
+        );
+        let synthesized = get_synthesized_document(&conn, &run_id)
+            .expect("synthesis query should succeed")
+            .expect("Story synthesis should persist");
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert!(!synthesized.summary_claims.is_empty());
+        assert!(!synthesized.synthesis_evidence.is_empty());
+        let normalized = get_normalized_document(&conn, &run_id)
+            .expect("normalized query should succeed")
+            .expect("normalized Story source should persist");
+        let normalized_text = normalized
+            .pages
+            .iter()
+            .flat_map(|page| &page.content)
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(synthesized
+            .synthesis_evidence
+            .iter()
+            .all(|evidence| normalized_text.contains(&evidence.exact_quote)));
+        let evidence_ids = synthesized
+            .synthesis_evidence
+            .iter()
+            .map(|evidence| evidence.evidence_id.as_str())
+            .collect::<HashSet<_>>();
+        assert!(synthesized.summary_claims.iter().all(|claim| claim
+            .evidence_ids
+            .iter()
+            .all(|evidence_id| evidence_ids.contains(evidence_id.as_str()))));
+        assert_eq!(
+            completed.citations.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert_eq!(
+            completed.citations.summary_claims,
+            synthesized.summary_claims
+        );
+
+        let requests = runtime.requests.lock().unwrap();
+        assert!(requests.iter().any(|request| matches!(
+            &request.output_format,
+            ModelOutputFormat::JsonSchema { name, .. }
+                if name == coherent::STORY_SCHEMA_NAME
+        )));
+        assert!(!requests.iter().any(|request| matches!(
+            &request.output_format,
+            ModelOutputFormat::JsonSchema { name, .. } if name == coherent::SCHEMA_NAME
+        )));
+    }
+
+    #[test]
+    fn connect_delivery_rejects_a_specialized_summary_profile() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Story);
+        let runtime = FakeRuntime::healthy();
+        analyze_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("Story fixture should reach the analyzed checkpoint");
+
+        let error = synthesize_analyzed_document_controlled_with_delivery(
+            &mut conn,
+            &runtime,
+            &run_id,
+            &UNCONTROLLED_EXECUTION,
+            Some(SummaryDeliveryPolicy::connect()),
+        )
+        .expect_err("Connect must not silently use a specialized profile");
+        assert_eq!(error.code(), "SUMMARY_PROFILE_DELIVERY_UNSUPPORTED");
+        assert!(get_synthesized_document(&conn, &run_id)
+            .expect("synthesis query should succeed")
+            .is_none());
     }
 
     #[test]
