@@ -2293,9 +2293,8 @@ PR #39
 
 ## Slice 24 — Manual Story Summary Profile (2026-09-07)
 
-**Status**: implementation and automated gates complete in draft PR #40;
-live-model quality acceptance remains unverified under current local runtime
-contention
+**Status**: implementation, automated gates and live-model quality acceptance
+complete in PR #40
 
 **Verified root cause and change boundary**:
 - Slice 23 persists an immutable application summary profile, but its typed
@@ -2382,16 +2381,35 @@ contention
   The parser mechanically proves only bounded prose, valid source IDs, exact
   source retrieval and modal preservation; it does not prove semantic support.
 - An ignored live Story harness uses the same non-private narrative and real
-  Ollama adapter. The attempted run produced no model response and was cancelled
-  with exit 130 after the provider stalled. At diagnosis, another LM Studio
-  process held 19,854 MiB of GPU memory and Ollama reported the selected
-  `qwen3-30b-a3b:latest` model running 84% CPU / 16% GPU. No model-produced Story
-  quality result is claimed from that attempt.
+  Ollama adapter. Its first completed model response passed the mechanical
+  contract but failed manual semantic review: it added `Determined` and `fearing
+  for Ivo's life`, and joined Ivo's worsening condition to the storm with an
+  unsupported `as` relationship. The Story prompt was narrowed to keep external
+  reasons external, reject invented emotional labels and prevent temporal or
+  causal connectors between events the source does not relate.
+- After the competing LM Studio model was unloaded, Ollama loaded
+  `qwen3-30b-a3b:latest` at 100% GPU. The corrected live harness passed in 5.86
+  seconds and generated:
 
-**Remaining acceptance limit**:
-- An uncontended run of the ignored live Story harness is still needed to judge
-  whether the selected model's generated synopsis is useful and source-faithful
-  in practice. That judgment must examine chronology, causality, character
-  identity, sourced motivation, conflict, major events, resolution and invented
-  additions. Passing schema, source-ID and semantic-verdict checks alone does
-  not close this limit.
+  > Mara, the village mapmaker, seeks to reopen the mountain pass to deliver
+  > winter medicine to her brother Ivo, who is ill; a storm has destroyed the
+  > only bridge, and council leader Soren forbids any attempt to cross, but Mara
+  > finds an older footpath on her late mother's map, though it crosses unstable
+  > cliffs, and as Ivo's fever worsens, she asks guide Len to help her test the
+  > route before the next snowfall. [p. 1; p. 2; p. 3; p. 4]
+  >
+  > Len secures a rope after a rockslide blocks their return, enabling them to
+  > reach the far-side clinic and bring the medicine back; Soren subsequently
+  > reopens the marked footpath under a guide requirement, Ivo recovers, and Mara
+  > keeps her mother's map in the village archive. [p. 5; p. 6]
+
+  Source comparison confirms this model-produced synopsis retains character
+  identity, Mara's stated goal, the bridge and Soren as obstacles, the explicit
+  worsening-fever reason for asking Len, the rockslide-to-rope-to-clinic causal
+  chain, the reopened path and Ivo's recovery. It preserves event order and adds
+  no unsupported emotion, internal state, motive, action or term.
+
+**Remaining limit**:
+- This is one semantic acceptance example from one synthetic narrative and one
+  qualified local model. Mechanical validation and one accepted sample do not
+  establish general Story reliability across narrative styles or documents.
