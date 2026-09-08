@@ -2573,3 +2573,83 @@ complete
 - The five live examples demonstrate the intended decisions on one qualified
   local model. They do not measure classification reliability across documents,
   and the application intentionally exposes no confidence percentage.
+
+## Slice 27 — Long General Summary Synthesis (2026-09-08)
+
+**Status**: implementation, automated gates and live-model quality acceptance
+complete
+
+**Verified root cause and implemented behavior**:
+- The 111-page public DOL fixture did not reach coherent General synthesis. Its
+  complete exact-source catalog exceeded one synthesis request, so the existing
+  admission rule returned the verified claim ledger. An analysis quote-boundary
+  omission also made the catalog incomplete. General can now continue from a
+  nonempty safe catalog while preserving the omission warning; an empty catalog,
+  and incomplete Story or Contract catalogs, still use the existing fallback.
+- Long General sources reuse the existing normalized exact-source catalog. The
+  application partitions it into bounded ordered windows, asks the model to
+  select a fixed number of known source IDs from each window, restores canonical
+  source order, and sends only those exact segments to the existing coherent
+  synthesis path. Selection must strictly shrink, use unique known IDs, and fit
+  both the application character budget and the runtime's exact preflight.
+- A matching extraction claim may accompany an exact quotation as drafting
+  guidance. Exact quotation remains authoritative; unmatched source segments
+  carry no duplicate claim field. Selection requests never receive extraction
+  claims, so selection remains grounded in source text.
+- Selected sources retain their original selection-window identity. A General
+  summary unit cannot combine windowed and unwindowed sources or sources from
+  two windows. One bounded structural repair is allowed independently of the
+  existing modality repair. If that repair remains invalid, already-valid
+  original units are retained and the unsafe units are omitted with
+  `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD`; an all-invalid or otherwise
+  malformed response still fails closed.
+- The General and shared semantic-verification prompts explicitly reject topic
+  expansion, actor or program transfer, broadened enumerations, generic
+  conclusions, changed endpoints and strengthened modality. Mechanical source
+  ID validation remains distinct from semantic support judgment.
+
+**Acceptance evidence so far**:
+- Focused tests pass for exact source-selection count and character boundaries,
+  canonical ordering, duplicate and foreign IDs, zero and over-limit inputs,
+  partial-catalog policy, extracted-claim matching, selection-window admission,
+  a successful window repair, safe-unit retention after a failed repair, and a
+  separate subsequent modality repair. The coherent test group passed 19 tests
+  with 2 opt-in live tests ignored; the low-context end-to-end test proves a
+  complete catalog can be rejected while its bounded reduction reaches coherent
+  synthesis.
+- `cargo test --all-targets` passed 424 library tests with 10 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting, the
+  TypeScript/Vite production build and `git diff --check` passed.
+- Before the long-document path was repaired, the public 111-page fixture
+  completed with 81 rendered claims, 17,283 summary characters, 176 model
+  requests, and
+  `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`. The final seeded run used
+  `qwen3-30b-a3b:latest` through Ollama at 100% GPU and completed in 115.91
+  seconds with 186 requests. It delivered six cited paragraphs and 2,744 summary
+  characters without the source-context fallback warning.
+- Manual comparison against the cited pages confirms that the retained result
+  preserves the FLSA definition and enterprise conditions, overtime rules and
+  examples, separate MSPA coverage conditions for FLCs versus AGERs/AGASs,
+  payroll and vehicle-insurance requirements, and field-sanitation quantities.
+  Earlier candidates changed `did not use more than 500` to `fewer than 500`,
+  broadened five named relationships to `family member`, transferred the FLC
+  consideration condition to AGERs/AGASs, and changed an outbound-transport
+  endpoint. The final retained paragraphs contain none of those changes; the
+  cross-window H-2A paragraph was withheld rather than published.
+
+**Non-scope and remaining limits**:
+- This slice does not change Story or Contract overflow behavior, automatic
+  classification, document-type modeling, ingestion, OCR, Connect delivery,
+  persistence schema, result rendering, dependencies, or model training.
+- Selection is a bounded relevance judgment, not exhaustive long-document
+  coverage. A failed structural repair reduces coverage and exposes a warning.
+  The delivered phrase `payroll must be processed at least semi-monthly` is a
+  plain-language interpretation of the source slide's `Payroll` heading and
+  `Pay at least semi-monthly` bullet, rather than mechanically proved
+  entailment.
+- The shared verifier returned supported for several earlier statements that
+  manual source comparison rejected. Valid IDs and model verdicts therefore do
+  not establish semantic support; representative output still requires the
+  documented human comparison. This is one public document on one qualified
+  local model, not a measured reliability result.
