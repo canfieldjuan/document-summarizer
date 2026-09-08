@@ -4249,7 +4249,10 @@ mod tests {
         coordinated_actors.exact_quote = "Farm labor contractors (FLCs) are subject to the rule if they recruit workers and agricultural employers (AGERs) are subject to the rule if they recruit for money.".into();
         let mut negative_actor_condition = catalog().candidates[0].evidence.clone();
         negative_actor_condition.evidence_id = "negative-actor-condition".into();
-        negative_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they do not recruit for compensation.".into();
+        negative_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they don't recruit for compensation.".into();
+        let mut contracted_bound = catalog().candidates[1].evidence.clone();
+        contracted_bound.evidence_id = "contracted-bound".into();
+        contracted_bound.exact_quote = "The limit isn't more than 500 units.".into();
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
         transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
@@ -4298,6 +4301,7 @@ mod tests {
             combined_actors,
             coordinated_actors,
             negative_actor_condition,
+            contracted_bound,
             transport,
             inverted_transport,
             explicit_evaluation,
@@ -4358,6 +4362,16 @@ mod tests {
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
+                claim_id: "supported-contracted-boundary".into(),
+                text: "The limit is at most 500 units.".into(),
+                evidence_ids: vec!["contracted-bound".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-contracted-boundary".into(),
+                text: "The limit is more than 500 units.".into(),
+                evidence_ids: vec!["contracted-bound".into()],
+            },
+            CitedClaim {
                 claim_id: "broadened-enumeration".into(),
                 text: "A family member of the owner qualifies for the exemption.".into(),
                 evidence_ids: vec!["flsa".into()],
@@ -4415,6 +4429,11 @@ mod tests {
             CitedClaim {
                 claim_id: "transferred-passive-bound-subject".into(),
                 text: "At most 900 applications are accepted by Plan B.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-article-bound-subject".into(),
+                text: "Plan B accepts a maximum of 900 applications.".into(),
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
@@ -4594,6 +4613,7 @@ mod tests {
             "supported-spelled-boundary",
             "supported-symbol-upper-boundary",
             "supported-symbol-lower-boundary",
+            "supported-contracted-boundary",
             "supported-formatted-integer",
             "supported-formatted-decimal",
             "supported-negative-boundary",
@@ -4624,11 +4644,13 @@ mod tests {
             "changed-spelled-boundary",
             "changed-symbol-upper-boundary",
             "changed-symbol-lower-boundary",
+            "changed-contracted-boundary",
             "broadened-enumeration",
             "changed-formatted-decimal",
             "changed-negative-boundary",
             "transferred-bound-subject",
             "transferred-passive-bound-subject",
+            "transferred-article-bound-subject",
             "transferred-condition",
             "transferred-condition-full-names",
             "transferred-condition-coordinated",

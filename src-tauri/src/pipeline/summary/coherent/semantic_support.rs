@@ -224,6 +224,33 @@ fn numeric_mentions(tokens: &[String]) -> Vec<NumericMention> {
     mentions
 }
 
+fn negation_present(tokens: &[String]) -> bool {
+    tokens.iter().enumerate().any(|(index, word)| {
+        let additive_not =
+            word == "not" && tokens.get(index + 1).is_some_and(|next| next == "only");
+        (!additive_not && matches!(word.as_str(), "not" | "no" | "never" | "without"))
+            || (matches!(
+                word.as_str(),
+                "isn"
+                    | "aren"
+                    | "wasn"
+                    | "weren"
+                    | "don"
+                    | "doesn"
+                    | "didn"
+                    | "won"
+                    | "wouldn"
+                    | "shouldn"
+                    | "couldn"
+                    | "mustn"
+                    | "hasn"
+                    | "haven"
+                    | "hadn"
+                    | "can"
+            ) && tokens.get(index + 1).is_some_and(|next| next == "t"))
+    })
+}
+
 fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<NumericRelation> {
     let before = &words[..start];
     let after = &words[end..];
@@ -261,11 +288,8 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
         return Some(NumericRelation::AtLeast);
     }
     if ends_with_words(before, &["more", "than"]) || ends_with_words(before, &["greater", "than"]) {
-        let negated = before[..before.len().saturating_sub(2)]
-            .iter()
-            .rev()
-            .take(3)
-            .any(|word| matches!(word.as_str(), "no" | "not" | "never"));
+        let prefix = &before[..before.len().saturating_sub(2)];
+        let negated = negation_present(&prefix[prefix.len().saturating_sub(4)..]);
         return Some(if negated {
             NumericRelation::AtMost
         } else {
@@ -273,11 +297,8 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
         });
     }
     if ends_with_words(before, &["less", "than"]) || ends_with_words(before, &["fewer", "than"]) {
-        let negated = before[..before.len().saturating_sub(2)]
-            .iter()
-            .rev()
-            .take(3)
-            .any(|word| matches!(word.as_str(), "no" | "not" | "never"));
+        let prefix = &before[..before.len().saturating_sub(2)];
+        let negated = negation_present(&prefix[prefix.len().saturating_sub(4)..]);
         return Some(if negated {
             NumericRelation::AtLeast
         } else {
@@ -372,7 +393,7 @@ fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
 fn numeric_context(tokens: &[String], index: usize) -> Vec<String> {
     const COMPARISON_WORDS: &[&str] = &[
         "no", "not", "more", "less", "fewer", "greater", "than", "at", "most", "least", "up", "to",
-        "maximum", "minimum", "of", "exactly", "under", "below", "over", "above",
+        "maximum", "minimum", "of", "exactly", "under", "below", "over", "above", "a", "an", "the",
     ];
     let mut end = index;
     while end > 0 && COMPARISON_WORDS.contains(&tokens[end - 1].as_str()) {
@@ -817,21 +838,7 @@ fn qualifier_polarities(tokens: &[String], concept: &[&str]) -> HashSet<bool> {
         .iter()
         .enumerate()
         .filter(|(_, word)| concept.contains(&word.as_str()))
-        .map(|(index, _)| {
-            tokens[index.saturating_sub(6)..index]
-                .iter()
-                .enumerate()
-                .any(|(relative, word)| {
-                    let absolute = index.saturating_sub(6) + relative;
-                    let additive_not = word == "not"
-                        && tokens.get(absolute + 1).is_some_and(|next| next == "only");
-                    !additive_not
-                        && matches!(
-                            word.as_str(),
-                            "not" | "no" | "never" | "without" | "isn" | "aren" | "wasn" | "weren"
-                        )
-                })
-        })
+        .map(|(index, _)| negation_present(&tokens[index.saturating_sub(6)..index]))
         .collect()
 }
 
@@ -1047,20 +1054,7 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                 );
             subject_is_concrete.then(|| EvaluationRelation {
                 subject,
-                negated: tokens[linking_index..=concept_index]
-                    .iter()
-                    .enumerate()
-                    .any(|(relative, word)| {
-                        let additive_not = word == "not"
-                            && tokens
-                                .get(linking_index + relative + 1)
-                                .is_some_and(|next| next == "only");
-                        !additive_not
-                            && matches!(
-                                word.as_str(),
-                                "not" | "no" | "never" | "t" | "isn" | "aren" | "wasn" | "weren"
-                            )
-                    }),
+                negated: negation_present(&tokens[linking_index..=concept_index]),
             })
         })
         .collect()
