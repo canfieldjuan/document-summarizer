@@ -20,6 +20,13 @@ fn ends_with_words(words: &[String], suffix: &[&str]) -> bool {
 }
 
 fn numeric_value(word: &str) -> Option<String> {
+    let (negative, word) = if let Some(value) = word.strip_prefix('-') {
+        (true, value)
+    } else if let Some(value) = word.strip_prefix('+') {
+        (false, value)
+    } else {
+        (false, word)
+    };
     let mut parts = word.split('.');
     let integer = parts.next()?;
     let fraction = parts.next();
@@ -35,9 +42,14 @@ fn numeric_value(word: &str) -> Option<String> {
     let integer = integer.trim_start_matches('0');
     let integer = if integer.is_empty() { "0" } else { integer };
     let fraction = fraction.map(|value| value.trim_end_matches('0'));
-    Some(match fraction {
+    let normalized = match fraction {
         Some("") | None => integer.to_string(),
         Some(value) => format!("{integer}.{value}"),
+    };
+    Some(if negative && normalized != "0" {
+        format!("-{normalized}")
+    } else {
+        normalized
     })
 }
 
@@ -126,8 +138,16 @@ fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
             token.extend(character.to_lowercase());
             continue;
         }
-        let inside_number = token.chars().all(|value| value.is_ascii_digit())
-            && !token.is_empty()
+        let next_is_digit = characters
+            .get(index + 1)
+            .is_some_and(|value| value.is_ascii_digit());
+        if matches!(character, '+' | '-' | '−') && token.is_empty() && next_is_digit {
+            token.push(if character == '+' { '+' } else { '-' });
+            continue;
+        }
+        let unsigned_token = token.strip_prefix(['+', '-']).unwrap_or(token.as_str());
+        let inside_number = unsigned_token.chars().all(|value| value.is_ascii_digit())
+            && !unsigned_token.is_empty()
             && characters
                 .get(index + 1)
                 .is_some_and(|value| value.is_ascii_digit());
@@ -320,12 +340,6 @@ fn acronym(word: &str) -> Option<String> {
         .then(|| word.to_string())
 }
 
-fn acronym_set(text: &str) -> HashSet<String> {
-    text.split(|character: char| !character.is_alphanumeric())
-        .filter_map(acronym)
-        .collect()
-}
-
 fn defined_actor_labels(text: &str) -> HashMap<String, Vec<String>> {
     let mut labels = HashMap::new();
     for (open, _) in text.match_indices('(') {
@@ -382,6 +396,80 @@ fn contains_any_word(text: &str, alternatives: &[&str]) -> bool {
         .any(|word| alternatives.contains(&word.as_str()))
 }
 
+fn tokens_contain_any(tokens: &[String], alternatives: &[&str]) -> bool {
+    tokens
+        .iter()
+        .any(|word| alternatives.contains(&word.as_str()))
+}
+
+fn actor_mention_end(tokens: &[String], actor: &str, label: &[String]) -> Option<usize> {
+    let actor = actor.to_ascii_lowercase();
+    let acronym_end = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| {
+            *word == &actor
+                || word
+                    .strip_suffix('s')
+                    .is_some_and(|word| word == actor.as_str())
+        })
+        .map(|(index, _)| index + 1)
+        .max();
+    let label_end = tokens
+        .windows(label.len())
+        .enumerate()
+        .filter(|(_, window)| *window == label)
+        .map(|(index, _)| index + label.len())
+        .max();
+    acronym_end.into_iter().chain(label_end).max()
+}
+
+fn tokens_mention_actor(tokens: &[String], actor: &str, label: &[String]) -> bool {
+    actor_mention_end(tokens, actor, label).is_some()
+}
+
+fn actor_relation_segments(
+    evidence: &[&EvidenceItem],
+    actors: &[(&str, &[String])],
+    concept: &[&str],
+) -> Vec<Vec<String>> {
+    evidence
+        .iter()
+        .flat_map(|item| semantic_clauses(&item.exact_quote))
+        .flat_map(|clause| {
+            let tokens = words(clause);
+            let mut segments = Vec::new();
+            let mut start = 0;
+            for index in 0..tokens.len() {
+                let contrast = matches!(
+                    tokens[index].as_str(),
+                    "while" | "whereas" | "but" | "although"
+                );
+                let left = &tokens[start..index];
+                let right_mentions_actor = actors
+                    .iter()
+                    .any(|(actor, label)| tokens_mention_actor(&tokens[index + 1..], actor, label));
+                let completed_coordination = matches!(tokens[index].as_str(), "and" | "or")
+                    && right_mentions_actor
+                    && (tokens_contain_any(left, concept)
+                        || actors
+                            .iter()
+                            .filter_map(|(actor, label)| actor_mention_end(left, actor, label))
+                            .max()
+                            .is_some_and(|actor_end| actor_end < left.len()));
+                if (contrast || completed_coordination) && start < index {
+                    segments.push(tokens[start..index].to_vec());
+                    start = index + 1;
+                }
+            }
+            if start < tokens.len() {
+                segments.push(tokens[start..].to_vec());
+            }
+            segments
+        })
+        .collect()
+}
+
 fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     let claim_words = claim
         .split(|character: char| !character.is_alphanumeric())
@@ -419,14 +507,11 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         .filter(|(actor, label)| {
             subject_acronyms.contains(*actor) || contains_word_sequence(subject, label)
         })
+        .map(|(actor, label)| (actor.as_str(), label.as_slice()))
         .collect::<Vec<_>>();
     if actors.len() < 2 {
         return true;
     }
-    let source_clauses = evidence
-        .iter()
-        .flat_map(|item| semantic_clauses(&item.exact_quote))
-        .collect::<Vec<_>>();
     const QUALIFIER_CONCEPTS: &[&[&str]] = &[
         &[
             "compensation",
@@ -444,12 +529,13 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         if !contains_any_word(&condition, concept) {
             return true;
         }
+        let source_relations = actor_relation_segments(evidence, &actors, concept);
         let supported = actors
             .iter()
             .map(|(actor, label)| {
-                source_clauses.iter().any(|clause| {
-                    (acronym_set(clause).contains(*actor) || contains_owned_words(clause, label))
-                        && contains_any_word(clause, concept)
+                source_relations.iter().any(|relation| {
+                    tokens_mention_actor(relation, actor, label)
+                        && tokens_contain_any(relation, concept)
                 })
             })
             .collect::<Vec<_>>();
@@ -461,6 +547,57 @@ fn actor_qualifications_supported(claim: &str, evidence: &[&EvidenceItem]) -> bo
     semantic_clauses(claim).all(|clause| actor_qualification_clause_supported(clause, evidence))
 }
 
+fn original_words(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn evaluation_subject(clause: &str, concept: &[&str]) -> Option<Vec<String>> {
+    let tokens = original_words(clause);
+    let concept_index = tokens
+        .iter()
+        .position(|word| concept.contains(&word.to_ascii_lowercase().as_str()))?;
+    let linking_index = tokens[..concept_index].iter().rposition(|word| {
+        matches!(
+            word.to_ascii_lowercase().as_str(),
+            "is" | "are"
+                | "was"
+                | "were"
+                | "be"
+                | "been"
+                | "being"
+                | "seems"
+                | "seemed"
+                | "remains"
+                | "remained"
+        )
+    })?;
+    let mut subject = tokens[..linking_index]
+        .iter()
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if subject.first().is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "a" | "an" | "the" | "this" | "these" | "that" | "those"
+        )
+    }) {
+        subject.remove(0);
+    }
+    (!subject.is_empty()
+        && !matches!(
+            subject.as_slice(),
+            [word] if matches!(word.as_str(), "it" | "they" | "he" | "she")
+        ))
+    .then_some(subject)
+}
+
+fn evaluated_subject_matches(source: &[String], claim: &[String]) -> bool {
+    source == claim || source.windows(claim.len()).any(|window| window == claim)
+}
+
 fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
         &["essential", "critical", "vital", "necessary"],
@@ -470,12 +607,47 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
         &["safe", "safety"],
         &["healthy", "health"],
     ];
-    EVALUATIVE_CONCEPTS.iter().all(|concept| {
-        !contains_any_word(claim, concept)
-            || evidence
+    let source_clauses = evidence
+        .iter()
+        .flat_map(|item| semantic_clauses(&item.exact_quote))
+        .collect::<Vec<_>>();
+    for concept in EVALUATIVE_CONCEPTS {
+        let claim_clauses = semantic_clauses(claim)
+            .filter(|clause| contains_any_word(clause, concept))
+            .collect::<Vec<_>>();
+        if claim_clauses.is_empty() {
+            continue;
+        }
+        let evaluated_source_clauses = source_clauses
+            .iter()
+            .copied()
+            .filter(|clause| contains_any_word(clause, concept))
+            .collect::<Vec<_>>();
+        if evaluated_source_clauses.is_empty() {
+            return false;
+        }
+        let evaluated_subjects = evaluated_source_clauses
+            .iter()
+            .filter_map(|clause| evaluation_subject(clause, concept))
+            .collect::<Vec<_>>();
+        for clause in claim_clauses {
+            let Some(subject) = evaluation_subject(clause, concept) else {
+                continue;
+            };
+            let subject_is_cited = evidence
                 .iter()
-                .any(|item| contains_any_word(&item.exact_quote, concept))
-    })
+                .any(|item| contains_owned_words(&item.exact_quote, &subject));
+            if subject_is_cited
+                && !evaluated_subjects.is_empty()
+                && !evaluated_subjects
+                    .iter()
+                    .any(|source| evaluated_subject_matches(source, &subject))
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {

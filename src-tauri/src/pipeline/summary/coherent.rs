@@ -4234,7 +4234,7 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
@@ -4243,7 +4243,10 @@ mod tests {
         ager.exact_quote = "Agricultural employers (AGERs) and agricultural associations (AGAS) are subject to MSPA if they recruit a migrant worker.".into();
         let mut combined_actors = catalog().candidates[0].evidence.clone();
         combined_actors.evidence_id = "combined-actors".into();
-        combined_actors.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration. Agricultural employers (AGERs) and agricultural associations (AGAS) are subject to MSPA if they recruit a migrant worker.".into();
+        combined_actors.exact_quote = "Farm labor contractors (FLCs), agricultural employers (AGERs), and agricultural associations (AGAS) recruit migrant workers, while FLCs receive money or other valuable consideration for recruiting.".into();
+        let mut coordinated_actors = catalog().candidates[1].evidence.clone();
+        coordinated_actors.evidence_id = "coordinated-actors".into();
+        coordinated_actors.exact_quote = "Farm labor contractors (FLCs) are subject to the rule if they recruit workers and agricultural employers (AGERs) are subject to the rule if they recruit for money.".into();
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
         transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
@@ -4251,6 +4254,15 @@ mod tests {
         explicit_evaluation.evidence_id = "evaluation".into();
         explicit_evaluation.exact_quote =
             "These measures are essential for worker safety and health.".into();
+        let mut procedure_a = catalog().candidates[0].evidence.clone();
+        procedure_a.evidence_id = "procedure-a".into();
+        procedure_a.exact_quote = "Procedure A is essential.".into();
+        let mut procedure_b = catalog().candidates[1].evidence.clone();
+        procedure_b.evidence_id = "procedure-b".into();
+        procedure_b.exact_quote = "Procedure B is documented separately.".into();
+        let mut shared_procedures = catalog().candidates[0].evidence.clone();
+        shared_procedures.evidence_id = "shared-procedures".into();
+        shared_procedures.exact_quote = "Procedure A and Procedure B are essential.".into();
         let mut sentence_boundary = catalog().candidates[1].evidence.clone();
         sentence_boundary.evidence_id = "sentence-boundary".into();
         sentence_boundary.exact_quote =
@@ -4263,8 +4275,12 @@ mod tests {
             flc,
             ager,
             combined_actors,
+            coordinated_actors,
             transport,
             explicit_evaluation,
+            procedure_a,
+            procedure_b,
+            shared_procedures,
             sentence_boundary,
             modal,
         ];
@@ -4303,6 +4319,16 @@ mod tests {
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
+                claim_id: "supported-negative-boundary".into(),
+                text: "Temperatures must remain at least -5 degrees.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negative-boundary".into(),
+                text: "Temperatures must remain at least 5 degrees.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-actors".into(),
                 text: "FLCs, AGERs, and AGAS are subject to MSPA if they recruit migrant workers."
                     .into(),
@@ -4321,6 +4347,12 @@ mod tests {
                 evidence_ids: vec!["combined-actors".into()],
             },
             CitedClaim {
+                claim_id: "transferred-condition-coordinated".into(),
+                text: "FLCs and AGERs are subject to the rule if they recruit workers for money."
+                    .into(),
+                evidence_ids: vec!["coordinated-actors".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-endpoints".into(),
                 text: "The employer must provide transportation from housing to the work site each morning. The policy identifies this route."
                     .into(),
@@ -4336,6 +4368,21 @@ mod tests {
                 claim_id: "supported-evaluation".into(),
                 text: "The measures are critical for worker safety and health.".into(),
                 evidence_ids: vec!["evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-bound-evaluation".into(),
+                text: "Procedure A is critical.".into(),
+                evidence_ids: vec!["procedure-a".into(), "procedure-b".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-evaluation".into(),
+                text: "Procedure B is critical.".into(),
+                evidence_ids: vec!["procedure-a".into(), "procedure-b".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-shared-evaluation".into(),
+                text: "Procedure B is critical.".into(),
+                evidence_ids: vec!["shared-procedures".into()],
             },
             CitedClaim {
                 claim_id: "supported-after-negative-sentence".into(),
@@ -4389,9 +4436,12 @@ mod tests {
             "supported-boundary",
             "supported-formatted-integer",
             "supported-formatted-decimal",
+            "supported-negative-boundary",
             "supported-actors",
             "supported-endpoints",
             "supported-evaluation",
+            "supported-bound-evaluation",
+            "supported-shared-evaluation",
             "supported-after-negative-sentence",
             "supported-modal",
         ] {
@@ -4401,9 +4451,12 @@ mod tests {
             "changed-boundary",
             "broadened-enumeration",
             "changed-formatted-decimal",
+            "changed-negative-boundary",
             "transferred-condition",
             "transferred-condition-full-names",
+            "transferred-condition-coordinated",
             "changed-endpoint",
+            "transferred-evaluation",
             "strengthened-modal",
             "invented-evaluation",
         ] {
