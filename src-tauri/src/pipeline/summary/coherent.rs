@@ -543,10 +543,11 @@ fn contract_clause_references_for_evidence(
         let item = evidence
             .get(evidence_id.as_str())
             .ok_or_else(invalid_response)?;
-        if let Some(reference) = sole_leading_contract_clause_reference(&item.exact_quote) {
-            if seen_numbers.insert(reference.number.clone()) {
-                references.push(reference);
-            }
+        let Some(reference) = sole_leading_contract_clause_reference(&item.exact_quote) else {
+            return Ok(Vec::new());
+        };
+        if seen_numbers.insert(reference.number.clone()) {
+            references.push(reference);
         }
     }
     Ok(references)
@@ -2299,6 +2300,29 @@ mod tests {
         assert!(!multi_clause_claims[0].text.contains("[Section"));
         assert!(
             contract_clause_reference_feedback(&multi_clause_claims, &multi_clause_evidence,)
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut mixed_clause_catalog = contract_catalog();
+        mixed_clause_catalog.candidates[1].evidence.exact_quote =
+            "2. Services.\nConsultant shall report.\n3. Fees.\nClient shall pay $2,400.".into();
+        let mixed_clause_response = json!({
+            "units": [{
+                "text": "Client shall pay Consultant $2,400.",
+                "source_ids": ["s1", "s2"]
+            }]
+        });
+        let (mixed_clause_claims, mixed_clause_evidence) = parse_response(
+            SummaryProfile::Contract,
+            &mixed_clause_response.to_string(),
+            "contract-document",
+            &mixed_clause_catalog,
+        )
+        .unwrap();
+        assert!(!mixed_clause_claims[0].text.contains("[Section"));
+        assert!(
+            contract_clause_reference_feedback(&mixed_clause_claims, &mixed_clause_evidence,)
                 .unwrap()
                 .is_empty()
         );
