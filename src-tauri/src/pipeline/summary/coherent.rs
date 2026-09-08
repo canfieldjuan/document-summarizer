@@ -4266,6 +4266,10 @@ mod tests {
         let mut negative_evaluation = catalog().candidates[1].evidence.clone();
         negative_evaluation.evidence_id = "negative-evaluation".into();
         negative_evaluation.exact_quote = "Procedure C is not essential.".into();
+        let mut compound_evaluations = catalog().candidates[0].evidence.clone();
+        compound_evaluations.evidence_id = "compound-evaluations".into();
+        compound_evaluations.exact_quote =
+            "Procedure D is essential and Procedure E is critical.".into();
         let mut sentence_boundary = catalog().candidates[1].evidence.clone();
         sentence_boundary.evidence_id = "sentence-boundary".into();
         sentence_boundary.exact_quote =
@@ -4285,6 +4289,7 @@ mod tests {
             procedure_b,
             shared_procedures,
             negative_evaluation,
+            compound_evaluations,
             sentence_boundary,
             modal,
         ];
@@ -4377,6 +4382,16 @@ mod tests {
                 evidence_ids: vec!["coordinated-actors".into()],
             },
             CitedClaim {
+                claim_id: "supported-single-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit workers for money.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-single-actor-condition".into(),
+                text: "AGERs are subject to MSPA if they recruit workers for money.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-endpoints".into(),
                 text: "The employer must provide transportation from housing to the work site each morning. The policy identifies this route."
                     .into(),
@@ -4417,6 +4432,11 @@ mod tests {
                 claim_id: "changed-evaluation-polarity".into(),
                 text: "Procedure C is critical.".into(),
                 evidence_ids: vec!["negative-evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-compound-evaluation".into(),
+                text: "Procedure E is critical.".into(),
+                evidence_ids: vec!["compound-evaluations".into()],
             },
             CitedClaim {
                 claim_id: "supported-after-negative-sentence".into(),
@@ -4475,11 +4495,13 @@ mod tests {
             "supported-minimum-of",
             "supported-bound-subject",
             "supported-actors",
+            "supported-single-actor-condition",
             "supported-endpoints",
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
             "supported-negative-evaluation",
+            "supported-compound-evaluation",
             "supported-after-negative-sentence",
             "supported-modal",
         ] {
@@ -4494,6 +4516,7 @@ mod tests {
             "transferred-condition",
             "transferred-condition-full-names",
             "transferred-condition-coordinated",
+            "transferred-single-actor-condition",
             "changed-endpoint",
             "transferred-evaluation",
             "changed-evaluation-polarity",

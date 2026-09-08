@@ -2695,14 +2695,16 @@ complete
 **Acceptance evidence so far**:
 - Paired deterministic probes preserve equivalent `at most 500` wording,
   comma/decimal and signed number formatting, `maximum of`/`minimum of` wording,
-  source-supported actor grouping, synonymous transport endpoints with a
-  trailing time modifier, subject-bound, shared-subject and negative
-  evaluations, and qualified modality. Opposite probes reject an exclusive
+  source-supported actor grouping and a correctly qualified single actor,
+  synonymous transport endpoints with a trailing time modifier, subject-bound,
+  shared-subject, compound and negative evaluations, and qualified modality.
+  Opposite probes reject an exclusive
   `fewer than 500` boundary, a removed negative sign, a bound moved between named
   plans, broader kinship label, acronym and full-name actor transfer (including
-  distinct rules in one item or compound sentence), an endpoint reversal, an
-  evaluation moved between named procedures, removed evaluation negation, an
-  invented evaluation, and `should`-to-`must` strengthening. Separate probes
+  distinct rules in one item or compound sentence, and a single actor borrowing
+  another actor's qualifier), an endpoint reversal, an evaluation moved between
+  named procedures, removed evaluation negation, an invented evaluation, and
+  `should`-to-`must` strengthening. Separate probes
   reject partial verdict coverage, mismatched identities and unknown evidence,
   and preserve an already-ambiguous verdict.
 - An end-to-end fixture makes the model return `supported` for an invented

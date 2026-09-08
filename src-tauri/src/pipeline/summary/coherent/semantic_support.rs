@@ -569,14 +569,18 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         .iter()
         .flat_map(|item| defined_actor_labels(&item.exact_quote))
         .collect::<HashMap<_, _>>();
-    let actors = defined_labels
+    let source_actors = defined_labels
+        .iter()
+        .map(|(actor, label)| (actor.as_str(), label.as_slice()))
+        .collect::<Vec<_>>();
+    let claimed_actors = defined_labels
         .iter()
         .filter(|(actor, label)| {
             subject_acronyms.contains(*actor) || contains_word_sequence(subject, label)
         })
         .map(|(actor, label)| (actor.as_str(), label.as_slice()))
         .collect::<Vec<_>>();
-    if actors.len() < 2 {
+    if claimed_actors.is_empty() {
         return true;
     }
     const QUALIFIER_CONCEPTS: &[&[&str]] = &[
@@ -596,17 +600,19 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         if !contains_any_word(&condition, concept) {
             return true;
         }
-        let source_relations = actor_relation_segments(evidence, &actors, concept);
-        let supported = actors
-            .iter()
-            .map(|(actor, label)| {
-                source_relations.iter().any(|relation| {
-                    tokens_mention_actor(relation, actor, label)
-                        && tokens_contain_any(relation, concept)
-                })
+        let source_relations = actor_relation_segments(evidence, &source_actors, concept);
+        let supports_actor = |actor: &str, label: &[String]| {
+            source_relations.iter().any(|relation| {
+                tokens_mention_actor(relation, actor, label)
+                    && tokens_contain_any(relation, concept)
             })
-            .collect::<Vec<_>>();
-        !supported.iter().any(|value| *value) || supported.iter().all(|value| *value)
+        };
+        !source_actors
+            .iter()
+            .any(|(actor, label)| supports_actor(actor, label))
+            || claimed_actors
+                .iter()
+                .all(|(actor, label)| supports_actor(actor, label))
     })
 }
 
@@ -627,56 +633,96 @@ struct EvaluationRelation {
     negated: bool,
 }
 
-fn evaluation_relation(clause: &str, concept: &[&str]) -> Option<EvaluationRelation> {
+const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
+    &["essential", "critical", "vital", "necessary"],
+    &["ensure", "ensures", "ensuring", "guarantee", "guarantees"],
+    &["important", "importance"],
+    &["effective", "effectiveness"],
+    &["safe", "safety"],
+    &["healthy", "health"],
+];
+
+fn is_evaluative_word(word: &str) -> bool {
+    EVALUATIVE_CONCEPTS
+        .iter()
+        .any(|concept| concept.contains(&word))
+}
+
+fn is_evaluation_link(word: &str) -> bool {
+    matches!(
+        word,
+        "is" | "are"
+            | "was"
+            | "were"
+            | "be"
+            | "been"
+            | "being"
+            | "seems"
+            | "seemed"
+            | "remains"
+            | "remained"
+            | "isn"
+            | "aren"
+            | "wasn"
+            | "weren"
+    )
+}
+
+fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelation> {
     let tokens = original_words(clause)
         .into_iter()
         .map(|word| word.to_ascii_lowercase())
         .collect::<Vec<_>>();
-    let concept_index = tokens
+    let concept_indices = tokens
         .iter()
-        .position(|word| concept.contains(&word.as_str()))?;
-    let linking_index = tokens[..concept_index].iter().rposition(|word| {
-        matches!(
-            word.as_str(),
-            "is" | "are"
-                | "was"
-                | "were"
-                | "be"
-                | "been"
-                | "being"
-                | "seems"
-                | "seemed"
-                | "remains"
-                | "remained"
-                | "isn"
-                | "aren"
-                | "wasn"
-                | "weren"
-        )
-    })?;
-    let mut subject = tokens[..linking_index].to_vec();
-    if subject.first().is_some_and(|word| {
-        matches!(
-            word.as_str(),
-            "a" | "an" | "the" | "this" | "these" | "that" | "those"
-        )
-    }) {
-        subject.remove(0);
-    }
-    let subject_is_concrete = !subject.is_empty()
-        && !matches!(
-            subject.as_slice(),
-            [word] if matches!(word.as_str(), "it" | "they" | "he" | "she")
-        );
-    subject_is_concrete.then(|| EvaluationRelation {
-        subject,
-        negated: tokens[linking_index..=concept_index].iter().any(|word| {
-            matches!(
-                word.as_str(),
-                "not" | "no" | "never" | "t" | "isn" | "aren" | "wasn" | "weren"
-            )
-        }),
-    })
+        .enumerate()
+        .filter(|(_, word)| concept.contains(&word.as_str()))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    concept_indices
+        .into_iter()
+        .filter_map(|concept_index| {
+            let linking_index = tokens[..concept_index]
+                .iter()
+                .rposition(|word| is_evaluation_link(word))?;
+            let previous_evaluation = tokens[..linking_index]
+                .iter()
+                .rposition(|word| is_evaluative_word(word));
+            let subject_start = previous_evaluation
+                .and_then(|previous| {
+                    tokens[previous + 1..linking_index]
+                        .iter()
+                        .rposition(|word| {
+                            matches!(word.as_str(), "and" | "or" | "but" | "while" | "whereas")
+                        })
+                        .map(|relative| previous + relative + 2)
+                })
+                .unwrap_or(0);
+            let mut subject = tokens[subject_start..linking_index].to_vec();
+            if subject.first().is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "a" | "an" | "the" | "this" | "these" | "that" | "those"
+                )
+            }) {
+                subject.remove(0);
+            }
+            let subject_is_concrete = !subject.is_empty()
+                && !matches!(
+                    subject.as_slice(),
+                    [word] if matches!(word.as_str(), "it" | "they" | "he" | "she")
+                );
+            subject_is_concrete.then(|| EvaluationRelation {
+                subject,
+                negated: tokens[linking_index..=concept_index].iter().any(|word| {
+                    matches!(
+                        word.as_str(),
+                        "not" | "no" | "never" | "t" | "isn" | "aren" | "wasn" | "weren"
+                    )
+                }),
+            })
+        })
+        .collect()
 }
 
 fn evaluated_subject_matches(source: &[String], claim: &[String]) -> bool {
@@ -684,14 +730,6 @@ fn evaluated_subject_matches(source: &[String], claim: &[String]) -> bool {
 }
 
 fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
-    const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
-        &["essential", "critical", "vital", "necessary"],
-        &["ensure", "ensures", "ensuring", "guarantee", "guarantees"],
-        &["important", "importance"],
-        &["effective", "effectiveness"],
-        &["safe", "safety"],
-        &["healthy", "health"],
-    ];
     let source_clauses = evidence
         .iter()
         .flat_map(|item| semantic_clauses(&item.exact_quote))
@@ -713,23 +751,22 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
         }
         let evaluated_relations = evaluated_source_clauses
             .iter()
-            .filter_map(|clause| evaluation_relation(clause, concept))
+            .flat_map(|clause| evaluation_relations(clause, concept))
             .collect::<Vec<_>>();
         for clause in claim_clauses {
-            let Some(claim_relation) = evaluation_relation(clause, concept) else {
-                continue;
-            };
-            let subject_is_cited = evidence
-                .iter()
-                .any(|item| contains_owned_words(&item.exact_quote, &claim_relation.subject));
-            if subject_is_cited
-                && !evaluated_relations.is_empty()
-                && !evaluated_relations.iter().any(|source| {
-                    evaluated_subject_matches(&source.subject, &claim_relation.subject)
-                        && source.negated == claim_relation.negated
-                })
-            {
-                return false;
+            for claim_relation in evaluation_relations(clause, concept) {
+                let subject_is_cited = evidence
+                    .iter()
+                    .any(|item| contains_owned_words(&item.exact_quote, &claim_relation.subject));
+                if subject_is_cited
+                    && !evaluated_relations.is_empty()
+                    && !evaluated_relations.iter().any(|source| {
+                        evaluated_subject_matches(&source.subject, &claim_relation.subject)
+                            && source.negated == claim_relation.negated
+                    })
+                {
+                    return false;
+                }
             }
         }
     }
