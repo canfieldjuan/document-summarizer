@@ -2437,11 +2437,13 @@ complete
   year-led prose and a leading decimal phrase such as `1.5 million shares` are
   not treated as clause headings. Titles in parentheses or after a dash, colon
   or comma must match the source title. A period plus any whitespace separates
-  a source title from its body, including native-text newlines, while uppercase
-  initialisms such as `U.S.` remain intact.
+  a source title from its body, including native-text newlines. A title-shaped
+  phrase after an uppercase initialism such as `U.S.` remains part of the title;
+  following operative prose leaves the initialism as the title ending.
 - A complete catalog of at most six distinct numbered clauses must retain
   evidence from every supplied clause. Each source segment must contain exactly
-  one numbered clause at its beginning; multi-clause segments, mixed,
+  one numbered clause at its beginning; multi-clause segments are detected
+  across whitespace or punctuation boundaries. Those segments, mixed,
   incomplete and larger catalogs keep materiality-based selection. Contract
   gets at most two bounded repair attempts for an incomplete short result and
   then fails closed. General and Story retain their existing repair behavior.

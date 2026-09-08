@@ -419,6 +419,48 @@ enum ContractClauseMention {
     InaccurateTitle,
 }
 
+fn contract_title_looks_like_heading(text: &str) -> bool {
+    const CONNECTORS: &[&str] = &[
+        "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to",
+        "under", "with",
+    ];
+    let mut has_substantive_word = false;
+    for raw_word in text.split_whitespace() {
+        let word = raw_word.trim_matches(|character: char| !character.is_alphanumeric());
+        if word.is_empty() {
+            continue;
+        }
+        if CONNECTORS.contains(&word.to_lowercase().as_str()) {
+            continue;
+        }
+        if !word
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_uppercase() || character.is_ascii_digit())
+        {
+            return false;
+        }
+        has_substantive_word = true;
+    }
+    has_substantive_word
+}
+
+fn contract_title_continues_after_initialism(text: &str) -> bool {
+    let text = text.trim_start();
+    let continuation_end = text
+        .char_indices()
+        .find_map(|(index, character)| {
+            (character == '.'
+                && text[index + character.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace))
+            .then_some(index)
+        })
+        .unwrap_or(text.len());
+    contract_title_looks_like_heading(text[..continuation_end].trim())
+}
+
 fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReference> {
     let text = text.trim_start();
     let number_end = text.find(char::is_whitespace)?;
@@ -454,7 +496,9 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
                 part.chars().count() == 1
                     && part.chars().all(|character| character.is_ascii_uppercase())
             });
-        (!ends_with_initialism).then_some(index)
+        let following = &remainder[index + character.len_utf8()..];
+        (!ends_with_initialism || !contract_title_continues_after_initialism(following))
+            .then_some(index)
     });
     if dotted_without_terminal && body_delimiter.is_none() {
         return None;
@@ -463,7 +507,7 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
     let title = remainder[..title_end].trim();
     if title.is_empty()
         || title.chars().count() > 120
-        || (dotted_without_terminal && !title.chars().next().is_some_and(char::is_uppercase))
+        || (dotted_without_terminal && !contract_title_looks_like_heading(title))
     {
         return None;
     }
@@ -483,7 +527,7 @@ fn contract_clause_references_in_segment(text: &str) -> Vec<ContractClauseRefere
                 references.push(reference);
             }
         }
-        at_word_start = character.is_whitespace();
+        at_word_start = !character.is_alphanumeric();
     }
     references
 }
@@ -2157,6 +2201,10 @@ mod tests {
         .is_none());
         assert!(leading_contract_clause_reference("1.5 million shares are authorized.").is_none());
         assert!(leading_contract_clause_reference(
+            "1.5 Million shares are authorized. Holders may vote."
+        )
+        .is_none());
+        assert!(leading_contract_clause_reference(
             "4.2 expenses. Client will reimburse approved travel."
         )
         .is_none());
@@ -2176,6 +2224,15 @@ mod tests {
             Some(ContractClauseReference {
                 number: "2".into(),
                 title: "U.S. Export Controls".into(),
+            })
+        );
+        assert_eq!(
+            leading_contract_clause_reference(
+                "2. Territory in U.S. Client must comply with export restrictions."
+            ),
+            Some(ContractClauseReference {
+                number: "2".into(),
+                title: "Territory in U.S".into(),
             })
         );
         assert!(text_mentions_contract_clause(
@@ -2357,12 +2414,17 @@ mod tests {
         incomplete.omitted_source_units = 1;
         assert!(required_short_contract_clauses(&incomplete).is_none());
 
-        let mut multiple_clauses_per_segment = contract_catalog();
-        multiple_clauses_per_segment.candidates.truncate(1);
-        multiple_clauses_per_segment.candidates[0]
-            .evidence
-            .exact_quote = "1. Parties. Client engages Consultant.\n2. Services. Consultant shall deliver monthly reports.".into();
-        assert!(required_short_contract_clauses(&multiple_clauses_per_segment).is_none());
+        for source in [
+            "1. Parties. Client engages Consultant.\n2. Services. Consultant shall deliver monthly reports.",
+            "1. Parties. Client engages Consultant.;2. Services. Consultant shall deliver monthly reports.",
+        ] {
+            let mut multiple_clauses_per_segment = contract_catalog();
+            multiple_clauses_per_segment.candidates.truncate(1);
+            multiple_clauses_per_segment.candidates[0]
+                .evidence
+                .exact_quote = source.into();
+            assert!(required_short_contract_clauses(&multiple_clauses_per_segment).is_none());
+        }
     }
 
     #[test]
