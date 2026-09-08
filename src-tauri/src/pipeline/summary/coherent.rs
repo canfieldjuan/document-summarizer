@@ -419,54 +419,11 @@ enum ContractClauseMention {
     InaccurateTitle,
 }
 
-fn contract_title_looks_like_heading(text: &str) -> bool {
-    const CONNECTORS: &[&str] = &[
-        "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to",
-        "under", "with",
-    ];
-    let mut has_substantive_word = false;
-    for raw_word in text.split_whitespace() {
-        let word = raw_word.trim_matches(|character: char| !character.is_alphanumeric());
-        if word.is_empty() {
-            continue;
-        }
-        if CONNECTORS.contains(&word.to_lowercase().as_str()) {
-            continue;
-        }
-        if !word
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_uppercase() || character.is_ascii_digit())
-        {
-            return false;
-        }
-        has_substantive_word = true;
-    }
-    has_substantive_word
-}
-
-fn contract_title_continues_after_initialism(text: &str) -> bool {
-    let text = text.trim_start();
-    let continuation_end = text
-        .char_indices()
-        .find_map(|(index, character)| {
-            (character == '.'
-                && text[index + character.len_utf8()..]
-                    .chars()
-                    .next()
-                    .is_some_and(char::is_whitespace))
-            .then_some(index)
-        })
-        .unwrap_or(text.len());
-    contract_title_looks_like_heading(text[..continuation_end].trim())
-}
-
 fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReference> {
     let text = text.trim_start();
     let number_end = text.find(char::is_whitespace)?;
     let raw_number = &text[..number_end];
-    let dotted_without_terminal = raw_number.contains('.') && !raw_number.ends_with('.');
-    if !raw_number.ends_with('.') && !dotted_without_terminal {
+    if !raw_number.ends_with('.') {
         return None;
     }
     let number = raw_number.trim_end_matches('.');
@@ -480,34 +437,21 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
     }
 
     let remainder = text[number_end..].trim_start();
-    let body_delimiter = remainder.char_indices().find_map(|(index, character)| {
-        if character != '.'
-            || !remainder[index + character.len_utf8()..]
-                .chars()
-                .next()
-                .is_some_and(char::is_whitespace)
-        {
+    let title_end = remainder.char_indices().find_map(|(index, character)| {
+        if character != '.' {
             return None;
         }
-        let final_title_token = remainder[..index].split_whitespace().next_back()?;
-        let initialism_parts = final_title_token.split('.').collect::<Vec<_>>();
-        let ends_with_initialism = initialism_parts.len() > 1
-            && initialism_parts.iter().all(|part| {
-                part.chars().count() == 1
-                    && part.chars().all(|character| character.is_ascii_uppercase())
-            });
         let following = &remainder[index + character.len_utf8()..];
-        (!ends_with_initialism || !contract_title_continues_after_initialism(following))
+        following
+            .chars()
+            .take_while(|character| character.is_whitespace())
+            .any(|character| matches!(character, '\n' | '\r'))
             .then_some(index)
-    });
-    if dotted_without_terminal && body_delimiter.is_none() {
-        return None;
-    }
-    let title_end = body_delimiter.unwrap_or_else(|| remainder.trim_end_matches('.').len());
+    })?;
     let title = remainder[..title_end].trim();
     if title.is_empty()
         || title.chars().count() > 120
-        || (dotted_without_terminal && !contract_title_looks_like_heading(title))
+        || (number.contains('.') && !title.chars().next().is_some_and(char::is_uppercase))
     {
         return None;
     }
@@ -1845,12 +1789,12 @@ mod tests {
     ];
 
     const CONTRACT_SOURCE_LINES: [&str; 6] = [
-        "1. Parties and Term. Northstar Bakery LLC (Client) engages Rowan Lee (Consultant) from October 1, 2026 through March 31, 2027.",
-        "2. Services. Consultant shall deliver monthly inventory reports to Client by the fifth business day of each month.",
-        "3. Fees. Client shall pay Consultant $2,400 per month within 15 days after receiving an accurate invoice.",
-        "4. Expenses. Client will reimburse Consultant for pre-approved travel expenses up to $500 per month; meals are excluded.",
-        "5. Confidentiality. Consultant must not disclose Client recipes during the term or for two years after it ends, except when disclosure is required by law.",
-        "6. Termination. Either party may terminate with 30 days written notice, but Client may terminate immediately for material breach if Consultant does not cure within 10 days after written notice.",
+        "1. Parties and Term.\nNorthstar Bakery LLC (Client) engages Rowan Lee (Consultant) from October 1, 2026 through March 31, 2027.",
+        "2. Services.\nConsultant shall deliver monthly inventory reports to Client by the fifth business day of each month.",
+        "3. Fees.\nClient shall pay Consultant $2,400 per month within 15 days after receiving an accurate invoice.",
+        "4. Expenses.\nClient will reimburse Consultant for pre-approved travel expenses up to $500 per month; meals are excluded.",
+        "5. Confidentiality.\nConsultant must not disclose Client recipes during the term or for two years after it ends, except when disclosure is required by law.",
+        "6. Termination.\nEither party may terminate with 30 days written notice, but Client may terminate immediately for material breach if Consultant does not cure within 10 days after written notice.",
     ];
 
     fn story_catalog() -> SourceCatalog {
@@ -2190,7 +2134,7 @@ mod tests {
     #[test]
     fn contract_clause_reference_attachment_checks_mixed_and_opposite_boundaries() {
         let clause = leading_contract_clause_reference(
-            "4.2 Expenses. Client will reimburse approved travel.",
+            "4.2. Expenses.\nClient will reimburse approved travel.",
         )
         .expect("a dotted contract clause should be recognized");
         assert_eq!(clause.number, "4.2");
@@ -2205,7 +2149,7 @@ mod tests {
         )
         .is_none());
         assert!(leading_contract_clause_reference(
-            "4.2 expenses. Client will reimburse approved travel."
+            "4.2. expenses.\nClient will reimburse approved travel."
         )
         .is_none());
         assert_eq!(
@@ -2219,7 +2163,7 @@ mod tests {
         );
         assert_eq!(
             leading_contract_clause_reference(
-                "2. U.S. Export Controls. Client must comply with export restrictions."
+                "2. U.S. Export Controls.\nClient must comply with export restrictions."
             ),
             Some(ContractClauseReference {
                 number: "2".into(),
@@ -2228,13 +2172,19 @@ mod tests {
         );
         assert_eq!(
             leading_contract_clause_reference(
-                "2. Territory in U.S. Client must comply with export restrictions."
+                "2. Territory in U.S.\nClient must comply with export restrictions."
             ),
             Some(ContractClauseReference {
                 number: "2".into(),
                 title: "Territory in U.S".into(),
             })
         );
+        for ambiguous_same_line in [
+            "2. U.S. Export Controls. Client Must Comply With Export Restrictions.",
+            "2. Territory in U.S. Client Shall Comply With Export Restrictions.",
+        ] {
+            assert!(leading_contract_clause_reference(ambiguous_same_line).is_none());
+        }
         assert!(text_mentions_contract_clause(
             "Section 4.2 (Expenses) covers travel.",
             &clause
@@ -2333,7 +2283,7 @@ mod tests {
         let mut dotted_catalog = contract_catalog();
         dotted_catalog.candidates.truncate(1);
         dotted_catalog.candidates[0].evidence.exact_quote =
-            "4.2 Expenses. Client will reimburse approved travel.".into();
+            "4.2. Expenses.\nClient will reimburse approved travel.".into();
         let dotted_response = json!({
             "units": [{
                 "text": "Section 4.20 describes approved travel.",
@@ -2415,8 +2365,8 @@ mod tests {
         assert!(required_short_contract_clauses(&incomplete).is_none());
 
         for source in [
-            "1. Parties. Client engages Consultant.\n2. Services. Consultant shall deliver monthly reports.",
-            "1. Parties. Client engages Consultant.;2. Services. Consultant shall deliver monthly reports.",
+            "1. Parties.\nClient engages Consultant.\n2. Services.\nConsultant shall deliver monthly reports.",
+            "1. Parties.\nClient engages Consultant.;2. Services.\nConsultant shall deliver monthly reports.",
         ] {
             let mut multiple_clauses_per_segment = contract_catalog();
             multiple_clauses_per_segment.candidates.truncate(1);

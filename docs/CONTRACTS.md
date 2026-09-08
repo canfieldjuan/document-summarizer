@@ -540,19 +540,18 @@ termination and remedies when present. It must retain who acts, what they do,
 the recipient, trigger, qualifications, timing and amount without adding legal
 advice, enforceability conclusions or judgments about a term.
 
-Contract clause references are application-owned provenance. When a cited exact
-source segment starts with a simple or dotted numbered clause, the parser keeps
-an accurate reference already present in the prose or appends the exact number
-before deterministic claim identity is materialized. A year-led prose sentence
-or a leading decimal phrase such as `1.5 million shares` is not treated as a
-clause, and a reference such as `4.20` cannot satisfy `4.2`. A title supplied in
-parentheses or after a dash, colon or comma must match the source title; a wrong
-title is sent through bounded repair instead of being accepted or masked by an
-appended number. The source title boundary accepts a period followed by any
-whitespace so native-text line breaks do not absorb the clause body into its
-title. Periods inside uppercase initialisms such as `U.S.` remain part of a
-longer title when the following phrase is title-shaped, while an initialism may
-also end the title when operative prose follows.
+Contract clause references are application-owned provenance. The parser derives
+a reference only when a cited exact source segment begins with a number token
+ending in a period and the clause title itself ends immediately before a line
+break. That structural boundary supports simple and dotted identifiers while
+leaving same-line forms ambiguous instead of guessing whether `1.5` is a clause
+or a decimal quantity. It also preserves periods inside titles such as `U.S.`.
+For admitted headings, the parser keeps an accurate reference already present
+in the prose or appends the exact number before deterministic claim identity is
+materialized. A reference such as `4.20` cannot satisfy `4.2`. A title supplied
+in parentheses or after a dash, colon or comma must match the source title; a
+wrong title is sent through bounded repair instead of being accepted or masked
+by an appended number.
 For a complete short catalog containing at most six source segments where every
 segment contains exactly one distinct numbered clause at its beginning,
 Contract validation also requires the result to retain evidence from every

@@ -2433,13 +2433,12 @@ complete
 - Clause references come from cited exact source headings. The application
   preserves an accurate reference already in the model prose or appends the
   exact numbered section before materializing deterministic claim identity.
-  Dotted identifiers are bounded exactly, so `4.20` does not satisfy `4.2`, and
-  year-led prose and a leading decimal phrase such as `1.5 million shares` are
-  not treated as clause headings. Titles in parentheses or after a dash, colon
-  or comma must match the source title. A period plus any whitespace separates
-  a source title from its body, including native-text newlines. A title-shaped
-  phrase after an uppercase initialism such as `U.S.` remains part of the title;
-  following operative prose leaves the initialism as the title ending.
+  Admission requires a number token ending in a period and a clause-title period
+  immediately before a line break. This deterministic structure supports simple
+  and dotted identifiers, preserves title periods such as `U.S.`, and leaves
+  ambiguous same-line decimal prose unclassified. Dotted identifiers remain
+  bounded exactly, so `4.20` does not satisfy `4.2`. Titles in parentheses or
+  after a dash, colon or comma must match the source title.
 - A complete catalog of at most six distinct numbered clauses must retain
   evidence from every supplied clause. Each source segment must contain exactly
   one numbered clause at its beginning; multi-clause segments are detected
@@ -2479,23 +2478,24 @@ complete
   agreement addresses services and fees.` while accepting the sourced service
   and payment terms. The isolated four-pair probe passed in 6.07 seconds.
 - The ignored live harness used `qwen3-30b-a3b:latest` through Ollama and passed
-  synthesis plus clause-by-clause materiality in 9.85 seconds. The run produced:
+  synthesis plus clause-by-clause materiality in 11.71 seconds. The run produced:
 
   > Northstar Bakery LLC, referred to as the Client, has engaged Rowan Lee,
   > referred to as the Consultant, for a term beginning on October 1, 2026, and
   > ending on March 31, 2027. [Section 1] [p. 1]
   >
-  > The Consultant must deliver monthly inventory reports to the Client by the
+  > The Consultant must provide monthly inventory reports to the Client by the
   > fifth business day of each month. The Client must pay the Consultant $2,400
-  > per month within 15 days after receiving an accurate invoice. The Client
-  > will reimburse the Consultant for pre-approved travel expenses up to $500
-  > per month, but meals are not eligible for reimbursement. The Consultant
-  > must not disclose the Client's recipes during the term or for two years
-  > after it ends, except when required by law. Either party may terminate the
-  > agreement with 30 days of written notice, but the Client may terminate
-  > immediately if the Consultant fails to cure a material breach within 10
-  > days after receiving written notice. [Section 2; Section 3; Section 4;
-  > Section 5; Section 6] [p. 2; p. 3; p. 4; p. 5; p. 6]
+  > each month within 15 days after receiving an accurate invoice. The Client
+  > will reimburse the Consultant for travel expenses that are pre-approved and
+  > do not exceed $500 per month, but meals are not eligible for reimbursement.
+  > The Consultant must not disclose the Client’s recipes during the term or for
+  > two years after it ends, unless disclosure is required by law. Either party
+  > may terminate the agreement with 30 days of written notice; however, the
+  > Client may terminate immediately if the Consultant fails to cure a material
+  > breach within 10 days after receiving written notice of the breach. [Section
+  > 2; Section 3; Section 4; Section 5; Section 6] [p. 2; p. 3; p. 4; p. 5; p.
+  > 6]
 
   Manual source comparison confirms that the model output preserves every
   party, actor, recipient, condition, exception, deadline, date, amount,
