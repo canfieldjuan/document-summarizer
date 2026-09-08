@@ -464,16 +464,37 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
 fn contract_clause_references_in_segment(text: &str) -> Vec<ContractClauseReference> {
     let text = text.trim_start();
     let mut references = Vec::new();
-    let mut at_word_start = true;
     for (index, character) in text.char_indices() {
-        if at_word_start && character.is_ascii_digit() {
+        if character.is_ascii_digit() && contract_clause_candidate_start(text, index) {
             if let Some(reference) = leading_contract_clause_reference(&text[index..]) {
                 references.push(reference);
             }
         }
-        at_word_start = !character.is_alphanumeric() && character != '.';
     }
     references
+}
+
+fn contract_clause_candidate_start(text: &str, index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    let before = &text[..index];
+    let Some(previous) = before.chars().next_back() else {
+        return true;
+    };
+    if previous != '.' {
+        return !previous.is_alphanumeric();
+    }
+
+    let token_before_period = before[..before.len() - 1]
+        .rsplit(|character: char| !character.is_alphanumeric() && character != '.')
+        .next()
+        .unwrap_or_default();
+    let period_ends_numeric_component = !token_before_period.is_empty()
+        && token_before_period.split('.').all(|part| {
+            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+        });
+    !period_ends_numeric_component
 }
 
 fn raw_contract_reference_ends_here(suffix: &str) -> bool {
@@ -526,10 +547,7 @@ fn contract_clause_mention(
                 let delimiter = suffix.chars().next().expect("checked delimiter must exist");
                 let titled = suffix[delimiter.len_utf8()..].trim_start();
                 if titled.starts_with(&title)
-                    && titled[title.len()..]
-                        .chars()
-                        .next()
-                        .is_none_or(|character| !character.is_alphanumeric())
+                    && raw_contract_reference_ends_here(&titled[title.len()..])
                 {
                     accurate = true;
                 } else {
@@ -2346,6 +2364,36 @@ mod tests {
             contract_clause_reference_feedback(&wrong_title, &wrong_title_evidence).unwrap();
         assert_eq!(wrong_title_feedback.len(), 1);
         assert!(wrong_title_feedback[0].contains("Section 4.2 (Expenses)"));
+
+        for text in [
+            "Section 4.2 — Expenses.Termination covers travel.",
+            "Section 4.2: Expenses/Termination covers travel.",
+        ] {
+            let malformed_title = vec![CitedClaim {
+                claim_id: "contract-malformed-title".into(),
+                text: text.into(),
+                evidence_ids: vec![dotted_catalog.candidates[0].evidence.evidence_id.clone()],
+            }];
+            let feedback = contract_clause_reference_feedback(
+                &malformed_title,
+                &[dotted_catalog.candidates[0].evidence.clone()],
+            )
+            .unwrap();
+            assert_eq!(feedback.len(), 1);
+            assert!(feedback[0].contains("Section 4.2 (Expenses)"));
+        }
+
+        let punctuation_then_space = vec![CitedClaim {
+            claim_id: "contract-punctuation-space".into(),
+            text: "Section 4.2 — Expenses, covering approved travel.".into(),
+            evidence_ids: vec![dotted_catalog.candidates[0].evidence.evidence_id.clone()],
+        }];
+        assert!(contract_clause_reference_feedback(
+            &punctuation_then_space,
+            &[dotted_catalog.candidates[0].evidence.clone()],
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
@@ -2405,6 +2453,7 @@ mod tests {
         for source in [
             "1. Parties.\nClient engages Consultant.\n2. Services.\nConsultant shall deliver monthly reports.",
             "1. Parties.\nClient engages Consultant.;2. Services.\nConsultant shall deliver monthly reports.",
+            "1. Parties.\nClient engages Consultant.2. Services.\nConsultant shall deliver monthly reports.",
         ] {
             let mut multiple_clauses_per_segment = contract_catalog();
             multiple_clauses_per_segment.candidates.truncate(1);
