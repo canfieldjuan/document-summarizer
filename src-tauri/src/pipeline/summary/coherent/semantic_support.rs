@@ -254,21 +254,50 @@ fn negation_present(tokens: &[String]) -> bool {
 fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<NumericRelation> {
     let before = &words[..start];
     let after = &words[end..];
-    if before.last().is_some_and(|word| word == "__lt") {
-        return Some(NumericRelation::LessThan);
+    if let Some(relation) = before.last().and_then(|word| match word.as_str() {
+        "__lt" => Some(NumericRelation::LessThan),
+        "__le" => Some(NumericRelation::AtMost),
+        "__gt" => Some(NumericRelation::GreaterThan),
+        "__ge" => Some(NumericRelation::AtLeast),
+        _ => None,
+    }) {
+        let prefix = &before[..before.len().saturating_sub(1)];
+        return Some(
+            if negation_present(&prefix[prefix.len().saturating_sub(4)..]) {
+                match relation {
+                    NumericRelation::LessThan => NumericRelation::AtLeast,
+                    NumericRelation::AtMost => NumericRelation::GreaterThan,
+                    NumericRelation::GreaterThan => NumericRelation::AtMost,
+                    NumericRelation::AtLeast => NumericRelation::LessThan,
+                    NumericRelation::Equal => NumericRelation::Equal,
+                }
+            } else {
+                relation
+            },
+        );
     }
-    if before.last().is_some_and(|word| word == "__le") {
-        return Some(NumericRelation::AtMost);
+    if ends_with_words(before, &["at", "most"]) {
+        let prefix = &before[..before.len().saturating_sub(2)];
+        return Some(
+            if negation_present(&prefix[prefix.len().saturating_sub(4)..]) {
+                NumericRelation::GreaterThan
+            } else {
+                NumericRelation::AtMost
+            },
+        );
     }
-    if before.last().is_some_and(|word| word == "__gt") {
-        return Some(NumericRelation::GreaterThan);
-    }
-    if before.last().is_some_and(|word| word == "__ge") {
-        return Some(NumericRelation::AtLeast);
+    if ends_with_words(before, &["at", "least"]) {
+        let prefix = &before[..before.len().saturating_sub(2)];
+        return Some(
+            if negation_present(&prefix[prefix.len().saturating_sub(4)..]) {
+                NumericRelation::LessThan
+            } else {
+                NumericRelation::AtLeast
+            },
+        );
     }
     if ends_with_words(before, &["no", "more", "than"])
         || ends_with_words(before, &["not", "more", "than"])
-        || ends_with_words(before, &["at", "most"])
         || ends_with_words(before, &["up", "to"])
         || before.last().is_some_and(|word| word == "maximum")
         || ends_with_words(before, &["maximum", "of"])
@@ -279,7 +308,6 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
     }
     if ends_with_words(before, &["no", "less", "than"])
         || ends_with_words(before, &["not", "less", "than"])
-        || ends_with_words(before, &["at", "least"])
         || before.last().is_some_and(|word| word == "minimum")
         || ends_with_words(before, &["minimum", "of"])
         || after.starts_with(&["or".to_string(), "more".to_string()])
@@ -494,8 +522,49 @@ fn numeric_contexts_match(source: &NumericReference, claim: &NumericReference) -
         .zip(claim_context)
         .take_while(|(source, claim)| source == claim)
         .count();
-    (!source.context.is_empty() && source.context == claim.context)
-        || shared_subject_prefix >= 2
+    let begins_predicate = |word: &String| {
+        matches!(
+            word.as_str(),
+            "is" | "are"
+                | "was"
+                | "were"
+                | "be"
+                | "been"
+                | "being"
+                | "accept"
+                | "accepts"
+                | "accepted"
+                | "accepting"
+                | "require"
+                | "requires"
+                | "required"
+                | "requiring"
+                | "has"
+                | "have"
+                | "had"
+                | "can"
+                | "could"
+                | "may"
+                | "might"
+                | "must"
+                | "shall"
+                | "should"
+                | "will"
+                | "would"
+                | "remain"
+                | "remains"
+                | "remained"
+                | "remaining"
+        )
+    };
+    (!source_context.is_empty() && source_context == claim_context)
+        || (shared_subject_prefix >= 2
+            && source_context
+                .get(shared_subject_prefix)
+                .is_some_and(begins_predicate)
+            && claim_context
+                .get(shared_subject_prefix)
+                .is_some_and(begins_predicate))
         || (!source.trailing_subject.is_empty()
             && (source.trailing_subject == claim.trailing_subject
                 || contains_sequence(&claim.context, &source.trailing_subject)))
@@ -779,15 +848,6 @@ fn defined_actor_labels(text: &str) -> HashMap<String, Vec<String>> {
     labels
 }
 
-fn contains_word_sequence(words: &[&str], phrase: &[String]) -> bool {
-    words.windows(phrase.len()).any(|window| {
-        window
-            .iter()
-            .map(|word| word.to_ascii_lowercase())
-            .eq(phrase.iter().cloned())
-    })
-}
-
 fn contains_owned_words(text: &str, phrase: &[String]) -> bool {
     let tokens = words(text);
     tokens.windows(phrase.len()).any(|window| window == phrase)
@@ -840,39 +900,76 @@ fn actor_relation_segments(
     evidence
         .iter()
         .flat_map(|item| semantic_clauses(&item.exact_quote))
-        .flat_map(|clause| {
-            let tokens = words(clause);
-            let mut segments = Vec::new();
-            let mut start = 0;
-            for index in 0..tokens.len() {
-                let contrast = matches!(
-                    tokens[index].as_str(),
-                    "while" | "whereas" | "but" | "although"
-                );
-                let left = &tokens[start..index];
-                let right_mentions_actor = actors
-                    .iter()
-                    .any(|(actor, label)| tokens_mention_actor(&tokens[index + 1..], actor, label));
-                let completed_coordination = matches!(tokens[index].as_str(), "and" | "or")
-                    && right_mentions_actor
-                    && (tokens_contain_any(left, concept)
-                        || actors
-                            .iter()
-                            .filter_map(|(actor, label)| actor_mention_end(left, actor, label))
-                            .max()
-                            .is_some_and(|actor_end| actor_end < left.len()));
-                if (contrast || completed_coordination) && start < index {
-                    segments.push(tokens[start..index].to_vec());
-                    start = index + 1;
-                }
-            }
-            if start < tokens.len() {
-                segments.push(tokens[start..].to_vec());
-            }
-            segments
-        })
+        .flat_map(|clause| actor_relation_token_segments(&words(clause), actors, concept))
         .collect()
 }
+
+fn actor_relation_token_segments(
+    tokens: &[String],
+    actors: &[(&str, &[String])],
+    concept: &[&str],
+) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for index in 0..tokens.len() {
+        let contrast = matches!(
+            tokens[index].as_str(),
+            "while" | "whereas" | "but" | "although"
+        );
+        let left = &tokens[start..index];
+        let right_mentions_actor = actors
+            .iter()
+            .any(|(actor, label)| tokens_mention_actor(&tokens[index + 1..], actor, label));
+        let completed_coordination = matches!(tokens[index].as_str(), "and" | "or")
+            && right_mentions_actor
+            && (tokens_contain_any(left, concept)
+                || actors
+                    .iter()
+                    .filter_map(|(actor, label)| actor_mention_end(left, actor, label))
+                    .max()
+                    .is_some_and(|actor_end| actor_end < left.len()));
+        if (contrast || completed_coordination) && start < index {
+            segments.push(tokens[start..index].to_vec());
+            start = index + 1;
+        }
+    }
+    if start < tokens.len() {
+        segments.push(tokens[start..].to_vec());
+    }
+    segments
+}
+
+const ACTOR_QUALIFIER_CONCEPTS: &[&[&str]] = &[
+    &[
+        "compensation",
+        "compensated",
+        "consideration",
+        "money",
+        "paid",
+        "payment",
+        "fee",
+    ],
+    &["only", "solely", "exclusively"],
+    &["unless", "except", "excluding", "absent", "without"],
+];
+
+const ACTOR_QUALIFIER_WORDS: &[&str] = &[
+    "compensation",
+    "compensated",
+    "consideration",
+    "money",
+    "paid",
+    "payment",
+    "fee",
+    "only",
+    "solely",
+    "exclusively",
+    "unless",
+    "except",
+    "excluding",
+    "absent",
+    "without",
+];
 
 fn qualifier_polarities(tokens: &[String], concept: &[&str]) -> HashSet<bool> {
     tokens
@@ -884,32 +981,18 @@ fn qualifier_polarities(tokens: &[String], concept: &[&str]) -> HashSet<bool> {
 }
 
 fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
-    let claim_words = claim
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    let Some(condition_index) = claim_words.iter().position(|word| {
-        matches!(
-            word.to_ascii_lowercase().as_str(),
-            "if" | "when" | "unless" | "provided"
-        )
-    }) else {
+    let claim_words = words(claim);
+    let Some(condition_index) = claim_words
+        .iter()
+        .position(|word| matches!(word.as_str(), "if" | "when" | "unless" | "provided"))
+    else {
         return true;
     };
     let leading_condition = condition_index == 0;
     let (subject_words, condition) = if leading_condition {
         if let Some(comma) = claim.find(',') {
-            (
-                claim[comma + 1..]
-                    .split(|character: char| !character.is_alphanumeric())
-                    .filter(|word| !word.is_empty())
-                    .collect::<Vec<_>>(),
-                claim[..comma].to_string(),
-            )
-        } else if let Some(then) = claim_words
-            .iter()
-            .position(|word| word.eq_ignore_ascii_case("then"))
-        {
+            (words(&claim[comma + 1..]), claim[..comma].to_string())
+        } else if let Some(then) = claim_words.iter().position(|word| word == "then") {
             (
                 claim_words[then + 1..].to_vec(),
                 claim_words[..then].join(" "),
@@ -927,7 +1010,7 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         .iter()
         .position(|word| {
             matches!(
-                word.to_ascii_lowercase().as_str(),
+                word.as_str(),
                 "subject"
                     | "is"
                     | "are"
@@ -944,10 +1027,6 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         })
         .unwrap_or(subject_words.len());
     let subject = &subject_words[..subject_end];
-    let subject_acronyms = subject
-        .iter()
-        .filter_map(|word| acronym(word))
-        .collect::<HashSet<_>>();
     let defined_labels = evidence
         .iter()
         .flat_map(|item| defined_actor_labels(&item.exact_quote))
@@ -958,29 +1037,14 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         .collect::<Vec<_>>();
     let claimed_actors = defined_labels
         .iter()
-        .filter(|(actor, label)| {
-            subject_acronyms.contains(*actor) || contains_word_sequence(subject, label)
-        })
+        .filter(|(actor, label)| tokens_mention_actor(subject, actor, label))
         .map(|(actor, label)| (actor.as_str(), label.as_slice()))
         .collect::<Vec<_>>();
     if claimed_actors.is_empty() {
         return true;
     }
-    const QUALIFIER_CONCEPTS: &[&[&str]] = &[
-        &[
-            "compensation",
-            "compensated",
-            "consideration",
-            "money",
-            "paid",
-            "payment",
-            "fee",
-        ],
-        &["only", "solely", "exclusively"],
-        &["unless", "except", "excluding", "absent", "without"],
-    ];
     let condition_tokens = words(&condition);
-    QUALIFIER_CONCEPTS.iter().all(|concept| {
+    ACTOR_QUALIFIER_CONCEPTS.iter().all(|concept| {
         let claim_polarities = qualifier_polarities(&condition_tokens, concept);
         if claim_polarities.is_empty() {
             return true;
@@ -1007,7 +1071,30 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
 }
 
 fn actor_qualifications_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
-    semantic_clauses(claim).all(|clause| actor_qualification_clause_supported(clause, evidence))
+    let defined_labels = evidence
+        .iter()
+        .flat_map(|item| defined_actor_labels(&item.exact_quote))
+        .collect::<HashMap<_, _>>();
+    let source_actors = defined_labels
+        .iter()
+        .map(|(actor, label)| (actor.as_str(), label.as_slice()))
+        .collect::<Vec<_>>();
+    semantic_clauses(claim)
+        .flat_map(|clause| {
+            let tokens = words(clause);
+            if tokens
+                .first()
+                .is_some_and(|word| matches!(word.as_str(), "if" | "when" | "unless" | "provided"))
+            {
+                vec![clause.to_string()]
+            } else {
+                actor_relation_token_segments(&tokens, &source_actors, ACTOR_QUALIFIER_WORDS)
+                    .into_iter()
+                    .map(|segment| segment.join(" "))
+                    .collect()
+            }
+        })
+        .all(|segment| actor_qualification_clause_supported(&segment, evidence))
 }
 
 fn original_words(text: &str) -> Vec<String> {
@@ -1097,11 +1184,41 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
     concept_indices
         .into_iter()
         .filter_map(|concept_index| {
-            let linking_index = tokens[..concept_index]
-                .iter()
-                .rposition(|word| is_evaluation_link(word))?;
-            let subject_start = evaluation_subject_start(&tokens, linking_index);
-            let mut subject = tokens[subject_start..linking_index].to_vec();
+            let transitive = matches!(
+                tokens[concept_index].as_str(),
+                "ensure" | "ensures" | "ensuring" | "guarantee" | "guarantees"
+            );
+            let subject_end = if transitive {
+                concept_index
+            } else {
+                tokens[..concept_index]
+                    .iter()
+                    .rposition(|word| is_evaluation_link(word))?
+            };
+            let subject_start = evaluation_subject_start(&tokens, subject_end);
+            let mut subject = tokens[subject_start..subject_end].to_vec();
+            if transitive {
+                while subject.last().is_some_and(|word| {
+                    matches!(
+                        word.as_str(),
+                        "do" | "does"
+                            | "did"
+                            | "can"
+                            | "could"
+                            | "may"
+                            | "might"
+                            | "must"
+                            | "shall"
+                            | "should"
+                            | "will"
+                            | "would"
+                            | "not"
+                            | "never"
+                    )
+                }) {
+                    subject.pop();
+                }
+            }
             if subject.first().is_some_and(|word| {
                 matches!(
                     word.as_str(),
@@ -1117,7 +1234,7 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                 );
             subject_is_concrete.then(|| EvaluationRelation {
                 subject,
-                negated: negation_present(&tokens[linking_index..=concept_index]),
+                negated: negation_present(&tokens[subject_end.saturating_sub(3)..=concept_index]),
             })
         })
         .collect()

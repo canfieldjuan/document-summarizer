@@ -2696,11 +2696,15 @@ complete
   auxiliary forms, and numeric comparator context ignores optional articles.
   Relation parsing stays within sentence or clause boundaries so a negation or
   endpoint in one sentence cannot affect the next. Leading decimals normalize
-  to their zero-prefixed value. Numeric subject comparison uses a two-token
-  prefix after a leading article, so auxiliaries do not hide a named-plan
-  transfer. Leading conditions accept either a comma or `then`, directional
+  to their zero-prefixed value. Numeric subject comparison accepts a shared
+  prefix only when both following tokens begin the predicate, so auxiliaries do
+  not hide a named-plan transfer and entities with shared name prefixes remain
+  distinct. Explicit negation inverts inclusive word or symbol comparators.
+  Leading conditions accept either a comma or `then`, and compound claims check
+  every completed actor-condition relation. Directional
   checks reject a known reversed endpoint even when the other endpoint is new,
-  and shared-copula evaluations inherit their prior concrete subject.
+  shared-copula evaluations inherit their prior concrete subject, and transitive
+  `ensure`/`guarantee` evaluations bind directly to their subject.
 - Verification artifacts now use version `8.0.0`. The previous coherent
   `7.0.0` contract remains readable, while new results cannot be mistaken for
   artifacts produced without the deterministic veto. Synthesis, summary,
@@ -2714,10 +2718,12 @@ complete
   condition, including a source-supported contracted negative condition. They
   also preserve a contracted inclusive numeric bound, an active bound paraphrased
   with its correct passive `by …` subject, a harmless auxiliary change on the
-  same named plan, a leading decimal, comma- and `then`-delimited conditions,
+  same named plan, distinct plans with a shared name prefix, a leading decimal,
+  comma- and `then`-delimited conditions, multiple correctly qualified actor
+  relations in one claim,
   synonymous transport endpoints including `home`, inverted source-route syntax,
   comparative `relative to`, additive, subject-bound, shared-subject,
-  shared-copula, compound and negative evaluations, and qualified modality.
+  shared-copula, transitive, compound and negative evaluations, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a removed negative sign,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
@@ -2725,10 +2731,11 @@ complete
   another actor's qualifier, including a leading condition), an active or
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
-  affirmative, a leading-decimal bound reversal, a named-plan transfer hidden by
-  an auxiliary, comma-less actor-condition transfer, endpoint reversal from
+  affirmative, an explicitly negated inclusive comparator, a leading-decimal
+  bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
+  prefix, comma-less and compound actor-condition transfers, endpoint reversal from
   either source-route syntax even with one newly worded endpoint, an evaluation
-  moved between named procedures including shared-copula wording, removed
+  moved between named procedures including shared-copula and transitive wording, removed
   evaluation negation, an invented evaluation, and `should`-to-`must`
   strengthening. Separate probes
   reject partial verdict coverage, mismatched identities and unknown evidence,

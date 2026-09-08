@@ -4234,7 +4234,7 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
@@ -4299,6 +4299,10 @@ mod tests {
         shared_copula.exact_quote =
             "Procedure G is essential and is effective. Procedure H is documented separately."
                 .into();
+        let mut transitive_evaluation = catalog().candidates[1].evidence.clone();
+        transitive_evaluation.evidence_id = "transitive-evaluation".into();
+        transitive_evaluation.exact_quote =
+            "Procedure I ensures safety. Procedure J is documented separately.".into();
         let mut modal = catalog().candidates[0].evidence.clone();
         modal.evidence_id = "modal".into();
         modal.exact_quote = "The interpreter should retain the operating context.".into();
@@ -4323,6 +4327,7 @@ mod tests {
             comparative_relative,
             additive_evaluation,
             shared_copula,
+            transitive_evaluation,
             modal,
         ];
 
@@ -4390,6 +4395,16 @@ mod tests {
                 claim_id: "changed-leading-decimal".into(),
                 text: "The fraction is less than .5.".into(),
                 evidence_ids: vec!["leading-decimal".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-inclusive-boundary".into(),
+                text: "The floor is at least 600 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negated-inclusive-boundary".into(),
+                text: "The floor is not at least 600 units.".into(),
+                evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
                 claim_id: "broadened-enumeration".into(),
@@ -4467,6 +4482,16 @@ mod tests {
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
+                claim_id: "supported-shared-prefix-bound-subject".into(),
+                text: "Health Plan A can accept at most 900 reports.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-shared-prefix-bound-subject".into(),
+                text: "Health Plan B can accept at most 900 reports.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-actors".into(),
                 text: "FLCs, AGERs, and AGAS are subject to MSPA if they recruit migrant workers."
                     .into(),
@@ -4530,6 +4555,18 @@ mod tests {
                 claim_id: "changed-negative-actor-condition".into(),
                 text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
                 evidence_ids: vec!["negative-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-compound-actor-conditions".into(),
+                text: "FLCs are subject to MSPA if they recruit workers for money, and AGERs are subject to MSPA if they recruit workers."
+                    .into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-compound-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit workers for money, and AGERs are subject to MSPA if they recruit workers for money."
+                    .into(),
+                evidence_ids: vec!["combined-actors".into()],
             },
             CitedClaim {
                 claim_id: "supported-endpoints".into(),
@@ -4628,6 +4665,16 @@ mod tests {
                 evidence_ids: vec!["shared-copula".into()],
             },
             CitedClaim {
+                claim_id: "supported-transitive-evaluation".into(),
+                text: "Procedure I ensures safety.".into(),
+                evidence_ids: vec!["transitive-evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-transitive-evaluation".into(),
+                text: "Procedure J ensures safety.".into(),
+                evidence_ids: vec!["transitive-evaluation".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-modal".into(),
                 text: "The interpreter should retain the operating context.".into(),
                 evidence_ids: vec!["modal".into()],
@@ -4677,6 +4724,7 @@ mod tests {
             "supported-symbol-lower-boundary",
             "supported-contracted-boundary",
             "supported-leading-decimal",
+            "supported-inclusive-boundary",
             "supported-formatted-integer",
             "supported-formatted-decimal",
             "supported-negative-boundary",
@@ -4685,11 +4733,13 @@ mod tests {
             "supported-bound-subject",
             "supported-passive-bound-subject",
             "supported-auxiliary-bound-subject",
+            "supported-shared-prefix-bound-subject",
             "supported-actors",
             "supported-single-actor-condition",
             "supported-leading-condition",
             "supported-leading-then-condition",
             "supported-negative-actor-condition",
+            "supported-compound-actor-conditions",
             "supported-endpoints",
             "supported-inverted-source-endpoints",
             "supported-home-endpoint",
@@ -4702,6 +4752,7 @@ mod tests {
             "supported-comparative-relative",
             "supported-additive-evaluation",
             "supported-shared-copula-evaluation",
+            "supported-transitive-evaluation",
             "supported-modal",
         ] {
             assert_eq!(verdict(claim_id), ClaimVerdict::Supported, "{claim_id}");
@@ -4713,6 +4764,7 @@ mod tests {
             "changed-symbol-lower-boundary",
             "changed-contracted-boundary",
             "changed-leading-decimal",
+            "changed-negated-inclusive-boundary",
             "broadened-enumeration",
             "changed-formatted-decimal",
             "changed-negative-boundary",
@@ -4720,6 +4772,7 @@ mod tests {
             "transferred-passive-bound-subject",
             "transferred-article-bound-subject",
             "transferred-auxiliary-bound-subject",
+            "transferred-shared-prefix-bound-subject",
             "transferred-condition",
             "transferred-condition-full-names",
             "transferred-condition-coordinated",
@@ -4727,12 +4780,14 @@ mod tests {
             "transferred-leading-condition",
             "transferred-leading-then-condition",
             "changed-negative-actor-condition",
+            "transferred-compound-actor-condition",
             "changed-endpoint",
             "changed-inverted-source-endpoints",
             "changed-one-known-endpoint",
             "transferred-evaluation",
             "changed-evaluation-polarity",
             "transferred-shared-copula-evaluation",
+            "transferred-transitive-evaluation",
             "strengthened-modal",
             "invented-evaluation",
         ] {
