@@ -423,7 +423,9 @@ fn leading_contract_clause_reference(text: &str) -> Option<ContractClauseReferen
     if number.is_empty()
         || number.len() > 24
         || !number.split('.').all(|part| {
-            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+            !part.is_empty()
+                && part.len() <= 3
+                && part.chars().all(|character| character.is_ascii_digit())
         })
     {
         return None;
@@ -566,16 +568,19 @@ fn contract_clause_reference_suffix(references: &[ContractClauseReference]) -> O
 fn contract_clause_reference_before_terminal<'a>(
     text: &'a str,
     suffix: &str,
-) -> Option<(&'a str, char)> {
+) -> Option<(&'a str, char, &'a str)> {
     let suffix_start = text.rfind(suffix)?;
-    let mut trailing = text[suffix_start + suffix.len()..].chars();
-    let terminal = trailing.next()?;
+    let trailing = &text[suffix_start + suffix.len()..];
+    let terminal = trailing.chars().next()?;
+    let closers = &trailing[terminal.len_utf8()..];
     if !matches!(terminal, '.' | '!' | '?' | '。' | '！' | '？')
-        || !trailing.all(|character| matches!(character, '"' | '\'' | '”' | '’' | ')' | ']' | '}'))
+        || !closers
+            .chars()
+            .all(|character| matches!(character, '"' | '\'' | '”' | '’' | ')' | ']' | '}'))
     {
         return None;
     }
-    Some((&text[..suffix_start], terminal))
+    Some((&text[..suffix_start], terminal, closers))
 }
 
 fn attach_contract_clause_references(
@@ -592,7 +597,7 @@ fn attach_contract_clause_references(
         if let Some(suffix) = contract_clause_reference_suffix(&references) {
             if claim.text.ends_with(&suffix) {
                 // The application already owns the exact source-derived suffix.
-            } else if let Some((prefix, terminal)) =
+            } else if let Some((prefix, terminal, closers)) =
                 contract_clause_reference_before_terminal(&claim.text, &suffix)
             {
                 let prefix = prefix.trim_end();
@@ -603,6 +608,7 @@ fn attach_contract_clause_references(
                 if !pages::completion_valid(prefix) {
                     canonical.push(terminal);
                 }
+                canonical.push_str(closers);
                 canonical.push_str(&suffix);
                 claim.text = canonical;
             } else {
@@ -2187,6 +2193,20 @@ mod tests {
             "2026 budget guidance explains common contract fees."
         )
         .is_none());
+        for value_led in [
+            "2026. The agreement renews automatically.\nNotice is required.",
+            "1000. Services.\nConsultant shall deliver reports.",
+            "1000.1. Services.\nConsultant shall deliver reports.",
+        ] {
+            assert!(leading_contract_clause_reference(value_led).is_none());
+        }
+        assert_eq!(
+            leading_contract_clause_reference("999. Services.\nConsultant shall deliver reports."),
+            Some(ContractClauseReference {
+                number: "999".into(),
+                title: "Services".into(),
+            })
+        );
         assert!(leading_contract_clause_reference("1.5 million shares are authorized.").is_none());
         assert!(leading_contract_clause_reference(
             "1.5 Million shares are authorized. Holders may vote."
@@ -2290,9 +2310,19 @@ mod tests {
         attach_contract_clause_references(&mut already_canonical, &catalog).unwrap();
         assert_eq!(already_canonical[0].text.matches("[Section 1]").count(), 1);
 
-        for punctuated in [
-            "Northstar Bakery LLC engages Rowan Lee. [Section 1].",
-            "Northstar Bakery LLC engages Rowan Lee [Section 1].\"",
+        for (punctuated, expected) in [
+            (
+                "Northstar Bakery LLC engages Rowan Lee. [Section 1].",
+                "Northstar Bakery LLC engages Rowan Lee. [Section 1]",
+            ),
+            (
+                "\"Northstar Bakery LLC engages Rowan Lee [Section 1].\"",
+                "\"Northstar Bakery LLC engages Rowan Lee.\" [Section 1]",
+            ),
+            (
+                "(Northstar Bakery LLC engages Rowan Lee [Section 1].)",
+                "(Northstar Bakery LLC engages Rowan Lee.) [Section 1]",
+            ),
         ] {
             let response = json!({
                 "units": [{
@@ -2308,10 +2338,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(canonicalized[0].text.matches("[Section 1]").count(), 1);
-            assert_eq!(
-                canonicalized[0].text,
-                "Northstar Bakery LLC engages Rowan Lee. [Section 1]"
-            );
+            assert_eq!(canonicalized[0].text, expected);
         }
 
         let evidence = catalog
