@@ -509,8 +509,39 @@ admitted values are `general`, `story` and `contract`. Unknown, malformed, or mi
 fail at their typed boundary and never select a specialized profile or silently
 default a current run.
 
-The desktop presents General, Story and Contract before source admission and sends the
-explicit selection with the start command. General remains the initial choice.
+The desktop presents General, Automatic suggestion, Story and Contract before
+source admission. General remains the initial choice. An explicit General,
+Story or Contract selection is sent directly with the start command and does
+not run purpose classification.
+
+Automatic suggestion is an opt-in selection mode rather than a stored summary
+profile. Before creating a run, the desktop parses, normalizes and interprets
+the selected source in memory, then asks the configured model for exactly one
+typed dominant-purpose value. Document purpose remains separate from summary
+profile: `agreement` selects Contract, `narrative` selects Story, and
+`informational`, `mixed`, `other` and `unknown` select General. `other` means a
+recognized purpose without a specialized profile; `unknown` means the supplied
+evidence is insufficient or ambiguous. Mixed remains an admitted classification
+result rather than being forced into a recognized type. The classifier does not
+produce a confidence percentage.
+
+Short sources containing at most 6,000 normalized characters supply their full
+native text. Longer sources supply at most 16 bounded heading hints plus
+distributed excerpts from up to five non-empty pages, including the endpoints.
+An initial `mixed` or `unknown` result permits exactly one expanded bounded
+inspection using up to nine distributed pages. Invalid output, unavailable
+native text, parsing failure and model failure stop before run creation rather
+than silently selecting General. The source content hash used for classification
+must still match at admission; a changed source fails before any document or run
+row is persisted.
+
+Only the effective General, Story or Contract value enters the existing run
+identity and persistence path. The command returns the purpose and sampling mode;
+the desktop uses the purpose for immediate feedback, and neither value is stored
+as document type metadata. Automatic mode reads and parses the local source
+before the ordinary pipeline reads and parses it again; this bounded duplicate
+work preserves the existing immutable admission transaction without a migration
+or a parallel pipeline.
 SQLite schema version 16 stores the selected value in
 `pipeline_run_summary_profiles` in the same transaction that first persists the
 document and run. The row is immutable. The migration assigns General to every
@@ -585,9 +616,9 @@ Connect admissions assign General explicitly in their existing acceptance
 transaction and retain the direct delivery-policy synthesis described above. A
 Story or Contract paired with a Connect delivery policy is rejected rather
 than silently sent through a different summary behavior. This contract does not
-add document-type inference, automatic suggestions,
-classifier confidence, long-document sampling, trained adapters, a parallel
-synthesis framework or a renderer redesign.
+add persisted document-type metadata, measured classification reliability,
+trained adapters, a parallel synthesis framework, Connect specialization or a
+renderer redesign.
 
 ### Historical direct verified paraphrases and explicit omissions
 

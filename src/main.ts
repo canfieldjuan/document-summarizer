@@ -129,6 +129,16 @@ interface RunHistoryItem {
 }
 
 type SummaryProfile = "general" | "story" | "contract";
+type SummaryProfileSelection = SummaryProfile | "automatic";
+type DocumentPurpose = "agreement" | "narrative" | "informational" | "mixed" | "other" | "unknown";
+type ProfileSuggestionSampling = "fullText" | "distributed" | "expanded";
+
+interface SummaryProfileSuggestion {
+  documentPurpose: DocumentPurpose;
+  suggestedProfile: SummaryProfile;
+  sampling: ProfileSuggestionSampling;
+  sourceContentHash: string;
+}
 
 interface BackgroundRunAccepted {
   runId: string;
@@ -884,15 +894,33 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-function selectedSummaryProfile(): SummaryProfile {
+function selectedSummaryProfile(): SummaryProfileSelection {
   if (
     summaryProfile.value === "general"
+    || summaryProfile.value === "automatic"
     || summaryProfile.value === "story"
     || summaryProfile.value === "contract"
   ) {
     return summaryProfile.value;
   }
   throw new Error(`Unsupported summary profile: ${summaryProfile.value}`);
+}
+
+function documentPurposeLabel(purpose: DocumentPurpose): string {
+  switch (purpose) {
+    case "agreement":
+      return "an agreement";
+    case "narrative":
+      return "a narrative";
+    case "informational":
+      return "informational content";
+    case "mixed":
+      return "mixed content";
+    case "other":
+      return "a purpose without a specialized profile";
+    case "unknown":
+      return "an uncertain purpose";
+  }
 }
 
 function summaryProfileLabel(profile: SummaryProfile): string {
@@ -932,10 +960,24 @@ async function selectAndSummarize(): Promise<void> {
   const filename = displayFilename(selected);
   beginProcessing(null, filename, "Preparing the durable pipeline run…");
   try {
-    const selectedProfile = selectedSummaryProfile();
+    const profileSelection = selectedSummaryProfile();
+    let selectedProfile: SummaryProfile;
+    let expectedContentHash: string | null = null;
+    if (profileSelection === "automatic") {
+      processingStatus.textContent = "Inspecting normalized content and document structure…";
+      const suggestion = await invoke<SummaryProfileSuggestion>("suggest_summary_profile", {
+        filePath: selected,
+      });
+      selectedProfile = suggestion.suggestedProfile;
+      expectedContentHash = suggestion.sourceContentHash;
+      processingStatus.textContent = `Automatic found ${documentPurposeLabel(suggestion.documentPurpose)} and selected ${summaryProfileLabel(selectedProfile)}.`;
+    } else {
+      selectedProfile = profileSelection;
+    }
     const accepted = await invoke<BackgroundRunAccepted>("summarize_document", {
       filePath: selected,
       summaryProfile: selectedProfile,
+      expectedContentHash,
     });
     await monitorBackgroundRun(accepted.runId, accepted.originalFilename);
   } catch (error) {

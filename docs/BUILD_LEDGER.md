@@ -2515,3 +2515,61 @@ complete
 - The live result is one synthetic six-clause contract on one qualified local
   model. Paragraph organization remains prompt-driven and manually assessed;
   it is not represented as a measured reliability score.
+
+## Slice 26 — Automatic Summary Profile Suggestions (2026-09-08)
+
+**Status**: implementation, automated gates and live-model acceptance complete
+
+**Verified boundary and implemented behavior**:
+- Automatic suggestion is an opt-in desktop selection. Manual General, Story
+  and Contract choices bypass classification and retain precedence.
+- The pre-ingestion command uses the shared PDF parser, normalizer and structure
+  interpreter in memory. It does not create or mutate a pipeline run. Only its
+  effective General, Story or Contract result enters the existing immutable
+  profile persistence path.
+- Purpose is separate from profile. Agreement maps to Contract and narrative to
+  Story. Informational, mixed, recognized-but-unserved `other`, and uncertain
+  `unknown` map to the General fallback. Invalid model output fails visibly and
+  unavailable source text remains an input failure.
+- Sources containing at most 6,000 normalized characters use complete native
+  text. Longer sources use up to 16 heading hints and bounded excerpts from five
+  distributed non-empty pages. An initial mixed or unknown result receives one
+  expanded inspection of up to nine pages; no other result creates a second
+  classification request.
+- The suggestion returns the classified source's content hash. Admission
+  recomputes it and rejects a mismatch before persistence, preventing a replaced
+  local file from being summarized under a profile chosen from earlier content.
+
+**Acceptance evidence so far**:
+- Six deterministic classifier tests pass with one opt-in live test ignored.
+  They cover purpose-to-profile mapping, complete short input, exact structured
+  output, bounded distributed and expanded sampling, empty and limit boundaries,
+  one expanded request, malformed and extra output, and the required dominant-
+  purpose counterexamples.
+- The source-identity admission test proves both sides of the guard: a mismatch
+  leaves document, run and event tables empty, while the matching hash admits
+  the run.
+- The TypeScript/Vite production build passes with the Automatic selector wired
+  to the effective-profile start path.
+- `cargo test --all-targets` passed 419 library tests with 10 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting and `git diff
+  --check` also pass.
+- With LM Studio reporting no loaded models, the ignored live harness loaded
+  `qwen3-30b-a3b:latest` through Ollama at 100% GPU. It passed all five synthetic
+  cases in 9.27 seconds: an agreement selected Contract; an article explaining
+  contracts selected General; a story containing legal language selected Story;
+  an analytical report opening with an anecdote selected General; and a coequal
+  mixed collection selected General.
+
+**Non-scope and remaining limit**:
+- This slice does not persist purpose or sampling metadata, measure classifier
+  reliability, add trained adapters, specialize Connect, change synthesis
+  prompts or schemas, or redesign result rendering.
+- Automatic mode parses the source once for classification and the ordinary
+  pipeline parses it again after admission. The content-hash guard preserves
+  source identity across those reads, but the extra local parsing and one or two
+  model calls add latency before a run is created.
+- The five live examples demonstrate the intended decisions on one qualified
+  local model. They do not measure classification reliability across documents,
+  and the application intentionally exposes no confidence percentage.

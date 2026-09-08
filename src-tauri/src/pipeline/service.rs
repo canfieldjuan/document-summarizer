@@ -359,9 +359,15 @@ pub(crate) fn admit_pdf_for_background(
     file_path: &str,
     profile_snapshot: Option<&ModelProfileSnapshot>,
     summary_profile: SummaryProfile,
+    expected_content_hash: Option<&str>,
 ) -> Result<(IngestedDocument, PipelineRun), DocumentServiceError> {
-    let (document, ingested) =
-        ingest_pdf_with_profiles(conn, file_path, profile_snapshot, summary_profile)?;
+    let (document, ingested) = ingest_pdf_with_profiles(
+        conn,
+        file_path,
+        profile_snapshot,
+        summary_profile,
+        expected_content_hash,
+    )?;
     let (parsing, persisted_document) =
         db::start_parsing(conn, &ingested.run_id, ingested.state_version)
             .map_err(ParsePipelineError::from)?;
@@ -1007,6 +1013,7 @@ mod tests {
             source.0.to_str().expect("fixture path should be UTF-8"),
             None,
             summary_profile,
+            None,
         )
         .expect("fixture should ingest");
         let failure = process_ingested_to_summary(

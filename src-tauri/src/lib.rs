@@ -11,14 +11,15 @@ use pipeline::chunk::{
     chunk_document as chunk_pipeline_document, ChunkPipelineError, DeterministicDocumentChunker,
 };
 use pipeline::contracts::{
-    ChunkedDocument, IngestedDocument, ModelRuntimeFailure, NormalizedDocument, ParsedDocument,
-    PipelineRun, StructuredDocument, SummaryProfile,
+    ChunkedDocument, DocumentNormalizer, DocumentParser, IngestedDocument, ModelRuntime,
+    ModelRuntimeFailure, NormalizedDocument, ParsedDocument, PipelineFailure, PipelineRun,
+    StructureInterpreter, StructuredDocument, SummaryProfile,
 };
 use pipeline::db::{init_db, StoreError};
-use pipeline::ingest::{ingest_pdf, IngestError};
+use pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion, IngestError};
 use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
 use pipeline::model_settings::{
-    catalog as load_model_catalog, register_gguf, save_selected_preset,
+    catalog as load_model_catalog, register_gguf, runtime_from_settings, save_selected_preset,
     settings_path as model_settings_path, ModelCatalog,
 };
 use pipeline::normalize::{
@@ -26,6 +27,9 @@ use pipeline::normalize::{
 };
 use pipeline::parser::{
     parse_document as parse_pipeline_document, ParsePipelineError, PdfExtractParser,
+};
+use pipeline::profile_suggestion::{
+    suggest_summary_profile as suggest_profile_from_document, SummaryProfileSuggestion,
 };
 use pipeline::recovery::reconcile_interrupted_runs;
 use pipeline::service::DocumentServiceError;
@@ -145,6 +149,12 @@ impl From<ModelRuntimeFailure> for CommandError {
     }
 }
 
+impl From<PipelineFailure> for CommandError {
+    fn from(error: PipelineFailure) -> Self {
+        Self::new(error.code, error.message)
+    }
+}
+
 impl From<WorkspaceError> for CommandError {
     fn from(error: WorkspaceError) -> Self {
         Self::new(error.code(), error.to_string())
@@ -228,14 +238,50 @@ fn chunk_document(
 }
 
 #[tauri::command]
+async fn suggest_summary_profile(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<SummaryProfileSuggestion, CommandError> {
+    let settings_path = state.model_settings_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (document, _) = prepare_pdf_ingestion(&file_path, None).map_err(CommandError::from)?;
+        let parsed = PdfExtractParser::new()
+            .parse(&document)
+            .map_err(CommandError::from)?;
+        let normalized = CanonicalNormalizer::new()
+            .normalize(&parsed)
+            .map_err(CommandError::from)?;
+        let structured = DeterministicStructureInterpreter::new()
+            .interpret(&normalized)
+            .map_err(CommandError::from)?;
+        let runtime = runtime_from_settings(&settings_path).map_err(CommandError::from)?;
+        runtime.health().map_err(CommandError::from)?;
+        suggest_profile_from_document(&runtime, &normalized, &structured, &document.content_hash)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| {
+        CommandError::new(
+            "PROFILE_SUGGESTION_STOPPED",
+            "Automatic profile suggestion stopped unexpectedly",
+        )
+    })?
+}
+
+#[tauri::command]
 fn summarize_document(
     state: State<'_, AppState>,
     file_path: String,
     summary_profile: SummaryProfile,
+    expected_content_hash: Option<String>,
 ) -> Result<BackgroundRunAccepted, CommandError> {
     state
         .jobs
-        .start_pdf(&file_path, summary_profile)
+        .start_pdf(
+            &file_path,
+            summary_profile,
+            expected_content_hash.as_deref(),
+        )
         .map_err(CommandError::from)
 }
 
@@ -453,6 +499,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             normalize_document,
             structure_document,
             chunk_document,
+            suggest_summary_profile,
             summarize_document,
             retry_document,
             continue_document,
