@@ -531,10 +531,10 @@ fn contract_clause_mention(
             }
             let suffix = suffix.trim_start();
             if let Some(parenthesized) = suffix.strip_prefix('(') {
-                if parenthesized
-                    .find(')')
-                    .is_some_and(|end| parenthesized[..end].trim() == title)
-                {
+                if parenthesized.find(')').is_some_and(|end| {
+                    parenthesized[..end].trim() == title
+                        && raw_contract_reference_ends_here(&parenthesized[end + 1..])
+                }) {
                     accurate = true;
                 } else {
                     inaccurate_title = true;
@@ -2368,6 +2368,8 @@ mod tests {
         for text in [
             "Section 4.2 — Expenses.Termination covers travel.",
             "Section 4.2: Expenses/Termination covers travel.",
+            "Section 4.2 (Expenses)Termination covers travel.",
+            "Section 4.2 (Expenses)/Termination covers travel.",
         ] {
             let malformed_title = vec![CitedClaim {
                 claim_id: "contract-malformed-title".into(),
@@ -2385,7 +2387,7 @@ mod tests {
 
         let punctuation_then_space = vec![CitedClaim {
             claim_id: "contract-punctuation-space".into(),
-            text: "Section 4.2 — Expenses, covering approved travel.".into(),
+            text: "Section 4.2 (Expenses), covering approved travel.".into(),
             evidence_ids: vec![dotted_catalog.candidates[0].evidence.evidence_id.clone()],
         }];
         assert!(contract_clause_reference_feedback(
@@ -2454,6 +2456,7 @@ mod tests {
             "1. Parties.\nClient engages Consultant.\n2. Services.\nConsultant shall deliver monthly reports.",
             "1. Parties.\nClient engages Consultant.;2. Services.\nConsultant shall deliver monthly reports.",
             "1. Parties.\nClient engages Consultant.2. Services.\nConsultant shall deliver monthly reports.",
+            "1. Term.\nThis agreement expires in 2026.2. Services.\nConsultant shall report.",
         ] {
             let mut multiple_clauses_per_segment = contract_catalog();
             multiple_clauses_per_segment.candidates.truncate(1);
