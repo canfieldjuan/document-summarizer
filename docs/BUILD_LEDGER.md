@@ -2683,9 +2683,10 @@ complete
   contractors` instead of `FLCs`. Actor qualifiers are bound to their source
   relationship inside compound sentences, and evaluative conclusions are bound
   to a named subject when the cited text makes that comparison mechanical.
-  Numeric relations retain signs, and relation parsing stays within sentence or
-  clause boundaries so a negation or endpoint in one sentence cannot affect the
-  next.
+  Numeric relations retain signs and bind an explicit constraint to its nearby
+  subject/predicate when cited text exposes the same context. Evaluative
+  relations retain negation. Relation parsing stays within sentence or clause
+  boundaries so a negation or endpoint in one sentence cannot affect the next.
 - Verification artifacts now use version `8.0.0`. The previous coherent
   `7.0.0` contract remains readable, while new results cannot be mistaken for
   artifacts produced without the deterministic veto. Synthesis, summary,
@@ -2693,15 +2694,17 @@ complete
 
 **Acceptance evidence so far**:
 - Paired deterministic probes preserve equivalent `at most 500` wording,
-  comma/decimal and signed number formatting, source-supported actor grouping,
-  synonymous transport endpoints with a trailing time modifier, subject-bound
-  and shared-subject evaluations, and qualified modality. Opposite probes reject
-  an exclusive `fewer than 500` boundary, a removed negative sign, broader
-  kinship label, acronym and full-name actor transfer (including distinct rules
-  in one item or compound sentence), an endpoint reversal, an evaluation moved
-  between named procedures, an invented evaluation, and `should`-to-`must`
-  strengthening. Separate probes reject partial verdict coverage, mismatched
-  identities and unknown evidence, and preserve an already-ambiguous verdict.
+  comma/decimal and signed number formatting, `maximum of`/`minimum of` wording,
+  source-supported actor grouping, synonymous transport endpoints with a
+  trailing time modifier, subject-bound, shared-subject and negative
+  evaluations, and qualified modality. Opposite probes reject an exclusive
+  `fewer than 500` boundary, a removed negative sign, a bound moved between named
+  plans, broader kinship label, acronym and full-name actor transfer (including
+  distinct rules in one item or compound sentence), an endpoint reversal, an
+  evaluation moved between named procedures, removed evaluation negation, an
+  invented evaluation, and `should`-to-`must` strengthening. Separate probes
+  reject partial verdict coverage, mismatched identities and unknown evidence,
+  and preserve an already-ambiguous verdict.
 - An end-to-end fixture makes the model return `supported` for an invented
   evaluative conclusion. The production verification boundary downgrades it,
   persists the auditable failed attempt and creates no summary artifact.

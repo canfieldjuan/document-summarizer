@@ -4234,7 +4234,7 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. Plan A accepts at most 900 applications. Plan B accepts 300 applications.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
@@ -4263,6 +4263,9 @@ mod tests {
         let mut shared_procedures = catalog().candidates[0].evidence.clone();
         shared_procedures.evidence_id = "shared-procedures".into();
         shared_procedures.exact_quote = "Procedure A and Procedure B are essential.".into();
+        let mut negative_evaluation = catalog().candidates[1].evidence.clone();
+        negative_evaluation.evidence_id = "negative-evaluation".into();
+        negative_evaluation.exact_quote = "Procedure C is not essential.".into();
         let mut sentence_boundary = catalog().candidates[1].evidence.clone();
         sentence_boundary.evidence_id = "sentence-boundary".into();
         sentence_boundary.exact_quote =
@@ -4281,6 +4284,7 @@ mod tests {
             procedure_a,
             procedure_b,
             shared_procedures,
+            negative_evaluation,
             sentence_boundary,
             modal,
         ];
@@ -4326,6 +4330,26 @@ mod tests {
             CitedClaim {
                 claim_id: "changed-negative-boundary".into(),
                 text: "Temperatures must remain at least 5 degrees.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-maximum-of".into(),
+                text: "Capacity is at most 750 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-minimum-of".into(),
+                text: "Eligibility requires at least 18 years.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-bound-subject".into(),
+                text: "Plan A accepts at most 900 applications.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-bound-subject".into(),
+                text: "Plan B accepts at most 900 applications.".into(),
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
@@ -4385,6 +4409,16 @@ mod tests {
                 evidence_ids: vec!["shared-procedures".into()],
             },
             CitedClaim {
+                claim_id: "supported-negative-evaluation".into(),
+                text: "Procedure C is not critical.".into(),
+                evidence_ids: vec!["negative-evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-evaluation-polarity".into(),
+                text: "Procedure C is critical.".into(),
+                evidence_ids: vec!["negative-evaluation".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-after-negative-sentence".into(),
                 text: "More than 500 cases trigger review.".into(),
                 evidence_ids: vec!["sentence-boundary".into()],
@@ -4437,11 +4471,15 @@ mod tests {
             "supported-formatted-integer",
             "supported-formatted-decimal",
             "supported-negative-boundary",
+            "supported-maximum-of",
+            "supported-minimum-of",
+            "supported-bound-subject",
             "supported-actors",
             "supported-endpoints",
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
+            "supported-negative-evaluation",
             "supported-after-negative-sentence",
             "supported-modal",
         ] {
@@ -4452,11 +4490,13 @@ mod tests {
             "broadened-enumeration",
             "changed-formatted-decimal",
             "changed-negative-boundary",
+            "transferred-bound-subject",
             "transferred-condition",
             "transferred-condition-full-names",
             "transferred-condition-coordinated",
             "changed-endpoint",
             "transferred-evaluation",
+            "changed-evaluation-polarity",
             "strengthened-modal",
             "invented-evaluation",
         ] {

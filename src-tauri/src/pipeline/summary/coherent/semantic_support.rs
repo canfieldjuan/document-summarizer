@@ -11,6 +11,13 @@ enum NumericRelation {
     Equal,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NumericConstraint {
+    value: String,
+    relation: NumericRelation,
+    context: Vec<String>,
+}
+
 fn ends_with_words(words: &[String], suffix: &[&str]) -> bool {
     words.len() >= suffix.len()
         && words[words.len() - suffix.len()..]
@@ -61,6 +68,7 @@ fn numeric_relation(words: &[String], index: usize) -> Option<NumericRelation> {
         || ends_with_words(before, &["at", "most"])
         || ends_with_words(before, &["up", "to"])
         || before.last().is_some_and(|word| word == "maximum")
+        || ends_with_words(before, &["maximum", "of"])
         || after.starts_with(&["or".to_string(), "fewer".to_string()])
         || after.starts_with(&["or".to_string(), "less".to_string()])
     {
@@ -70,6 +78,7 @@ fn numeric_relation(words: &[String], index: usize) -> Option<NumericRelation> {
         || ends_with_words(before, &["not", "less", "than"])
         || ends_with_words(before, &["at", "least"])
         || before.last().is_some_and(|word| word == "minimum")
+        || ends_with_words(before, &["minimum", "of"])
         || after.starts_with(&["or".to_string(), "more".to_string()])
         || after.starts_with(&["or".to_string(), "greater".to_string()])
     {
@@ -170,7 +179,19 @@ fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
     clauses
 }
 
-fn numeric_constraints(text: &str) -> Vec<(String, NumericRelation)> {
+fn numeric_context(tokens: &[String], index: usize) -> Vec<String> {
+    const COMPARISON_WORDS: &[&str] = &[
+        "no", "not", "more", "less", "fewer", "greater", "than", "at", "most", "least", "up", "to",
+        "maximum", "minimum", "of", "exactly", "under", "below", "over", "above",
+    ];
+    let mut end = index;
+    while end > 0 && COMPARISON_WORDS.contains(&tokens[end - 1].as_str()) {
+        end -= 1;
+    }
+    tokens[end.saturating_sub(8)..end].to_vec()
+}
+
+fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
     comparison_clauses(text)
         .into_iter()
         .flat_map(|tokens| {
@@ -178,10 +199,32 @@ fn numeric_constraints(text: &str) -> Vec<(String, NumericRelation)> {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, word)| {
-                    numeric_value(word).zip(numeric_relation(&tokens, index))
+                    match (numeric_value(word), numeric_relation(&tokens, index)) {
+                        (Some(value), Some(relation)) => Some(NumericConstraint {
+                            value,
+                            relation,
+                            context: numeric_context(&tokens, index),
+                        }),
+                        _ => None,
+                    }
                 })
                 .collect::<Vec<_>>()
         })
+        .collect()
+}
+
+fn numeric_mention_contexts(text: &str) -> Vec<Vec<String>> {
+    comparison_clauses(text)
+        .into_iter()
+        .flat_map(|tokens| {
+            tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, word)| numeric_value(word).is_some())
+                .map(|(index, _)| numeric_context(&tokens, index))
+                .collect::<Vec<_>>()
+        })
+        .filter(|context| !context.is_empty())
         .collect()
 }
 
@@ -190,10 +233,34 @@ fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
         .iter()
         .flat_map(|item| numeric_constraints(&item.exact_quote))
         .collect::<Vec<_>>();
+    let source_contexts = evidence
+        .iter()
+        .flat_map(|item| numeric_mention_contexts(&item.exact_quote))
+        .collect::<Vec<_>>();
     numeric_constraints(claim).into_iter().all(|constraint| {
-        source_constraints
+        let matching_relation = source_constraints
             .iter()
-            .any(|source| source == &constraint)
+            .filter(|source| {
+                source.value == constraint.value && source.relation == constraint.relation
+            })
+            .collect::<Vec<_>>();
+        if matching_relation
+            .iter()
+            .any(|source| source.context == constraint.context)
+        {
+            return true;
+        }
+        if matching_relation.is_empty()
+            && source_constraints
+                .iter()
+                .any(|source| source.value == constraint.value)
+        {
+            return false;
+        }
+        constraint.context.is_empty()
+            || !source_contexts
+                .iter()
+                .any(|source| source == &constraint.context)
     })
 }
 
@@ -554,14 +621,23 @@ fn original_words(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn evaluation_subject(clause: &str, concept: &[&str]) -> Option<Vec<String>> {
-    let tokens = original_words(clause);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvaluationRelation {
+    subject: Vec<String>,
+    negated: bool,
+}
+
+fn evaluation_relation(clause: &str, concept: &[&str]) -> Option<EvaluationRelation> {
+    let tokens = original_words(clause)
+        .into_iter()
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<Vec<_>>();
     let concept_index = tokens
         .iter()
-        .position(|word| concept.contains(&word.to_ascii_lowercase().as_str()))?;
+        .position(|word| concept.contains(&word.as_str()))?;
     let linking_index = tokens[..concept_index].iter().rposition(|word| {
         matches!(
-            word.to_ascii_lowercase().as_str(),
+            word.as_str(),
             "is" | "are"
                 | "was"
                 | "were"
@@ -572,12 +648,13 @@ fn evaluation_subject(clause: &str, concept: &[&str]) -> Option<Vec<String>> {
                 | "seemed"
                 | "remains"
                 | "remained"
+                | "isn"
+                | "aren"
+                | "wasn"
+                | "weren"
         )
     })?;
-    let mut subject = tokens[..linking_index]
-        .iter()
-        .map(|word| word.to_ascii_lowercase())
-        .collect::<Vec<_>>();
+    let mut subject = tokens[..linking_index].to_vec();
     if subject.first().is_some_and(|word| {
         matches!(
             word.as_str(),
@@ -586,12 +663,20 @@ fn evaluation_subject(clause: &str, concept: &[&str]) -> Option<Vec<String>> {
     }) {
         subject.remove(0);
     }
-    (!subject.is_empty()
+    let subject_is_concrete = !subject.is_empty()
         && !matches!(
             subject.as_slice(),
             [word] if matches!(word.as_str(), "it" | "they" | "he" | "she")
-        ))
-    .then_some(subject)
+        );
+    subject_is_concrete.then(|| EvaluationRelation {
+        subject,
+        negated: tokens[linking_index..=concept_index].iter().any(|word| {
+            matches!(
+                word.as_str(),
+                "not" | "no" | "never" | "t" | "isn" | "aren" | "wasn" | "weren"
+            )
+        }),
+    })
 }
 
 fn evaluated_subject_matches(source: &[String], claim: &[String]) -> bool {
@@ -626,22 +711,23 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
         if evaluated_source_clauses.is_empty() {
             return false;
         }
-        let evaluated_subjects = evaluated_source_clauses
+        let evaluated_relations = evaluated_source_clauses
             .iter()
-            .filter_map(|clause| evaluation_subject(clause, concept))
+            .filter_map(|clause| evaluation_relation(clause, concept))
             .collect::<Vec<_>>();
         for clause in claim_clauses {
-            let Some(subject) = evaluation_subject(clause, concept) else {
+            let Some(claim_relation) = evaluation_relation(clause, concept) else {
                 continue;
             };
             let subject_is_cited = evidence
                 .iter()
-                .any(|item| contains_owned_words(&item.exact_quote, &subject));
+                .any(|item| contains_owned_words(&item.exact_quote, &claim_relation.subject));
             if subject_is_cited
-                && !evaluated_subjects.is_empty()
-                && !evaluated_subjects
-                    .iter()
-                    .any(|source| evaluated_subject_matches(source, &subject))
+                && !evaluated_relations.is_empty()
+                && !evaluated_relations.iter().any(|source| {
+                    evaluated_subject_matches(&source.subject, &claim_relation.subject)
+                        && source.negated == claim_relation.negated
+                })
             {
                 return false;
             }
