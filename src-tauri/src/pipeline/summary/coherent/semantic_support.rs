@@ -60,9 +60,166 @@ fn numeric_value(word: &str) -> Option<String> {
     })
 }
 
-fn numeric_relation(words: &[String], index: usize) -> Option<NumericRelation> {
-    let before = &words[..index];
-    let after = &words[index + 1..];
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NumericMention {
+    value: String,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardinalKind {
+    Small,
+    Tens,
+    Hundred,
+    Scale,
+}
+
+fn small_cardinal(word: &str) -> Option<u64> {
+    Some(match word {
+        "zero" => 0,
+        "one" => 1,
+        "two" => 2,
+        "three" => 3,
+        "four" => 4,
+        "five" => 5,
+        "six" => 6,
+        "seven" => 7,
+        "eight" => 8,
+        "nine" => 9,
+        "ten" => 10,
+        "eleven" => 11,
+        "twelve" => 12,
+        "thirteen" => 13,
+        "fourteen" => 14,
+        "fifteen" => 15,
+        "sixteen" => 16,
+        "seventeen" => 17,
+        "eighteen" => 18,
+        "nineteen" => 19,
+        _ => return None,
+    })
+}
+
+fn tens_cardinal(word: &str) -> Option<u64> {
+    Some(match word {
+        "twenty" => 20,
+        "thirty" => 30,
+        "forty" => 40,
+        "fifty" => 50,
+        "sixty" => 60,
+        "seventy" => 70,
+        "eighty" => 80,
+        "ninety" => 90,
+        _ => return None,
+    })
+}
+
+fn cardinal_scale(word: &str) -> Option<u64> {
+    Some(match word {
+        "thousand" => 1_000,
+        "million" => 1_000_000,
+        "billion" => 1_000_000_000,
+        _ => return None,
+    })
+}
+
+fn spelled_numeric_value(tokens: &[String], start: usize) -> Option<NumericMention> {
+    let mut index = start;
+    let negative = tokens
+        .get(index)
+        .is_some_and(|word| matches!(word.as_str(), "minus" | "negative"));
+    if negative {
+        index += 1;
+    }
+    let mut total = 0_u64;
+    let mut group = 0_u64;
+    let mut last_kind = None;
+    let mut last_scale = u64::MAX;
+    let mut saw_number = false;
+    while let Some(word) = tokens.get(index).map(String::as_str) {
+        if word == "and"
+            && saw_number
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| small_cardinal(next).is_some() || tens_cardinal(next).is_some())
+        {
+            index += 1;
+            continue;
+        }
+        if let Some(value) = small_cardinal(word) {
+            if matches!(last_kind, Some(CardinalKind::Small))
+                || matches!(last_kind, Some(CardinalKind::Tens)) && value > 9
+            {
+                break;
+            }
+            group = group.checked_add(value)?;
+            last_kind = Some(CardinalKind::Small);
+        } else if let Some(value) = tens_cardinal(word) {
+            if matches!(last_kind, Some(CardinalKind::Small | CardinalKind::Tens)) {
+                break;
+            }
+            group = group.checked_add(value)?;
+            last_kind = Some(CardinalKind::Tens);
+        } else if word == "hundred" {
+            if !matches!(last_kind, Some(CardinalKind::Small)) || !(1..=9).contains(&group) {
+                break;
+            }
+            group = group.checked_mul(100)?;
+            last_kind = Some(CardinalKind::Hundred);
+        } else if let Some(scale) = cardinal_scale(word) {
+            if !saw_number || group == 0 || scale >= last_scale {
+                break;
+            }
+            total = total.checked_add(group.checked_mul(scale)?)?;
+            group = 0;
+            last_scale = scale;
+            last_kind = Some(CardinalKind::Scale);
+        } else {
+            break;
+        }
+        saw_number = true;
+        index += 1;
+    }
+    if !saw_number || index == start + usize::from(negative) {
+        return None;
+    }
+    let value = total.checked_add(group)?;
+    Some(NumericMention {
+        value: if negative && value != 0 {
+            format!("-{value}")
+        } else {
+            value.to_string()
+        },
+        start,
+        end: index,
+    })
+}
+
+fn numeric_mentions(tokens: &[String]) -> Vec<NumericMention> {
+    let mut mentions = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if let Some(value) = numeric_value(&tokens[index]) {
+            mentions.push(NumericMention {
+                value,
+                start: index,
+                end: index + 1,
+            });
+            index += 1;
+        } else if let Some(mention) = spelled_numeric_value(tokens, index) {
+            index = mention.end;
+            mentions.push(mention);
+        } else {
+            index += 1;
+        }
+    }
+    mentions
+}
+
+fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<NumericRelation> {
+    let before = &words[..start];
+    let after = &words[end..];
     if ends_with_words(before, &["no", "more", "than"])
         || ends_with_words(before, &["not", "more", "than"])
         || ends_with_words(before, &["at", "most"])
@@ -195,18 +352,16 @@ fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
     comparison_clauses(text)
         .into_iter()
         .flat_map(|tokens| {
-            tokens
-                .iter()
-                .enumerate()
-                .filter_map(|(index, word)| {
-                    match (numeric_value(word), numeric_relation(&tokens, index)) {
-                        (Some(value), Some(relation)) => Some(NumericConstraint {
-                            value,
+            numeric_mentions(&tokens)
+                .into_iter()
+                .filter_map(|mention| {
+                    numeric_relation(&tokens, mention.start, mention.end).map(|relation| {
+                        NumericConstraint {
+                            value: mention.value,
                             relation,
-                            context: numeric_context(&tokens, index),
-                        }),
-                        _ => None,
-                    }
+                            context: numeric_context(&tokens, mention.start),
+                        }
+                    })
                 })
                 .collect::<Vec<_>>()
         })
@@ -217,11 +372,9 @@ fn numeric_mention_contexts(text: &str) -> Vec<Vec<String>> {
     comparison_clauses(text)
         .into_iter()
         .flat_map(|tokens| {
-            tokens
-                .iter()
-                .enumerate()
-                .filter(|(_, word)| numeric_value(word).is_some())
-                .map(|(index, _)| numeric_context(&tokens, index))
+            numeric_mentions(&tokens)
+                .into_iter()
+                .map(|mention| numeric_context(&tokens, mention.start))
                 .collect::<Vec<_>>()
         })
         .filter(|context| !context.is_empty())
@@ -321,6 +474,34 @@ fn directional_relations_in_clause(clause: &str) -> Vec<(Vec<String>, Vec<String
                 !matches!(
                     word.as_str(),
                     "and" | "or" | "by" | "from" | "unless" | "absent" | "if" | "when"
+                )
+            })
+            .take(8)
+            .filter_map(|word| endpoint_word(word))
+            .collect::<Vec<_>>();
+        if !origin.is_empty() && !destination.is_empty() {
+            relations.push((origin, destination));
+        }
+    }
+    for (to, token) in tokens.iter().enumerate() {
+        if token != "to" {
+            continue;
+        }
+        let Some(from) =
+            (to + 1..(to + 13).min(tokens.len())).find(|index| tokens[*index] == "from")
+        else {
+            continue;
+        };
+        let destination = tokens[to + 1..from]
+            .iter()
+            .filter_map(|word| endpoint_word(word))
+            .collect::<Vec<_>>();
+        let origin = tokens[from + 1..]
+            .iter()
+            .take_while(|word| {
+                !matches!(
+                    word.as_str(),
+                    "and" | "or" | "by" | "to" | "unless" | "absent" | "if" | "when"
                 )
             })
             .take(8)
@@ -550,17 +731,45 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
     }) else {
         return true;
     };
-    let condition = claim_words[condition_index..].join(" ");
-    let subject_end = claim_words[..condition_index]
+    let leading_condition = condition_index == 0;
+    let (subject_words, condition) = if leading_condition {
+        let Some(comma) = claim.find(',') else {
+            return true;
+        };
+        (
+            claim[comma + 1..]
+                .split(|character: char| !character.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .collect::<Vec<_>>(),
+            claim[..comma].to_string(),
+        )
+    } else {
+        (
+            claim_words[..condition_index].to_vec(),
+            claim_words[condition_index..].join(" "),
+        )
+    };
+    let subject_end = subject_words
         .iter()
         .position(|word| {
             matches!(
                 word.to_ascii_lowercase().as_str(),
-                "subject" | "must" | "shall" | "may" | "can" | "will" | "required" | "requires"
+                "subject"
+                    | "is"
+                    | "are"
+                    | "was"
+                    | "were"
+                    | "must"
+                    | "shall"
+                    | "may"
+                    | "can"
+                    | "will"
+                    | "required"
+                    | "requires"
             )
         })
-        .unwrap_or(condition_index);
-    let subject = &claim_words[..subject_end];
+        .unwrap_or(subject_words.len());
+    let subject = &subject_words[..subject_end];
     let subject_acronyms = subject
         .iter()
         .filter_map(|word| acronym(word))

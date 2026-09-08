@@ -4250,6 +4250,10 @@ mod tests {
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
         transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
+        let mut inverted_transport = catalog().candidates[0].evidence.clone();
+        inverted_transport.evidence_id = "inverted-transport".into();
+        inverted_transport.exact_quote =
+            "The employer must transport workers to the workplace from living quarters.".into();
         let mut explicit_evaluation = catalog().candidates[0].evidence.clone();
         explicit_evaluation.evidence_id = "evaluation".into();
         explicit_evaluation.exact_quote =
@@ -4284,6 +4288,7 @@ mod tests {
             combined_actors,
             coordinated_actors,
             transport,
+            inverted_transport,
             explicit_evaluation,
             procedure_a,
             procedure_b,
@@ -4304,6 +4309,18 @@ mod tests {
             CitedClaim {
                 claim_id: "changed-boundary".into(),
                 text: "The exemption applies when the employer used fewer than 500 man-days."
+                    .into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-spelled-boundary".into(),
+                text: "The exemption applies when the employer used at most five hundred man-days."
+                    .into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-spelled-boundary".into(),
+                text: "The exemption applies when the employer used more than five hundred man-days."
                     .into(),
                 evidence_ids: vec!["flsa".into()],
             },
@@ -4392,6 +4409,16 @@ mod tests {
                 evidence_ids: vec!["combined-actors".into()],
             },
             CitedClaim {
+                claim_id: "supported-leading-condition".into(),
+                text: "If they recruit workers for money, FLCs are subject to MSPA.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-leading-condition".into(),
+                text: "If they recruit workers for money, AGERs are subject to MSPA.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-endpoints".into(),
                 text: "The employer must provide transportation from housing to the work site each morning. The policy identifies this route."
                     .into(),
@@ -4402,6 +4429,18 @@ mod tests {
                 text: "The employer must provide transportation from the workplace to the living quarters."
                     .into(),
                 evidence_ids: vec!["transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-inverted-source-endpoints".into(),
+                text: "The employer must transport workers from housing to the work site."
+                    .into(),
+                evidence_ids: vec!["inverted-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-inverted-source-endpoints".into(),
+                text: "The employer must transport workers from the workplace to living quarters."
+                    .into(),
+                evidence_ids: vec!["inverted-transport".into()],
             },
             CitedClaim {
                 claim_id: "supported-evaluation".into(),
@@ -4488,6 +4527,7 @@ mod tests {
         };
         for claim_id in [
             "supported-boundary",
+            "supported-spelled-boundary",
             "supported-formatted-integer",
             "supported-formatted-decimal",
             "supported-negative-boundary",
@@ -4496,7 +4536,9 @@ mod tests {
             "supported-bound-subject",
             "supported-actors",
             "supported-single-actor-condition",
+            "supported-leading-condition",
             "supported-endpoints",
+            "supported-inverted-source-endpoints",
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
@@ -4509,6 +4551,7 @@ mod tests {
         }
         for claim_id in [
             "changed-boundary",
+            "changed-spelled-boundary",
             "broadened-enumeration",
             "changed-formatted-decimal",
             "changed-negative-boundary",
@@ -4517,7 +4560,9 @@ mod tests {
             "transferred-condition-full-names",
             "transferred-condition-coordinated",
             "transferred-single-actor-condition",
+            "transferred-leading-condition",
             "changed-endpoint",
+            "changed-inverted-source-endpoints",
             "transferred-evaluation",
             "changed-evaluation-polarity",
             "strengthened-modal",
