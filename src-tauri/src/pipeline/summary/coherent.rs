@@ -472,17 +472,15 @@ fn wrapped_initialism_line(candidate_title: &str) -> bool {
         })
 }
 
-fn contract_clause_references_in_segment(text: &str) -> Vec<ContractClauseReference> {
+fn contract_clause_references_in_segment(text: &str) -> Option<Vec<ContractClauseReference>> {
     let text = text.trim_start();
     let mut references = Vec::new();
     for (index, character) in text.char_indices() {
         if character.is_ascii_digit() && contract_clause_candidate_start(text, index) {
-            if let Some(reference) = leading_contract_clause_reference(&text[index..]) {
-                references.push(reference);
-            }
+            references.push(leading_contract_clause_reference(&text[index..])?);
         }
     }
-    references
+    Some(references)
 }
 
 fn contract_clause_candidate_start(text: &str, index: usize) -> bool {
@@ -529,7 +527,7 @@ fn contract_clause_candidate_start(text: &str, index: usize) -> bool {
 
 fn sole_leading_contract_clause_reference(text: &str) -> Option<ContractClauseReference> {
     let leading = leading_contract_clause_reference(text)?;
-    let references = contract_clause_references_in_segment(text);
+    let references = contract_clause_references_in_segment(text)?;
     (references.len() == 1 && references[0] == leading).then_some(leading)
 }
 
@@ -2303,6 +2301,30 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+
+        let mut unresolved_later_heading_catalog = contract_catalog();
+        unresolved_later_heading_catalog.candidates.truncate(1);
+        unresolved_later_heading_catalog.candidates[0].evidence.exact_quote = "1. Parties.\nClient engages Consultant.\n2. Services. Consultant shall deliver reports.".into();
+        let unresolved_later_heading_response = json!({
+            "units": [{
+                "text": "Consultant shall deliver reports.",
+                "source_ids": ["s1"]
+            }]
+        });
+        let (unresolved_later_heading_claims, unresolved_later_heading_evidence) = parse_response(
+            SummaryProfile::Contract,
+            &unresolved_later_heading_response.to_string(),
+            "contract-document",
+            &unresolved_later_heading_catalog,
+        )
+        .unwrap();
+        assert!(!unresolved_later_heading_claims[0].text.contains("[Section"));
+        assert!(contract_clause_reference_feedback(
+            &unresolved_later_heading_claims,
+            &unresolved_later_heading_evidence,
+        )
+        .unwrap()
+        .is_empty());
 
         let mut mixed_clause_catalog = contract_catalog();
         mixed_clause_catalog.candidates[1].evidence.exact_quote =
