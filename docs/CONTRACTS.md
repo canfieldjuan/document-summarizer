@@ -505,11 +505,11 @@ wire result while standalone summaries adopt coherent General presentation.
 Status: current desktop runs have an explicit immutable summary profile. A
 summary profile controls application-level synthesis behavior and presentation;
 it is separate from both the document's type and the model runtime profile. The
-admitted values are `general` and `story`. Unknown, malformed, or missing values
+admitted values are `general`, `story` and `contract`. Unknown, malformed, or missing values
 fail at their typed boundary and never select a specialized profile or silently
 default a current run.
 
-The desktop presents General and Story before source admission and sends the
+The desktop presents General, Story and Contract before source admission and sends the
 explicit selection with the start command. General remains the initial choice.
 SQLite schema version 16 stores the selected value in
 `pipeline_run_summary_profiles` in the same transaction that first persists the
@@ -526,22 +526,42 @@ substitute a mutable current setting. A missing profile rejects synthesis,
 retry, continuation or workspace projection at the applicable boundary rather
 than permitting incompatible result reuse.
 
-Standalone General and Story runs share ingestion, normalization, bounded exact
+Standalone General, Story and Contract runs share ingestion, normalization, bounded exact
 source catalogs, response shape, durable citations, semantic verification,
 fallback, retry, continuation and rendering. General synthesis preserves the
 main message, important support and qualifications. Story synthesis instead
 asks for a readable synopsis that preserves sourced character identity and
 motivation, conflict, causal relationships, major events, chronology and the
 resolution or explicitly unresolved ending. It must not infer a motivation,
-internal state or causal link from sequence alone. The existing source-backed
-verification and modal-strengthening guard apply to both profiles; profile
-instructions do not weaken support requirements.
+internal state or causal link from sequence alone. Contract synthesis produces a
+plain-language overview organized around parties and roles, scope and term,
+obligations, conditions, exceptions, deadlines, amounts, confidentiality,
+termination and remedies when present. It must retain who acts, what they do,
+the recipient, trigger, qualifications, timing and amount without adding legal
+advice, enforceability conclusions or judgments about a term.
+
+Contract clause references are application-owned provenance. When a cited exact
+source segment starts with a simple or dotted numbered clause, the parser keeps
+an accurate reference already present in the prose or appends the exact number
+before deterministic claim identity is materialized. A year-led prose sentence
+is not treated as a clause, and a reference such as `4.20` cannot satisfy `4.2`.
+For a complete short catalog containing at most six source segments where every
+segment begins with a distinct numbered clause, Contract validation also
+requires the result to retain evidence from every supplied clause. Mixed,
+incomplete and larger catalogs retain normal materiality-based selection; the
+short-contract rule does not turn long summaries into clause inventories.
+Contract may use up to two bounded validation repairs after its initial response
+when a required short clause is omitted. General and Story retain the existing
+single modal-strengthening repair. All profiles retain the existing source-backed
+semantic verification and modal-strengthening guard; profile instructions do
+not weaken support requirements. Paragraph grouping is an output instruction
+and semantic acceptance criterion, not a mechanically measured quality score.
 
 Connect admissions assign General explicitly in their existing acceptance
 transaction and retain the direct delivery-policy synthesis described above. A
-specialized profile paired with a Connect delivery policy is rejected rather
+Story or Contract paired with a Connect delivery policy is rejected rather
 than silently sent through a different summary behavior. This contract does not
-add Contract prompts, document-type inference, automatic suggestions,
+add document-type inference, automatic suggestions,
 classifier confidence, long-document sampling, trained adapters, a parallel
 synthesis framework or a renderer redesign.
 

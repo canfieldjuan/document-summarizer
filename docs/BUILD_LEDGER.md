@@ -2413,3 +2413,79 @@ complete in PR #40
 - This is one semantic acceptance example from one synthetic narrative and one
   qualified local model. Mechanical validation and one accepted sample do not
   establish general Story reliability across narrative styles or documents.
+
+## Slice 25 — Manual Contract Summary Profile (2026-09-07)
+
+**Status**: implementation, automated gates and live-model quality acceptance
+complete
+
+**Verified boundary and implemented behavior**:
+- The existing immutable profile identity now admits `contract`, and the
+  desktop offers Contract beside General and Story before source admission.
+  Persistence, retry, continuation, history and reopen continue to use the
+  shared stored profile rather than the selector's current value.
+- Contract uses the existing standalone source-aware synthesis, exact evidence,
+  semantic verification, citation, fallback and persistence pipeline. Its named
+  schema and prompt preserve parties and roles, scope and term, obligations,
+  recipients, conditions, exceptions, deadlines, dates, amounts,
+  confidentiality, termination and remedies while rejecting invented legal
+  advice or evaluations.
+- Clause references come from cited exact source headings. The application
+  preserves an accurate reference already in the model prose or appends the
+  exact numbered section before materializing deterministic claim identity.
+  Dotted identifiers are bounded exactly, so `4.20` does not satisfy `4.2`, and
+  year-led prose is not treated as a clause heading.
+- A complete catalog of at most six distinct numbered clauses must retain
+  evidence from every supplied clause. Mixed, incomplete and larger catalogs
+  keep materiality-based selection. Contract gets at most two bounded repair
+  attempts for an incomplete short result and then fails closed. General and
+  Story retain their existing repair behavior.
+- Connect remains explicitly General-only. A Contract run paired with a Connect
+  delivery policy fails with `SUMMARY_PROFILE_DELIVERY_UNSUPPORTED` rather than
+  silently using General behavior.
+
+**Acceptance evidence so far**:
+- Focused tests cover typed admission and unknown-value rejection, immutable
+  persistence, source-aware profile dispatch, exact source binding, Contract
+  refusal on Connect, clause-reference pass/fail boundaries, short-contract
+  coverage boundaries and the bounded repair limit.
+- `cargo test --all-targets` passed 410 library tests with 8 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting, the
+  TypeScript/Vite production build and `git diff --check` passed.
+- The authored six-clause example passes the real response parser, deterministic
+  identity, modal-force checks, exact evidence materialization, clause-reference
+  validation and short-contract coverage validation.
+- The ignored live harness used `qwen3-30b-a3b:latest` through Ollama and passed
+  in 8.14 seconds. The run produced:
+
+  > Northstar Bakery LLC, referred to as the Client, has engaged Rowan Lee,
+  > referred to as the Consultant, for a term beginning on October 1, 2026, and
+  > ending on March 31, 2027. [Section 1] [p. 1]
+  >
+  > The Consultant must deliver monthly inventory reports to the Client by the
+  > fifth business day of each month. The Client must pay the Consultant $2,400
+  > per month within 15 days after receiving an accurate invoice. The Client
+  > will reimburse the Consultant for pre-approved travel expenses up to $500
+  > per month, but meals are not eligible for reimbursement. The Consultant
+  > must not disclose the Client's recipes during the term or for two years
+  > after it ends, except when required by law. Either party may terminate the
+  > agreement with 30 days of written notice, but the Client may terminate
+  > immediately if the Consultant fails to cure a material breach within 10
+  > days after receiving written notice. [Section 2; Section 3; Section 4;
+  > Section 5; Section 6] [p. 2; p. 3; p. 4; p. 5; p. 6]
+
+  Manual source comparison confirms that the model output preserves every
+  party, actor, recipient, condition, exception, deadline, date, amount,
+  permission and prohibition in the fixture without adding a legal conclusion
+  or unsupported term. The parser mechanically proves bounded prose, valid
+  source identity, exact reference construction and modal preservation; those
+  checks alone do not prove semantic support.
+
+**Non-scope and remaining limit**:
+- This slice does not add document-type inference, automatic suggestions,
+  uncertain or mixed routing, long-document sampling, trained adapters, a
+  parallel synthesis framework, Connect specialization or a UI redesign.
+- The live result is one synthetic six-clause contract on one qualified local
+  model. Paragraph organization remains prompt-driven and manually assessed;
+  it is not represented as a measured reliability score.

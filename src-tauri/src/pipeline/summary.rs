@@ -487,7 +487,7 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
         (Some(_), SummaryProfile::General) => {
             direct::synthesize(runtime, &persisted_analysis, &chunked, &normalized, control)
         }
-        (Some(_), SummaryProfile::Story) => Err(stage_failure(
+        (Some(_), SummaryProfile::Story | SummaryProfile::Contract) => Err(stage_failure(
             PipelineStage::Synthesize,
             "SUMMARY_PROFILE_DELIVERY_UNSUPPORTED",
             "Connect delivery supports only the General summary profile",
@@ -8706,90 +8706,96 @@ mod tests {
     }
 
     #[test]
-    fn story_profile_uses_source_aware_synthesis_and_exact_citation_context() {
-        let database = TestDatabase::new();
-        let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Story);
-        let runtime = ProfileRecordingRuntime::default();
+    fn specialized_profiles_use_source_aware_synthesis_and_exact_citation_context() {
+        for (profile, expected_schema) in [
+            (SummaryProfile::Story, coherent::STORY_SCHEMA_NAME),
+            (SummaryProfile::Contract, coherent::CONTRACT_SCHEMA_NAME),
+        ] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
+            let runtime = ProfileRecordingRuntime::default();
 
-        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
-            .expect("Story summary should complete through the shared pipeline");
-        assert_eq!(
-            db::get_run_summary_profile(&conn, &run_id).expect("profile should load"),
-            Some(SummaryProfile::Story)
-        );
-        let synthesized = get_synthesized_document(&conn, &run_id)
-            .expect("synthesis query should succeed")
-            .expect("Story synthesis should persist");
-        assert_eq!(
-            synthesized.presentation_mode,
-            SummaryPresentationMode::Coherent
-        );
-        assert!(!synthesized.summary_claims.is_empty());
-        assert!(!synthesized.synthesis_evidence.is_empty());
-        let normalized = get_normalized_document(&conn, &run_id)
-            .expect("normalized query should succeed")
-            .expect("normalized Story source should persist");
-        let normalized_text = normalized
-            .pages
-            .iter()
-            .flat_map(|page| &page.content)
-            .map(|block| block.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(synthesized
-            .synthesis_evidence
-            .iter()
-            .all(|evidence| normalized_text.contains(&evidence.exact_quote)));
-        let evidence_ids = synthesized
-            .synthesis_evidence
-            .iter()
-            .map(|evidence| evidence.evidence_id.as_str())
-            .collect::<HashSet<_>>();
-        assert!(synthesized.summary_claims.iter().all(|claim| claim
-            .evidence_ids
-            .iter()
-            .all(|evidence_id| evidence_ids.contains(evidence_id.as_str()))));
-        assert_eq!(
-            completed.citations.presentation_mode,
-            SummaryPresentationMode::Coherent
-        );
-        assert_eq!(
-            completed.citations.summary_claims,
-            synthesized.summary_claims
-        );
+            let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+                .expect("specialized summary should complete through the shared pipeline");
+            assert_eq!(
+                db::get_run_summary_profile(&conn, &run_id).expect("profile should load"),
+                Some(profile)
+            );
+            let synthesized = get_synthesized_document(&conn, &run_id)
+                .expect("synthesis query should succeed")
+                .expect("specialized synthesis should persist");
+            assert_eq!(
+                synthesized.presentation_mode,
+                SummaryPresentationMode::Coherent
+            );
+            assert!(!synthesized.summary_claims.is_empty());
+            assert!(!synthesized.synthesis_evidence.is_empty());
+            let normalized = get_normalized_document(&conn, &run_id)
+                .expect("normalized query should succeed")
+                .expect("normalized specialized source should persist");
+            let normalized_text = normalized
+                .pages
+                .iter()
+                .flat_map(|page| &page.content)
+                .map(|block| block.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(synthesized
+                .synthesis_evidence
+                .iter()
+                .all(|evidence| normalized_text.contains(&evidence.exact_quote)));
+            let evidence_ids = synthesized
+                .synthesis_evidence
+                .iter()
+                .map(|evidence| evidence.evidence_id.as_str())
+                .collect::<HashSet<_>>();
+            assert!(synthesized.summary_claims.iter().all(|claim| claim
+                .evidence_ids
+                .iter()
+                .all(|evidence_id| evidence_ids.contains(evidence_id.as_str()))));
+            assert_eq!(
+                completed.citations.presentation_mode,
+                SummaryPresentationMode::Coherent
+            );
+            assert_eq!(
+                completed.citations.summary_claims,
+                synthesized.summary_claims
+            );
 
-        let requests = runtime.requests.lock().unwrap();
-        assert!(requests.iter().any(|request| matches!(
-            &request.output_format,
-            ModelOutputFormat::JsonSchema { name, .. }
-                if name == coherent::STORY_SCHEMA_NAME
-        )));
-        assert!(!requests.iter().any(|request| matches!(
-            &request.output_format,
-            ModelOutputFormat::JsonSchema { name, .. } if name == coherent::SCHEMA_NAME
-        )));
+            let requests = runtime.requests.lock().unwrap();
+            assert!(requests.iter().any(|request| matches!(
+                &request.output_format,
+                ModelOutputFormat::JsonSchema { name, .. } if name == expected_schema
+            )));
+            assert!(!requests.iter().any(|request| matches!(
+                &request.output_format,
+                ModelOutputFormat::JsonSchema { name, .. } if name == coherent::SCHEMA_NAME
+            )));
+        }
     }
 
     #[test]
     fn connect_delivery_rejects_a_specialized_summary_profile() {
-        let database = TestDatabase::new();
-        let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Story);
-        let runtime = FakeRuntime::healthy();
-        analyze_chunked_document(&mut conn, &runtime, &run_id)
-            .expect("Story fixture should reach the analyzed checkpoint");
+        for profile in [SummaryProfile::Story, SummaryProfile::Contract] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
+            let runtime = FakeRuntime::healthy();
+            analyze_chunked_document(&mut conn, &runtime, &run_id)
+                .expect("specialized fixture should reach the analyzed checkpoint");
 
-        let error = synthesize_analyzed_document_controlled_with_delivery(
-            &mut conn,
-            &runtime,
-            &run_id,
-            &UNCONTROLLED_EXECUTION,
-            Some(SummaryDeliveryPolicy::connect()),
-        )
-        .expect_err("Connect must not silently use a specialized profile");
-        assert_eq!(error.code(), "SUMMARY_PROFILE_DELIVERY_UNSUPPORTED");
-        assert!(get_synthesized_document(&conn, &run_id)
-            .expect("synthesis query should succeed")
-            .is_none());
+            let error = synthesize_analyzed_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                Some(SummaryDeliveryPolicy::connect()),
+            )
+            .expect_err("Connect must not silently use a specialized profile");
+            assert_eq!(error.code(), "SUMMARY_PROFILE_DELIVERY_UNSUPPORTED");
+            assert!(get_synthesized_document(&conn, &run_id)
+                .expect("synthesis query should succeed")
+                .is_none());
+        }
     }
 
     #[test]

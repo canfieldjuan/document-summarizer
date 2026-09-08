@@ -2815,7 +2815,7 @@ mod tests {
                 [&run.run_id],
             )
             .is_err());
-        assert!(serde_json::from_str::<SummaryProfile>("\"contract\"").is_err());
+        assert!(serde_json::from_str::<SummaryProfile>("\"automatic\"").is_err());
         assert_eq!(
             serde_json::from_str::<SummaryProfile>("\"general\"")
                 .expect("General should be a valid explicit profile"),
@@ -2825,6 +2825,11 @@ mod tests {
             serde_json::from_str::<SummaryProfile>("\"story\"")
                 .expect("Story should be a valid explicit profile"),
             SummaryProfile::Story
+        );
+        assert_eq!(
+            serde_json::from_str::<SummaryProfile>("\"contract\"")
+                .expect("Contract should be a valid explicit profile"),
+            SummaryProfile::Contract
         );
 
         let story_source = TestFile::new("pdf", b"%PDF-1.4\nSTORY_SUMMARY_PROFILE");
@@ -2844,6 +2849,26 @@ mod tests {
             .expect("the identical Story profile should pass");
         assert!(matches!(
             ensure_run_summary_profile(&conn, &story_run.run_id, SummaryProfile::General),
+            Err(StoreError::SummaryProfileMismatch { .. })
+        ));
+
+        let contract_source = TestFile::new("pdf", b"%PDF-1.4\nCONTRACT_SUMMARY_PROFILE");
+        let (_, contract_run) = ingest_pdf_with_profiles(
+            &mut conn,
+            contract_source.0.to_str().expect("UTF-8 path"),
+            None,
+            SummaryProfile::Contract,
+        )
+        .expect("Contract candidate should ingest");
+        assert_eq!(
+            get_run_summary_profile(&conn, &contract_run.run_id)
+                .expect("Contract summary profile should load"),
+            Some(SummaryProfile::Contract)
+        );
+        ensure_run_summary_profile(&conn, &contract_run.run_id, SummaryProfile::Contract)
+            .expect("the identical Contract profile should pass");
+        assert!(matches!(
+            ensure_run_summary_profile(&conn, &contract_run.run_id, SummaryProfile::Story),
             Err(StoreError::SummaryProfileMismatch { .. })
         ));
     }
