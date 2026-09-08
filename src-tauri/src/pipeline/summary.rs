@@ -5455,6 +5455,7 @@ mod tests {
             source.to_str().expect("fixture path should be UTF-8"),
             None,
             summary_profile,
+            None,
         )
         .expect("fixture should ingest");
         parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id)

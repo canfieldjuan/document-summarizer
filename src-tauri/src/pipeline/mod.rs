@@ -8,6 +8,7 @@ pub mod model;
 pub mod model_settings;
 pub mod normalize;
 pub mod parser;
+pub mod profile_suggestion;
 mod qwen_tokenizer;
 pub mod recovery;
 mod schema;

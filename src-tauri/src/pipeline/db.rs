@@ -2838,6 +2838,7 @@ mod tests {
             story_source.0.to_str().expect("UTF-8 path"),
             None,
             SummaryProfile::Story,
+            None,
         )
         .expect("Story candidate should ingest");
         assert_eq!(
@@ -2858,6 +2859,7 @@ mod tests {
             contract_source.0.to_str().expect("UTF-8 path"),
             None,
             SummaryProfile::Contract,
+            None,
         )
         .expect("Contract candidate should ingest");
         assert_eq!(

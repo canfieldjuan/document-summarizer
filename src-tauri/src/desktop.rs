@@ -126,6 +126,7 @@ impl DesktopJobManager {
         &self,
         file_path: &str,
         summary_profile: SummaryProfile,
+        expected_content_hash: Option<&str>,
     ) -> Result<BackgroundRunAccepted, DesktopJobError> {
         let runtime = (self.runtime_factory)(None)?;
         let profile_snapshot = runtime
@@ -142,6 +143,7 @@ impl DesktopJobManager {
             file_path,
             Some(&profile_snapshot),
             summary_profile,
+            expected_content_hash,
         )?;
         let accepted = accepted_view(&document, &run, summary_profile);
         self.spawn(run.run_id, BackgroundWork::StartedParsing, Some(runtime))?;
@@ -763,6 +765,7 @@ mod tests {
                     .to_str()
                     .expect("fixture path should be UTF-8"),
                 SummaryProfile::Story,
+                None,
             )
             .expect("background run should be accepted");
         assert_eq!(accepted.state, PipelineState::Parsing);
@@ -858,6 +861,7 @@ mod tests {
                     .to_str()
                     .expect("fixture path should be UTF-8"),
                 SummaryProfile::General,
+                None,
             )
             .expect_err("a product desktop start must require an immutable snapshot");
 
@@ -961,6 +965,7 @@ mod tests {
                 .expect("fixture path should be UTF-8"),
             None,
             SummaryProfile::Story,
+            None,
         )
         .expect("Story fixture should ingest");
         let snapshot = fixture_snapshot();
@@ -1162,6 +1167,7 @@ mod tests {
                     .to_str()
                     .expect("fixture path should be UTF-8"),
                 SummaryProfile::General,
+                None,
             )
             .expect("background run should be accepted");
 
@@ -1267,6 +1273,7 @@ mod tests {
                 .expect("fixture path should be UTF-8"),
             None,
             SummaryProfile::General,
+            None,
         )
         .expect("newer caller should admit parsing work");
         let stale_version = parsing.state_version.saturating_sub(1);

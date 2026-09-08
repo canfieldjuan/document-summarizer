@@ -24,6 +24,8 @@ pub enum IngestError {
     InvalidSourcePath,
     #[error("Source has no usable filename")]
     InvalidFilename,
+    #[error("Source content changed after profile suggestion")]
+    SourceChanged,
     #[error("Database persistence failed: {0}")]
     Store(#[from] StoreError),
 }
@@ -36,6 +38,7 @@ impl IngestError {
             Self::InvalidPdfSignature => "INVALID_PDF_SIGNATURE",
             Self::InvalidSourcePath => "INVALID_SOURCE_PATH",
             Self::InvalidFilename => "INVALID_FILENAME",
+            Self::SourceChanged => "SOURCE_CHANGED_AFTER_PROFILE_SUGGESTION",
             Self::Store(_) => "DATABASE_ERROR",
         }
     }
@@ -55,8 +58,12 @@ pub(crate) fn ingest_pdf_with_profiles(
     file_path: &str,
     profile_snapshot: Option<&ModelProfileSnapshot>,
     summary_profile: SummaryProfile,
+    expected_content_hash: Option<&str>,
 ) -> Result<(IngestedDocument, PipelineRun), IngestError> {
     let (document, run) = prepare_pdf_ingestion(file_path, None)?;
+    if expected_content_hash.is_some_and(|expected| expected != document.content_hash) {
+        return Err(IngestError::SourceChanged);
+    }
     let ingested_run = db::persist_ingestion_with_profiles(
         conn,
         &document,
@@ -243,6 +250,46 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].previous_state, None);
         assert_eq!(events[0].next_state, PipelineState::Received);
+    }
+
+    #[test]
+    fn expected_hash_rejects_changed_source_before_persistence_and_accepts_match() {
+        let directory = TestDirectory::new();
+        let source_path = directory.0.join("suggested.pdf");
+        let test_path = source_path.to_str().unwrap();
+        let source_bytes = b"%PDF-1.4 suggested content";
+        fs::write(test_path, source_bytes).unwrap();
+        let expected_hash = format!("{:x}", Sha256::digest(source_bytes));
+        let mut conn = init_db(":memory:").unwrap();
+
+        let error = ingest_pdf_with_profiles(
+            &mut conn,
+            test_path,
+            None,
+            SummaryProfile::General,
+            Some("different-content-hash"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, IngestError::SourceChanged));
+        for table in ["documents", "pipeline_runs", "pipeline_events"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} must remain empty after mismatch");
+        }
+
+        let (document, run) = ingest_pdf_with_profiles(
+            &mut conn,
+            test_path,
+            None,
+            SummaryProfile::General,
+            Some(&expected_hash),
+        )
+        .unwrap();
+        assert_eq!(document.content_hash, expected_hash);
+        assert_eq!(run.state, PipelineState::Ingested);
     }
 
     #[test]
