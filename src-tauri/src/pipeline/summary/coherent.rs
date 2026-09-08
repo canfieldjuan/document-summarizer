@@ -210,7 +210,7 @@ pub(super) fn synthesize(
         )
     })?;
     let mut next_request_ordinal = 0;
-    let (full_user_prompt, full_output_schema) = prompt_and_schema(&catalog)?;
+    let (full_user_prompt, full_output_schema) = prompt_and_schema(profile, &catalog)?;
     let full_request_characters =
         synthesis_request_characters(profile, &full_user_prompt, &full_output_schema)?;
     let full_request = summary_request(
@@ -264,7 +264,7 @@ pub(super) fn synthesize(
         catalog.clone()
     };
 
-    let (user_prompt, output_schema) = prompt_and_schema(&synthesis_catalog)?;
+    let (user_prompt, output_schema) = prompt_and_schema(profile, &synthesis_catalog)?;
     if !model_health_checked {
         runtime.health().map_err(|failure| {
             runtime_pipeline_failure(PipelineStage::Synthesize, "MODEL_HEALTH", failure)
@@ -354,7 +354,8 @@ fn select_general_source_catalog(
     let mut request_count = 0usize;
 
     loop {
-        let (summary_prompt, summary_schema) = prompt_and_schema(&current)?;
+        let (summary_prompt, summary_schema) =
+            prompt_and_schema(SummaryProfile::General, &current)?;
         let summary_request = summary_request(
             SummaryProfile::General,
             &summary_prompt,
@@ -1653,7 +1654,10 @@ fn fallback_document(
     })
 }
 
-fn prompt_and_schema(catalog: &SourceCatalog) -> Result<(String, Value), PipelineFailure> {
+fn prompt_and_schema(
+    profile: SummaryProfile,
+    catalog: &SourceCatalog,
+) -> Result<(String, Value), PipelineFailure> {
     if catalog.candidates.is_empty() {
         return Err(stage_failure(
             PipelineStage::Synthesize,
@@ -1673,7 +1677,11 @@ fn prompt_and_schema(catalog: &SourceCatalog) -> Result<(String, Value), Pipelin
                 chunk_ordinal: candidate.chunk_ordinal,
                 page_number: candidate.evidence.source_span.page_start,
                 selection_window: candidate.selection_window,
-                source_claim: candidate.drafting_claim.clone(),
+                source_claim: if profile == SummaryProfile::General {
+                    candidate.drafting_claim.clone()
+                } else {
+                    None
+                },
                 exact_quote: candidate.evidence.exact_quote.clone(),
             })
             .collect(),
@@ -2091,7 +2099,7 @@ pub(super) fn validate_for_runtime(
     let expected_fallback = if incomplete_catalog_requires_fallback(profile, &catalog) {
         Some(FallbackReason::IncompleteCatalog)
     } else {
-        let (user_prompt, output_schema) = prompt_and_schema(&catalog)?;
+        let (user_prompt, output_schema) = prompt_and_schema(profile, &catalog)?;
         let input_limit = generation_input_character_limit_for_context(
             runtime.context_tokens(PipelineStage::Synthesize),
             OUTPUT_TOKENS,
@@ -2830,7 +2838,7 @@ mod tests {
             enriched.candidates[1].evidence.exact_quote
         );
         assert!(enriched.candidates[1].drafting_claim.is_none());
-        let (prompt, _) = prompt_and_schema(&enriched).unwrap();
+        let (prompt, _) = prompt_and_schema(SummaryProfile::General, &enriched).unwrap();
         let prompt: Value = serde_json::from_str(&prompt).unwrap();
         assert_eq!(
             prompt["source_segments"][0]["source_claim"],
@@ -2878,7 +2886,8 @@ mod tests {
             &partial
         ));
 
-        let (user_prompt, output_schema) = prompt_and_schema(&complete).unwrap();
+        let (user_prompt, output_schema) =
+            prompt_and_schema(SummaryProfile::General, &complete).unwrap();
         let prompt_only_characters =
             GENERAL_SYSTEM_PROMPT.chars().count() + user_prompt.chars().count();
         let complete_request_characters =
@@ -3072,19 +3081,44 @@ mod tests {
 
     #[test]
     fn profile_requests_share_sources_and_select_distinct_summary_instructions() {
-        let (user_prompt, output_schema) = prompt_and_schema(&catalog()).unwrap();
-        let prompt: Value = serde_json::from_str(&user_prompt).unwrap();
+        let catalog = catalog();
+        let (general_prompt, general_schema) =
+            prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let (story_prompt, story_schema) =
+            prompt_and_schema(SummaryProfile::Story, &catalog).unwrap();
+        let (contract_prompt, contract_schema) =
+            prompt_and_schema(SummaryProfile::Contract, &catalog).unwrap();
+        let prompt: Value = serde_json::from_str(&general_prompt).unwrap();
         assert_eq!(
             prompt["source_segments"][0]["source_claim"],
             "Source statement 1."
         );
-        let general = summary_request(SummaryProfile::General, &user_prompt, &output_schema, 0, 7);
-        let story = summary_request(SummaryProfile::Story, &user_prompt, &output_schema, 0, 7);
-        let contract =
-            summary_request(SummaryProfile::Contract, &user_prompt, &output_schema, 0, 7);
+        for specialized_prompt in [&story_prompt, &contract_prompt] {
+            let prompt: Value = serde_json::from_str(specialized_prompt).unwrap();
+            assert!(prompt["source_segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|source| source.get("source_claim").is_none()));
+        }
+        let general = summary_request(
+            SummaryProfile::General,
+            &general_prompt,
+            &general_schema,
+            0,
+            7,
+        );
+        let story = summary_request(SummaryProfile::Story, &story_prompt, &story_schema, 0, 7);
+        let contract = summary_request(
+            SummaryProfile::Contract,
+            &contract_prompt,
+            &contract_schema,
+            0,
+            7,
+        );
 
-        assert_eq!(general.user_prompt, story.user_prompt);
-        assert_eq!(general.user_prompt, contract.user_prompt);
+        assert_ne!(general.user_prompt, story.user_prompt);
+        assert_eq!(story.user_prompt, contract.user_prompt);
         assert_eq!(general.seed, story.seed);
         assert_eq!(general.seed, contract.seed);
         let (
@@ -3662,7 +3696,8 @@ mod tests {
         let catalog = story_catalog();
         let runtime = OllamaRuntime::from_environment().expect("Ollama runtime should configure");
         runtime.health().expect("Ollama should be available");
-        let (user_prompt, output_schema) = prompt_and_schema(&catalog).unwrap();
+        let (user_prompt, output_schema) =
+            prompt_and_schema(SummaryProfile::Story, &catalog).unwrap();
         let request = summary_request(SummaryProfile::Story, &user_prompt, &output_schema, 0, 24);
         runtime
             .preflight_request(&request)
@@ -3741,7 +3776,8 @@ mod tests {
         let ollama = OllamaRuntime::from_environment().expect("Ollama runtime should configure");
         let runtime = RecordingRuntime::new(&ollama);
         runtime.health().expect("Ollama should be available");
-        let (user_prompt, output_schema) = prompt_and_schema(&catalog).unwrap();
+        let (user_prompt, output_schema) =
+            prompt_and_schema(SummaryProfile::Contract, &catalog).unwrap();
         let request = summary_request(
             SummaryProfile::Contract,
             &user_prompt,
@@ -3859,7 +3895,7 @@ mod tests {
             }],
             omitted_source_units: 0,
         };
-        let (prompt, schema) = prompt_and_schema(&catalog).unwrap();
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
         let runtime = ModalRepairRuntime::new(true);
         let (claims, evidence, withheld) = generate_summary_with_validation_repair(
             SummaryProfile::General,
@@ -3929,7 +3965,7 @@ mod tests {
             candidates,
             omitted_source_units: 0,
         };
-        let (prompt, schema) = prompt_and_schema(&catalog).unwrap();
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
         let runtime = WindowRepairRuntime::new(true);
         let (claims, _, withheld) = generate_summary_with_validation_repair(
             SummaryProfile::General,
@@ -3980,7 +4016,7 @@ mod tests {
     #[test]
     fn contract_coverage_repair_is_bounded_and_fails_closed() {
         let catalog = contract_catalog();
-        let (prompt, schema) = prompt_and_schema(&catalog).unwrap();
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::Contract, &catalog).unwrap();
         let runtime = ContractCoverageRepairRuntime::new(true);
         let (claims, evidence, withheld) = generate_summary_with_validation_repair(
             SummaryProfile::Contract,
@@ -4192,7 +4228,7 @@ mod tests {
 
     #[test]
     fn repair_prompt_adds_bounded_application_feedback_without_changing_sources() {
-        let (prompt, _) = prompt_and_schema(&catalog()).unwrap();
+        let (prompt, _) = prompt_and_schema(SummaryProfile::General, &catalog()).unwrap();
         let repaired = prompt_with_validation_feedback(
             &prompt,
             &["Preserve qualified wording for predicate 'retain'".into()],

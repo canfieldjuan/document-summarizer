@@ -2597,7 +2597,9 @@ complete
   carry no duplicate claim field. The guidance is prompt-only; persisted
   synthesis evidence retains the historical v6 exact-quote representation, so
   existing `6.0.0` artifacts reconstruct unchanged. Selection requests never
-  receive extraction claims, so selection remains grounded in source text.
+  receive extraction claims, and Story and Contract prompts do not receive this
+  General-only guidance, so their existing context admission sizes remain
+  unchanged.
 - Selected sources retain their original selection-window identity. A General
   summary unit cannot combine windowed and unwindowed sources or sources from
   two windows. One bounded structural repair is allowed independently of the
