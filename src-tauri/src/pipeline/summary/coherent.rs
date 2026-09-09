@@ -34,6 +34,8 @@ enum WithheldUnitKind {
     DecoderClipped,
     CrossWindowAndDecoderClipped,
     ModalStrengthened,
+    DecoderClippedAndModalStrengthened,
+    CrossWindowAndDecoderClippedAndModalStrengthened,
 }
 
 #[derive(Debug)]
@@ -50,6 +52,7 @@ struct SafeSiblingFallback {
     required_mixed_window_evidence_ids: Vec<String>,
     required_clipped_evidence_ids: Vec<String>,
     withheld_cross_window_unit: bool,
+    withheld_modal_strengthened_unit: bool,
 }
 
 fn maximum_summary_units(source_count: usize) -> usize {
@@ -319,7 +322,11 @@ pub(super) fn synthesize(
     let mut warnings = analyzed.warnings.clone();
     if matches!(
         withheld_unit_kind,
-        Some(WithheldUnitKind::CrossWindow | WithheldUnitKind::CrossWindowAndDecoderClipped)
+        Some(
+            WithheldUnitKind::CrossWindow
+                | WithheldUnitKind::CrossWindowAndDecoderClipped
+                | WithheldUnitKind::CrossWindowAndDecoderClippedAndModalStrengthened
+        )
     ) {
         warnings.push(PipelineWarning {
             code: WINDOW_WITHHELD_WARNING_CODE.to_string(),
@@ -330,7 +337,12 @@ pub(super) fn synthesize(
     }
     if matches!(
         withheld_unit_kind,
-        Some(WithheldUnitKind::DecoderClipped | WithheldUnitKind::CrossWindowAndDecoderClipped)
+        Some(
+            WithheldUnitKind::DecoderClipped
+                | WithheldUnitKind::CrossWindowAndDecoderClipped
+                | WithheldUnitKind::DecoderClippedAndModalStrengthened
+                | WithheldUnitKind::CrossWindowAndDecoderClippedAndModalStrengthened
+        )
     ) {
         warnings.push(PipelineWarning {
             code: CLIPPED_UNIT_WITHHELD_WARNING_CODE.to_string(),
@@ -339,7 +351,14 @@ pub(super) fn synthesize(
             stage: Some(PipelineStage::Synthesize),
         });
     }
-    if withheld_unit_kind == Some(WithheldUnitKind::ModalStrengthened) {
+    if matches!(
+        withheld_unit_kind,
+        Some(
+            WithheldUnitKind::ModalStrengthened
+                | WithheldUnitKind::DecoderClippedAndModalStrengthened
+                | WithheldUnitKind::CrossWindowAndDecoderClippedAndModalStrengthened
+        )
+    ) {
         warnings.push(PipelineWarning {
             code: MODAL_UNIT_WITHHELD_WARNING_CODE.to_string(),
             message: "One or more generated summary units strengthened qualified source language and were withheld before delivery"
@@ -1151,16 +1170,27 @@ fn generated_from_clipped_fallback(
     if fallback.claims.is_empty() {
         return None;
     }
-    let withheld_unit_kind = if fallback.withheld_cross_window_unit {
-        WithheldUnitKind::CrossWindowAndDecoderClipped
-    } else {
-        WithheldUnitKind::DecoderClipped
-    };
+    let withheld_unit_kind = clipped_fallback_withheld_kind(
+        fallback.withheld_cross_window_unit,
+        fallback.withheld_modal_strengthened_unit,
+    );
     Some(GeneratedSummaryContent {
         claims: fallback.claims,
         evidence: fallback.evidence,
         withheld_unit_kind: Some(withheld_unit_kind),
     })
+}
+
+fn clipped_fallback_withheld_kind(
+    withheld_cross_window_unit: bool,
+    withheld_modal_strengthened_unit: bool,
+) -> WithheldUnitKind {
+    match (withheld_cross_window_unit, withheld_modal_strengthened_unit) {
+        (false, false) => WithheldUnitKind::DecoderClipped,
+        (true, false) => WithheldUnitKind::CrossWindowAndDecoderClipped,
+        (false, true) => WithheldUnitKind::DecoderClippedAndModalStrengthened,
+        (true, true) => WithheldUnitKind::CrossWindowAndDecoderClippedAndModalStrengthened,
+    }
 }
 
 fn retain_individually_modal_safe_claims(
@@ -1174,6 +1204,7 @@ fn retain_individually_modal_safe_claims(
         required_mixed_window_evidence_ids,
         required_clipped_evidence_ids,
         withheld_cross_window_unit,
+        mut withheld_modal_strengthened_unit,
     } = fallback;
     let mut retained_claims = Vec::with_capacity(claims.len());
     for claim in claims {
@@ -1186,6 +1217,7 @@ fn retain_individually_modal_safe_claims(
             });
         } else {
             required_modal_sibling_evidence_ids.extend(claim.evidence_ids);
+            withheld_modal_strengthened_unit = true;
         }
     }
     let retained_claims = materialize_cited_claims(document_id, VERSION, retained_claims).ok()?;
@@ -1204,6 +1236,7 @@ fn retain_individually_modal_safe_claims(
         required_mixed_window_evidence_ids,
         required_clipped_evidence_ids,
         withheld_cross_window_unit,
+        withheld_modal_strengthened_unit,
     })
 }
 
@@ -2322,6 +2355,7 @@ fn parse_response_without_clipped_units(
         required_mixed_window_evidence_ids,
         required_clipped_evidence_ids,
         withheld_cross_window_unit,
+        withheld_modal_strengthened_unit: false,
     })
 }
 
@@ -4943,6 +4977,10 @@ mod tests {
             VERSION,
         )
         .expect("the filtered fallback claim ID must match its new ordinal");
+        assert_eq!(
+            generated.withheld_unit_kind,
+            Some(WithheldUnitKind::DecoderClippedAndModalStrengthened)
+        );
         assert_eq!(leading_modal.requests().len(), 1);
 
         let leading = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::CorrectWithLeadingClip);
@@ -5072,7 +5110,7 @@ mod tests {
         assert_eq!(generated.evidence[0].evidence_id, "evidence-1");
         assert_eq!(
             generated.withheld_unit_kind,
-            Some(WithheldUnitKind::DecoderClipped)
+            Some(WithheldUnitKind::DecoderClippedAndModalStrengthened)
         );
         assert_eq!(modal_omitting.requests().len(), 2);
 
@@ -5103,7 +5141,7 @@ mod tests {
         assert_eq!(generated.evidence[0].evidence_id, "evidence-1");
         assert_eq!(
             generated.withheld_unit_kind,
-            Some(WithheldUnitKind::DecoderClipped)
+            Some(WithheldUnitKind::DecoderClippedAndModalStrengthened)
         );
         assert_eq!(shared_modal.requests().len(), 2);
 
@@ -5248,6 +5286,23 @@ mod tests {
             Some(WithheldUnitKind::DecoderClipped)
         );
         assert_eq!(nested_omitting.requests().len(), 3);
+
+        assert_eq!(
+            clipped_fallback_withheld_kind(false, false),
+            WithheldUnitKind::DecoderClipped
+        );
+        assert_eq!(
+            clipped_fallback_withheld_kind(true, false),
+            WithheldUnitKind::CrossWindowAndDecoderClipped
+        );
+        assert_eq!(
+            clipped_fallback_withheld_kind(false, true),
+            WithheldUnitKind::DecoderClippedAndModalStrengthened
+        );
+        assert_eq!(
+            clipped_fallback_withheld_kind(true, true),
+            WithheldUnitKind::CrossWindowAndDecoderClippedAndModalStrengthened
+        );
     }
 
     #[test]

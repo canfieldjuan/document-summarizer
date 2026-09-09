@@ -2925,13 +2925,15 @@ complete
   modality-safe. Other structural errors still fail closed.
   It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`, plus
   `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD` when the delivered fallback
-  also excluded a mixed-window sibling. An all-clipped response carries its
-  source-coverage requirement into repair but cannot supply an original
-  fallback; if its repair omits required evidence or remains invalid, it fails
-  closed. If feedback would exceed the configured input or runtime context, the
-  best already-validated fallback is returned with its warning; the size error
-  remains for responses with no deliverable fallback. The schema and its
-  1,200-character limit are unchanged.
+  also excluded a mixed-window sibling, and
+  `COHERENT_SUMMARY_MODAL_STRENGTHENED_UNITS_WITHHELD` when a complete sibling
+  was separately excluded for stronger modality. An all-clipped response
+  carries its source-coverage requirement into repair but cannot supply an
+  original fallback; if its repair omits required evidence or remains invalid,
+  it fails closed. If feedback would exceed the configured input or runtime
+  context, the best already-validated fallback is returned with its warning;
+  the size error remains for responses with no deliverable fallback. The schema
+  and its 1,200-character limit are unchanged.
 
 **Acceptance evidence so far**:
 - Paired tests accept a complete sentence at exactly 1,200 characters and prove
@@ -2956,8 +2958,10 @@ complete
   that recovered safe units survive a repeated strengthening failure for both a
   mixed original and an all-clipped original. The all-clipped source probe
   rejects unrelated replacement evidence and accepts the required evidence.
-  Negative probes reject a 1,199-character fragment, empty, duplicate, foreign
-  and nine-source metadata, unwindowed General catalogs, and Story catalogs.
+  Withholding-state probes cover clipped-only, clipped-plus-window,
+  clipped-plus-modality and all three combined. Negative probes reject a
+  1,199-character fragment, empty, duplicate, foreign and nine-source metadata,
+  unwindowed General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the
