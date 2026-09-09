@@ -2877,3 +2877,129 @@ complete
 - Long Story and Contract synthesis, automatic routing, ingestion, OCR,
   persistence schema, UI, model training and unrelated synthesis repair remain
   outside this slice.
+
+## Slice 29 — Long General Decoder-Cap Recovery (2026-09-08)
+
+**Status**: implementation, automated gates and live-model regression acceptance
+complete
+
+**Verified root cause and implemented behavior**:
+- Long General synthesis uses a structured schema whose unit text has a
+  1,200-character maximum. In the public 111-page DOL run, the model's repair
+  response was valid JSON but its final unit ended at exactly that maximum on
+  the letter `o`, without terminal punctuation. The response used only 855 of
+  the configured 2,048 completion tokens, so increasing the output-token budget
+  would not address this decoder boundary.
+- The parser now classifies this exact condition only for General catalogs whose
+  selected sources all carry long-document selection windows. The capped unit
+  must otherwise be canonical and cite a nonempty, bounded set of unique known
+  source IDs. Shorter incomplete text, malformed metadata, short General input,
+  Story and Contract retain their existing invalid-response behavior.
+- One bounded repair asks the model to shorten only incomplete capped units and
+  preserve complete units and their source IDs. A valid repair is accepted only
+  if it contains every validated original sibling's exact text and normalized
+  evidence IDs in order and covers every clipped unit's source evidence, with
+  repeated references counted separately. Safe siblings are consumed before
+  replacement coverage is checked. Each modal-strengthened or mixed-window
+  complete sibling keeps its own source-evidence group; candidate claims are
+  reserved whole only when their combined evidence exactly matches that group.
+  Clipped coverage is checked afterward, so one repaired sibling cannot also
+  count as replacement for a clipped unit through shared or added evidence.
+  Ordinal-derived claim IDs are intentionally excluded because
+  repairing an earlier unit can move a later sibling. If the repair remains
+  invalid, omits a sibling, rewrites one or drops clipped material, the
+  application may retain complete sibling units from the original response only
+  after normal source, window, completion, modality and evidence validation.
+  Modality is evaluated per sibling: one strengthened sibling is excluded from
+  the preservation baseline without erasing a separate safe sibling or its
+  canonical evidence. Retained siblings are rematerialized after filtering so
+  their deterministic claim IDs match their new fallback ordinals. A separate
+  mixed-window sibling is likewise withheld without erasing structurally valid
+  siblings, regardless of whether that unit precedes or follows the clipped
+  unit. A later window fallback may omit that mixed unit while it must still
+  preserve safe siblings, corrected modal evidence and recovered clipped
+  evidence. That newer validated fallback takes precedence if the window repair
+  is invalid or incomplete. Validated window and modality snapshots replace an
+  older snapshot of the other kind, so fallback selection follows repair order
+  instead of a fixed warning-type preference. A fully recovered response that
+  still strengthens source modality likewise snapshots its individually safe
+  units before the modality retry. If that retry fails, the newer safe content
+  is delivered with
+  `COHERENT_SUMMARY_MODAL_STRENGTHENED_UNITS_WITHHELD`; this also gives an
+  all-clipped original a deliverable fallback when at least one repaired unit is
+  modality-safe. Other structural errors still fail closed.
+  It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`, plus
+  `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD` when the delivered fallback
+  also excluded a mixed-window sibling, and
+  `COHERENT_SUMMARY_MODAL_STRENGTHENED_UNITS_WITHHELD` when a complete sibling
+  was separately excluded for stronger modality. An all-clipped response
+  carries its source-coverage requirement into repair but cannot supply an
+  original fallback; if its repair omits required evidence or remains invalid,
+  it fails closed. A clipped unit produced by the window repair may use the same
+  single decoder-repair attempt when its complete siblings still contain the
+  prior safe window baseline. Successful recovery delivers the newer content;
+  a repeated clip or omitted baseline returns the prior fallback with both
+  window and clipped warnings. If feedback would exceed the configured input
+  or runtime context, the best already-validated fallback is returned with its
+  warning; the size error remains for responses with no deliverable fallback.
+  The schema and its 1,200-character limit are unchanged.
+
+**Acceptance evidence so far**:
+- Paired tests accept a complete sentence at exactly 1,200 characters and prove
+  that an incomplete capped unit gets one repair. A corrected repair returns
+  both validated units; a repeated defect returns only the fully validated
+  sibling and reports the clipped-unit fallback. Repairs that omit or rewrite
+  the complete sibling also return the unchanged validated sibling, while a
+  repaired leading clip preserves and accepts a later sibling across its
+  ordinal-derived claim-ID change. Dropping only the clipped material returns
+  the warned safe fallback. A mixed response with one safe sibling and one
+  modal-strengthened sibling proves that a repair cannot omit the safe one after
+  correcting the other. Clipped-plus-mixed-window probes cover both unit orders
+  and both warning outcomes. A nested clipped-then-window repair probe proves
+  that a newer window fallback cannot replace the original safe sibling
+  baseline. Shared- and added-evidence probes prove that correcting a modal
+  sibling does not also satisfy a clipped replacement, including when the same
+  candidate claim adds a clipped source ID. A repair-budget probe returns the
+  warned safe fallback when feedback cannot fit and keeps the size error for an
+  all-clipped response. A leading modal-invalid sibling probe validates the
+  rematerialized ID of the later retained safe claim. Two nested window probes
+  prove that a recovered clipped unit survives both an invalid repair and a
+  structurally valid but incomplete repair. Two nested modality probes prove
+  that recovered safe units survive a repeated strengthening failure for both a
+  mixed original and an all-clipped original. The all-clipped source probe
+  rejects unrelated replacement evidence and accepts the required evidence.
+  Withholding-state probes cover clipped-only, clipped-plus-window,
+  clipped-plus-modality and all three combined. Window-then-clipped probes prove
+  successful recovery, repeated-clip fallback and rejection of a repair that
+  omits the prior safe window baseline while retaining a newer complete sibling.
+  A clipped-then-modal-then-window probe proves the newest validated window
+  snapshot retains the corrected modal sibling when the window retry fails.
+  Negative probes reject a 1,199-character
+  fragment, empty, duplicate, foreign and nine-source metadata, unwindowed
+  General catalogs, and Story catalogs.
+- `cargo test --all-targets` passed 431 library tests with 10 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting, the
+  TypeScript/Vite production build and `git diff --check` passed. The final
+  parser-ordering refinement was rerun through the focused tests and strict
+  Clippy.
+- With LM Studio empty, `qwen3-30b-a3b:latest` ran through Ollama at 100% GPU.
+  The full 111-page DOL acceptance fixture passed in 106.46 seconds with 186
+  requests, 81 claims, 83 synthesized evidence items and citations across 84
+  pages. It delivered six complete cited paragraphs and 2,744 summary
+  characters. The representative summary preserved the governing agriculture
+  laws, FLSA coverage and overtime qualifications, MSPA actor distinctions,
+  payroll and vehicle-insurance requirements, and field-sanitation quantities.
+
+**Non-scope and remaining limits**:
+- The live regression run used the pre-existing cross-window safe-unit fallback
+  from its first synthesis response; it exposed the decoder-capped repair
+  response but did not need the new clipped-unit fallback. The deterministic
+  runtime tests exercise both the successful repair and repeated-defect paths.
+- Earlier ledgered attempts failed before verification with an unfinished
+  synthesis response, but that historical initial-response failure did not
+  recur in the acceptance run. The current trace verifies the decoder-cap
+  mechanism, not that every historical failure had the same cause.
+- This slice does not change output or context budgets, structured schema
+  limits, Story or Contract behavior, automatic routing, persistence, UI,
+  ingestion, OCR, model training or semantic-verification policy.
