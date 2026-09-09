@@ -162,6 +162,16 @@ enum SourceFraming {
 }
 
 impl SourceFraming {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Problem => "problem",
+            Self::Risk => "risk",
+            Self::Warning => "warning",
+            Self::Exception => "exception",
+            Self::Limitation => "limitation",
+        }
+    }
+
     fn render_claim(self, text: String) -> String {
         let relationship = match self {
             Self::Problem => "The document presents the following as a problem",
@@ -233,8 +243,29 @@ fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
     }
 }
 
-fn source_allows_drafting_claim(exact_quote: &str) -> bool {
-    required_source_framing(exact_quote).is_none()
+pub(super) fn verification_source_framing(
+    profile: SummaryProfile,
+    evidence: &[EvidenceItem],
+    normalized: &NormalizedDocument,
+) -> HashMap<String, String> {
+    if profile != SummaryProfile::General {
+        return HashMap::new();
+    }
+    let blocks = normalized
+        .pages
+        .iter()
+        .flat_map(|page| &page.content)
+        .map(|block| (block.block_id.as_str(), block))
+        .collect::<HashMap<_, _>>();
+    evidence
+        .iter()
+        .filter_map(|item| {
+            let framing = blocks
+                .get(item.block_id.as_str())
+                .and_then(|block| required_source_framing(&block.text))?;
+            Some((item.evidence_id.clone(), framing.label().to_string()))
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -311,6 +342,7 @@ struct SourceCandidate {
     evidence: EvidenceItem,
     chunk_ordinal: u32,
     selection_window: Option<usize>,
+    source_framing: Option<SourceFraming>,
     drafting_claim: Option<String>,
 }
 
@@ -551,6 +583,7 @@ pub(super) fn synthesize(
         warnings,
     };
     let result = if coherent_verification_exceeds_runtime_context(
+        profile,
         runtime,
         &result,
         analyzed,
@@ -2637,7 +2670,7 @@ fn prompt_and_schema(
                 page_number: candidate.evidence.source_span.page_start,
                 selection_window: candidate.selection_window,
                 source_framing: if profile == SummaryProfile::General {
-                    required_source_framing(&candidate.evidence.exact_quote)
+                    candidate.source_framing
                 } else {
                     None
                 },
@@ -2768,9 +2801,7 @@ fn parse_response(
                 has_unwindowed_source = true;
             }
             if profile == SummaryProfile::General {
-                if let Some(source_framing) =
-                    required_source_framing(&candidate.evidence.exact_quote)
-                {
+                if let Some(source_framing) = candidate.source_framing {
                     source_framings.insert(source_framing);
                     framed_source_count += 1;
                 }
@@ -3244,6 +3275,7 @@ fn source_catalog_for_synthesis_version(
                     false,
                 )
             })?;
+            let source_framing = required_source_framing(&block.text);
             let evidence_id = deterministic_id(
                 "summary-evidence",
                 &[
@@ -3281,7 +3313,7 @@ fn source_catalog_for_synthesis_version(
                 })
                 .map(|evidence| evidence.claim_text.clone())
                 .filter(|claim| claim != &source.exact_quote)
-                .filter(|_| source_allows_drafting_claim(&source.exact_quote));
+                .filter(|_| source_framing.is_none());
             candidates.push(SourceCandidate {
                 request_id: format!("s{ordinal}"),
                 evidence: EvidenceItem {
@@ -3294,6 +3326,7 @@ fn source_catalog_for_synthesis_version(
                 },
                 chunk_ordinal: chunk.ordinal,
                 selection_window: None,
+                source_framing,
                 drafting_claim,
             });
         }
@@ -4190,6 +4223,7 @@ mod tests {
             },
             chunk_ordinal: page - 1,
             selection_window: None,
+            source_framing: None,
             drafting_claim: Some(format!("Source statement {page}.")),
         }
     }
@@ -4231,12 +4265,6 @@ mod tests {
         }
         let overlong_heading = format!("{} Problems\n\nBody text.", "x".repeat(80));
         assert_eq!(required_source_framing(&overlong_heading), None);
-        assert!(!source_allows_drafting_claim(
-            "Common Problems\n\nPiece-rate pay may fall below minimum wage.",
-        ));
-        assert!(source_allows_drafting_claim(
-            "Ordinary Overview\n\nPiece-rate pay may fall below minimum wage.",
-        ));
     }
 
     #[test]
@@ -4244,6 +4272,7 @@ mod tests {
         let mut catalog = catalog();
         catalog.candidates[0].evidence.exact_quote =
             "Common Problems\n\nEmployees paid a piece rate may fall below minimum wage.".into();
+        catalog.candidates[0].source_framing = Some(SourceFraming::Problem);
         let neutral = json!({"units":[{
             "text":"Employees paid a piece rate may fall below minimum wage.",
             "source_ids":["s1"]
@@ -4280,6 +4309,7 @@ mod tests {
 
         catalog.candidates[1].evidence.exact_quote =
             "Potential Problems\n\nFatigue can increase crash risk.".into();
+        catalog.candidates[1].source_framing = Some(SourceFraming::Problem);
         let same_framing = json!({"units":[{
             "text":"Piece-rate pay may fall below minimum wage, and fatigue can increase crash risk.",
             "source_ids":["s1","s2"]
@@ -4295,6 +4325,7 @@ mod tests {
 
         catalog.candidates[1].evidence.exact_quote =
             "Key Risks\n\nFatigue can increase crash risk.".into();
+        catalog.candidates[1].source_framing = Some(SourceFraming::Risk);
         let mixed = json!({"units":[{
             "text":"Piece-rate pay may fall below minimum wage, and fatigue can increase crash risk.",
             "source_ids":["s1","s2"]
@@ -4313,7 +4344,8 @@ mod tests {
         runtime.health().expect("Ollama should be available");
         let mut catalog = catalog();
         catalog.candidates[0].evidence.exact_quote =
-            "Common Problems\n\nEmployees paid a piece rate may fall below minimum wage.".into();
+            "Employees paid a piece rate may fall below minimum wage.".into();
+        catalog.candidates[0].source_framing = Some(SourceFraming::Problem);
         let model_units = [
             "Employees paid a piece rate may fall below minimum wage.",
             "This problem was resolved. Employees paid a piece rate may fall below minimum wage.",
@@ -4328,7 +4360,12 @@ mod tests {
             evidence = Some(parsed.1);
         }
         let evidence = evidence.expect("parsed claims should retain their exact source");
-        let prompt = verification_prompt(&claims, &evidence).unwrap();
+        let source_framing = HashMap::from([(
+            evidence[0].evidence_id.clone(),
+            SourceFraming::Problem.label().to_string(),
+        )]);
+        let prompt =
+            verification_prompt_with_source_framing(&claims, &evidence, &source_framing).unwrap();
         let mut next_request_ordinal = 0;
         let verdicts = classify_claim_support(
             &runtime,
@@ -4499,12 +4536,10 @@ mod tests {
 
     #[test]
     fn source_catalog_keeps_split_segments_in_document_order() {
-        let first = format!("{}.", "A".repeat(399));
+        let first = format!("Common Problems\n\n{}.", "A".repeat(399));
         let second = format!("{}!", "B".repeat(399));
         let first_block_text = format!("{first} {second}");
-        let later =
-            "Common Problems\n\nEmployees paid a piece rate may fall below the minimum wage."
-                .to_string();
+        let later = "Later ordinary block.".to_string();
         let source_span = SourceSpan {
             page_start: 1,
             page_end: 1,
@@ -4598,8 +4633,7 @@ mod tests {
                         evidence_id: "analysis-evidence-2".into(),
                         chunk_id: "chunk-1".into(),
                         block_id: "block-b".into(),
-                        claim_text: "Employees paid a piece rate may fall below the minimum wage."
-                            .into(),
+                        claim_text: "Later extracted claim.".into(),
                         exact_quote: later.clone(),
                         source_span: normalized.pages[0].content[1].source.clone(),
                     },
@@ -4627,24 +4661,61 @@ mod tests {
             enriched.candidates[0].evidence.exact_quote
         );
         assert_eq!(
-            enriched.candidates[0].drafting_claim.as_deref(),
-            Some("A concise extracted claim.")
+            enriched.candidates[0].source_framing,
+            Some(SourceFraming::Problem)
+        );
+        assert!(enriched.candidates[0].drafting_claim.is_none());
+        assert_eq!(
+            enriched.candidates[1].source_framing,
+            Some(SourceFraming::Problem)
         );
         assert_eq!(
             enriched.candidates[1].evidence.claim_text,
             enriched.candidates[1].evidence.exact_quote
         );
         assert!(enriched.candidates[1].drafting_claim.is_none());
-        assert!(enriched.candidates[2].drafting_claim.is_none());
+        assert_eq!(enriched.candidates[2].source_framing, None);
+        assert_eq!(
+            enriched.candidates[2].drafting_claim.as_deref(),
+            Some("Later extracted claim.")
+        );
+        let verification_evidence = enriched
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evidence.clone())
+            .collect::<Vec<_>>();
+        let verification_framing = verification_source_framing(
+            SummaryProfile::General,
+            &verification_evidence,
+            &normalized,
+        );
+        assert_eq!(verification_framing.len(), 2);
+        for candidate in &enriched.candidates[..2] {
+            assert_eq!(
+                verification_framing
+                    .get(&candidate.evidence.evidence_id)
+                    .map(String::as_str),
+                Some("problem")
+            );
+        }
+        assert!(!verification_framing.contains_key(&enriched.candidates[2].evidence.evidence_id));
+        assert!(verification_source_framing(
+            SummaryProfile::Story,
+            &verification_evidence,
+            &normalized,
+        )
+        .is_empty());
         let (prompt, _) = prompt_and_schema(SummaryProfile::General, &enriched).unwrap();
         let prompt: Value = serde_json::from_str(&prompt).unwrap();
-        assert_eq!(
-            prompt["source_segments"][0]["source_claim"],
-            "A concise extracted claim."
-        );
+        assert_eq!(prompt["source_segments"][0]["source_framing"], "problem");
+        assert!(prompt["source_segments"][0].get("source_claim").is_none());
+        assert_eq!(prompt["source_segments"][1]["source_framing"], "problem");
         assert!(prompt["source_segments"][1].get("source_claim").is_none());
-        assert_eq!(prompt["source_segments"][2]["source_framing"], "problem");
-        assert!(prompt["source_segments"][2].get("source_claim").is_none());
+        assert!(prompt["source_segments"][2].get("source_framing").is_none());
+        assert_eq!(
+            prompt["source_segments"][2]["source_claim"],
+            "Later extracted claim."
+        );
     }
 
     #[test]
@@ -5396,6 +5467,7 @@ mod tests {
         catalog.candidates[1].evidence.exact_quote =
             "Common Problems\n\nEmployees paid a piece rate may fall below the minimum wage."
                 .into();
+        catalog.candidates[1].source_framing = Some(SourceFraming::Problem);
         catalog.candidates[1].drafting_claim = None;
         let (general_prompt, general_schema) =
             prompt_and_schema(SummaryProfile::General, &catalog).unwrap();

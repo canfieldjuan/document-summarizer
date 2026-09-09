@@ -203,6 +203,7 @@ mod tests {
             PromptVerificationClaim {
                 claim_id: "claim-private-a".into(),
                 text: "First.".into(),
+                source_framing: None,
                 evidence: vec![PromptVerificationEvidence {
                     evidence_id: "evidence-private-a".into(),
                     exact_quote: "Shared quotation.".into(),
@@ -211,6 +212,7 @@ mod tests {
             PromptVerificationClaim {
                 claim_id: "claim-private-b".into(),
                 text: "Second.".into(),
+                source_framing: None,
                 evidence: vec![
                     PromptVerificationEvidence {
                         evidence_id: "evidence-private-a".into(),
