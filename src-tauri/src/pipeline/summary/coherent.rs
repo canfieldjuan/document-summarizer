@@ -970,9 +970,10 @@ fn generate_summary_with_validation_repair(
 
 fn preserves_claims_in_order(candidate: &[CitedClaim], required: &[CitedClaim]) -> bool {
     let mut candidate = candidate.iter();
-    required
-        .iter()
-        .all(|required| candidate.any(|claim| claim == required))
+    required.iter().all(|required| {
+        candidate
+            .any(|claim| claim.text == required.text && claim.evidence_ids == required.evidence_ids)
+    })
 }
 
 fn summary_request(
@@ -2506,6 +2507,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum ClippedRepairBehavior {
         Correct,
+        CorrectWithLeadingClip,
         Repeat,
         OmitSibling,
         RewriteSibling,
@@ -2684,7 +2686,14 @@ mod tests {
             self.requests.lock().unwrap().push(request.clone());
             let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
             let is_repair = prompt.get("validation_feedback").is_some();
-            let units = if !is_repair {
+            let units = if !is_repair
+                && matches!(self.behavior, ClippedRepairBehavior::CorrectWithLeadingClip)
+            {
+                json!([
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s1","s2"]},
+                    {"text":"The later source remains supported.","source_ids":["s3"]}
+                ])
+            } else if !is_repair {
                 json!([
                     {"text":"The first source remains supported.","source_ids":["s1"]},
                     {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2","s3"]}
@@ -2692,8 +2701,12 @@ mod tests {
             } else {
                 match self.behavior {
                     ClippedRepairBehavior::Correct => json!([
-                    {"text":"The first source remains supported.","source_ids":["s1"]},
-                    {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                        {"text":"The first source remains supported.","source_ids":["s1"]},
+                        {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                    ]),
+                    ClippedRepairBehavior::CorrectWithLeadingClip => json!([
+                        {"text":"The first sources are summarized completely.","source_ids":["s1","s2"]},
+                        {"text":"The later source remains supported.","source_ids":["s3"]}
                     ]),
                     ClippedRepairBehavior::Repeat => json!([
                     {"text":"The first source remains supported.","source_ids":["s1"]},
@@ -4351,6 +4364,28 @@ mod tests {
             .is_some_and(|feedback| feedback.iter().any(|item| item
                 .as_str()
                 .is_some_and(|message| message.contains("1200-character decoder limit")))));
+
+        let leading = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::CorrectWithLeadingClip);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &leading,
+            "document-1",
+            &catalog,
+            prompt.clone(),
+            schema.clone(),
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("a corrected leading clip must preserve its later sibling across ordinal changes");
+        assert_eq!(generated.claims.len(), 2);
+        assert_eq!(
+            generated.claims[1].text,
+            "The later source remains supported."
+        );
+        assert_eq!(generated.withheld_unit_kind, None);
+        assert_eq!(leading.requests().len(), 2);
 
         let repeating = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::Repeat);
         let GeneratedSummaryContent {

@@ -2897,8 +2897,10 @@ complete
   Story and Contract retain their existing invalid-response behavior.
 - One bounded repair asks the model to shorten only incomplete capped units and
   preserve complete units and their source IDs. A valid repair is accepted only
-  if it contains every validated original sibling unchanged and in order. If the
-  repair remains invalid, omits a sibling or rewrites one, the application may
+  if it contains every validated original sibling's exact text and normalized
+  evidence IDs in order. Ordinal-derived claim IDs are intentionally excluded
+  because repairing an earlier unit can move a later sibling. If the repair
+  remains invalid, omits a sibling or rewrites one, the application may
   retain complete sibling units from the original response only after normal
   source, window, completion, modality and evidence validation.
   It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`. An all-clipped response
@@ -2910,8 +2912,10 @@ complete
   that an incomplete capped unit gets one repair. A corrected repair returns
   both validated units; a repeated defect returns only the fully validated
   sibling and reports the clipped-unit fallback. Repairs that omit or rewrite
-  the complete sibling also return the unchanged validated sibling. Negative
-  probes reject a 1,199-character fragment, an all-clipped response, empty,
+  the complete sibling also return the unchanged validated sibling, while a
+  repaired leading clip preserves and accepts a later sibling across its
+  ordinal-derived claim-ID change. Negative probes reject a 1,199-character
+  fragment, an all-clipped response, empty,
   duplicate, foreign and nine-source metadata, unwindowed General catalogs, and
   Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
