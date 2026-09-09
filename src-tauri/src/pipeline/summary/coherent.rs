@@ -315,18 +315,25 @@ fn source_framing_for_segment(
     if matches.next().is_some() {
         return None;
     }
+    let segment_end = segment_start.checked_add(exact_quote.len())?;
     let mut framing = inherited;
+    let mut governing_framing = inherited;
     let mut paragraph_start = 0usize;
     for paragraph in normalized_block.split("\n\n") {
-        if paragraph_start > segment_start {
+        if paragraph_start >= segment_end {
             break;
         }
         framing = source_framing_after_paragraph(framing, paragraph.trim());
+        if paragraph_start <= segment_start {
+            governing_framing = framing;
+        } else if framing != governing_framing {
+            return None;
+        }
         paragraph_start = paragraph_start
             .saturating_add(paragraph.len())
             .saturating_add(2);
     }
-    framing
+    governing_framing
 }
 
 pub(super) fn verification_source_framing(
@@ -4409,6 +4416,15 @@ mod tests {
                 None,
             ),
             None
+        );
+        let mixed_segment = "Common Problems\n\nProblem detail.\n\nSolutions\n\nSolution detail.";
+        assert_eq!(
+            source_framing_for_segment(mixed_segment, mixed_segment, None),
+            None
+        );
+        assert_eq!(
+            source_framing_for_segment(mixed_segment, "Common Problems\n\nProblem detail.", None,),
+            Some(SourceFraming::Problem)
         );
     }
 

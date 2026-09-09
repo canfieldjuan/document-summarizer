@@ -3287,7 +3287,9 @@ release acceptance exposed issue #49
   nearest reliable section heading in canonical document order, including later
   segments and continuation pages that no longer contain it. A subsequent
   bounded heading-shaped paragraph, including a sentence-case heading, resets
-  the label; a recognized framing heading replaces it. General
+  the label; a recognized framing heading replaces it. A bounded source segment
+  that crosses either transition remains unframed because one relationship does
+  not govern all of its text. General
   synthesis and verification use the same section-scope resolver. Story,
   Contract and source-selection prompts do not receive that context.
 - An extracted drafting claim is omitted when its source carries a framing label,
@@ -3306,7 +3308,7 @@ release acceptance exposed issue #49
   a page-21 paragraph beginning `Employees paid a piece rate may fall below the
   minimum wage` while its cited exact quote began `Common Problems`.
 - The final implementation's run used `qwen3-30b-a3b:latest` at 100% GPU and
-  passed in 103.81 seconds. Its delivered page-21 paragraph begins `The document
+  passed in 103.37 seconds. Its delivered page-21 paragraph begins `The document
   presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
@@ -3314,7 +3316,8 @@ release acceptance exposed issue #49
   also prove application-owned framing of neutral General units, propagation to
   later segments and page blocks of a split section, reset at a later
   sentence-case solution section, fail-closed mixed verification context, Story
-  isolation,
+  isolation, and rejection of a short source segment spanning both problem and
+  solution sections,
   lossy drafting-claim suppression and exact version-pair retry
   behavior. A focused live GPU probe accepted a final framed claim whose exact
   segment omitted the heading and rejected framing applied to an invented
