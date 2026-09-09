@@ -9,6 +9,7 @@ enum NumericRelation {
     GreaterThan,
     AtLeast,
     Equal,
+    NotEqual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,7 +270,7 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
                     NumericRelation::AtMost => NumericRelation::GreaterThan,
                     NumericRelation::GreaterThan => NumericRelation::AtMost,
                     NumericRelation::AtLeast => NumericRelation::LessThan,
-                    NumericRelation::Equal => NumericRelation::Equal,
+                    NumericRelation::Equal | NumericRelation::NotEqual => relation,
                 }
             } else {
                 relation
@@ -360,7 +361,14 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
         );
     }
     if before.last().is_some_and(|word| word == "exactly") {
-        return Some(NumericRelation::Equal);
+        let prefix = &before[..before.len().saturating_sub(1)];
+        return Some(
+            if negation_present(&prefix[prefix.len().saturating_sub(4)..]) {
+                NumericRelation::NotEqual
+            } else {
+                NumericRelation::Equal
+            },
+        );
     }
     None
 }
@@ -1314,10 +1322,10 @@ fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     modal_predicates(claim, true).into_iter().all(|predicate| {
         !weak_source
             .iter()
-            .any(|source| source.predicate == predicate.predicate)
-            || strong_source.iter().any(|source| {
-                source.predicate == predicate.predicate && source.negated == predicate.negated
-            })
+            .any(|source| modal_statements_match(&predicate, source, false))
+            || strong_source
+                .iter()
+                .any(|source| modal_statements_match(&predicate, source, true))
     })
 }
 

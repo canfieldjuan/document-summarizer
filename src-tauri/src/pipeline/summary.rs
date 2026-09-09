@@ -1072,10 +1072,7 @@ fn verify(
         &mut next_request_ordinal,
         control,
     )?;
-    if matches!(
-        synthesized.presentation_mode,
-        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList
-    ) {
+    if synthesized.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback {
         coherent::apply_semantic_fidelity_guards(
             &synthesized.claims,
             &ledger_evidence,

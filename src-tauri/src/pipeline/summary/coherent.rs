@@ -4234,7 +4234,7 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
@@ -4309,6 +4309,10 @@ mod tests {
         let mut modal = catalog().candidates[0].evidence.clone();
         modal.evidence_id = "modal".into();
         modal.exact_quote = "The interpreter should retain the operating context.".into();
+        let mut mixed_modal = catalog().candidates[1].evidence.clone();
+        mixed_modal.evidence_id = "mixed-modal".into();
+        mixed_modal.exact_quote =
+            "Plan A may accept applications. Plan B must accept applications.".into();
         let evidence = vec![
             first,
             flc,
@@ -4333,6 +4337,7 @@ mod tests {
             transitive_evaluation,
             nonliteral_evaluation,
             modal,
+            mixed_modal,
         ];
 
         let claims = vec![
@@ -4418,6 +4423,16 @@ mod tests {
             CitedClaim {
                 claim_id: "changed-negated-under-boundary".into(),
                 text: "Clearance is not under 700 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-exact-boundary".into(),
+                text: "The exact limit is exactly 650 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negated-exact-boundary".into(),
+                text: "The exact limit is not exactly 650 units.".into(),
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
@@ -4699,6 +4714,16 @@ mod tests {
                 evidence_ids: vec!["modal".into()],
             },
             CitedClaim {
+                claim_id: "supported-strong-modal-subject".into(),
+                text: "Plan B must accept applications.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-strong-modal-subject".into(),
+                text: "Plan A must accept applications.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
                 claim_id: "deferred-nonliteral-evaluation".into(),
                 text: "Helmets improve worker safety.".into(),
                 evidence_ids: vec!["nonliteral-evaluation".into()],
@@ -4740,6 +4765,7 @@ mod tests {
             "supported-leading-decimal",
             "supported-inclusive-boundary",
             "supported-under-boundary",
+            "supported-exact-boundary",
             "supported-formatted-integer",
             "supported-formatted-decimal",
             "supported-negative-boundary",
@@ -4770,6 +4796,7 @@ mod tests {
             "supported-transitive-evaluation",
             "deferred-nonliteral-evaluation",
             "supported-modal",
+            "supported-strong-modal-subject",
         ] {
             assert_eq!(verdict(claim_id), ClaimVerdict::Supported, "{claim_id}");
         }
@@ -4782,6 +4809,7 @@ mod tests {
             "changed-leading-decimal",
             "changed-negated-inclusive-boundary",
             "changed-negated-under-boundary",
+            "changed-negated-exact-boundary",
             "broadened-enumeration",
             "changed-formatted-decimal",
             "changed-negative-boundary",
@@ -4806,6 +4834,7 @@ mod tests {
             "transferred-shared-copula-evaluation",
             "transferred-transitive-evaluation",
             "strengthened-modal",
+            "transferred-strong-modal-subject",
         ] {
             assert_eq!(verdict(claim_id), ClaimVerdict::Unsupported, "{claim_id}");
         }
