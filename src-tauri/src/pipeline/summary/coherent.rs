@@ -3292,7 +3292,7 @@ pub(super) fn validate_content(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
-    if synthesized.synthesis_version != VERSION
+    if !coherent_synthesis_version_supported(&synthesized.synthesis_version)
         || synthesized.document_id != analyzed.document_id
         || synthesized.runtime_id.trim().is_empty()
         || synthesized.model_id.trim().is_empty()
@@ -3336,7 +3336,7 @@ pub(super) fn validate_content(
                 &synthesized.summary_claims,
                 &synthesized.synthesis_evidence,
                 &synthesized.document_id,
-                VERSION,
+                &synthesized.synthesis_version,
             )?;
             validate_modal_content(&synthesized.summary_claims, &synthesized.synthesis_evidence)?;
             if render_cited_summary_with_evidence(

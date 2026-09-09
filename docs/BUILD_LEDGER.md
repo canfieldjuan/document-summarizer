@@ -3160,6 +3160,11 @@ complete
 - The warning uses the existing synthesis-warning persistence and presentation
   path. Full-context coherent summaries and verified claim-ledger fallbacks do
   not receive it.
+- Coherent synthesis, verification and final-summary versions advance with this
+  output contract. A pre-disclosure `Synthesized` or `Verified` checkpoint now
+  fails recoverably before final artifacts are written so retry regenerates it;
+  already completed pre-disclosure coherent summaries remain readable through
+  their exact historical version pairing.
 
 **Acceptance evidence**:
 - Deterministic low-context end-to-end tests for General, Story and Contract
@@ -3169,7 +3174,12 @@ complete
   proves that none receives the warning without a reduced catalog. The exact
   selection-context rejection test proves that fallback output receives only
   the existing fallback notice.
-- `cargo test --all-targets` passed 433 library tests with 12 intentional
+- Continuation regression coverage installs both affected pre-disclosure
+  checkpoint versions and proves that each becomes a recoverable failed run
+  without summary or citation artifacts. Paired historical-validation coverage
+  proves that completed pre-disclosure coherent output still validates, and the
+  legacy mechanical verification continuation remains supported.
+- `cargo test --all-targets` passed 434 library tests with 12 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy and the TypeScript/Vite production
   build passed.

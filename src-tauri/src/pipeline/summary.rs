@@ -43,11 +43,12 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "6.0.0";
-pub const VERIFICATION_VERSION: &str = "8.0.0";
-pub const SUMMARY_VERSION: &str = "6.0.0";
+pub const SYNTHESIS_VERSION: &str = "7.0.0";
+pub const VERIFICATION_VERSION: &str = "9.0.0";
+pub const SUMMARY_VERSION: &str = "7.0.0";
 pub const CITATION_VERSION: &str = "4.0.0";
 
+const PRE_DISCLOSURE_SYNTHESIS_VERSION: &str = "6.0.0";
 const DIRECT_SYNTHESIS_VERSION: &str = "5.0.0";
 const DIRECT_KEY_POINTS_VERIFICATION_VERSION: &str = "6.0.0";
 const DIRECT_SUMMARY_VERSION: &str = "5.0.0";
@@ -59,10 +60,12 @@ const PREVIOUS_SYNTHESIS_VERSION: &str = "3.0.0";
 const LEGACY_SYNTHESIS_VERSION: &str = "2.0.0";
 const HIERARCHICAL_VERIFICATION_VERSION: &str = "4.0.0";
 const DIRECT_VERIFICATION_VERSION: &str = "5.0.0";
+const PRE_DISCLOSURE_VERIFICATION_VERSION: &str = "8.0.0";
 const PREVIOUS_COHERENT_VERIFICATION_VERSION: &str = "7.0.0";
 const PREVIOUS_VERIFICATION_VERSION: &str = "3.0.0";
 const LEGACY_VERIFICATION_VERSION: &str = "2.0.0";
 const HIERARCHICAL_SUMMARY_VERSION: &str = "4.0.0";
+const PRE_DISCLOSURE_SUMMARY_VERSION: &str = "6.0.0";
 const PREVIOUS_SUMMARY_VERSION: &str = "3.0.0";
 const LEGACY_SUMMARY_VERSION: &str = "2.0.0";
 const PREVIOUS_CITATION_VERSION: &str = "2.0.0";
@@ -132,6 +135,48 @@ impl SummaryDeliveryPolicy {
             select_key_points: false,
         }
     }
+}
+
+fn coherent_synthesis_version_supported(version: &str) -> bool {
+    matches!(
+        version,
+        SYNTHESIS_VERSION | PRE_DISCLOSURE_SYNTHESIS_VERSION
+    )
+}
+
+fn coherent_verification_versions_match(
+    synthesis_version: &str,
+    verification_version: &str,
+) -> bool {
+    (synthesis_version == SYNTHESIS_VERSION && verification_version == VERIFICATION_VERSION)
+        || (synthesis_version == PRE_DISCLOSURE_SYNTHESIS_VERSION
+            && matches!(
+                verification_version,
+                PREVIOUS_COHERENT_VERIFICATION_VERSION | PRE_DISCLOSURE_VERIFICATION_VERSION
+            ))
+}
+
+fn coherent_checkpoint_requires_retry(
+    synthesized: &SynthesizedDocument,
+    verification_version: Option<&str>,
+) -> bool {
+    synthesized.presentation_mode != SummaryPresentationMode::LegacyClaimList
+        && (synthesized.synthesis_version == PRE_DISCLOSURE_SYNTHESIS_VERSION
+            || verification_version.is_some_and(|version| {
+                matches!(
+                    version,
+                    PREVIOUS_COHERENT_VERIFICATION_VERSION | PRE_DISCLOSURE_VERIFICATION_VERSION
+                )
+            }))
+}
+
+fn outdated_coherent_checkpoint_failure() -> PipelineFailure {
+    stage_failure(
+        PipelineStage::Verify,
+        "COHERENT_CHECKPOINT_REQUIRES_RETRY",
+        "This coherent summary checkpoint predates bounded source-selection disclosure; retry the run to regenerate it",
+        true,
+    )
 }
 
 pub(crate) fn generation_seed_for_run(run_id: &str) -> u64 {
@@ -622,6 +667,15 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
 
     let (verifying_run, persisted_synthesis) =
         db::start_verification(conn, run_id, run.state_version)?;
+    if coherent_checkpoint_requires_retry(&persisted_synthesis, None) {
+        return Err(persist_failure(
+            conn,
+            run_id,
+            verifying_run.state_version,
+            ActiveStage::Verification,
+            outdated_coherent_checkpoint_failure(),
+        ));
+    }
     let run_seed = generation_seed_for_run(run_id);
     let verified = match verify(
         summary_profile,
@@ -705,6 +759,17 @@ pub(crate) fn complete_verified_document_with_delivery(
                 run_id: run_id.to_string(),
             },
         )?;
+    if coherent_checkpoint_requires_retry(
+        &persisted_synthesis,
+        Some(&verified.verification_version),
+    ) {
+        return Err(persist_final_failure(
+            conn,
+            run_id,
+            run.state_version,
+            outdated_coherent_checkpoint_failure(),
+        ));
+    }
     if let Err(failure) = validate_verified_document(
         &verified,
         &persisted_synthesis,
@@ -740,7 +805,10 @@ pub(crate) fn complete_verified_document_with_delivery(
         DIRECT_VERIFICATION_VERSION | DIRECT_KEY_POINTS_VERIFICATION_VERSION => {
             DIRECT_SUMMARY_VERSION
         }
-        PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION => SUMMARY_VERSION,
+        PREVIOUS_COHERENT_VERIFICATION_VERSION | PRE_DISCLOSURE_VERIFICATION_VERSION => {
+            PRE_DISCLOSURE_SUMMARY_VERSION
+        }
+        VERIFICATION_VERSION => SUMMARY_VERSION,
         _ => unreachable!("verified document validation rejects unknown versions"),
     };
     let mut summary = SummaryArtifact {
@@ -1596,7 +1664,7 @@ fn verification_claim_budget(
 ) -> Result<usize, PipelineFailure> {
     if matches!(
         synthesized.synthesis_version.as_str(),
-        SYNTHESIS_VERSION | DIRECT_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION | PRE_DISCLOSURE_SYNTHESIS_VERSION | DIRECT_SYNTHESIS_VERSION
     ) {
         Ok(direct::MAX_CLAIMS)
     } else if synthesized.synthesis_version == HIERARCHICAL_SYNTHESIS_VERSION {
@@ -3255,7 +3323,9 @@ fn verification_warnings(
     }
     if coverage_retry_attempted {
         warnings.push(coverage_shortfall_warning());
-    } else if synthesized.synthesis_version == SYNTHESIS_VERSION && unsupported + ambiguous > 0 {
+    } else if coherent_synthesis_version_supported(&synthesized.synthesis_version)
+        && unsupported + ambiguous > 0
+    {
         warnings.push(PipelineWarning {
             code: COVERAGE_SHORTFALL_WARNING_CODE.into(),
             message: "Some quote-bound claims were withheld; the supported result is preserved without a seed-only retry".into(),
@@ -3613,7 +3683,7 @@ fn validate_synthesized_document(
     normalized: &NormalizedDocument,
     runtime: &dyn ModelRuntime,
 ) -> Result<(), PipelineFailure> {
-    let runtime_stage = if synthesized.synthesis_version == SYNTHESIS_VERSION {
+    let runtime_stage = if coherent_synthesis_version_supported(&synthesized.synthesis_version) {
         PipelineStage::Synthesize
     } else {
         PipelineStage::Analyze
@@ -3628,7 +3698,7 @@ fn validate_synthesized_document(
             false,
         ));
     }
-    if synthesized.synthesis_version == SYNTHESIS_VERSION {
+    if coherent_synthesis_version_supported(&synthesized.synthesis_version) {
         coherent::validate_for_runtime(
             SummaryProfile::General,
             synthesized,
@@ -3653,17 +3723,19 @@ fn validate_synthesized_document_without_runtime(
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_DISCLOSURE_SYNTHESIS_VERSION
             | DIRECT_SYNTHESIS_VERSION
             | HIERARCHICAL_SYNTHESIS_VERSION
             | PREVIOUS_SYNTHESIS_VERSION
             | LEGACY_SYNTHESIS_VERSION
     );
-    let historical_metadata_valid = synthesized.synthesis_version == SYNTHESIS_VERSION
-        || (synthesized.runtime_id == analyzed.runtime_id
-            && synthesized.model_id == analyzed.model_id);
+    let historical_metadata_valid =
+        coherent_synthesis_version_supported(&synthesized.synthesis_version)
+            || (synthesized.runtime_id == analyzed.runtime_id
+                && synthesized.model_id == analyzed.model_id);
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
-        SYNTHESIS_VERSION | DIRECT_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION | PRE_DISCLOSURE_SYNTHESIS_VERSION | DIRECT_SYNTHESIS_VERSION
     ) {
         direct::MAX_CLAIMS
     } else {
@@ -3685,14 +3757,15 @@ fn validate_synthesized_document_without_runtime(
             false,
         ));
     }
-    let ledger_synthesis_version = if synthesized.synthesis_version == SYNTHESIS_VERSION {
-        DIRECT_SYNTHESIS_VERSION
-    } else {
-        &synthesized.synthesis_version
-    };
+    let ledger_synthesis_version =
+        if coherent_synthesis_version_supported(&synthesized.synthesis_version) {
+            DIRECT_SYNTHESIS_VERSION
+        } else {
+            &synthesized.synthesis_version
+        };
     validate_claims(&synthesized.claims, analyzed, ledger_synthesis_version)?;
 
-    if synthesized.synthesis_version == SYNTHESIS_VERSION {
+    if coherent_synthesis_version_supported(&synthesized.synthesis_version) {
         coherent::validate_content(synthesized, analyzed, chunked, normalized)?;
         return validate_synthesized_source_coverage(synthesized, chunked);
     }
@@ -3815,7 +3888,9 @@ fn validate_verified_document(
     }
     if matches!(
         verified.verification_version.as_str(),
-        PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION
+        PREVIOUS_COHERENT_VERIFICATION_VERSION
+            | PRE_DISCLOSURE_VERIFICATION_VERSION
+            | VERIFICATION_VERSION
     ) {
         return validate_coherent_verified_document(verified, synthesized, analyzed);
     }
@@ -3895,12 +3970,10 @@ fn validate_coherent_verified_document(
     synthesized: &SynthesizedDocument,
     analyzed: &AnalyzedDocument,
 ) -> Result<(), PipelineFailure> {
-    let metadata_valid = synthesized.synthesis_version == SYNTHESIS_VERSION
-        && verified.document_id == synthesized.document_id
-        && matches!(
-            verified.verification_version.as_str(),
-            PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION
-        )
+    let metadata_valid = coherent_verification_versions_match(
+        &synthesized.synthesis_version,
+        &verified.verification_version,
+    ) && verified.document_id == synthesized.document_id
         && verified.synthesis_attempt_ordinal == 0
         && verified.presentation_mode == synthesized.presentation_mode
         && verified.synthesis_evidence == synthesized.synthesis_evidence
@@ -3967,11 +4040,14 @@ fn validate_coherent_verified_document(
     {
         eprintln!(
             "coherent validation: metadata={metadata_valid} synth_version={} document={} verify_version={} ordinal={} mode={} evidence={} runtime={} model={} chunks={} ledger_verdicts={} summary_verdicts={} ledger_coverage={ledger_coverage_valid} summary_coverage={summary_coverage_valid} ledger_claims={} summary_claims={} text={} key_points={} warnings={}",
-            synthesized.synthesis_version == SYNTHESIS_VERSION,
+            coherent_verification_versions_match(
+                &synthesized.synthesis_version,
+                &verified.verification_version,
+            ),
             verified.document_id == synthesized.document_id,
-            matches!(
-                verified.verification_version.as_str(),
-                PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION
+            coherent_verification_versions_match(
+                &synthesized.synthesis_version,
+                &verified.verification_version,
             ),
             verified.synthesis_attempt_ordinal == 0,
             verified.presentation_mode == synthesized.presentation_mode,
@@ -4419,7 +4495,7 @@ fn build_citation_artifact(
 
 pub(crate) fn expected_citation_version(summary_version: &str) -> Option<&'static str> {
     match summary_version {
-        SUMMARY_VERSION => Some(CITATION_VERSION),
+        SUMMARY_VERSION | PRE_DISCLOSURE_SUMMARY_VERSION => Some(CITATION_VERSION),
         DIRECT_SUMMARY_VERSION | HIERARCHICAL_SUMMARY_VERSION => Some(DIRECT_CITATION_VERSION),
         PREVIOUS_SUMMARY_VERSION => Some(PREVIOUS_CITATION_VERSION),
         LEGACY_SUMMARY_VERSION => Some(LEGACY_CITATION_VERSION),
@@ -9916,13 +9992,16 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "6.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "7.0.0");
+        assert_eq!(PRE_DISCLOSURE_SYNTHESIS_VERSION, "6.0.0");
         assert_eq!(DIRECT_SYNTHESIS_VERSION, "5.0.0");
         assert_eq!(DIRECT_VERIFICATION_VERSION, "5.0.0");
         assert_eq!(DIRECT_KEY_POINTS_VERIFICATION_VERSION, "6.0.0");
         assert_eq!(PREVIOUS_COHERENT_VERIFICATION_VERSION, "7.0.0");
-        assert_eq!(VERIFICATION_VERSION, "8.0.0");
-        assert_eq!(SUMMARY_VERSION, "6.0.0");
+        assert_eq!(PRE_DISCLOSURE_VERIFICATION_VERSION, "8.0.0");
+        assert_eq!(VERIFICATION_VERSION, "9.0.0");
+        assert_eq!(PRE_DISCLOSURE_SUMMARY_VERSION, "6.0.0");
+        assert_eq!(SUMMARY_VERSION, "7.0.0");
         assert_eq!(direct::VERSION, DIRECT_SYNTHESIS_VERSION);
         assert_eq!(HIERARCHICAL_SYNTHESIS_VERSION, "4.0.0");
         assert_eq!(HIERARCHICAL_VERIFICATION_VERSION, "4.0.0");
@@ -10063,7 +10142,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_coherent_verification_version_remains_readable() {
+    fn pre_disclosure_completed_coherent_artifacts_remain_readable() {
         let database = TestDatabase::new();
         let (mut conn, run_id) = chunked_run(&database);
         summarize_chunked_document(&mut conn, &FakeRuntime::healthy(), &run_id)
@@ -10071,13 +10150,62 @@ mod tests {
         let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
         let chunked = get_chunked_document(&conn, &run_id).unwrap().unwrap();
         let analyzed = get_analyzed_document(&conn, &run_id).unwrap().unwrap();
-        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let mut synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
         let mut verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+        let mut summary = get_summary_artifact(&conn, &run_id).unwrap().unwrap();
+        let mut citations = get_citation_artifact(&conn, &run_id).unwrap().unwrap();
         assert_eq!(verified.verification_version, VERIFICATION_VERSION);
 
-        verified.verification_version = PREVIOUS_COHERENT_VERIFICATION_VERSION.into();
+        for (index, claim) in synthesized.summary_claims.iter_mut().enumerate() {
+            let current_id = claim.claim_id.clone();
+            let previous_id = deterministic_claim_id(
+                &synthesized.document_id,
+                PRE_DISCLOSURE_SYNTHESIS_VERSION,
+                index,
+                &claim.text,
+                &claim.evidence_ids,
+            );
+            claim.claim_id = previous_id.clone();
+            for verified_claim in &mut verified.summary_claims {
+                if verified_claim.claim_id == current_id {
+                    verified_claim.claim_id = previous_id.clone();
+                }
+            }
+            for verification in &mut verified.summary_claim_verifications {
+                if verification.claim_id == current_id {
+                    verification.claim_id = previous_id.clone();
+                }
+            }
+        }
+        synthesized.synthesis_version = PRE_DISCLOSURE_SYNTHESIS_VERSION.into();
+        verified.verification_version = PRE_DISCLOSURE_VERIFICATION_VERSION.into();
         validate_verified_document(&verified, &synthesized, &analyzed, &chunked, &normalized)
-            .expect("the prior coherent verification contract must remain readable");
+            .expect("a completed pre-disclosure coherent pair must remain readable");
+
+        summary.summary_version = PRE_DISCLOSURE_SUMMARY_VERSION.into();
+        summary.integrity_hash = summary.calculate_integrity_hash().unwrap();
+        citations.summary_integrity_hash = summary.integrity_hash.clone();
+        citations.summary_claims = verified.summary_claims.clone();
+        citations.integrity_hash = citations.calculate_integrity_hash().unwrap();
+        validate_citation_artifact(
+            &citations,
+            &summary,
+            &verified,
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .expect("pre-disclosure completed summary and citations must remain readable");
+
+        assert!(!coherent_verification_versions_match(
+            SYNTHESIS_VERSION,
+            PRE_DISCLOSURE_VERIFICATION_VERSION,
+        ));
+        assert!(!coherent_verification_versions_match(
+            PRE_DISCLOSURE_SYNTHESIS_VERSION,
+            VERIFICATION_VERSION,
+        ));
     }
 
     #[test]

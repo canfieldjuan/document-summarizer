@@ -1242,6 +1242,91 @@ mod tests {
     }
 
     #[test]
+    fn pre_disclosure_coherent_checkpoints_fail_recoverably_before_delivery() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+
+        for checkpoint in [
+            ContinuationCheckpoint::Synthesized,
+            ContinuationCheckpoint::Verified,
+        ] {
+            let mut conn = init_db(":memory:").expect("schema should initialize");
+            let run =
+                prepare_checkpoint(&mut conn, &source, &pipeline, &FixtureRuntime, checkpoint);
+
+            match checkpoint {
+                ContinuationCheckpoint::Synthesized => {
+                    let mut synthesized = get_synthesized_document(&conn, &run.run_id)
+                        .expect("synthesis should load")
+                        .expect("synthesis should exist");
+                    synthesized.synthesis_version = "6.0.0".to_string();
+                    let artifact_json = serde_json::to_string(&synthesized)
+                        .expect("pre-disclosure synthesis should serialize");
+                    let artifact_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+                    conn.execute(
+                        "UPDATE synthesized_documents
+                         SET synthesis_version = ?1, artifact_hash = ?2, synthesized_artifact = ?3
+                         WHERE run_id = ?4",
+                        params![
+                            synthesized.synthesis_version,
+                            artifact_hash,
+                            artifact_json,
+                            run.run_id
+                        ],
+                    )
+                    .expect("pre-disclosure synthesis fixture should install");
+                }
+                ContinuationCheckpoint::Verified => {
+                    let mut verified = get_verified_document(&conn, &run.run_id)
+                        .expect("verification should load")
+                        .expect("verification should exist");
+                    verified.verification_version = "8.0.0".to_string();
+                    let artifact_json = serde_json::to_string(&verified)
+                        .expect("pre-disclosure verification should serialize");
+                    let artifact_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+                    conn.execute(
+                        "UPDATE verified_documents
+                         SET verification_version = ?1, artifact_hash = ?2, verified_artifact = ?3
+                         WHERE run_id = ?4",
+                        params![
+                            verified.verification_version,
+                            artifact_hash,
+                            artifact_json,
+                            run.run_id
+                        ],
+                    )
+                    .expect("pre-disclosure verification fixture should install");
+                }
+                _ => unreachable!("the fixture covers only affected coherent checkpoints"),
+            }
+
+            let runtime = (checkpoint == ContinuationCheckpoint::Synthesized)
+                .then_some(&FixtureRuntime as &dyn ModelRuntime);
+            let error = continue_run_to_summary(
+                &mut conn,
+                &run.run_id,
+                run.state_version,
+                pipeline.continuation_components(runtime),
+            )
+            .expect_err("pre-disclosure coherent checkpoints must not be delivered");
+            assert_eq!(error.code(), "COHERENT_CHECKPOINT_REQUIRES_RETRY");
+            assert_eq!(
+                get_pipeline_run(&conn, &run.run_id)
+                    .expect("failed run should load")
+                    .expect("failed run should exist")
+                    .state,
+                PipelineState::Failed
+            );
+            assert!(get_summary_artifact(&conn, &run.run_id)
+                .expect("summary query should succeed")
+                .is_none());
+            assert!(get_citation_artifact(&conn, &run.run_id)
+                .expect("citation query should succeed")
+                .is_none());
+        }
+    }
+
+    #[test]
     fn legacy_model_artifact_without_a_profile_is_not_advertised_as_continuable() {
         let source = TestSource::from_fixture();
         let pipeline = TestPipeline::default();
