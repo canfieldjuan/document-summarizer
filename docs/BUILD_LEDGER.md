@@ -3271,3 +3271,50 @@ release acceptance exposed issue #49
   synthetic corpus run. It does not turn model output into deterministic quality
   evidence, and a green mechanical result remains insufficient without semantic
   review.
+
+## Slice 34 — General Source-Context Framing (2026-09-09)
+
+**Status**: implementation and live-model acceptance complete
+
+**Verified root cause and implemented behavior**:
+- The public DOL source retained `Common Problems` in the same normalized block
+  and exact quotation as the minimum-wage statements. Analysis, synthesis and
+  semantic verification each dropped that governing heading, so the final cited
+  prose presented the statements neutrally even though its source did not.
+- General synthesis now derives a small, application-owned `source_framing`
+  label only from a bounded leading heading ending in problem, risk, warning,
+  exception or limitation. The final General prompt receives that label with the
+  authoritative exact quote; Story, Contract and source-selection prompts do not.
+- An extracted drafting claim is omitted when it loses a detected framing label.
+  After model verification, the existing deterministic semantic guard withholds
+  General wording that still lacks the required framing. Exact source evidence,
+  source order, citation rendering and persisted schemas remain unchanged.
+- Synthesis, verification and final-summary versions advance for the changed
+  output contract. Completed version-7 summaries remain readable; in-progress
+  coherent version-7 checkpoints retry, while version-7 claim-ledger fallbacks
+  remain continuable.
+
+**Acceptance evidence**:
+- Before the deterministic repair, a GPU DOL run passed mechanically but emitted
+  a page-21 paragraph beginning `Employees paid a piece rate may fall below the
+  minimum wage` while its cited exact quote began `Common Problems`.
+- The revised run used `qwen3-30b-a3b:latest` at 100% GPU and passed in 132.44
+  seconds. Its delivered page-21 paragraph begins `Common problems include`,
+  retains the minimum-wage details and page citation, and its unchanged exact
+  quote still begins `Common Problems`.
+- Boundary tests admit the five bounded heading classes and reject missing-body,
+  multiline, overlong and unrelated headings. They also prove both neutral and
+  framed General verdicts, mixed evidence, Story/Contract isolation, lossy
+  drafting-claim suppression and exact version-pair retry behavior. The full
+  Rust library suite passed 438 tests with 12 intentional ignores.
+- `cargo test --all-targets` passed those 438 library tests, 3 office tests and
+  all 3 release-contract tests; 12 opt-in library tests and 3 opt-in office
+  tests remained ignored. Strict all-target/all-feature Clippy, Rust formatting,
+  the TypeScript/Vite production build and `git diff --check` passed.
+
+**Non-scope and remaining limits**:
+- This is a conservative repair for explicit leading headings in source quotes,
+  not a general discourse parser. Semantic review remains necessary for framing
+  expressed indirectly or across separate blocks.
+- This slice does not change Story or Contract behavior, routing, UI, persistence
+  schemas, source selection, ingestion, OCR or model configuration.
