@@ -491,23 +491,27 @@ fn numeric_unit(tokens: &[String], end: usize) -> Option<String> {
     {
         index += 2;
     }
-    let unit = tokens.get(index)?.as_str();
-    Some(
-        match unit {
-            "dollar" | "dollars" => "dollar",
-            "percent" | "percentage" | "percentages" => "percent",
-            "application" | "applications" => "application",
-            "report" | "reports" => "report",
-            "degree" | "degrees" => "degree",
-            "unit" | "units" => "unit",
-            "year" | "years" => "year",
-            "day" | "days" => "day",
-            "case" | "cases" => "case",
-            "worker" | "workers" => "worker",
-            _ => return None,
-        }
-        .to_string(),
-    )
+    let unit = match tokens.get(index)?.as_str() {
+        "dollar" | "dollars" => "dollar",
+        "percent" | "percentage" | "percentages" => "percent",
+        "application" | "applications" => "application",
+        "report" | "reports" => "report",
+        "degree" | "degrees" => "degree",
+        "unit" | "units" => "unit",
+        "year" | "years" => "year",
+        "day" | "days" => "day",
+        "case" | "cases" => "case",
+        "worker" | "workers" => "worker",
+        _ => return None,
+    };
+    let qualifier = (unit == "degree")
+        .then(|| tokens.get(index + 1).map(String::as_str))
+        .flatten()
+        .filter(|word| matches!(*word, "celsius" | "centigrade" | "fahrenheit" | "kelvin"));
+    Some(match qualifier {
+        Some(qualifier) => format!("{unit} {qualifier}"),
+        None => unit.to_string(),
+    })
 }
 
 fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
@@ -631,17 +635,95 @@ fn constraint_reference(constraint: &NumericConstraint) -> NumericReference {
     }
 }
 
-fn numeric_relation_supports(source: NumericRelation, claim: NumericRelation) -> bool {
-    source == claim
-        || matches!(
-            (source, claim),
-            (NumericRelation::LessThan, NumericRelation::AtMost)
-                | (NumericRelation::GreaterThan, NumericRelation::AtLeast)
-                | (
-                    NumericRelation::Equal,
-                    NumericRelation::AtMost | NumericRelation::AtLeast
-                )
-        )
+fn numeric_value_parts(value: &str) -> Option<(bool, &str, &str)> {
+    let (negative, unsigned) = value
+        .strip_prefix('-')
+        .map_or((false, value), |unsigned| (true, unsigned));
+    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    (!integer.is_empty()
+        && integer.chars().all(|character| character.is_ascii_digit())
+        && fraction.chars().all(|character| character.is_ascii_digit()))
+    .then_some((negative, integer, fraction))
+}
+
+fn absolute_numeric_value_order(
+    left_integer: &str,
+    left_fraction: &str,
+    right_integer: &str,
+    right_fraction: &str,
+) -> std::cmp::Ordering {
+    left_integer
+        .len()
+        .cmp(&right_integer.len())
+        .then_with(|| left_integer.cmp(right_integer))
+        .then_with(|| {
+            let length = left_fraction.len().max(right_fraction.len());
+            (0..length)
+                .map(|index| {
+                    left_fraction
+                        .as_bytes()
+                        .get(index)
+                        .copied()
+                        .unwrap_or(b'0')
+                        .cmp(
+                            &right_fraction
+                                .as_bytes()
+                                .get(index)
+                                .copied()
+                                .unwrap_or(b'0'),
+                        )
+                })
+                .find(|order| !order.is_eq())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+fn numeric_value_order(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let (left_negative, left_integer, left_fraction) = numeric_value_parts(left)?;
+    let (right_negative, right_integer, right_fraction) = numeric_value_parts(right)?;
+    Some(match (left_negative, right_negative) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => {
+            absolute_numeric_value_order(left_integer, left_fraction, right_integer, right_fraction)
+        }
+        (true, true) => {
+            absolute_numeric_value_order(left_integer, left_fraction, right_integer, right_fraction)
+                .reverse()
+        }
+    })
+}
+
+fn numeric_relation_supports(
+    source: NumericRelation,
+    claim: NumericRelation,
+    source_to_claim: std::cmp::Ordering,
+) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    match (source, claim) {
+        (NumericRelation::Equal, NumericRelation::Equal) => source_to_claim == Equal,
+        (NumericRelation::Equal, NumericRelation::AtMost) => source_to_claim != Greater,
+        (NumericRelation::Equal, NumericRelation::LessThan) => source_to_claim == Less,
+        (NumericRelation::Equal, NumericRelation::AtLeast) => source_to_claim != Less,
+        (NumericRelation::Equal, NumericRelation::GreaterThan) => source_to_claim == Greater,
+        (NumericRelation::Equal, NumericRelation::NotEqual) => source_to_claim != Equal,
+        (NumericRelation::AtMost, NumericRelation::AtMost) => source_to_claim != Greater,
+        (NumericRelation::AtMost, NumericRelation::LessThan) => source_to_claim == Less,
+        (NumericRelation::AtMost, NumericRelation::NotEqual) => source_to_claim == Less,
+        (
+            NumericRelation::LessThan,
+            NumericRelation::LessThan | NumericRelation::AtMost | NumericRelation::NotEqual,
+        ) => source_to_claim != Greater,
+        (NumericRelation::AtLeast, NumericRelation::AtLeast) => source_to_claim != Less,
+        (NumericRelation::AtLeast, NumericRelation::GreaterThan) => source_to_claim == Greater,
+        (NumericRelation::AtLeast, NumericRelation::NotEqual) => source_to_claim == Greater,
+        (
+            NumericRelation::GreaterThan,
+            NumericRelation::GreaterThan | NumericRelation::AtLeast | NumericRelation::NotEqual,
+        ) => source_to_claim != Less,
+        (NumericRelation::NotEqual, NumericRelation::NotEqual) => source_to_claim == Equal,
+        _ => false,
+    }
 }
 
 fn numeric_units_match(source: &NumericConstraint, claim: &NumericConstraint) -> bool {
@@ -662,9 +744,9 @@ fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
         let matching_relation = source_constraints
             .iter()
             .filter(|source| {
-                source.value == constraint.value
-                    && numeric_relation_supports(source.relation, constraint.relation)
-                    && numeric_units_match(source, &constraint)
+                numeric_value_order(&source.value, &constraint.value).is_some_and(|order| {
+                    numeric_relation_supports(source.relation, constraint.relation, order)
+                }) && numeric_units_match(source, &constraint)
             })
             .collect::<Vec<_>>();
         if matching_relation
@@ -673,7 +755,14 @@ fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
         {
             return true;
         }
-        if matching_relation.is_empty()
+        let same_value_entails = source_constraints.iter().any(|source| {
+            source.value == constraint.value
+                && numeric_value_order(&source.value, &constraint.value).is_some_and(|order| {
+                    numeric_relation_supports(source.relation, constraint.relation, order)
+                })
+                && numeric_units_match(source, &constraint)
+        });
+        if !same_value_entails
             && source_constraints
                 .iter()
                 .any(|source| source.value == constraint.value)
@@ -748,15 +837,54 @@ fn endpoint_word(word: &str) -> Option<String> {
     Some(word.to_string())
 }
 
-type DirectionalRelation = (Vec<String>, Vec<String>, Vec<String>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectionalRelation {
+    origin: Vec<String>,
+    destination: Vec<String>,
+    actor: Vec<String>,
+}
 
-fn directional_context(tokens: &[String], anchor: usize) -> Vec<String> {
-    let context = &tokens[anchor.saturating_sub(8)..anchor];
-    context
+fn directional_actor(tokens: &[String], anchor: usize) -> Vec<String> {
+    let context = &tokens[..anchor];
+    let Some(predicate) = context.iter().rposition(|word| {
+        matches!(
+            word.as_str(),
+            "transport"
+                | "transports"
+                | "transported"
+                | "transporting"
+                | "carry"
+                | "carries"
+                | "carried"
+                | "carrying"
+                | "provide"
+                | "provides"
+                | "provided"
+                | "providing"
+        )
+    }) else {
+        return Vec::new();
+    };
+    let start = context[..predicate]
         .iter()
-        .filter(|word| !matches!(word.as_str(), "a" | "an" | "the"))
-        .cloned()
-        .collect()
+        .rposition(|word| matches!(word.as_str(), "and" | "but" | "while" | "whereas"))
+        .map_or(0, |index| index + 1);
+    let mut actor = context[start..predicate].to_vec();
+    if actor
+        .first()
+        .is_some_and(|word| matches!(word.as_str(), "a" | "an" | "the"))
+    {
+        actor.remove(0);
+    }
+    while actor.last().is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "can" | "could" | "may" | "might" | "must" | "shall" | "should" | "will" | "would"
+        )
+    }) {
+        actor.pop();
+    }
+    actor
 }
 
 fn directional_relations_in_clause(clause: &str) -> Vec<DirectionalRelation> {
@@ -787,7 +915,11 @@ fn directional_relations_in_clause(clause: &str) -> Vec<DirectionalRelation> {
             .filter_map(|word| endpoint_word(word))
             .collect::<Vec<_>>();
         if !origin.is_empty() && !destination.is_empty() {
-            relations.push((origin, destination, directional_context(&tokens, from)));
+            relations.push(DirectionalRelation {
+                origin,
+                destination,
+                actor: directional_actor(&tokens, from),
+            });
         }
     }
     for (to, token) in tokens.iter().enumerate() {
@@ -815,7 +947,11 @@ fn directional_relations_in_clause(clause: &str) -> Vec<DirectionalRelation> {
             .filter_map(|word| endpoint_word(word))
             .collect::<Vec<_>>();
         if !origin.is_empty() && !destination.is_empty() {
-            relations.push((origin, destination, directional_context(&tokens, to)));
+            relations.push(DirectionalRelation {
+                origin,
+                destination,
+                actor: directional_actor(&tokens, to),
+            });
         }
     }
     relations
@@ -859,11 +995,13 @@ fn endpoints_match(left: &[String], right: &[String]) -> bool {
 }
 
 fn endpoint_pairs_match(left: &DirectionalRelation, right: &DirectionalRelation) -> bool {
-    endpoints_match(&left.0, &right.0) && endpoints_match(&left.1, &right.1)
+    endpoints_match(&left.origin, &right.origin)
+        && endpoints_match(&left.destination, &right.destination)
 }
 
 fn relations_match(left: &DirectionalRelation, right: &DirectionalRelation) -> bool {
-    endpoint_pairs_match(left, right) && left.2 == right.2
+    endpoint_pairs_match(left, right)
+        && ((left.actor.is_empty() && right.actor.is_empty()) || left.actor == right.actor)
 }
 
 fn directional_relations(text: &str) -> Vec<DirectionalRelation> {
@@ -888,20 +1026,29 @@ fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
             .iter()
             .any(|source| endpoint_pairs_match(source, &relation))
         {
-            return !source_relations.iter().any(|source| source.2 == relation.2);
+            if relation.actor.is_empty() {
+                return true;
+            }
+            let actor_is_known = source_relations
+                .iter()
+                .any(|source| source.actor == relation.actor);
+            let route_has_known_actor = source_relations
+                .iter()
+                .any(|source| endpoint_pairs_match(source, &relation) && !source.actor.is_empty());
+            return !(actor_is_known && route_has_known_actor);
         }
         let origin_is_source_origin = source_relations
             .iter()
-            .any(|source| endpoints_match(&source.0, &relation.0));
+            .any(|source| endpoints_match(&source.origin, &relation.origin));
         let origin_is_source_destination = source_relations
             .iter()
-            .any(|source| endpoints_match(&source.1, &relation.0));
+            .any(|source| endpoints_match(&source.destination, &relation.origin));
         let destination_is_source_origin = source_relations
             .iter()
-            .any(|source| endpoints_match(&source.0, &relation.1));
+            .any(|source| endpoints_match(&source.origin, &relation.destination));
         let destination_is_source_destination = source_relations
             .iter()
-            .any(|source| endpoints_match(&source.1, &relation.1));
+            .any(|source| endpoints_match(&source.destination, &relation.destination));
         let reversed_known_endpoint = (origin_is_source_destination && !origin_is_source_origin)
             || (destination_is_source_origin && !destination_is_source_destination);
         let both_endpoints_known = (origin_is_source_origin || origin_is_source_destination)

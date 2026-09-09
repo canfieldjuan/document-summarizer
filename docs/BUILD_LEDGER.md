@@ -2689,13 +2689,15 @@ complete
   both claim and source expose the same literal concept; nonliteral evaluative
   paraphrases remain for the model verifier rather than being mechanically
   rejected. Numeric relations retain
-  signs, normalize bounded English cardinal wording, bind known units when
-  both source and claim expose them, accept only logically entailed weak-bound
+  signs, normalize bounded English cardinal wording, compare exact normalized
+  decimal thresholds, bind known units and explicit temperature-scale qualifiers
+  when both source and claim expose them, accept only logically entailed weak-bound
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
   when cited text exposes the same context. Restrictive `immediate family`
   wording must remain explicit in a family-member claim. Directional parsing
   accepts both `from … to …` and `to … from …` syntax and binds a route to its
-  mechanically known local actor context. Evaluative relations retain negation while treating additive
+  mechanically known local actor independently of supported transport/carry
+  predicate wording. Evaluative relations retain negation while treating additive
   `not only … but also` wording as affirmative. The kinship backstop recognizes
   clear noun uses such as `relative of` without treating comparative `relative
   to` as a family enumeration. Passive numeric wording binds a leading bound to
@@ -2726,20 +2728,22 @@ complete
   number formatting, `maximum of`/`minimum of` wording, source-supported actor
   grouping, a correctly qualified single actor, and a correctly bound leading
   condition, including a source-supported contracted negative condition. They
-  also preserve a contracted inclusive numeric bound, an entailed `less than`
-  to `at most` weakening with the same value and unit, an active bound paraphrased
+  also preserve a contracted inclusive numeric bound, entailed same-value and
+  cross-value weak-bound paraphrases with the same known unit, an active bound paraphrased
   with its correct passive `by …` subject, a harmless auxiliary change on the
   same named plan, distinct plans with a shared name prefix, a leading decimal,
   comma- and `then`-delimited conditions, multiple correctly qualified actor
   relations in one claim,
   synonymous transport endpoints including `home`, inverted source-route syntax,
-  a route retained on its source actor, explicit `immediate family` scope,
+  a route retained on its source actor across a transport/carry paraphrase,
+  an unchanged Celsius qualifier, explicit `immediate family` scope,
   comparative `relative to`, additive, subject-bound, shared-subject,
   shared-copula, transitive, compound and negative evaluations, a nonliteral
   safety paraphrase left to model verification, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
-  changed from dollars to percent, a removed negative sign,
+  changed from dollars to percent or Celsius to Fahrenheit, a stronger numeric
+  threshold, a removed negative sign,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
   distinct rules in one item or compound sentence, and a single actor borrowing
   another actor's qualifier, including a leading condition), an active or
@@ -2749,7 +2753,8 @@ complete
   bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
   prefix, comma-less and compound actor-condition transfers, endpoint reversal from
   either source-route syntax even with one newly worded endpoint, a route moved
-  from one mechanically known actor to another, removal of the restrictive
+  from one mechanically known actor to another even when the route predicate is
+  paraphrased, removal of the restrictive
   `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula and transitive wording, removed
   evaluation negation, `should`-to-`must` strengthening, and strong modality
