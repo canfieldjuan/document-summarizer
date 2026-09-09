@@ -675,6 +675,8 @@ mod tests {
 
     struct FixtureRuntime;
 
+    struct SynthesisFallbackFixtureRuntime;
+
     fn fixture_model_profile() -> ModelProfileSnapshot {
         ModelProfileSnapshot {
             version: 1,
@@ -718,6 +720,40 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_model_profile())
+        }
+    }
+
+    impl ModelRuntime for SynthesisFallbackFixtureRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            if request.stage == PipelineStage::Synthesize {
+                return Err(ModelRuntimeFailure {
+                    code: "MODEL_CONTEXT_EXCEEDED".to_string(),
+                    message: "fixture exact synthesis context rejection".to_string(),
+                    recoverable: false,
+                    request_attempts: Vec::new(),
+                });
+            }
+            Ok(())
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            FixtureRuntime.health()
+        }
+
+        fn runtime_id(&self) -> &str {
+            FixtureRuntime.runtime_id()
+        }
+
+        fn model_id(&self) -> &str {
+            FixtureRuntime.model_id()
         }
 
         fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
@@ -1238,6 +1274,203 @@ mod tests {
                     assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 4);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn pre_disclosure_coherent_checkpoints_fail_recoverably_before_delivery() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+
+        for checkpoint in [
+            ContinuationCheckpoint::Synthesized,
+            ContinuationCheckpoint::Verified,
+        ] {
+            let mut conn = init_db(":memory:").expect("schema should initialize");
+            let run =
+                prepare_checkpoint(&mut conn, &source, &pipeline, &FixtureRuntime, checkpoint);
+
+            match checkpoint {
+                ContinuationCheckpoint::Synthesized => {
+                    let mut synthesized = get_synthesized_document(&conn, &run.run_id)
+                        .expect("synthesis should load")
+                        .expect("synthesis should exist");
+                    synthesized.synthesis_version = "6.0.0".to_string();
+                    let artifact_json = serde_json::to_string(&synthesized)
+                        .expect("pre-disclosure synthesis should serialize");
+                    let artifact_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+                    conn.execute(
+                        "UPDATE synthesized_documents
+                         SET synthesis_version = ?1, artifact_hash = ?2, synthesized_artifact = ?3
+                         WHERE run_id = ?4",
+                        params![
+                            synthesized.synthesis_version,
+                            artifact_hash,
+                            artifact_json,
+                            run.run_id
+                        ],
+                    )
+                    .expect("pre-disclosure synthesis fixture should install");
+                }
+                ContinuationCheckpoint::Verified => {
+                    let mut verified = get_verified_document(&conn, &run.run_id)
+                        .expect("verification should load")
+                        .expect("verification should exist");
+                    verified.verification_version = "8.0.0".to_string();
+                    let artifact_json = serde_json::to_string(&verified)
+                        .expect("pre-disclosure verification should serialize");
+                    let artifact_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+                    conn.execute(
+                        "UPDATE verified_documents
+                         SET verification_version = ?1, artifact_hash = ?2, verified_artifact = ?3
+                         WHERE run_id = ?4",
+                        params![
+                            verified.verification_version,
+                            artifact_hash,
+                            artifact_json,
+                            run.run_id
+                        ],
+                    )
+                    .expect("pre-disclosure verification fixture should install");
+                }
+                _ => unreachable!("the fixture covers only affected coherent checkpoints"),
+            }
+
+            let runtime = (checkpoint == ContinuationCheckpoint::Synthesized)
+                .then_some(&FixtureRuntime as &dyn ModelRuntime);
+            let error = continue_run_to_summary(
+                &mut conn,
+                &run.run_id,
+                run.state_version,
+                pipeline.continuation_components(runtime),
+            )
+            .expect_err("pre-disclosure coherent checkpoints must not be delivered");
+            assert_eq!(error.code(), "COHERENT_CHECKPOINT_REQUIRES_RETRY");
+            assert_eq!(
+                get_pipeline_run(&conn, &run.run_id)
+                    .expect("failed run should load")
+                    .expect("failed run should exist")
+                    .state,
+                PipelineState::Failed
+            );
+            assert!(get_summary_artifact(&conn, &run.run_id)
+                .expect("summary query should succeed")
+                .is_none());
+            assert!(get_citation_artifact(&conn, &run.run_id)
+                .expect("citation query should succeed")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn pre_disclosure_fallback_checkpoints_remain_continuable() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+
+        for checkpoint in [
+            ContinuationCheckpoint::Synthesized,
+            ContinuationCheckpoint::Verified,
+        ] {
+            let mut conn = init_db(":memory:").expect("schema should initialize");
+            let run = prepare_checkpoint(
+                &mut conn,
+                &source,
+                &pipeline,
+                &SynthesisFallbackFixtureRuntime,
+                checkpoint,
+            );
+            let mut synthesized = get_synthesized_document(&conn, &run.run_id)
+                .expect("synthesis should load")
+                .expect("synthesis should exist");
+            assert_eq!(
+                synthesized.presentation_mode,
+                SummaryPresentationMode::ClaimLedgerFallback
+            );
+            synthesized.synthesis_version = "6.0.0".to_string();
+            let artifact_json = serde_json::to_string(&synthesized)
+                .expect("pre-disclosure fallback synthesis should serialize");
+            let artifact_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+            conn.execute(
+                "UPDATE synthesized_documents
+                 SET synthesis_version = ?1, artifact_hash = ?2, synthesized_artifact = ?3
+                 WHERE run_id = ?4",
+                params![
+                    synthesized.synthesis_version,
+                    artifact_hash,
+                    artifact_json,
+                    run.run_id
+                ],
+            )
+            .expect("pre-disclosure fallback synthesis fixture should install");
+            conn.execute_batch("DROP TRIGGER summary_synthesis_attempts_no_update;")
+                .expect("historical fixture should temporarily allow attempt replacement");
+            conn.execute(
+                "UPDATE summary_synthesis_attempts
+                 SET synthesis_version = ?1, artifact_hash = ?2, synthesized_artifact = ?3
+                 WHERE run_id = ?4 AND attempt_ordinal = 0",
+                params![
+                    synthesized.synthesis_version,
+                    artifact_hash,
+                    artifact_json,
+                    run.run_id
+                ],
+            )
+            .expect("pre-disclosure fallback synthesis attempt should install");
+            conn.execute_batch(
+                "CREATE TRIGGER summary_synthesis_attempts_no_update
+                 BEFORE UPDATE ON summary_synthesis_attempts
+                 BEGIN
+                     SELECT RAISE(ABORT, 'summary_synthesis_attempts are immutable');
+                 END;",
+            )
+            .expect("synthesis-attempt immutability should be restored");
+
+            if checkpoint == ContinuationCheckpoint::Verified {
+                let mut verified = get_verified_document(&conn, &run.run_id)
+                    .expect("verification should load")
+                    .expect("verification should exist");
+                verified.verification_version = "8.0.0".to_string();
+                let artifact_json = serde_json::to_string(&verified)
+                    .expect("pre-disclosure fallback verification should serialize");
+                let artifact_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+                conn.execute(
+                    "UPDATE verified_documents
+                     SET verification_version = ?1, artifact_hash = ?2, verified_artifact = ?3
+                     WHERE run_id = ?4",
+                    params![
+                        verified.verification_version,
+                        artifact_hash,
+                        artifact_json,
+                        run.run_id
+                    ],
+                )
+                .expect("pre-disclosure fallback verification fixture should install");
+            }
+
+            let runtime = (checkpoint == ContinuationCheckpoint::Synthesized)
+                .then_some(&SynthesisFallbackFixtureRuntime as &dyn ModelRuntime);
+            let completed = continue_run_to_summary(
+                &mut conn,
+                &run.run_id,
+                run.state_version,
+                pipeline.continuation_components(runtime),
+            )
+            .expect("pre-disclosure fallback checkpoint should remain continuable");
+
+            assert_eq!(
+                completed.citations.presentation_mode,
+                SummaryPresentationMode::ClaimLedgerFallback
+            );
+            assert!(completed
+                .summary
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE"));
+            assert!(completed
+                .summary
+                .warnings
+                .iter()
+                .all(|warning| warning.code != "COHERENT_SUMMARY_SOURCE_SELECTION_APPLIED"));
         }
     }
 
