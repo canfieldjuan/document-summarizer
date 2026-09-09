@@ -238,9 +238,18 @@ impl SourceFraming {
         }
     }
 
-    fn has_affirmative_marker(self, words: &[String]) -> bool {
-        words.iter().enumerate().any(|(index, word)| {
-            self.markers().contains(&word.as_str()) && framing_marker_is_affirmative(words, index)
+    fn affirmative_marker_position(self, words: &[String]) -> Option<usize> {
+        if words.first().is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "neither" | "no" | "nobody" | "none" | "nothing"
+            )
+        }) {
+            return None;
+        }
+        words.iter().enumerate().find_map(|(index, word)| {
+            (self.markers().contains(&word.as_str()) && framing_marker_is_affirmative(words, index))
+                .then_some(index)
         })
     }
 }
@@ -528,15 +537,47 @@ fn source_framing_preserved_by_claim(exact_quote: &str, claim: &str) -> bool {
     let body_words = framing_content_words(body);
     let required_overlap = body_words.len().min(2);
     required_overlap > 0
-        && framing_clauses(claim).any(|clause| {
-            framing.has_affirmative_marker(&clause)
-                && clause
+        && framing_clauses(claim)
+            .enumerate()
+            .any(|(clause_index, clause)| {
+                let Some(marker_index) = framing.affirmative_marker_position(&clause) else {
+                    return false;
+                };
+                clause
                     .iter()
                     .filter(|word| body_words.contains(*word))
                     .collect::<HashSet<_>>()
                     .len()
                     >= required_overlap
-        })
+                    || clause_index == 0 && framing_leads_clause(&clause[..marker_index])
+            })
+}
+
+fn framing_leads_clause(words_before_marker: &[String]) -> bool {
+    words_before_marker.iter().all(|word| {
+        matches!(
+            word.as_str(),
+            "a" | "an"
+                | "are"
+                | "common"
+                | "document"
+                | "important"
+                | "is"
+                | "it"
+                | "key"
+                | "known"
+                | "main"
+                | "primary"
+                | "safety"
+                | "source"
+                | "the"
+                | "these"
+                | "this"
+                | "those"
+                | "was"
+                | "were"
+        )
+    })
 }
 
 fn required_source_framing_and_body(exact_quote: &str) -> Option<(SourceFraming, &str)> {
@@ -4567,6 +4608,10 @@ mod tests {
                 "Key Risks\n\nEmployees and employers are affected.",
                 "This risk means employees and employers are affected.",
             ),
+            (
+                "Key Risks\n\nFatigue can cause accidents.",
+                "The danger is that tiredness can lead to crashes.",
+            ),
         ] {
             assert!(source_framing_preserved_by_claim(source, preserved));
         }
@@ -4594,6 +4639,10 @@ mod tests {
             (
                 "Important Exceptions\n\nSeasonal workers receive different treatment.",
                 "Seasonal workers are not exempt.",
+            ),
+            (
+                "Important Exceptions\n\nSeasonal workers are exempt.",
+                "No seasonal workers are exempt.",
             ),
             (
                 "Known Limitations\n\nThis remedy is described.",

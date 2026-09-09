@@ -3306,7 +3306,8 @@ release acceptance exposed issue #49
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multiline, overlong and unrelated headings. Framing checks reject prefix-only,
   negated, category-free and proposition-mismatched wording by requiring two
-  meaningful body terms when available, while accepting direct synonyms and
+  meaningful body terms when available. A leading framing construction may rely
+  on the existing source-aware semantic verdict, preserving full paraphrases and
   coordinated actors such as `employees and employers`. Tests also prove neutral and framed General
   verdicts, mixed evidence, Story/Contract isolation, lossy drafting-claim
   suppression and exact version-pair retry behavior. The full Rust library suite
