@@ -2877,3 +2877,62 @@ complete
 - Long Story and Contract synthesis, automatic routing, ingestion, OCR,
   persistence schema, UI, model training and unrelated synthesis repair remain
   outside this slice.
+
+## Slice 29 — Long General Decoder-Cap Recovery (2026-09-08)
+
+**Status**: implementation, automated gates and live-model regression acceptance
+complete
+
+**Verified root cause and implemented behavior**:
+- Long General synthesis uses a structured schema whose unit text has a
+  1,200-character maximum. In the public 111-page DOL run, the model's repair
+  response was valid JSON but its final unit ended at exactly that maximum on
+  the letter `o`, without terminal punctuation. The response used only 855 of
+  the configured 2,048 completion tokens, so increasing the output-token budget
+  would not address this decoder boundary.
+- The parser now classifies this exact condition only for General catalogs whose
+  selected sources all carry long-document selection windows. The capped unit
+  must otherwise be canonical and cite a nonempty, bounded set of unique known
+  source IDs. Shorter incomplete text, malformed metadata, short General input,
+  Story and Contract retain their existing invalid-response behavior.
+- One bounded repair asks the model to shorten only incomplete capped units and
+  preserve complete units and their source IDs. If the repair remains invalid,
+  the application may retain complete sibling units from the original response
+  only after normal source, window, completion, modality and evidence validation.
+  It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`. An all-clipped response
+  or one without a fully valid sibling still fails closed. The schema and its
+  1,200-character limit are unchanged.
+
+**Acceptance evidence so far**:
+- Paired tests accept a complete sentence at exactly 1,200 characters and prove
+  that an incomplete capped unit gets one repair. A corrected repair returns
+  both validated units; a repeated defect returns only the fully validated
+  sibling and reports the clipped-unit fallback. Negative probes reject a
+  1,199-character fragment, an all-clipped response, empty, duplicate, foreign
+  and nine-source metadata, unwindowed General catalogs, and Story catalogs.
+- `cargo test --all-targets` passed 431 library tests with 10 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting, the
+  TypeScript/Vite production build and `git diff --check` passed. The final
+  parser-ordering refinement was rerun through the focused tests and strict
+  Clippy.
+- With LM Studio empty, `qwen3-30b-a3b:latest` ran through Ollama at 100% GPU.
+  The full 111-page DOL acceptance fixture passed in 106.46 seconds with 186
+  requests, 81 claims, 83 synthesized evidence items and citations across 84
+  pages. It delivered six complete cited paragraphs and 2,744 summary
+  characters. The representative summary preserved the governing agriculture
+  laws, FLSA coverage and overtime qualifications, MSPA actor distinctions,
+  payroll and vehicle-insurance requirements, and field-sanitation quantities.
+
+**Non-scope and remaining limits**:
+- The live regression run used the pre-existing cross-window safe-unit fallback
+  from its first synthesis response; it exposed the decoder-capped repair
+  response but did not need the new clipped-unit fallback. The deterministic
+  runtime tests exercise both the successful repair and repeated-defect paths.
+- Earlier ledgered attempts failed before verification with an unfinished
+  synthesis response, but that historical initial-response failure did not
+  recur in the acceptance run. The current trace verifies the decoder-cap
+  mechanism, not that every historical failure had the same cause.
+- This slice does not change output or context budgets, structured schema
+  limits, Story or Contract behavior, automatic routing, persistence, UI,
+  ingestion, OCR, model training or semantic-verification policy.

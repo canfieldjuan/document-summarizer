@@ -24,6 +24,21 @@ const TARGET_SELECTED_SOURCES: usize = 16;
 const MAX_SOURCE_SELECTION_CANDIDATES_PER_REQUEST: usize = 16;
 const MAX_SOURCE_SELECTION_REQUESTS: usize = 64;
 const WINDOW_MIXED_RESPONSE_CODE: &str = "MODEL_SUMMARY_RESPONSE_WINDOW_MIXED";
+const UNIT_CLIPPED_RESPONSE_CODE: &str = "MODEL_SUMMARY_RESPONSE_UNIT_CLIPPED";
+const CLIPPED_UNIT_WITHHELD_WARNING_CODE: &str = "COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WithheldUnitKind {
+    CrossWindow,
+    DecoderClipped,
+}
+
+#[derive(Debug)]
+struct GeneratedSummaryContent {
+    claims: Vec<CitedClaim>,
+    evidence: Vec<EvidenceItem>,
+    withheld_unit_kind: Option<WithheldUnitKind>,
+}
 
 fn maximum_summary_units(source_count: usize) -> usize {
     source_count.div_ceil(3).clamp(1, MAX_SUMMARY_CLAIMS)
@@ -272,28 +287,38 @@ pub(super) fn synthesize(
             runtime_pipeline_failure(PipelineStage::Synthesize, "MODEL_HEALTH", failure)
         })?;
     }
-    let (summary_claims, synthesis_evidence, withheld_cross_window_units) =
-        generate_summary_with_validation_repair(
-            profile,
-            runtime,
-            &analyzed.document_id,
-            &synthesis_catalog,
-            user_prompt,
-            output_schema,
-            input_limit,
-            next_request_ordinal,
-            generation_seed,
-            control,
-        )?;
+    let GeneratedSummaryContent {
+        claims: summary_claims,
+        evidence: synthesis_evidence,
+        withheld_unit_kind,
+    } = generate_summary_with_validation_repair(
+        profile,
+        runtime,
+        &analyzed.document_id,
+        &synthesis_catalog,
+        user_prompt,
+        output_schema,
+        input_limit,
+        next_request_ordinal,
+        generation_seed,
+        control,
+    )?;
     let summary_text = render_cited_summary_with_evidence(&summary_claims, &synthesis_evidence)?;
     let mut warnings = analyzed.warnings.clone();
-    if withheld_cross_window_units {
-        warnings.push(PipelineWarning {
+    match withheld_unit_kind {
+        Some(WithheldUnitKind::CrossWindow) => warnings.push(PipelineWarning {
             code: WINDOW_WITHHELD_WARNING_CODE.to_string(),
             message: "One or more generated summary units combined separate source windows and were withheld after one bounded repair"
                 .to_string(),
             stage: Some(PipelineStage::Synthesize),
-        });
+        }),
+        Some(WithheldUnitKind::DecoderClipped) => warnings.push(PipelineWarning {
+            code: CLIPPED_UNIT_WITHHELD_WARNING_CODE.to_string(),
+            message: "One or more generated summary units reached the decoder text limit without a complete sentence and were withheld after one bounded repair"
+                .to_string(),
+            stage: Some(PipelineStage::Synthesize),
+        }),
+        None => {}
     }
     let result = SynthesizedDocument {
         document_id: analyzed.document_id.clone(),
@@ -746,7 +771,7 @@ fn generate_summary_with_validation_repair(
     starting_request_ordinal: u32,
     generation_seed: u64,
     control: &dyn ExecutionControl,
-) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>, bool), PipelineFailure> {
+) -> Result<GeneratedSummaryContent, PipelineFailure> {
     let mut request_prompt = user_prompt;
     let mut request_ordinal = 0;
     let maximum_repairs = if profile == SummaryProfile::Contract {
@@ -757,6 +782,8 @@ fn generate_summary_with_validation_repair(
     let mut validation_repairs = 0;
     let mut window_repairs = 0;
     let mut window_fallback = None;
+    let mut clipped_repairs = 0;
+    let mut clipped_fallback = None;
     loop {
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
         let ordinal = starting_request_ordinal
@@ -824,9 +851,55 @@ fn generate_summary_with_validation_repair(
                 request_ordinal += 1;
                 continue;
             }
+            Err(failure)
+                if failure.code == UNIT_CLIPPED_RESPONSE_CODE
+                    && profile == SummaryProfile::General
+                    && window_fallback.is_none()
+                    && clipped_repairs == 0 =>
+            {
+                clipped_fallback = parse_response_without_clipped_units(
+                    profile,
+                    &response.text,
+                    document_id,
+                    catalog,
+                )
+                .ok()
+                .filter(|parsed| {
+                    modal_strengthening_feedback(&parsed.0, &parsed.1)
+                        .is_ok_and(|feedback| feedback.is_empty())
+                });
+                let feedback = vec![format!(
+                    "One or more text fields reached the {MAX_UNIT_CHARACTERS}-character decoder limit before the sentence ended. Keep every complete unit and its source_ids unchanged; shorten each incomplete unit to a complete short paragraph ending in terminal punctuation"
+                )];
+                request_prompt = prompt_with_validation_feedback(&request_prompt, &feedback)?;
+                if synthesis_request_characters(profile, &request_prompt, &output_schema)?
+                    > input_limit
+                {
+                    return Err(stage_failure(
+                        PipelineStage::Synthesize,
+                        "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
+                        "The bounded summary validation repair cannot fit the synthesis context",
+                        false,
+                    ));
+                }
+                clipped_repairs += 1;
+                request_ordinal += 1;
+                continue;
+            }
             Err(failure) => {
                 if let Some((claims, evidence)) = window_fallback.take() {
-                    return Ok((claims, evidence, true));
+                    return Ok(GeneratedSummaryContent {
+                        claims,
+                        evidence,
+                        withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
+                    });
+                }
+                if let Some((claims, evidence)) = clipped_fallback.take() {
+                    return Ok(GeneratedSummaryContent {
+                        claims,
+                        evidence,
+                        withheld_unit_kind: Some(WithheldUnitKind::DecoderClipped),
+                    });
                 }
                 return Err(failure);
             }
@@ -841,11 +914,26 @@ fn generate_summary_with_validation_repair(
             ));
         }
         if feedback.is_empty() {
-            return Ok((parsed.0, parsed.1, false));
+            return Ok(GeneratedSummaryContent {
+                claims: parsed.0,
+                evidence: parsed.1,
+                withheld_unit_kind: None,
+            });
         }
         if validation_repairs >= maximum_repairs {
             if let Some((claims, evidence)) = window_fallback.take() {
-                return Ok((claims, evidence, true));
+                return Ok(GeneratedSummaryContent {
+                    claims,
+                    evidence,
+                    withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
+                });
+            }
+            if let Some((claims, evidence)) = clipped_fallback.take() {
+                return Ok(GeneratedSummaryContent {
+                    claims,
+                    evidence,
+                    withheld_unit_kind: Some(WithheldUnitKind::DecoderClipped),
+                });
             }
             return Err(if profile == SummaryProfile::Contract {
                 contract_validation_failure()
@@ -1760,9 +1848,27 @@ fn parse_response(
     let mut signatures = HashSet::new();
     let mut referenced = HashSet::new();
     let mut validated = Vec::with_capacity(raw.units.len());
+    let windowed_general = is_windowed_general_catalog(profile, catalog);
     for unit in raw.units {
-        if !canonical_bounded_text(&unit.text, MAX_UNIT_CHARACTERS)
-            || !pages::completion_valid(&unit.text)
+        let text_is_canonical = canonical_bounded_text(&unit.text, MAX_UNIT_CHARACTERS);
+        let text_is_complete = pages::completion_valid(&unit.text);
+        let clipped_source_ids = unit.source_ids.iter().collect::<HashSet<_>>();
+        let clipped_source_ids_are_valid = !unit.source_ids.is_empty()
+            && unit.source_ids.len() <= MAX_SOURCES_PER_UNIT
+            && clipped_source_ids.len() == unit.source_ids.len()
+            && clipped_source_ids
+                .iter()
+                .all(|source_id| candidates.contains_key(source_id.as_str()));
+        if windowed_general
+            && text_is_canonical
+            && unit.text.chars().count() == MAX_UNIT_CHARACTERS
+            && !text_is_complete
+            && clipped_source_ids_are_valid
+        {
+            return Err(clipped_unit_response());
+        }
+        if !text_is_canonical
+            || !text_is_complete
             || unit.source_ids.is_empty()
             || unit.source_ids.len() > MAX_SOURCES_PER_UNIT
         {
@@ -1820,6 +1926,15 @@ fn parse_response(
     Ok((summary_claims, synthesis_evidence))
 }
 
+fn is_windowed_general_catalog(profile: SummaryProfile, catalog: &SourceCatalog) -> bool {
+    profile == SummaryProfile::General
+        && !catalog.candidates.is_empty()
+        && catalog
+            .candidates
+            .iter()
+            .all(|candidate| candidate.selection_window.is_some())
+}
+
 fn parse_response_without_mixed_windows(
     profile: SummaryProfile,
     response: &str,
@@ -1860,6 +1975,56 @@ fn parse_response_without_mixed_windows(
     }
     if withheld == 0 || retained.is_empty() {
         return Err(window_mixed_response());
+    }
+    let retained =
+        serde_json::to_string(&RawResponse { units: retained }).map_err(|_| invalid_response())?;
+    parse_response(profile, &retained, document_id, catalog)
+}
+
+fn parse_response_without_clipped_units(
+    profile: SummaryProfile,
+    response: &str,
+    document_id: &str,
+    catalog: &SourceCatalog,
+) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
+    if !is_windowed_general_catalog(profile, catalog) {
+        return Err(clipped_unit_response());
+    }
+    let raw: RawResponse = serde_json::from_str(response).map_err(|_| invalid_response())?;
+    if raw.units.is_empty() || raw.units.len() > maximum_summary_units_for_catalog(catalog) {
+        return Err(invalid_response());
+    }
+    let known_source_ids = catalog
+        .candidates
+        .iter()
+        .map(|candidate| candidate.request_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut retained = Vec::with_capacity(raw.units.len());
+    let mut withheld = 0usize;
+    for unit in raw.units {
+        let clipped = canonical_bounded_text(&unit.text, MAX_UNIT_CHARACTERS)
+            && unit.text.chars().count() == MAX_UNIT_CHARACTERS
+            && !pages::completion_valid(&unit.text);
+        if clipped {
+            let unique_source_ids = unit
+                .source_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            if unit.source_ids.is_empty()
+                || unit.source_ids.len() > MAX_SOURCES_PER_UNIT
+                || unique_source_ids.len() != unit.source_ids.len()
+                || !unique_source_ids.is_subset(&known_source_ids)
+            {
+                return Err(invalid_response());
+            }
+            withheld += 1;
+        } else {
+            retained.push(unit);
+        }
+    }
+    if withheld == 0 || retained.is_empty() {
+        return Err(clipped_unit_response());
     }
     let retained =
         serde_json::to_string(&RawResponse { units: retained }).map_err(|_| invalid_response())?;
@@ -1962,6 +2127,15 @@ fn window_mixed_response() -> PipelineFailure {
         PipelineStage::Synthesize,
         WINDOW_MIXED_RESPONSE_CODE,
         "Each General summary unit must cite sources from exactly one selection window",
+        true,
+    )
+}
+
+fn clipped_unit_response() -> PipelineFailure {
+    stage_failure(
+        PipelineStage::Synthesize,
+        UNIT_CLIPPED_RESPONSE_CODE,
+        "A coherent summary unit reached the decoder text limit before its sentence completed",
         true,
     )
 }
@@ -2309,6 +2483,11 @@ mod tests {
         corrects_repair: bool,
     }
 
+    struct ClippedUnitRepairRuntime {
+        requests: Mutex<Vec<ModelRequest>>,
+        corrects_repair: bool,
+    }
+
     struct ContractCoverageRepairRuntime {
         requests: Mutex<Vec<ModelRequest>>,
         corrects_repair: bool,
@@ -2337,6 +2516,19 @@ mod tests {
     }
 
     impl WindowRepairRuntime {
+        fn new(corrects_repair: bool) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                corrects_repair,
+            }
+        }
+
+        fn requests(&self) -> Vec<ModelRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl ClippedUnitRepairRuntime {
         fn new(corrects_repair: bool) -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
@@ -2456,6 +2648,43 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "window-repair-model"
+        }
+    }
+
+    impl ModelRuntime for ClippedUnitRepairRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            self.requests.lock().unwrap().push(request.clone());
+            let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+            let is_repair = prompt.get("validation_feedback").is_some();
+            let units = if is_repair && self.corrects_repair {
+                json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                ])
+            } else {
+                json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2","s3"]}
+                ])
+            };
+            Ok(ModelResponse {
+                text: json!({"units":units}).to_string(),
+                runtime_id: self.runtime_id().to_string(),
+                model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
+            })
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "clipped-unit-repair-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "clipped-unit-repair-model"
         }
     }
 
@@ -3807,9 +4036,12 @@ mod tests {
         for (index, response) in runtime.responses().iter().enumerate() {
             println!("CONTRACT_LIVE_RAW_ATTEMPT_{}\n{}", index + 1, response.text);
         }
-        let (claims, evidence, withheld) =
-            result.expect("Contract generation and bounded source repair should complete");
-        assert!(!withheld);
+        let GeneratedSummaryContent {
+            claims,
+            evidence,
+            withheld_unit_kind,
+        } = result.expect("Contract generation and bounded source repair should complete");
+        assert_eq!(withheld_unit_kind, None);
         assert!(!claims.is_empty());
         assert!(claims.len() <= maximum_summary_units(CONTRACT_SOURCE_LINES.len()));
         assert_eq!(evidence.len(), CONTRACT_SOURCE_LINES.len());
@@ -3888,6 +4120,223 @@ mod tests {
     }
 
     #[test]
+    fn clipped_unit_salvage_is_exact_long_general_and_validates_discarded_metadata() {
+        let mut candidates = vec![
+            candidate("s1", "evidence-1", 1),
+            candidate("s2", "evidence-2", 2),
+            candidate("s3", "evidence-3", 3),
+            candidate("s4", "evidence-4", 4),
+            candidate("s5", "evidence-5", 5),
+            candidate("s6", "evidence-6", 6),
+            candidate("s7", "evidence-7", 7),
+            candidate("s8", "evidence-8", 8),
+            candidate("s9", "evidence-9", 9),
+        ];
+        for (index, candidate) in candidates.iter_mut().enumerate() {
+            candidate.selection_window = Some(index / 2);
+        }
+        let catalog = SourceCatalog {
+            candidates,
+            omitted_source_units: 0,
+        };
+        let response = |text: String, source_ids: Vec<&str>| {
+            json!({
+                "units": [
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":text,"source_ids":source_ids}
+                ]
+            })
+            .to_string()
+        };
+        let clipped = response("x".repeat(MAX_UNIT_CHARACTERS), vec!["s2", "s3"]);
+        let failure = parse_response(SummaryProfile::General, &clipped, "document-1", &catalog)
+            .expect_err("the decoder-capped incomplete unit must be classified explicitly");
+        assert_eq!(failure.code, UNIT_CLIPPED_RESPONSE_CODE);
+        let (claims, evidence) = parse_response_without_clipped_units(
+            SummaryProfile::General,
+            &clipped,
+            "document-1",
+            &catalog,
+        )
+        .expect("a complete sibling unit may be retained from long General synthesis");
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].text, "The first source remains supported.");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].evidence_id, "evidence-1");
+
+        let complete_at_limit = response(
+            format!("{}.", "x".repeat(MAX_UNIT_CHARACTERS - 1)),
+            vec!["s2"],
+        );
+        assert!(parse_response(
+            SummaryProfile::General,
+            &complete_at_limit,
+            "document-1",
+            &catalog,
+        )
+        .is_ok());
+
+        let shorter_incomplete = response("x".repeat(MAX_UNIT_CHARACTERS - 1), vec!["s2"]);
+        assert_eq!(
+            parse_response(
+                SummaryProfile::General,
+                &shorter_incomplete,
+                "document-1",
+                &catalog,
+            )
+            .unwrap_err()
+            .code,
+            "MODEL_SUMMARY_RESPONSE_INVALID"
+        );
+        assert!(parse_response_without_clipped_units(
+            SummaryProfile::General,
+            &shorter_incomplete,
+            "document-1",
+            &catalog,
+        )
+        .is_err());
+
+        for invalid_source_ids in [
+            vec![],
+            vec!["foreign"],
+            vec!["s2", "s2"],
+            vec!["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"],
+        ] {
+            let invalid = response("x".repeat(MAX_UNIT_CHARACTERS), invalid_source_ids);
+            assert_eq!(
+                parse_response(SummaryProfile::General, &invalid, "document-1", &catalog)
+                    .unwrap_err()
+                    .code,
+                "MODEL_SUMMARY_RESPONSE_INVALID"
+            );
+            assert!(parse_response_without_clipped_units(
+                SummaryProfile::General,
+                &invalid,
+                "document-1",
+                &catalog,
+            )
+            .is_err());
+        }
+
+        let all_clipped = json!({
+            "units": [{
+                "text":"x".repeat(MAX_UNIT_CHARACTERS),
+                "source_ids":["s1"]
+            }]
+        })
+        .to_string();
+        assert!(parse_response_without_clipped_units(
+            SummaryProfile::General,
+            &all_clipped,
+            "document-1",
+            &catalog,
+        )
+        .is_err());
+
+        let mut unwindowed = catalog.clone();
+        for candidate in &mut unwindowed.candidates {
+            candidate.selection_window = None;
+        }
+        assert_eq!(
+            parse_response(SummaryProfile::General, &clipped, "document-1", &unwindowed,)
+                .unwrap_err()
+                .code,
+            "MODEL_SUMMARY_RESPONSE_INVALID"
+        );
+        assert!(parse_response_without_clipped_units(
+            SummaryProfile::General,
+            &clipped,
+            "document-1",
+            &unwindowed,
+        )
+        .is_err());
+        assert_eq!(
+            parse_response(SummaryProfile::Story, &clipped, "document-1", &catalog)
+                .unwrap_err()
+                .code,
+            "MODEL_SUMMARY_RESPONSE_INVALID"
+        );
+        assert!(parse_response_without_clipped_units(
+            SummaryProfile::Story,
+            &clipped,
+            "document-1",
+            &catalog,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn clipped_long_general_unit_gets_one_repair_then_safe_fallback() {
+        let mut candidates = vec![
+            candidate("s1", "evidence-1", 1),
+            candidate("s2", "evidence-2", 2),
+            candidate("s3", "evidence-3", 3),
+            candidate("s4", "evidence-4", 4),
+        ];
+        for (index, candidate) in candidates.iter_mut().enumerate() {
+            candidate.selection_window = Some(index / 2);
+        }
+        let catalog = SourceCatalog {
+            candidates,
+            omitted_source_units: 0,
+        };
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let correcting = ClippedUnitRepairRuntime::new(true);
+        let GeneratedSummaryContent {
+            claims,
+            evidence,
+            withheld_unit_kind,
+        } = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &correcting,
+            "document-1",
+            &catalog,
+            prompt.clone(),
+            schema.clone(),
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("one bounded repair should replace a decoder-clipped unit");
+        assert_eq!(claims.len(), 2);
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(withheld_unit_kind, None);
+        let requests = correcting.requests();
+        assert_eq!(requests.len(), 2);
+        let repair_prompt = serde_json::from_str::<Value>(&requests[1].user_prompt).unwrap();
+        assert!(repair_prompt["validation_feedback"]
+            .as_array()
+            .is_some_and(|feedback| feedback.iter().any(|item| item
+                .as_str()
+                .is_some_and(|message| message.contains("1200-character decoder limit")))));
+
+        let repeating = ClippedUnitRepairRuntime::new(false);
+        let GeneratedSummaryContent {
+            claims,
+            evidence,
+            withheld_unit_kind,
+        } = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &repeating,
+            "document-1",
+            &catalog,
+            prompt,
+            schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("a complete sibling should survive one failed clipped-unit repair");
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].text, "The first source remains supported.");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(withheld_unit_kind, Some(WithheldUnitKind::DecoderClipped));
+        assert_eq!(repeating.requests().len(), 2);
+    }
+
+    #[test]
     fn modal_repair_controls_second_request_and_fails_closed_after_one_retry() {
         let catalog = SourceCatalog {
             candidates: vec![SourceCandidate {
@@ -3901,7 +4350,11 @@ mod tests {
         };
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
         let runtime = ModalRepairRuntime::new(true);
-        let (claims, evidence, withheld) = generate_summary_with_validation_repair(
+        let GeneratedSummaryContent {
+            claims,
+            evidence,
+            withheld_unit_kind,
+        } = generate_summary_with_validation_repair(
             SummaryProfile::General,
             &runtime,
             "document-1",
@@ -3914,7 +4367,7 @@ mod tests {
             &UNCONTROLLED_EXECUTION,
         )
         .unwrap();
-        assert!(!withheld);
+        assert_eq!(withheld_unit_kind, None);
         assert_eq!(claims[0].text, "The interpreter should retain the section.");
         assert_eq!(claims[0].evidence_ids, vec!["evidence-1"]);
         assert_eq!(
@@ -3971,7 +4424,11 @@ mod tests {
         };
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
         let runtime = WindowRepairRuntime::new(true);
-        let (claims, _, withheld) = generate_summary_with_validation_repair(
+        let GeneratedSummaryContent {
+            claims,
+            evidence: _,
+            withheld_unit_kind,
+        } = generate_summary_with_validation_repair(
             SummaryProfile::General,
             &runtime,
             "document-1",
@@ -3984,7 +4441,7 @@ mod tests {
             &UNCONTROLLED_EXECUTION,
         )
         .expect("one structural repair and one modal repair should succeed");
-        assert!(!withheld);
+        assert_eq!(withheld_unit_kind, None);
         assert_eq!(claims[0].text, "The interpreter should retain the section.");
         let requests = runtime.requests();
         assert_eq!(requests.len(), 3);
@@ -3997,7 +4454,11 @@ mod tests {
         );
 
         let repeating = WindowRepairRuntime::new(false);
-        let (claims, evidence, withheld) = generate_summary_with_validation_repair(
+        let GeneratedSummaryContent {
+            claims,
+            evidence,
+            withheld_unit_kind,
+        } = generate_summary_with_validation_repair(
             SummaryProfile::General,
             &repeating,
             "document-1",
@@ -4010,7 +4471,7 @@ mod tests {
             &UNCONTROLLED_EXECUTION,
         )
         .expect("a valid original unit should survive a failed bounded window repair");
-        assert!(withheld);
+        assert_eq!(withheld_unit_kind, Some(WithheldUnitKind::CrossWindow));
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].text, "Exact source statement 2.");
         assert_eq!(evidence.len(), 1);
@@ -4022,7 +4483,11 @@ mod tests {
         let catalog = contract_catalog();
         let (prompt, schema) = prompt_and_schema(SummaryProfile::Contract, &catalog).unwrap();
         let runtime = ContractCoverageRepairRuntime::new(true);
-        let (claims, evidence, withheld) = generate_summary_with_validation_repair(
+        let GeneratedSummaryContent {
+            claims,
+            evidence,
+            withheld_unit_kind,
+        } = generate_summary_with_validation_repair(
             SummaryProfile::Contract,
             &runtime,
             "contract-document",
@@ -4035,7 +4500,7 @@ mod tests {
             &UNCONTROLLED_EXECUTION,
         )
         .expect("one repair should restore every short-contract clause");
-        assert!(!withheld);
+        assert_eq!(withheld_unit_kind, None);
         assert_eq!(claims.len(), 2);
         assert_eq!(evidence.len(), CONTRACT_SOURCE_LINES.len());
         assert!(claims[0]
