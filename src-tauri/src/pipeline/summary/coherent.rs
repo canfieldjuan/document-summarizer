@@ -4234,7 +4234,7 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Quota is at most 5 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The count is less than 450 cases. The quota is at most 400 cases. Outdoor temperature is at most 5 degrees Celsius. Plan A charges at most 5 dollars. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Quota is at most 5 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The count is less than 450 cases. The quota is at most 400 cases. Outdoor temperature is at most 5 degrees Celsius. Cargo weighs at most 5 kilograms. Plan A charges at most 5 dollars. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
@@ -4250,6 +4250,9 @@ mod tests {
         let mut negative_actor_condition = catalog().candidates[0].evidence.clone();
         negative_actor_condition.evidence_id = "negative-actor-condition".into();
         negative_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they don't recruit for compensation.".into();
+        let mut unless_actor_condition = catalog().candidates[1].evidence.clone();
+        unless_actor_condition.evidence_id = "unless-actor-condition".into();
+        unless_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA unless they recruit for compensation.".into();
         let mut contracted_bound = catalog().candidates[1].evidence.clone();
         contracted_bound.evidence_id = "contracted-bound".into();
         contracted_bound.exact_quote = "The limit isn't more than 500 units.".into();
@@ -4313,6 +4316,9 @@ mod tests {
         immediate_family.evidence_id = "immediate-family".into();
         immediate_family.exact_quote =
             "Eligibility is limited to immediate family members of the owner.".into();
+        let mut mixed_family = catalog().candidates[0].evidence.clone();
+        mixed_family.evidence_id = "mixed-family".into();
+        mixed_family.exact_quote = "Immediate family members qualify under exemption A. Family members qualify under exemption B.".into();
         let mut modal = catalog().candidates[0].evidence.clone();
         modal.evidence_id = "modal".into();
         modal.exact_quote = "The interpreter should retain the operating context.".into();
@@ -4331,6 +4337,7 @@ mod tests {
             combined_actors,
             coordinated_actors,
             negative_actor_condition,
+            unless_actor_condition,
             contracted_bound,
             leading_decimal,
             transport,
@@ -4349,6 +4356,7 @@ mod tests {
             transitive_evaluation,
             nonliteral_evaluation,
             immediate_family,
+            mixed_family,
             modal,
             mixed_modal,
             contracted_modal,
@@ -4495,6 +4503,16 @@ mod tests {
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
+                claim_id: "supported-generic-unit".into(),
+                text: "Cargo weighs at most 5 kilograms.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-generic-unit".into(),
+                text: "Cargo weighs at most 5 pounds.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
                 claim_id: "broadened-enumeration".into(),
                 text: "A family member of the owner qualifies for the exemption.".into(),
                 evidence_ids: vec!["flsa".into()],
@@ -4508,6 +4526,11 @@ mod tests {
                 claim_id: "broadened-immediate-family".into(),
                 text: "A family member of the owner is eligible.".into(),
                 evidence_ids: vec!["immediate-family".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-mixed-family-scope".into(),
+                text: "A family member qualifies under exemption B.".into(),
+                evidence_ids: vec!["mixed-family".into()],
             },
             CitedClaim {
                 claim_id: "supported-formatted-integer".into(),
@@ -4655,6 +4678,16 @@ mod tests {
                 evidence_ids: vec!["negative-actor-condition".into()],
             },
             CitedClaim {
+                claim_id: "supported-unless-actor-condition".into(),
+                text: "FLCs are subject to MSPA unless they recruit for compensation.".into(),
+                evidence_ids: vec!["unless-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-unless-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
+                evidence_ids: vec!["unless-actor-condition".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-compound-actor-conditions".into(),
                 text: "FLCs are subject to MSPA if they recruit workers for money, and AGERs are subject to MSPA if they recruit workers."
                     .into(),
@@ -4740,6 +4773,16 @@ mod tests {
             CitedClaim {
                 claim_id: "deferred-unknown-route-actor".into(),
                 text: "Plan D transports workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-passive-route-agent".into(),
+                text: "Workers are transported by Plan B from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-passive-route-agent".into(),
+                text: "Workers are transported by Plan C from station to field.".into(),
                 evidence_ids: vec!["actor-transport".into()],
             },
             CitedClaim {
@@ -4890,7 +4933,9 @@ mod tests {
             "supported-weaker-value",
             "supported-compound-unit",
             "supported-single-subject-auxiliary",
+            "supported-generic-unit",
             "supported-immediate-family",
+            "supported-mixed-family-scope",
             "supported-formatted-integer",
             "supported-formatted-decimal",
             "supported-negative-boundary",
@@ -4905,6 +4950,7 @@ mod tests {
             "supported-leading-condition",
             "supported-leading-then-condition",
             "supported-negative-actor-condition",
+            "supported-unless-actor-condition",
             "supported-compound-actor-conditions",
             "supported-endpoints",
             "supported-inverted-source-endpoints",
@@ -4913,6 +4959,7 @@ mod tests {
             "supported-paraphrased-actor-endpoints",
             "supported-unlisted-route-predicate",
             "deferred-unknown-route-actor",
+            "supported-passive-route-agent",
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
@@ -4943,6 +4990,7 @@ mod tests {
             "changed-stronger-value",
             "changed-compound-unit",
             "transferred-single-subject-auxiliary",
+            "changed-generic-unit",
             "broadened-enumeration",
             "broadened-immediate-family",
             "changed-formatted-decimal",
@@ -4959,6 +5007,7 @@ mod tests {
             "transferred-leading-condition",
             "transferred-leading-then-condition",
             "changed-negative-actor-condition",
+            "changed-unless-actor-condition",
             "transferred-compound-actor-condition",
             "changed-endpoint",
             "changed-inverted-source-endpoints",
@@ -4967,6 +5016,7 @@ mod tests {
             "transferred-paraphrased-actor-endpoints",
             "transferred-unlisted-route-predicate",
             "transferred-cited-nonroute-actor",
+            "transferred-passive-route-agent",
             "transferred-evaluation",
             "changed-evaluation-polarity",
             "transferred-shared-copula-evaluation",

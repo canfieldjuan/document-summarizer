@@ -2690,15 +2690,18 @@ complete
   paraphrases remain for the model verifier rather than being mechanically
   rejected. Numeric relations retain
   signs, normalize bounded English cardinal wording, compare exact normalized
-  decimal thresholds, bind known units and explicit temperature-scale qualifiers
-  when both source and claim expose them, accept only logically entailed weak-bound
+  decimal thresholds, bind ordinary following unit tokens and explicit
+  temperature-scale qualifiers when both source and claim expose them while
+  excluding grammatical continuations, accept only logically entailed weak-bound
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
   when cited text exposes the same context. Restrictive `immediate family`
-  wording must remain explicit in a family-member claim, while singular and
-  plural `member` forms are equivalent. Directional parsing
+  wording must remain explicit in a family-member claim when every cited family
+  occurrence is restricted, while singular and plural `member` forms are
+  equivalent and an explicit unqualified source occurrence remains usable. Directional parsing
   accepts both `from … to …` and `to … from …` syntax and binds a route to its
   mechanically known local actor independently of predicate wording when the
-  claim prefix identifies an actor already attached to a cited route. Evaluative relations retain negation while treating additive
+  claim prefix identifies an actor already attached to a cited route, and an
+  explicit passive `by` agent owns its route. Evaluative relations retain negation while treating additive
   `not only … but also` wording as affirmative. The kinship backstop recognizes
   clear noun uses such as `relative of` without treating comparative `relative
   to` as a family enumeration. Passive numeric wording binds a leading bound to
@@ -2716,7 +2719,8 @@ complete
   polarity to the same local subject and object context, including contracted
   weak-modality negation and one-word `cannot`.
   Leading conditions accept either a comma or `then`, and compound claims check
-  every completed actor-condition relation. Directional
+  every completed actor-condition relation; `unless` contributes exclusionary
+  polarity when a qualifier is compared. Directional
   checks reject a known reversed endpoint even when the other endpoint is new
   and reject a route transferred to an actor named at the start of another cited
   clause; an actor absent from cited clause starts remains for model judgment,
@@ -2743,28 +2747,31 @@ complete
   synonymous transport endpoints including `home`, inverted source-route syntax,
   a route retained on its source actor across carry and unlisted-predicate paraphrases,
   a route claim for a mechanically unknown actor left to model verification,
-  an unchanged Celsius qualifier, explicit `immediate family` scope across
-  singular/plural wording,
+  an unchanged Celsius qualifier, a generic unchanged mass unit, explicit
+  `immediate family` scope across singular/plural wording, and an unqualified
+  family claim when cited evidence contains both restricted and unrestricted scopes,
   comparative `relative to`, additive, subject-bound, shared-subject,
   shared-copula, transitive, compound and negative evaluations, a nonliteral
   safety paraphrase left to model verification, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
-  changed from dollars to percent or Celsius to Fahrenheit, a stronger numeric
+  changed from dollars to percent, Celsius to Fahrenheit, or kilograms to pounds,
+  a stronger numeric
   threshold, a removed negative sign,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
   distinct rules in one item or compound sentence, and a single actor borrowing
   another actor's qualifier, including a leading condition), an active or
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
-  affirmative, a contracted or `cannot` weak modal strengthened to a strong modal,
+  affirmative, an `unless` condition reversed to `if`, a contracted or `cannot`
+  weak modal strengthened to a strong modal,
   explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
   bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
   prefix, comma-less and compound actor-condition transfers, endpoint reversal from
   either source-route syntax even with one newly worded endpoint, a route moved
   from one mechanically known actor to another even when the route predicate is
   paraphrased with an unlisted verb or when the target actor is named only in a
-  cited non-route clause,
+  cited non-route clause, a passive route assigned to the wrong explicit agent,
   removal of the restrictive
   `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula and transitive wording, removed

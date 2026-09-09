@@ -491,7 +491,59 @@ fn numeric_unit(tokens: &[String], end: usize) -> Option<String> {
     {
         index += 2;
     }
-    let unit = match tokens.get(index)?.as_str() {
+    let raw_unit = tokens.get(index)?.as_str();
+    if matches!(
+        raw_unit,
+        "a" | "an"
+            | "the"
+            | "and"
+            | "or"
+            | "but"
+            | "if"
+            | "when"
+            | "unless"
+            | "that"
+            | "which"
+            | "who"
+            | "where"
+            | "from"
+            | "to"
+            | "by"
+            | "of"
+            | "in"
+            | "on"
+            | "at"
+            | "for"
+            | "with"
+            | "without"
+            | "as"
+            | "than"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "be"
+            | "been"
+            | "being"
+            | "has"
+            | "have"
+            | "had"
+            | "do"
+            | "does"
+            | "did"
+            | "can"
+            | "could"
+            | "may"
+            | "might"
+            | "must"
+            | "shall"
+            | "should"
+            | "will"
+            | "would"
+    ) {
+        return None;
+    }
+    let unit = match raw_unit {
         "dollar" | "dollars" => "dollar",
         "percent" | "percentage" | "percentages" => "percent",
         "application" | "applications" => "application",
@@ -502,15 +554,18 @@ fn numeric_unit(tokens: &[String], end: usize) -> Option<String> {
         "day" | "days" => "day",
         "case" | "cases" => "case",
         "worker" | "workers" => "worker",
-        _ => return None,
-    };
+        "kilogram" | "kilograms" | "kg" | "kgs" => "kilogram",
+        "pound" | "pounds" | "lb" | "lbs" => "pound",
+        _ => raw_unit.strip_suffix('s').unwrap_or(raw_unit),
+    }
+    .to_string();
     let qualifier = (unit == "degree")
         .then(|| tokens.get(index + 1).map(String::as_str))
         .flatten()
         .filter(|word| matches!(*word, "celsius" | "centigrade" | "fahrenheit" | "kelvin"));
     Some(match qualifier {
         Some(qualifier) => format!("{unit} {qualifier}"),
-        None => unit.to_string(),
+        None => unit,
     })
 }
 
@@ -794,15 +849,36 @@ fn broader_enumeration_supported(claim: &str, evidence: &[&EvidenceItem]) -> boo
     {
         return false;
     }
-    let source_has_immediate_family = evidence.iter().any(|item| {
-        contains_words(&item.exact_quote, &["immediate", "family", "member"])
-            || contains_words(&item.exact_quote, &["immediate", "family", "members"])
-    });
+    let family_scopes = |text: &str| {
+        let tokens = words(text);
+        tokens
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| {
+                pair[0] == "family" && matches!(pair[1].as_str(), "member" | "members")
+            })
+            .map(|(index, _)| {
+                tokens
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|word| word == "immediate")
+            })
+            .collect::<Vec<_>>()
+    };
+    let source_scopes = evidence
+        .iter()
+        .flat_map(|item| family_scopes(&item.exact_quote))
+        .collect::<Vec<_>>();
+    let source_has_immediate_family = source_scopes.contains(&true);
+    let source_has_unqualified_family = source_scopes.contains(&false);
     let claim_has_family = contains_words(claim, &["family", "member"])
         || contains_words(claim, &["family", "members"]);
     let claim_preserves_immediate = contains_words(claim, &["immediate", "family", "member"])
         || contains_words(claim, &["immediate", "family", "members"]);
-    if source_has_immediate_family && claim_has_family && !claim_preserves_immediate {
+    if source_has_immediate_family
+        && !source_has_unqualified_family
+        && claim_has_family
+        && !claim_preserves_immediate
+    {
         return false;
     }
     let kinship_relative = |text: &str| {
@@ -848,6 +924,12 @@ struct DirectionalRelation {
 
 fn directional_actor(tokens: &[String], anchor: usize) -> Vec<String> {
     let context = &tokens[..anchor];
+    if let Some(by) = context.iter().rposition(|word| word == "by") {
+        let agent = strip_leading_article(&context[by + 1..]);
+        if !agent.is_empty() {
+            return agent.iter().take(4).cloned().collect();
+        }
+    }
     let Some(predicate) = context.iter().rposition(|word| {
         matches!(
             word.as_str(),
@@ -1263,7 +1345,10 @@ fn qualifier_polarities(tokens: &[String], concept: &[&str]) -> HashSet<bool> {
         .iter()
         .enumerate()
         .filter(|(_, word)| concept.contains(&word.as_str()))
-        .map(|(index, _)| negation_present(&tokens[index.saturating_sub(6)..index]))
+        .map(|(index, _)| {
+            let context = &tokens[index.saturating_sub(6)..index];
+            negation_present(context) || context.iter().any(|word| word == "unless")
+        })
         .collect()
 }
 
