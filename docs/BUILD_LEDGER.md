@@ -2756,9 +2756,15 @@ complete
   evaluation and polarity. A literal evaluation otherwise requires the exact
   cited subject or an explicit conjunctive subject component; it cannot move
   from a qualified subject such as a procedure's review to the shorter procedure
-  name. The lexical negatives `unimportant`, `ineffective`, `unsafe`, and
-  `unhealthy` carry negative polarity when compared with their positive
-  evaluation concepts.
+  name. The lexical negatives `unimportant`, `ineffective`, `unsafe`,
+  `unhealthy`, `unnecessary`, and `nonessential` carry negative polarity when
+  compared with their positive evaluation concepts. A source-side temporal
+  route restriction introduced by `during`, `until`, or `throughout` must
+  survive in a mechanically compared route claim; otherwise that broader claim
+  is downgraded. A temporal phrase found only in a claim still remains for the
+  model verifier. Plain copular numeric equality recognizes an intervening
+  `not`, so both equality-to-inequality and inequality-to-equality changes are
+  rejected.
 - Verification artifacts now use version `8.0.0`. The previous coherent
   `7.0.0` contract remains readable, while new results cannot be mistaken for
   artifacts produced without the deterministic veto. Synthesis, summary,
@@ -2782,7 +2788,8 @@ complete
   a route retained on its source actor across carry and unlisted-predicate paraphrases,
   a route claim for a mechanically unknown actor left to model verification,
   either member of a coordinated source actor retaining the shared route, a
-  disjunctive actor alternative left to model verification,
+  disjunctive actor alternative left to model verification, a retained
+  source-side temporal route restriction,
   an unchanged Celsius qualifier, a generic unchanged mass unit, a square-unit
   spelling variant including a nested compound denominator, an ordinary
   predicate across an inserted auxiliary, a symbolic percent source retained as `percent`, a prefix
@@ -2792,7 +2799,8 @@ complete
   family claim when cited evidence contains both restricted and unrestricted scopes,
   comparative `relative to`, additive, subject-bound, shared-subject,
   shared-copula, transitive, compound, coordinated, qualified-subject, explicit
-  and lexical negative evaluations including `unimportant`, a nonliteral
+  and lexical negative evaluations including `unimportant`, `unnecessary`, and
+  `nonessential`, a nonliteral
   safety paraphrase left to model verification, and qualified modality including
   a negative strong source retained with the same polarity.
   Opposite probes reject an exclusive
@@ -2814,19 +2822,22 @@ complete
   plain `if` strengthened to `only if`, a contracted or `cannot`
   weak modal strengthened to a strong modal, a `cannot be more than` numeric
   constraint reversed to affirmative `more than`,
-  explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
+  explicitly negated inclusive, `under`, and exact comparators, both polarity
+  changes around a negated copular equality, a leading-decimal
   bound reversal, a named-plan transfer hidden by an auxiliary, ordinary
   predicate, or shared name prefix, comma-less and compound actor-condition transfers, endpoint reversal from
   either source-route syntax even with one newly worded endpoint, a route moved
   from one mechanically known actor to another even when the route predicate is
   paraphrased with an unlisted verb or when the target actor is named only in a
   cited non-route clause, including both conditions together, a passive route assigned to the wrong explicit agent,
-  or a coordinated route assigned to a cited non-owner,
+  or a coordinated route assigned to a cited non-owner, omission of a cited
+  temporal route restriction,
   removal of the restrictive
   `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula, transitive and
   coordinated wording or from a qualified evaluation subject to its shorter
-  subphrase, lexical negative evaluations including `unimportant` reversed to positive, removed
+  subphrase, lexical negative evaluations including `unimportant`,
+  `unnecessary`, and `nonessential` reversed to positive, removed
   evaluation negation, `should`-to-`must` strengthening, strong modality
   transferred between named plans, and either polarity reversal of an existing
   strong modal. Separate probes

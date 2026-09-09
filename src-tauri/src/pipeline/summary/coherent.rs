@@ -4275,6 +4275,9 @@ mod tests {
         let mut plain_equality = catalog().candidates[1].evidence.clone();
         plain_equality.evidence_id = "plain-equality".into();
         plain_equality.exact_quote = "The capacity is 500 units.".into();
+        let mut negative_equality = catalog().candidates[0].evidence.clone();
+        negative_equality.evidence_id = "negative-equality".into();
+        negative_equality.exact_quote = "The threshold is not 500 units.".into();
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
         transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
@@ -4292,6 +4295,10 @@ mod tests {
         disjunctive_route.evidence_id = "disjunctive-route".into();
         disjunctive_route.exact_quote =
             "Plan A or Plan B transport workers from station to field.".into();
+        let mut temporally_scoped_route = catalog().candidates[0].evidence.clone();
+        temporally_scoped_route.evidence_id = "temporally-scoped-route".into();
+        temporally_scoped_route.exact_quote =
+            "Plan A transports workers from station to field during harvest.".into();
         let mut explicit_evaluation = catalog().candidates[0].evidence.clone();
         explicit_evaluation.evidence_id = "evaluation".into();
         explicit_evaluation.exact_quote =
@@ -4313,7 +4320,7 @@ mod tests {
         let mut lexical_evaluations = catalog().candidates[0].evidence.clone();
         lexical_evaluations.evidence_id = "lexical-evaluations".into();
         lexical_evaluations.exact_quote =
-            "Procedure L is ineffective. Procedure M is unsafe. Procedure N is unhealthy. Procedure O is unimportant.".into();
+            "Procedure L is ineffective. Procedure M is unsafe. Procedure N is unhealthy. Procedure O is unimportant. Procedure P is unnecessary. Procedure Q is nonessential.".into();
         let mut negative_evaluation = catalog().candidates[1].evidence.clone();
         negative_evaluation.evidence_id = "negative-evaluation".into();
         negative_evaluation.exact_quote = "Procedure C is not essential.".into();
@@ -4377,11 +4384,13 @@ mod tests {
             contextual_bound,
             suffix_currency,
             plain_equality,
+            negative_equality,
             transport,
             inverted_transport,
             actor_transport,
             coordinated_route,
             disjunctive_route,
+            temporally_scoped_route,
             explicit_evaluation,
             procedure_a,
             procedure_b,
@@ -4642,6 +4651,21 @@ mod tests {
                 claim_id: "changed-copular-equality-bound".into(),
                 text: "The capacity is less than 500 units.".into(),
                 evidence_ids: vec!["plain-equality".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-positive-copular-equality-polarity".into(),
+                text: "The capacity is not 500 units.".into(),
+                evidence_ids: vec!["plain-equality".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-negative-copular-equality".into(),
+                text: "The threshold is not 500 units.".into(),
+                evidence_ids: vec!["negative-equality".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negative-copular-equality-polarity".into(),
+                text: "The threshold is 500 units.".into(),
+                evidence_ids: vec!["negative-equality".into()],
             },
             CitedClaim {
                 claim_id: "broadened-enumeration".into(),
@@ -4962,6 +4986,16 @@ mod tests {
                 evidence_ids: vec!["disjunctive-route".into()],
             },
             CitedClaim {
+                claim_id: "supported-temporally-scoped-route".into(),
+                text: "Plan A transports workers from station to field during harvest.".into(),
+                evidence_ids: vec!["temporally-scoped-route".into()],
+            },
+            CitedClaim {
+                claim_id: "broadened-temporally-scoped-route".into(),
+                text: "Plan A transports workers from station to field.".into(),
+                evidence_ids: vec!["temporally-scoped-route".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-evaluation".into(),
                 text: "The measures are critical for worker safety and health.".into(),
                 evidence_ids: vec!["evaluation".into()],
@@ -5039,6 +5073,26 @@ mod tests {
             CitedClaim {
                 claim_id: "changed-lexical-unimportant".into(),
                 text: "Procedure O is important.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-unnecessary".into(),
+                text: "Procedure P is not necessary.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-unnecessary".into(),
+                text: "Procedure P is necessary.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-nonessential".into(),
+                text: "Procedure Q is not essential.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-nonessential".into(),
+                text: "Procedure Q is essential.".into(),
                 evidence_ids: vec!["lexical-evaluations".into()],
             },
             CitedClaim {
@@ -5194,6 +5248,7 @@ mod tests {
             "supported-ordinary-bound-predicate",
             "deferred-unrelated-same-value-conflict",
             "supported-copular-equality-bound",
+            "supported-negative-copular-equality",
             "supported-immediate-family",
             "supported-mixed-family-scope",
             "supported-formatted-integer",
@@ -5224,6 +5279,7 @@ mod tests {
             "supported-passive-route-agent",
             "supported-coordinated-route-actor",
             "deferred-disjunctive-route-actor",
+            "supported-temporally-scoped-route",
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
@@ -5233,6 +5289,8 @@ mod tests {
             "supported-lexical-unsafe",
             "supported-lexical-unhealthy",
             "supported-lexical-unimportant",
+            "supported-lexical-unnecessary",
+            "supported-lexical-nonessential",
             "supported-negative-evaluation",
             "supported-compound-evaluation",
             "supported-after-negative-sentence",
@@ -5271,6 +5329,8 @@ mod tests {
             "transferred-ordinary-bound-predicate",
             "changed-contextual-same-value",
             "changed-copular-equality-bound",
+            "changed-positive-copular-equality-polarity",
+            "changed-negative-copular-equality-polarity",
             "broadened-enumeration",
             "broadened-immediate-family",
             "changed-formatted-decimal",
@@ -5302,6 +5362,7 @@ mod tests {
             "transferred-unlisted-cited-nonroute-actor",
             "transferred-passive-route-agent",
             "transferred-coordinated-route-actor",
+            "broadened-temporally-scoped-route",
             "transferred-evaluation",
             "transferred-coordinated-evaluation",
             "transferred-evaluation-subphrase",
@@ -5309,6 +5370,8 @@ mod tests {
             "changed-lexical-unsafe",
             "changed-lexical-unhealthy",
             "changed-lexical-unimportant",
+            "changed-lexical-unnecessary",
+            "changed-lexical-nonessential",
             "changed-evaluation-polarity",
             "transferred-shared-copula-evaluation",
             "transferred-transitive-evaluation",

@@ -386,13 +386,23 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
             },
         );
     }
-    if before
+    let is_equality_copula =
+        |word: &String| matches!(word.as_str(), "is" | "are" | "was" | "were" | "equals");
+    let equality_copula = before
         .last()
-        .is_some_and(|word| matches!(word.as_str(), "is" | "are" | "was" | "were" | "equals"))
-    {
-        let prefix = &before[..before.len().saturating_sub(1)];
+        .filter(|word| is_equality_copula(word))
+        .map(|_| (before.len() - 1, false))
+        .or_else(|| {
+            (before.last().is_some_and(|word| word == "not"))
+                .then(|| before.len().checked_sub(2))
+                .flatten()
+                .filter(|index| is_equality_copula(&before[*index]))
+                .map(|index| (index, true))
+        });
+    if let Some((copula, intervening_negation)) = equality_copula {
+        let prefix = &before[..copula];
         return Some(
-            if negation_present(&prefix[prefix.len().saturating_sub(4)..]) {
+            if intervening_negation || negation_present(&prefix[prefix.len().saturating_sub(4)..]) {
                 NumericRelation::NotEqual
             } else {
                 NumericRelation::Equal
@@ -1146,8 +1156,33 @@ fn endpoint_word(word: &str) -> Option<String> {
 struct DirectionalRelation {
     origin: Vec<String>,
     destination: Vec<String>,
+    source_scope: Vec<String>,
     actor: Vec<String>,
     prefix: Vec<String>,
+}
+
+fn directional_endpoint_and_scope(tokens: &[String]) -> (Vec<String>, Vec<String>) {
+    let hard_boundary = tokens
+        .iter()
+        .position(|word| {
+            matches!(
+                word.as_str(),
+                "and" | "or" | "by" | "from" | "to" | "unless" | "absent" | "if" | "when"
+            )
+        })
+        .unwrap_or(tokens.len());
+    let tokens = &tokens[..hard_boundary];
+    let scope_start = tokens
+        .iter()
+        .position(|word| matches!(word.as_str(), "during" | "until" | "throughout"))
+        .unwrap_or(tokens.len());
+    let endpoint = tokens[..scope_start]
+        .iter()
+        .take(8)
+        .filter_map(|word| endpoint_word(word))
+        .collect::<Vec<_>>();
+    let source_scope = tokens[scope_start..].to_vec();
+    (endpoint, source_scope)
 }
 
 fn directional_actor(tokens: &[String], anchor: usize) -> Vec<String> {
@@ -1224,21 +1259,12 @@ fn directional_relations_in_clause(clause: &str) -> Vec<DirectionalRelation> {
             .iter()
             .filter_map(|word| endpoint_word(word))
             .collect::<Vec<_>>();
-        let destination = tokens[to + 1..]
-            .iter()
-            .take_while(|word| {
-                !matches!(
-                    word.as_str(),
-                    "and" | "or" | "by" | "from" | "unless" | "absent" | "if" | "when"
-                )
-            })
-            .take(8)
-            .filter_map(|word| endpoint_word(word))
-            .collect::<Vec<_>>();
+        let (destination, source_scope) = directional_endpoint_and_scope(&tokens[to + 1..]);
         if !origin.is_empty() && !destination.is_empty() {
             relations.push(DirectionalRelation {
                 origin,
                 destination,
+                source_scope,
                 actor: directional_actor(&tokens, from),
                 prefix: strip_leading_article(&tokens[..from]).to_vec(),
             });
@@ -1257,21 +1283,12 @@ fn directional_relations_in_clause(clause: &str) -> Vec<DirectionalRelation> {
             .iter()
             .filter_map(|word| endpoint_word(word))
             .collect::<Vec<_>>();
-        let origin = tokens[from + 1..]
-            .iter()
-            .take_while(|word| {
-                !matches!(
-                    word.as_str(),
-                    "and" | "or" | "by" | "to" | "unless" | "absent" | "if" | "when"
-                )
-            })
-            .take(8)
-            .filter_map(|word| endpoint_word(word))
-            .collect::<Vec<_>>();
+        let (origin, source_scope) = directional_endpoint_and_scope(&tokens[from + 1..]);
         if !origin.is_empty() && !destination.is_empty() {
             relations.push(DirectionalRelation {
                 origin,
                 destination,
+                source_scope,
                 actor: directional_actor(&tokens, to),
                 prefix: strip_leading_article(&tokens[..to]).to_vec(),
             });
@@ -1320,6 +1337,7 @@ fn endpoints_match(left: &[String], right: &[String]) -> bool {
 fn endpoint_pairs_match(left: &DirectionalRelation, right: &DirectionalRelation) -> bool {
     endpoints_match(&left.origin, &right.origin)
         && endpoints_match(&left.destination, &right.destination)
+        && (left.source_scope.is_empty() || left.source_scope == right.source_scope)
 }
 
 fn relations_match(left: &DirectionalRelation, right: &DirectionalRelation) -> bool {
@@ -1801,7 +1819,14 @@ struct EvaluationRelation {
 }
 
 const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
-    &["essential", "critical", "vital", "necessary"],
+    &[
+        "essential",
+        "critical",
+        "vital",
+        "necessary",
+        "nonessential",
+        "unnecessary",
+    ],
     &["ensure", "ensures", "ensuring", "guarantee", "guarantees"],
     &["important", "importance", "unimportant"],
     &[
@@ -1817,7 +1842,13 @@ const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
 fn is_lexically_negated_evaluation(word: &str) -> bool {
     matches!(
         word,
-        "unimportant" | "ineffective" | "ineffectiveness" | "unsafe" | "unhealthy"
+        "nonessential"
+            | "unnecessary"
+            | "unimportant"
+            | "ineffective"
+            | "ineffectiveness"
+            | "unsafe"
+            | "unhealthy"
     )
 }
 
