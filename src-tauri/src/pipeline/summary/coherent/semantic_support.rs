@@ -2139,31 +2139,19 @@ fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
         })
 }
 
-fn source_framing_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
-    evidence
-        .iter()
-        .all(|item| source_framing_preserved_by_claim(&item.exact_quote, claim))
-}
-
-fn semantic_fidelity_supported(
-    claim: &str,
-    evidence: &[&EvidenceItem],
-    preserve_source_framing: bool,
-) -> bool {
+fn semantic_fidelity_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     comparison_boundaries_supported(claim, evidence)
         && broader_enumeration_supported(claim, evidence)
         && directional_endpoints_supported(claim, evidence)
         && actor_qualifications_supported(claim, evidence)
         && evaluative_conclusions_supported(claim, evidence)
         && modal_force_supported(claim, evidence)
-        && (!preserve_source_framing || source_framing_supported(claim, evidence))
 }
 
 pub(in crate::pipeline::summary) fn apply_semantic_fidelity_guards(
     claims: &[CitedClaim],
     evidence: &[EvidenceItem],
     verifications: &mut [ClaimVerification],
-    preserve_source_framing: bool,
 ) -> Result<(), PipelineFailure> {
     if claims.len() != verifications.len() {
         return Err(stage_failure(
@@ -2204,7 +2192,7 @@ pub(in crate::pipeline::summary) fn apply_semantic_fidelity_guards(
                     false,
                 )
             })?;
-        if !semantic_fidelity_supported(&claim.text, &cited, preserve_source_framing) {
+        if !semantic_fidelity_supported(&claim.text, &cited) {
             verification.verdict = ClaimVerdict::Unsupported;
         }
     }

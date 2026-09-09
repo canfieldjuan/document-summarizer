@@ -3285,11 +3285,12 @@ release acceptance exposed issue #49
   label only from a bounded leading heading ending in problem, risk, warning,
   exception or limitation. The final General prompt receives that label with the
   authoritative exact quote; Story, Contract and source-selection prompts do not.
-- An extracted drafting claim is omitted when it loses a detected framing label.
-  After model verification, the existing deterministic semantic guard withholds
-  General wording unless an affirmatively framed clause also overlaps the framed
-  quote body. Exact source evidence, source order, citation rendering and
-  persisted schemas remain unchanged.
+- An extracted drafting claim is omitted when its source carries a framing label,
+  avoiding a lossy intermediate paraphrase. When General synthesis selects such
+  a source, Rust adds the application-owned relationship to the final claim text
+  before the existing source-aware semantic verifier runs. Distinct framing
+  labels cannot govern one generated unit. Exact source evidence, source order,
+  citation rendering and persisted schemas remain unchanged.
 - Synthesis, verification and final-summary versions advance for the changed
   output contract. Completed version-7 summaries remain readable; in-progress
   coherent version-7 checkpoints retry, while version-7 claim-ledger fallbacks
@@ -3299,21 +3300,19 @@ release acceptance exposed issue #49
 - Before the deterministic repair, a GPU DOL run passed mechanically but emitted
   a page-21 paragraph beginning `Employees paid a piece rate may fall below the
   minimum wage` while its cited exact quote began `Common Problems`.
-- The revised run used `qwen3-30b-a3b:latest` at 100% GPU and passed in 132.44
-  seconds. Its delivered page-21 paragraph begins `Common problems include`,
-  retains the minimum-wage details and page citation, and its unchanged exact
-  quote still begins `Common Problems`.
+- The final implementation's run used `qwen3-30b-a3b:latest` at 100% GPU and
+  passed in 110.39 seconds. Its delivered page-21 paragraph begins `The document
+  presents the following as a problem`, retains the minimum-wage details and
+  page citation, and its unchanged exact quote begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
-  multiline, overlong and unrelated headings. Framing checks reject prefix-only,
-  negated, category-free and proposition-mismatched wording by requiring two
-  meaningful body terms when available. A leading framing construction may rely
-  on the existing source-aware semantic verdict, preserving full paraphrases and
-  coordinated actors such as `employees and employers`. Tests also prove neutral and framed General
-  verdicts, mixed evidence, Story/Contract isolation, lossy drafting-claim
-  suppression and exact version-pair retry behavior. The full Rust library suite
-  passed 438 tests with 12 intentional ignores.
+  multiline, overlong, negated, solution-oriented and unrelated headings. Tests
+  also prove application-owned framing of neutral General units, rejection of
+  conflicting labels, Story isolation, lossy drafting-claim suppression and
+  exact version-pair retry behavior. A focused live GPU probe accepted the final
+  framed claim and rejected framing applied to an invented resolution. The full
+  Rust library suite passed 438 tests with 13 intentional ignores.
 - `cargo test --all-targets` passed those 438 library tests, 3 office tests and
-  all 3 release-contract tests; 12 opt-in library tests and 3 opt-in office
+  all 3 release-contract tests; 13 opt-in library tests and 3 opt-in office
   tests remained ignored. Strict all-target/all-feature Clippy, Rust formatting,
   the TypeScript/Vite production build and `git diff --check` passed.
 
