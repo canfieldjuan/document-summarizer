@@ -211,14 +211,9 @@ fn heading_has_only_framing_modifiers(words: &[String]) -> bool {
     })
 }
 
-fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
-    let (heading, body) = exact_quote.trim_start().split_once("\n\n")?;
+fn framing_from_heading(heading: &str) -> Option<SourceFraming> {
     let heading = heading.trim();
-    if body.trim().is_empty()
-        || heading.is_empty()
-        || heading.contains('\n')
-        || heading.chars().count() > 80
-    {
+    if heading.is_empty() || heading.contains('\n') || heading.chars().count() > 80 {
         return None;
     }
     let words = heading
@@ -243,6 +238,73 @@ fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
     }
 }
 
+#[cfg(test)]
+fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
+    let (heading, body) = exact_quote.trim_start().split_once("\n\n")?;
+    (!body.trim().is_empty())
+        .then(|| framing_from_heading(heading))
+        .flatten()
+}
+
+fn likely_section_heading(text: &str) -> bool {
+    let heading = text.trim();
+    if heading.is_empty()
+        || heading.contains('\n')
+        || heading.chars().count() > 80
+        || heading.ends_with(['.', '?', '!', ';'])
+    {
+        return false;
+    }
+    let words = heading
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() || words.len() > 8 {
+        return false;
+    }
+    let all_uppercase = heading
+        .chars()
+        .filter(|character| character.is_alphabetic())
+        .all(|character| character.is_uppercase());
+    all_uppercase
+        || words.iter().enumerate().all(|(index, word)| {
+            let connector = matches!(
+                word.to_ascii_lowercase().as_str(),
+                "a" | "an" | "and" | "for" | "in" | "of" | "on" | "or" | "the" | "to" | "with"
+            );
+            index > 0 && connector
+                || word
+                    .chars()
+                    .find(|character| character.is_alphabetic())
+                    .is_none_or(|character| character.is_uppercase())
+        })
+}
+
+fn source_framing_for_segment(normalized_block: &str, exact_quote: &str) -> Option<SourceFraming> {
+    let mut matches = normalized_block.match_indices(exact_quote);
+    let (segment_start, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let mut framing = None;
+    let mut paragraph_start = 0usize;
+    for paragraph in normalized_block.split("\n\n") {
+        if paragraph_start > segment_start {
+            break;
+        }
+        let heading = paragraph.trim();
+        if let Some(next) = framing_from_heading(heading) {
+            framing = Some(next);
+        } else if likely_section_heading(heading) {
+            framing = None;
+        }
+        paragraph_start = paragraph_start
+            .saturating_add(paragraph.len())
+            .saturating_add(2);
+    }
+    framing
+}
+
 pub(super) fn verification_source_framing(
     profile: SummaryProfile,
     evidence: &[EvidenceItem],
@@ -262,7 +324,7 @@ pub(super) fn verification_source_framing(
         .filter_map(|item| {
             let framing = blocks
                 .get(item.block_id.as_str())
-                .and_then(|block| required_source_framing(&block.text))?;
+                .and_then(|block| source_framing_for_segment(&block.text, &item.exact_quote))?;
             Some((item.evidence_id.clone(), framing.label().to_string()))
         })
         .collect()
@@ -3275,7 +3337,7 @@ fn source_catalog_for_synthesis_version(
                     false,
                 )
             })?;
-            let source_framing = required_source_framing(&block.text);
+            let source_framing = source_framing_for_segment(&block.text, &source.exact_quote);
             let evidence_id = deterministic_id(
                 "summary-evidence",
                 &[
@@ -4265,6 +4327,46 @@ mod tests {
         }
         let overlong_heading = format!("{} Problems\n\nBody text.", "x".repeat(80));
         assert_eq!(required_source_framing(&overlong_heading), None);
+
+        for heading in [
+            "Solutions",
+            "Scope and Services",
+            "2. Remedies",
+            "KNOWN ISSUES",
+        ] {
+            assert!(likely_section_heading(heading));
+        }
+        for body in [
+            "employees below minimum wage",
+            "This is a complete sentence.",
+            "A heading with far too many separate words to fit the supported boundary",
+        ] {
+            assert!(!likely_section_heading(body));
+        }
+
+        let sectioned = "Common Problems\n\nFirst problem. Later problem.\n\nSolutions to Common Problems\n\nFirst solution. Later solution.\n\nNo Known Issues\n\nNo defects were found.\n\nKey Risks\n\nRisk detail.";
+        assert_eq!(
+            source_framing_for_segment(sectioned, "Later problem."),
+            Some(SourceFraming::Problem)
+        );
+        for unframed in [
+            "Solutions to Common Problems\n\nFirst solution.",
+            "Later solution.",
+            "No defects were found.",
+        ] {
+            assert_eq!(source_framing_for_segment(sectioned, unframed), None);
+        }
+        assert_eq!(
+            source_framing_for_segment(sectioned, "Risk detail."),
+            Some(SourceFraming::Risk)
+        );
+        assert_eq!(
+            source_framing_for_segment(
+                "Common Problems\n\nRepeated.\n\nSolutions\n\nRepeated.",
+                "Repeated.",
+            ),
+            None
+        );
     }
 
     #[test]
@@ -4538,7 +4640,9 @@ mod tests {
     fn source_catalog_keeps_split_segments_in_document_order() {
         let first = format!("Common Problems\n\n{}.", "A".repeat(399));
         let second = format!("{}!", "B".repeat(399));
-        let first_block_text = format!("{first} {second}");
+        let third = format!("Solutions\n\n{}.", "C".repeat(399));
+        let fourth = format!("{}!", "D".repeat(399));
+        let first_block_text = format!("{first} {second}\n\n{third} {fourth}");
         let later = "Later ordinary block.".to_string();
         let source_span = SourceSpan {
             page_start: 1,
@@ -4592,7 +4696,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.evidence.block_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["block-a", "block-a", "block-b"]
+            vec!["block-a", "block-a", "block-a", "block-a", "block-b"]
         );
         assert_eq!(
             catalog
@@ -4600,7 +4704,13 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.evidence.exact_quote.as_str())
                 .collect::<Vec<_>>(),
-            vec![first.as_str(), second.as_str(), later.as_str()]
+            vec![
+                first.as_str(),
+                second.as_str(),
+                third.as_str(),
+                fourth.as_str(),
+                later.as_str(),
+            ]
         );
         assert_eq!(
             catalog
@@ -4608,7 +4718,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.request_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["s1", "s2", "s3"]
+            vec!["s1", "s2", "s3", "s4", "s5"]
         );
 
         let analyzed = AnalyzedDocument {
@@ -4674,9 +4784,11 @@ mod tests {
             enriched.candidates[1].evidence.exact_quote
         );
         assert!(enriched.candidates[1].drafting_claim.is_none());
-        assert_eq!(enriched.candidates[2].source_framing, None);
+        for candidate in &enriched.candidates[2..] {
+            assert_eq!(candidate.source_framing, None);
+        }
         assert_eq!(
-            enriched.candidates[2].drafting_claim.as_deref(),
+            enriched.candidates[4].drafting_claim.as_deref(),
             Some("Later extracted claim.")
         );
         let verification_evidence = enriched
@@ -4698,7 +4810,9 @@ mod tests {
                 Some("problem")
             );
         }
-        assert!(!verification_framing.contains_key(&enriched.candidates[2].evidence.evidence_id));
+        for candidate in &enriched.candidates[2..] {
+            assert!(!verification_framing.contains_key(&candidate.evidence.evidence_id));
+        }
         assert!(verification_source_framing(
             SummaryProfile::Story,
             &verification_evidence,
@@ -4711,9 +4825,11 @@ mod tests {
         assert!(prompt["source_segments"][0].get("source_claim").is_none());
         assert_eq!(prompt["source_segments"][1]["source_framing"], "problem");
         assert!(prompt["source_segments"][1].get("source_claim").is_none());
-        assert!(prompt["source_segments"][2].get("source_framing").is_none());
+        for source in &prompt["source_segments"].as_array().unwrap()[2..] {
+            assert!(source.get("source_framing").is_none());
+        }
         assert_eq!(
-            prompt["source_segments"][2]["source_claim"],
+            prompt["source_segments"][4]["source_claim"],
             "Later extracted claim."
         );
     }

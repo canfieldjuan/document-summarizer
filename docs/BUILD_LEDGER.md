@@ -3283,10 +3283,11 @@ release acceptance exposed issue #49
   prose presented the statements neutrally even though its source did not.
 - General synthesis now derives a small, application-owned `source_framing`
   label only from a normalized block's bounded leading heading ending in problem,
-  risk, warning, exception or limitation. Every bounded source segment from that
-  block carries the label, including later segments that no longer contain the
-  heading. General synthesis and verification receive that context; Story,
-  Contract and source-selection prompts do not.
+  risk, warning, exception or limitation. Bounded source segments inherit the
+  nearest reliable section heading, including later segments that no longer
+  contain it; a subsequent section heading resets or replaces the label. General
+  synthesis and verification use the same section-scope resolver. Story,
+  Contract and source-selection prompts do not receive that context.
 - An extracted drafting claim is omitted when its source carries a framing label,
   avoiding a lossy intermediate paraphrase. When General synthesis selects such
   a source, Rust adds the application-owned relationship to the final claim text
@@ -3303,14 +3304,15 @@ release acceptance exposed issue #49
   a page-21 paragraph beginning `Employees paid a piece rate may fall below the
   minimum wage` while its cited exact quote began `Common Problems`.
 - The final implementation's run used `qwen3-30b-a3b:latest` at 100% GPU and
-  passed in 110.17 seconds. Its delivered page-21 paragraph begins `The document
+  passed in 108.06 seconds. Its delivered page-21 paragraph begins `The document
   presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multiline, overlong, negated, solution-oriented and unrelated headings. Tests
   also prove application-owned framing of neutral General units, propagation to
-  later segments of a split block, fail-closed mixed verification context, Story
-  isolation, lossy drafting-claim suppression and exact version-pair retry
+  later segments of a split section, reset at a later `Solutions` section in the
+  same normalized block, fail-closed mixed verification context, Story isolation,
+  lossy drafting-claim suppression and exact version-pair retry
   behavior. A focused live GPU probe accepted a final framed claim whose exact
   segment omitted the heading and rejected framing applied to an invented
   resolution. The full Rust library suite passed 439 tests with 13 intentional
