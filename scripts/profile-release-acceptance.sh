@@ -44,11 +44,6 @@ if [[ "${ACTUAL_FIXTURE_SHA256}" != "${EXPECTED_FIXTURE_SHA256}" ]]; then
   exit 65
 fi
 
-if [[ ! -f "${REPOSITORY_ROOT}/dist/index.html" ]]; then
-  echo "Frontend assets are missing. Run npm ci and npm run build first." >&2
-  exit 69
-fi
-
 if [[ "${MODEL_BASE_URL}" != "${EXPECTED_MODEL_BASE_URL}" ]]; then
   echo "GPU acceptance requires ${EXPECTED_MODEL_BASE_URL}; got ${MODEL_BASE_URL}" >&2
   exit 69
@@ -66,6 +61,9 @@ if [[ -n "${DOC_SUM_MODEL_SETTINGS_PATH:-}" ||
   echo "GPU acceptance requires model-settings and qualification overrides to be unset." >&2
   exit 69
 fi
+
+cd "${REPOSITORY_ROOT}"
+npm run build
 
 if ! command -v ollama >/dev/null 2>&1; then
   echo "The Ollama CLI is required for the GPU residency check." >&2

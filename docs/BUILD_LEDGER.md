@@ -3209,9 +3209,9 @@ release acceptance exposed issue #49
   bounded long-Story, bounded long-Contract and complete persisted long-General
   live gates in one fixed sequence. It changes no product behavior.
 - The command accepts only the documented public DOL deck by SHA-256 before it
-  enables model-response and summary tracing. It also fails before testing when
-  frontend assets are absent, the selected Ollama model is not resident, or the
-  model row does not report `100% GPU`.
+  enables model-response and summary tracing. It builds the current frontend
+  sources and fails before Rust testing when that build fails, the selected
+  Ollama model is not resident, or the model row does not report `100% GPU`.
 - `docs/OFFICE_ACCEPTANCE.md` distinguishes the mechanical contract checked by
   the tests from the profile-specific semantic review still required of the
   printed representative output.
@@ -3226,9 +3226,9 @@ release acceptance exposed issue #49
 - The combined command passed all four fully qualified opt-in tests. Automatic
   routing classified the agreement as Contract, the legal story as Story, and
   the contract article, anecdotal report and mixed collection as General. Its
-  test finished in 2.07 seconds. Long Story finished in 3.06 seconds and long
-  Contract in 4.27 seconds. The complete persisted General pipeline finished in
-  111.35 seconds.
+  test finished in 2.07 seconds. Long Story finished in 3.07 seconds and long
+  Contract in 4.10 seconds. The complete persisted General pipeline finished in
+  110.55 seconds.
 - The Story output preserved Mara's goal, the destroyed bridge and prohibition,
   the risky alternate path, the rope-to-clinic causal link, and the reopening,
   recovery and archive resolution without adding a motivation. The Contract
@@ -3240,7 +3240,8 @@ release acceptance exposed issue #49
   requests, delivered 82 supported claims in a 4,436-character coherent
   summary, persisted citations and integrity metadata, and exposed
   `COHERENT_SUMMARY_SOURCE_SELECTION_APPLIED` alongside its other warnings.
-- The required local gates passed: the TypeScript/Vite production build, Rust
+- The combined command's TypeScript/Vite production build passed. The remaining
+  required local gates also passed: Rust
   formatting, strict all-target/all-feature Clippy and `git diff --check`. The
   full Rust suite passed 435 library tests with 12 intentional live ignores,
   three office tests with three opt-in ignores, and all three release-contract
