@@ -2896,20 +2896,24 @@ complete
   source IDs. Shorter incomplete text, malformed metadata, short General input,
   Story and Contract retain their existing invalid-response behavior.
 - One bounded repair asks the model to shorten only incomplete capped units and
-  preserve complete units and their source IDs. If the repair remains invalid,
-  the application may retain complete sibling units from the original response
-  only after normal source, window, completion, modality and evidence validation.
+  preserve complete units and their source IDs. A valid repair is accepted only
+  if it contains every validated original sibling unchanged and in order. If the
+  repair remains invalid, omits a sibling or rewrites one, the application may
+  retain complete sibling units from the original response only after normal
+  source, window, completion, modality and evidence validation.
   It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`. An all-clipped response
-  or one without a fully valid sibling still fails closed. The schema and its
-  1,200-character limit are unchanged.
+  cannot supply an original fallback; if its repair remains invalid, it fails
+  closed. The schema and its 1,200-character limit are unchanged.
 
 **Acceptance evidence so far**:
 - Paired tests accept a complete sentence at exactly 1,200 characters and prove
   that an incomplete capped unit gets one repair. A corrected repair returns
   both validated units; a repeated defect returns only the fully validated
-  sibling and reports the clipped-unit fallback. Negative probes reject a
-  1,199-character fragment, an all-clipped response, empty, duplicate, foreign
-  and nine-source metadata, unwindowed General catalogs, and Story catalogs.
+  sibling and reports the clipped-unit fallback. Repairs that omit or rewrite
+  the complete sibling also return the unchanged validated sibling. Negative
+  probes reject a 1,199-character fragment, an all-clipped response, empty,
+  duplicate, foreign and nine-source metadata, unwindowed General catalogs, and
+  Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the

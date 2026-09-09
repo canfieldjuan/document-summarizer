@@ -904,6 +904,19 @@ fn generate_summary_with_validation_repair(
                 return Err(failure);
             }
         };
+        let repaired_clipped_response_changed_siblings = clipped_repairs > 0
+            && clipped_fallback
+                .as_ref()
+                .is_some_and(|(claims, _)| !preserves_claims_in_order(&parsed.0, claims));
+        if repaired_clipped_response_changed_siblings {
+            if let Some((claims, evidence)) = clipped_fallback.take() {
+                return Ok(GeneratedSummaryContent {
+                    claims,
+                    evidence,
+                    withheld_unit_kind: Some(WithheldUnitKind::DecoderClipped),
+                });
+            }
+        }
         let mut feedback = modal_strengthening_feedback(&parsed.0, &parsed.1)?;
         if profile == SummaryProfile::Contract {
             let required_clauses = required_short_contract_clauses(catalog);
@@ -953,6 +966,13 @@ fn generate_summary_with_validation_repair(
         validation_repairs += 1;
         request_ordinal += 1;
     }
+}
+
+fn preserves_claims_in_order(candidate: &[CitedClaim], required: &[CitedClaim]) -> bool {
+    let mut candidate = candidate.iter();
+    required
+        .iter()
+        .all(|required| candidate.any(|claim| claim == required))
 }
 
 fn summary_request(
@@ -2483,9 +2503,17 @@ mod tests {
         corrects_repair: bool,
     }
 
+    #[derive(Clone, Copy)]
+    enum ClippedRepairBehavior {
+        Correct,
+        Repeat,
+        OmitSibling,
+        RewriteSibling,
+    }
+
     struct ClippedUnitRepairRuntime {
         requests: Mutex<Vec<ModelRequest>>,
-        corrects_repair: bool,
+        behavior: ClippedRepairBehavior,
     }
 
     struct ContractCoverageRepairRuntime {
@@ -2529,10 +2557,10 @@ mod tests {
     }
 
     impl ClippedUnitRepairRuntime {
-        fn new(corrects_repair: bool) -> Self {
+        fn new(behavior: ClippedRepairBehavior) -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
-                corrects_repair,
+                behavior,
             }
         }
 
@@ -2656,16 +2684,29 @@ mod tests {
             self.requests.lock().unwrap().push(request.clone());
             let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
             let is_repair = prompt.get("validation_feedback").is_some();
-            let units = if is_repair && self.corrects_repair {
-                json!([
-                    {"text":"The first source remains supported.","source_ids":["s1"]},
-                    {"text":"The later source is summarized completely.","source_ids":["s3"]}
-                ])
-            } else {
+            let units = if !is_repair {
                 json!([
                     {"text":"The first source remains supported.","source_ids":["s1"]},
                     {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2","s3"]}
                 ])
+            } else {
+                match self.behavior {
+                    ClippedRepairBehavior::Correct => json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                    ]),
+                    ClippedRepairBehavior::Repeat => json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2","s3"]}
+                    ]),
+                    ClippedRepairBehavior::OmitSibling => json!([
+                        {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                    ]),
+                    ClippedRepairBehavior::RewriteSibling => json!([
+                        {"text":"The first source was rewritten.","source_ids":["s1"]},
+                        {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                    ]),
+                }
             };
             Ok(ModelResponse {
                 text: json!({"units":units}).to_string(),
@@ -4281,7 +4322,7 @@ mod tests {
             omitted_source_units: 0,
         };
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
-        let correcting = ClippedUnitRepairRuntime::new(true);
+        let correcting = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::Correct);
         let GeneratedSummaryContent {
             claims,
             evidence,
@@ -4311,7 +4352,7 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| message.contains("1200-character decoder limit")))));
 
-        let repeating = ClippedUnitRepairRuntime::new(false);
+        let repeating = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::Repeat);
         let GeneratedSummaryContent {
             claims,
             evidence,
@@ -4321,8 +4362,8 @@ mod tests {
             &repeating,
             "document-1",
             &catalog,
-            prompt,
-            schema,
+            prompt.clone(),
+            schema.clone(),
             usize::MAX,
             0,
             1,
@@ -4334,6 +4375,37 @@ mod tests {
         assert_eq!(evidence.len(), 1);
         assert_eq!(withheld_unit_kind, Some(WithheldUnitKind::DecoderClipped));
         assert_eq!(repeating.requests().len(), 2);
+
+        for behavior in [
+            ClippedRepairBehavior::OmitSibling,
+            ClippedRepairBehavior::RewriteSibling,
+        ] {
+            let changing = ClippedUnitRepairRuntime::new(behavior);
+            let generated = generate_summary_with_validation_repair(
+                SummaryProfile::General,
+                &changing,
+                "document-1",
+                &catalog,
+                prompt.clone(),
+                schema.clone(),
+                usize::MAX,
+                0,
+                1,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .expect("a changed complete sibling must use the validated original fallback");
+            assert_eq!(generated.claims.len(), 1);
+            assert_eq!(
+                generated.claims[0].text,
+                "The first source remains supported."
+            );
+            assert_eq!(generated.evidence.len(), 1);
+            assert_eq!(
+                generated.withheld_unit_kind,
+                Some(WithheldUnitKind::DecoderClipped)
+            );
+            assert_eq!(changing.requests().len(), 2);
+        }
     }
 
     #[test]
