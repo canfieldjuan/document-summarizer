@@ -56,6 +56,65 @@ DOC_SUM_OFFICE_PDFS='/absolute/a.pdf:/absolute/b.pdf' \
 On Unix the list separator is `:`; Rust uses the platform's native path-list
 separator, so Windows uses `;`.
 
+## Combined summary-profile release acceptance
+
+`scripts/profile-release-acceptance.sh` runs the four live profile gates in a
+fixed order against the configured Ollama model:
+
+1. automatic routing across an agreement, a contract article, a legal story,
+   an anecdotal report, and mixed content;
+2. bounded long-Story selection and source-bound synthesis;
+3. bounded long-Contract selection and source-bound synthesis; and
+4. the complete persisted long-General pipeline on the public DOL training
+   deck.
+
+The script accepts only the documented DOL deck whose SHA-256 is
+`12097e00b956e8f387e2cd43dd609a9cecc1ca1580c32cc3b87b60518307382b`.
+That fixed public input makes it safe for the script to reveal the General
+summary needed for semantic review. It also requires the selected model to be
+preloaded in Ollama at `100% GPU` on the exact loopback endpoint
+`http://127.0.0.1:11434/v1/`; a different endpoint, missing model, CPU offload,
+wrong fixture, or missing frontend build fails before any test runs. Binding
+the checked endpoint to the endpoint used by the tests prevents a local GPU
+process from masking execution against another server. The command also rejects
+an inherited `OLLAMA_HOST`, product model-settings path, or qualification-model
+override because those variables can redirect the CLI check or the General
+integration harness away from the runtime being accepted.
+
+From the repository root, after `npm ci && npm run build`:
+
+```bash
+scripts/profile-release-acceptance.sh \
+  /absolute/path/to/dol-workplace-poster.pdf
+```
+
+The test results mechanically check routing enums, schema parsing, bounded
+selection, source IDs, exact quotations, profile-specific validation,
+citations, durable artifacts, and warnings. A passing command does not by
+itself establish that the generated wording is useful or semantically
+supported. Review the printed source and summaries for:
+
+- General: the main message, important supporting points, qualifications, and
+  whether headings or surrounding context change the meaning of a sentence;
+- Story: chronology, causality, character identity, conflict, resolution, and
+  invented motivations; and
+- Contract: parties, obligations, conditions, exceptions, dates, amounts,
+  clause references, and invented legal conclusions.
+
+Record the representative-output judgment and any defect in the canonical
+build ledger. A semantic defect gets its own repair slice; do not change product
+behavior while running this acceptance gate.
+
+These live tests are complementary rather than one native-desktop interaction.
+The automatic case ends after classification, the Story and Contract cases
+exercise bounded selection and synthesis directly, and the General case runs
+the complete persisted pipeline. The normal Rust suite separately checks
+expected-source-hash admission, immutable effective-profile persistence,
+profile-specific warnings, citations, and reopen behavior. The frontend build
+checks the compiled Automatic handoff, but this harness does not drive the
+native file dialog or prove classification-to-result behavior in one live UI
+invocation.
+
 ## Evidence gathered on 2026-08-30
 
 The deterministic harness passed all five public documents. Observed topology:
