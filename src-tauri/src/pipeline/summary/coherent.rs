@@ -163,14 +163,40 @@ enum SourceFraming {
 
 impl SourceFraming {
     fn preserved_by(self, text: &str) -> bool {
-        framing_words(text).any(|word| match self {
-            Self::Problem => word.starts_with("problem") || word.starts_with("issue"),
-            Self::Risk => word.starts_with("risk") || word.starts_with("hazard"),
-            Self::Warning => word.starts_with("warn") || word.starts_with("caution"),
-            Self::Exception => word.starts_with("except"),
-            Self::Limitation => word.starts_with("limit"),
+        let words = framing_words(text).collect::<Vec<_>>();
+        words.iter().enumerate().any(|(index, word)| {
+            let is_marker = match self {
+                Self::Problem => {
+                    matches!(word.as_str(), "problem" | "problems" | "issue" | "issues")
+                }
+                Self::Risk => matches!(word.as_str(), "risk" | "risks" | "hazard" | "hazards"),
+                Self::Warning => matches!(
+                    word.as_str(),
+                    "warn"
+                        | "warns"
+                        | "warned"
+                        | "warning"
+                        | "warnings"
+                        | "caution"
+                        | "cautions"
+                        | "cautioned"
+                ),
+                Self::Exception => matches!(word.as_str(), "exception" | "exceptions"),
+                Self::Limitation => matches!(word.as_str(), "limitation" | "limitations"),
+            };
+            is_marker && framing_marker_is_affirmative(&words, index)
         })
     }
+}
+
+fn framing_marker_is_affirmative(words: &[String], index: usize) -> bool {
+    let preceding = &words[index.saturating_sub(4)..index];
+    !preceding.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "free" | "no" | "not" | "never" | "neither" | "without"
+        )
+    }) && words.get(index + 1).is_none_or(|word| word != "free")
 }
 
 fn framing_words(text: &str) -> impl Iterator<Item = String> + '_ {
@@ -4173,6 +4199,32 @@ mod tests {
         }
         let overlong_heading = format!("{} Problems\n\nBody text.", "x".repeat(80));
         assert_eq!(required_source_framing(&overlong_heading), None);
+
+        for (framing, preserved) in [
+            (SourceFraming::Problem, "The document identifies an issue."),
+            (SourceFraming::Risk, "The document identifies a hazard."),
+            (SourceFraming::Warning, "The document warns readers."),
+            (
+                SourceFraming::Exception,
+                "The document states an exception.",
+            ),
+            (
+                SourceFraming::Limitation,
+                "The document states a limitation.",
+            ),
+        ] {
+            assert!(framing.preserved_by(preserved));
+        }
+        for (framing, bypass) in [
+            (SourceFraming::Problem, "The employer issued checks."),
+            (SourceFraming::Problem, "This is not a problem."),
+            (SourceFraming::Problem, "The practice is problem-free."),
+            (SourceFraming::Risk, "The arrangement is risk-free."),
+            (SourceFraming::Exception, "The agreement is exceptional."),
+            (SourceFraming::Limitation, "The remedy is limitless."),
+        ] {
+            assert!(!framing.preserved_by(bypass));
+        }
     }
 
     #[test]
@@ -4215,7 +4267,7 @@ mod tests {
 
         let framed_claim = CitedClaim {
             claim_id: "framed-claim".into(),
-            text: "The document identifies below-minimum-wage piece-rate pay as a problem.".into(),
+            text: "Common problems include piece-rate pay falling below the minimum wage.".into(),
             evidence_ids: vec![problem.evidence_id.clone(), ordinary.evidence_id.clone()],
         };
         let mut framed_verdict = ClaimVerification {

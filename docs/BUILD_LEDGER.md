@@ -3303,10 +3303,11 @@ release acceptance exposed issue #49
   retains the minimum-wage details and page citation, and its unchanged exact
   quote still begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
-  multiline, overlong and unrelated headings. They also prove both neutral and
-  framed General verdicts, mixed evidence, Story/Contract isolation, lossy
-  drafting-claim suppression and exact version-pair retry behavior. The full
-  Rust library suite passed 438 tests with 12 intentional ignores.
+  multiline, overlong and unrelated headings. Framing checks reject prefix-only,
+  negated and category-free wording. Tests also prove neutral and framed General
+  verdicts, mixed evidence, Story/Contract isolation, lossy drafting-claim
+  suppression and exact version-pair retry behavior. The full Rust library suite
+  passed 438 tests with 12 intentional ignores.
 - `cargo test --all-targets` passed those 438 library tests, 3 office tests and
   all 3 release-contract tests; 12 opt-in library tests and 3 opt-in office
   tests remained ignored. Strict all-target/all-feature Clippy, Rust formatting,
