@@ -246,7 +246,7 @@ fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
         .flatten()
 }
 
-fn likely_section_heading(text: &str) -> bool {
+fn possible_framing_boundary(text: &str) -> bool {
     let heading = text.trim();
     if heading.is_empty()
         || heading.contains('\n')
@@ -262,22 +262,13 @@ fn likely_section_heading(text: &str) -> bool {
     if words.is_empty() || words.len() > 8 {
         return false;
     }
-    let all_uppercase = heading
+    // Resetting is intentionally broader than creating a framing label: an
+    // uncertain boundary drops inherited context instead of applying it to a
+    // later section that may have a different purpose.
+    heading
         .chars()
-        .filter(|character| character.is_alphabetic())
-        .all(|character| character.is_uppercase());
-    all_uppercase
-        || words.iter().enumerate().all(|(index, word)| {
-            let connector = matches!(
-                word.to_ascii_lowercase().as_str(),
-                "a" | "an" | "and" | "for" | "in" | "of" | "on" | "or" | "the" | "to" | "with"
-            );
-            index > 0 && connector
-                || word
-                    .chars()
-                    .find(|character| character.is_alphabetic())
-                    .is_none_or(|character| character.is_uppercase())
-        })
+        .find(|character| character.is_alphabetic())
+        .is_some_and(|character| character.is_uppercase())
 }
 
 fn source_framing_for_segment(normalized_block: &str, exact_quote: &str) -> Option<SourceFraming> {
@@ -295,7 +286,7 @@ fn source_framing_for_segment(normalized_block: &str, exact_quote: &str) -> Opti
         let heading = paragraph.trim();
         if let Some(next) = framing_from_heading(heading) {
             framing = Some(next);
-        } else if likely_section_heading(heading) {
+        } else if possible_framing_boundary(heading) {
             framing = None;
         }
         paragraph_start = paragraph_start
@@ -4334,24 +4325,26 @@ mod tests {
             "2. Remedies",
             "KNOWN ISSUES",
         ] {
-            assert!(likely_section_heading(heading));
+            assert!(possible_framing_boundary(heading));
         }
+        assert!(possible_framing_boundary("How to avoid common problems"));
         for body in [
+            "2",
             "employees below minimum wage",
             "This is a complete sentence.",
             "A heading with far too many separate words to fit the supported boundary",
         ] {
-            assert!(!likely_section_heading(body));
+            assert!(!possible_framing_boundary(body));
         }
 
-        let sectioned = "Common Problems\n\nFirst problem. Later problem.\n\nSolutions to Common Problems\n\nFirst solution. Later solution.\n\nNo Known Issues\n\nNo defects were found.\n\nKey Risks\n\nRisk detail.";
+        let sectioned = "Common Problems\n\nFirst problem. Later problem.\n\nHow to avoid common problems\n\nEnsure workers receive minimum wage\n\nNo Known Issues\n\nNo defects were found.\n\nKey Risks\n\nRisk detail.";
         assert_eq!(
             source_framing_for_segment(sectioned, "Later problem."),
             Some(SourceFraming::Problem)
         );
         for unframed in [
-            "Solutions to Common Problems\n\nFirst solution.",
-            "Later solution.",
+            "How to avoid common problems\n\nEnsure workers receive minimum wage",
+            "Ensure workers receive minimum wage",
             "No defects were found.",
         ] {
             assert_eq!(source_framing_for_segment(sectioned, unframed), None);
@@ -4640,7 +4633,7 @@ mod tests {
     fn source_catalog_keeps_split_segments_in_document_order() {
         let first = format!("Common Problems\n\n{}.", "A".repeat(399));
         let second = format!("{}!", "B".repeat(399));
-        let third = format!("Solutions\n\n{}.", "C".repeat(399));
+        let third = format!("How to avoid common problems\n\n{}.", "C".repeat(399));
         let fourth = format!("{}!", "D".repeat(399));
         let first_block_text = format!("{first} {second}\n\n{third} {fourth}");
         let later = "Later ordinary block.".to_string();
