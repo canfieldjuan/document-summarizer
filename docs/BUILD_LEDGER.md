@@ -2900,9 +2900,12 @@ complete
   if it contains every validated original sibling's exact text and normalized
   evidence IDs in order. Ordinal-derived claim IDs are intentionally excluded
   because repairing an earlier unit can move a later sibling. If the repair
-  remains invalid, omits a sibling or rewrites one, the application may
-  retain complete sibling units from the original response only after normal
+  remains invalid, omits a sibling or rewrites one, the application may retain
+  complete sibling units from the original response only after normal
   source, window, completion, modality and evidence validation.
+  Modality is evaluated per sibling: one strengthened sibling is excluded from
+  the preservation baseline without erasing a separate safe sibling or its
+  canonical evidence.
   It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`. An all-clipped response
   cannot supply an original fallback; if its repair remains invalid, it fails
   closed. The schema and its 1,200-character limit are unchanged.
@@ -2914,10 +2917,11 @@ complete
   sibling and reports the clipped-unit fallback. Repairs that omit or rewrite
   the complete sibling also return the unchanged validated sibling, while a
   repaired leading clip preserves and accepts a later sibling across its
-  ordinal-derived claim-ID change. Negative probes reject a 1,199-character
-  fragment, an all-clipped response, empty,
-  duplicate, foreign and nine-source metadata, unwindowed General catalogs, and
-  Story catalogs.
+  ordinal-derived claim-ID change. A mixed response with one safe sibling and
+  one modal-strengthened sibling proves that a repair cannot omit the safe one
+  after correcting the other. Negative probes reject a 1,199-character
+  fragment, an all-clipped response, empty, duplicate, foreign and nine-source
+  metadata, unwindowed General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the

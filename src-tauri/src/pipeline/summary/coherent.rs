@@ -864,10 +864,7 @@ fn generate_summary_with_validation_repair(
                     catalog,
                 )
                 .ok()
-                .filter(|parsed| {
-                    modal_strengthening_feedback(&parsed.0, &parsed.1)
-                        .is_ok_and(|feedback| feedback.is_empty())
-                });
+                .and_then(retain_individually_modal_safe_claims);
                 let feedback = vec![format!(
                     "One or more text fields reached the {MAX_UNIT_CHARACTERS}-character decoder limit before the sentence ended. Keep every complete unit and its source_ids unchanged; shorten each incomplete unit to a complete short paragraph ending in terminal punctuation"
                 )];
@@ -974,6 +971,32 @@ fn preserves_claims_in_order(candidate: &[CitedClaim], required: &[CitedClaim]) 
         candidate
             .any(|claim| claim.text == required.text && claim.evidence_ids == required.evidence_ids)
     })
+}
+
+fn retain_individually_modal_safe_claims(
+    parsed: (Vec<CitedClaim>, Vec<EvidenceItem>),
+) -> Option<(Vec<CitedClaim>, Vec<EvidenceItem>)> {
+    let (claims, evidence) = parsed;
+    let mut retained_claims = Vec::with_capacity(claims.len());
+    for claim in claims {
+        let feedback =
+            modal_strengthening_feedback(std::slice::from_ref(&claim), &evidence).ok()?;
+        if feedback.is_empty() {
+            retained_claims.push(claim);
+        }
+    }
+    if retained_claims.is_empty() {
+        return None;
+    }
+    let referenced = retained_claims
+        .iter()
+        .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
+        .collect::<HashSet<_>>();
+    let retained_evidence = evidence
+        .into_iter()
+        .filter(|item| referenced.contains(item.evidence_id.as_str()))
+        .collect::<Vec<_>>();
+    Some((retained_claims, retained_evidence))
 }
 
 fn summary_request(
@@ -2511,6 +2534,7 @@ mod tests {
         Repeat,
         OmitSibling,
         RewriteSibling,
+        RepairModalAndOmitSafeSibling,
     }
 
     struct ClippedUnitRepairRuntime {
@@ -2693,6 +2717,17 @@ mod tests {
                     {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s1","s2"]},
                     {"text":"The later source remains supported.","source_ids":["s3"]}
                 ])
+            } else if !is_repair
+                && matches!(
+                    self.behavior,
+                    ClippedRepairBehavior::RepairModalAndOmitSafeSibling
+                )
+            {
+                json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"The operator must inspect the record.","source_ids":["s4"]},
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2","s3"]}
+                ])
             } else if !is_repair {
                 json!([
                     {"text":"The first source remains supported.","source_ids":["s1"]},
@@ -2717,6 +2752,10 @@ mod tests {
                     ]),
                     ClippedRepairBehavior::RewriteSibling => json!([
                         {"text":"The first source was rewritten.","source_ids":["s1"]},
+                        {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                    ]),
+                    ClippedRepairBehavior::RepairModalAndOmitSafeSibling => json!([
+                        {"text":"The operator should inspect the record.","source_ids":["s4"]},
                         {"text":"The later source is summarized completely.","source_ids":["s3"]}
                     ]),
                 }
@@ -4326,7 +4365,11 @@ mod tests {
             candidate("s2", "evidence-2", 2),
             candidate("s3", "evidence-3", 3),
             candidate("s4", "evidence-4", 4),
+            candidate("s5", "evidence-5", 5),
+            candidate("s6", "evidence-6", 6),
+            candidate("s7", "evidence-7", 7),
         ];
+        candidates[3].evidence.exact_quote = "The operator should inspect the record.".into();
         for (index, candidate) in candidates.iter_mut().enumerate() {
             candidate.selection_window = Some(index / 2);
         }
@@ -4441,6 +4484,34 @@ mod tests {
             );
             assert_eq!(changing.requests().len(), 2);
         }
+
+        let modal_omitting =
+            ClippedUnitRepairRuntime::new(ClippedRepairBehavior::RepairModalAndOmitSafeSibling);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &modal_omitting,
+            "document-1",
+            &catalog,
+            prompt,
+            schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("one modal-unsafe sibling must not erase a separate safe sibling baseline");
+        assert_eq!(generated.claims.len(), 1);
+        assert_eq!(
+            generated.claims[0].text,
+            "The first source remains supported."
+        );
+        assert_eq!(generated.evidence.len(), 1);
+        assert_eq!(generated.evidence[0].evidence_id, "evidence-1");
+        assert_eq!(
+            generated.withheld_unit_kind,
+            Some(WithheldUnitKind::DecoderClipped)
+        );
+        assert_eq!(modal_omitting.requests().len(), 2);
     }
 
     #[test]
