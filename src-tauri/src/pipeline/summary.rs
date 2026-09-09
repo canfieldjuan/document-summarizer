@@ -5038,6 +5038,13 @@ mod tests {
             }
         }
 
+        fn with_synthesis_context_tokens(synthesis_context_tokens: u32) -> Self {
+            Self {
+                synthesis_context_tokens,
+                ..Self::new()
+            }
+        }
+
         fn rejecting_exact_synthesis_admission() -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
@@ -9524,6 +9531,56 @@ mod tests {
         assert!(schema_names
             .iter()
             .any(|name| name == coherent::SCHEMA_NAME));
+        assert!(runtime.preflight_calls.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            verified.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert!(!verified.summary_claim_verifications.is_empty());
+        assert_eq!(completed.summary.text, verified.summary_text);
+        assert_eq!(
+            completed.citations.presentation_mode,
+            verified.presentation_mode
+        );
+        assert!(!completed.citations.summary_claims.is_empty());
+        assert!(!completed.citations.claims.is_empty());
+    }
+
+    #[test]
+    fn oversized_complete_story_source_context_uses_bounded_story_selection() {
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Story);
+
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("bounded Story source selection should produce a coherent summary");
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+
+        assert_eq!(
+            db::get_run_summary_profile(&conn, &run_id).unwrap(),
+            Some(SummaryProfile::Story)
+        );
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert!(!synthesized.summary_claims.is_empty());
+        assert!(!synthesized.synthesis_evidence.is_empty());
+        assert!(synthesized
+            .warnings
+            .iter()
+            .all(|warning| warning.code != coherent::FALLBACK_WARNING_CODE));
+        let schema_names = runtime.schema_names.lock().unwrap();
+        assert!(schema_names
+            .iter()
+            .any(|name| name == coherent::STORY_SOURCE_SELECTION_SCHEMA_NAME));
+        assert!(schema_names
+            .iter()
+            .any(|name| name == coherent::STORY_SCHEMA_NAME));
+        assert!(schema_names
+            .iter()
+            .all(|name| name != coherent::SOURCE_SELECTION_SCHEMA_NAME));
         assert!(runtime.preflight_calls.load(Ordering::SeqCst) > 0);
         assert_eq!(
             verified.presentation_mode,
