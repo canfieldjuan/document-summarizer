@@ -2917,9 +2917,12 @@ complete
   unit. A later window fallback may omit that mixed unit while it must still
   preserve safe siblings, corrected modal evidence and recovered clipped
   evidence. That newer validated fallback takes precedence if the window repair
-  is invalid or incomplete. A fully recovered response that still strengthens
-  source modality likewise snapshots its individually safe units before the
-  modality retry. If that retry fails, the newer safe content is delivered with
+  is invalid or incomplete. Validated window and modality snapshots replace an
+  older snapshot of the other kind, so fallback selection follows repair order
+  instead of a fixed warning-type preference. A fully recovered response that
+  still strengthens source modality likewise snapshots its individually safe
+  units before the modality retry. If that retry fails, the newer safe content
+  is delivered with
   `COHERENT_SUMMARY_MODAL_STRENGTHENED_UNITS_WITHHELD`; this also gives an
   all-clipped original a deliverable fallback when at least one repaired unit is
   modality-safe. Other structural errors still fail closed.
@@ -2965,7 +2968,10 @@ complete
   Withholding-state probes cover clipped-only, clipped-plus-window,
   clipped-plus-modality and all three combined. Window-then-clipped probes prove
   successful recovery, repeated-clip fallback and rejection of a repair that
-  omits the prior safe window baseline. Negative probes reject a 1,199-character
+  omits the prior safe window baseline while retaining a newer complete sibling.
+  A clipped-then-modal-then-window probe proves the newest validated window
+  snapshot retains the corrected modal sibling when the window retry fails.
+  Negative probes reject a 1,199-character
   fragment, empty, duplicate, foreign and nine-source metadata, unwindowed
   General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional

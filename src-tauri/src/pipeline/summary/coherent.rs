@@ -894,6 +894,9 @@ fn generate_summary_with_validation_repair(
                 ));
                 if preserved_claim_positions(&fallback.claims, &window.claims).is_none() {
                     clipped_fallback = None;
+                } else {
+                    window.claims = fallback.claims.clone();
+                    window.evidence = fallback.evidence.clone();
                 }
             }
             if clipped_fallback.is_some() {
@@ -926,7 +929,7 @@ fn generate_summary_with_validation_repair(
         let parsed = match parsed_response {
             Ok(parsed) => parsed,
             Err(failure) if failure.code == WINDOW_MIXED_RESPONSE_CODE && window_repairs == 0 => {
-                window_fallback = parse_response_without_mixed_windows(
+                let latest_window_fallback = parse_response_without_mixed_windows(
                     profile,
                     &response.text,
                     document_id,
@@ -947,6 +950,10 @@ fn generate_summary_with_validation_repair(
                     evidence,
                     withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
                 });
+                if latest_window_fallback.is_some() {
+                    modal_fallback = None;
+                }
+                window_fallback = latest_window_fallback;
                 let feedback = vec![
                     "Only units that cite source_ids from different selection_window values are invalid. Keep every other unit and its wording unchanged; split only the invalid units so every resulting unit cites exactly one selection_window"
                         .to_string(),
@@ -1000,7 +1007,12 @@ fn generate_summary_with_validation_repair(
         }
         let mut feedback = modal_strengthening_feedback(&parsed.0, &parsed.1)?;
         if clipped_repairs > 0 && !feedback.is_empty() && modal_fallback.is_none() {
-            modal_fallback = retain_modal_safe_generated_claims(&parsed.0, &parsed.1, document_id);
+            if let Some(latest_modal_fallback) =
+                retain_modal_safe_generated_claims(&parsed.0, &parsed.1, document_id)
+            {
+                modal_fallback = Some(latest_modal_fallback);
+                window_fallback = None;
+            }
         }
         if profile == SummaryProfile::Contract {
             let required_clauses = required_short_contract_clauses(catalog);
@@ -2851,6 +2863,7 @@ mod tests {
         WindowThenClipCorrect,
         WindowThenClipRepeats,
         WindowThenClipOmitsBaseline,
+        RepairClipThenModalThenWindowFails,
         NestedWindowRepairOmitsSafeSibling,
     }
 
@@ -3166,23 +3179,59 @@ mod tests {
                     ClippedRepairBehavior::WindowThenClipOmitsBaseline
                 ) {
                     json!([
-                        {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s5","s6"]}
+                        {"text":"The third source remains supported.","source_ids":["s3"]},
+                        {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2"]}
                     ])
                 } else {
                     json!([
                         {"text":"The first source remains supported.","source_ids":["s1"]},
-                        {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s5","s6"]}
+                        {"text":"The third source remains supported.","source_ids":["s3"]},
+                        {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2"]}
                     ])
                 }
             } else if matches!(self.behavior, ClippedRepairBehavior::WindowThenClipCorrect) {
                 json!([
                     {"text":"The first source remains supported.","source_ids":["s1"]},
-                    {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]}
+                    {"text":"The third source remains supported.","source_ids":["s3"]},
+                    {"text":"The clipped source is summarized completely.","source_ids":["s2"]}
                 ])
             } else if matches!(self.behavior, ClippedRepairBehavior::WindowThenClipRepeats) {
                 json!([
                     {"text":"The first source remains supported.","source_ids":["s1"]},
-                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s5","s6"]}
+                    {"text":"The third source remains supported.","source_ids":["s3"]},
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2"]}
+                ])
+            } else if matches!(
+                self.behavior,
+                ClippedRepairBehavior::RepairClipThenModalThenWindowFails
+            ) && feedback
+                .iter()
+                .any(|message| message.contains("decoder limit"))
+            {
+                json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]},
+                    {"text":"The operator must inspect the record.","source_ids":["s4"]}
+                ])
+            } else if matches!(
+                self.behavior,
+                ClippedRepairBehavior::RepairClipThenModalThenWindowFails
+            ) && feedback
+                .iter()
+                .any(|message| message.contains("strengthens"))
+            {
+                json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]},
+                    {"text":"The operator should inspect the record.","source_ids":["s4"]},
+                    {"text":"The mixed source is complete.","source_ids":["s2","s3"]}
+                ])
+            } else if matches!(
+                self.behavior,
+                ClippedRepairBehavior::RepairClipThenModalThenWindowFails
+            ) {
+                json!([
+                    {"text":"The mixed source remains invalid.","source_ids":["s2","s3"]}
                 ])
             } else if matches!(
                 self.behavior,
@@ -3271,6 +3320,7 @@ mod tests {
                     ClippedRepairBehavior::WindowThenClipCorrect
                     | ClippedRepairBehavior::WindowThenClipRepeats
                     | ClippedRepairBehavior::WindowThenClipOmitsBaseline => unreachable!(),
+                    ClippedRepairBehavior::RepairClipThenModalThenWindowFails => unreachable!(),
                     ClippedRepairBehavior::NestedWindowRepairOmitsSafeSibling => unreachable!(),
                 }
             };
@@ -5353,13 +5403,23 @@ mod tests {
             );
             assert_eq!(generated.withheld_unit_kind, expected_kind);
             if expected_kind.is_none() {
+                assert_eq!(generated.claims.len(), 3);
+                assert_eq!(
+                    generated.claims[1].text,
+                    "The third source remains supported."
+                );
+                assert_eq!(
+                    generated.claims[2].text,
+                    "The clipped source is summarized completely."
+                );
+                assert_eq!(generated.evidence.len(), 3);
+            } else {
                 assert_eq!(generated.claims.len(), 2);
                 assert_eq!(
                     generated.claims[1].text,
-                    "The clipped sources are summarized completely."
+                    "The third source remains supported."
                 );
-            } else {
-                assert_eq!(generated.claims.len(), 1);
+                assert_eq!(generated.evidence.len(), 2);
             }
             assert_eq!(window_then_clip.requests().len(), 3);
         }
@@ -5391,6 +5451,36 @@ mod tests {
             Some(WithheldUnitKind::CrossWindowAndDecoderClipped)
         );
         assert_eq!(omits_window_baseline.requests().len(), 2);
+
+        let modal_then_window = ClippedUnitRepairRuntime::new(
+            ClippedRepairBehavior::RepairClipThenModalThenWindowFails,
+        );
+        let (nested_prompt, nested_schema) =
+            prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &modal_then_window,
+            "document-1",
+            &catalog,
+            nested_prompt,
+            nested_schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("a newer window fallback must replace the older modal snapshot");
+        assert_eq!(generated.claims.len(), 3);
+        assert_eq!(
+            generated.claims[2].text,
+            "The operator should inspect the record."
+        );
+        assert_eq!(generated.evidence.len(), 4);
+        assert_eq!(
+            generated.withheld_unit_kind,
+            Some(WithheldUnitKind::CrossWindow)
+        );
+        assert_eq!(modal_then_window.requests().len(), 4);
 
         let nested_omitting = ClippedUnitRepairRuntime::new(
             ClippedRepairBehavior::NestedWindowRepairOmitsSafeSibling,
