@@ -4,6 +4,8 @@
 //! request-local source IDs. Rust owns durable evidence and claim identity.
 use super::*;
 
+mod semantic_support;
+
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
 pub(super) const MAX_SUMMARY_CLAIMS: usize = 8;
 pub(super) const FALLBACK_WARNING_CODE: &str = "COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE";
@@ -1579,6 +1581,8 @@ fn validate_modal_content(
         Err(invalid_document())
     }
 }
+
+pub(super) use semantic_support::apply_semantic_fidelity_guards;
 
 fn modal_strengthening_failure() -> PipelineFailure {
     stage_failure(
@@ -4224,6 +4228,1215 @@ mod tests {
                 .is_empty()
         );
         assert!(validate_modal_content(&requires, &strong_requirement_evidence).is_ok());
+    }
+
+    #[test]
+    fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
+        let mut first = catalog().candidates[0].evidence.clone();
+        first.evidence_id = "flsa".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Quota is at most 5 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The count is less than 450 cases. The quota is at most 400 cases. Outdoor temperature is at most 5 degrees Celsius. Cargo weighs at most 5 kilograms. The rate is at most 5%. The numeric cap cannot be more than 525 widgets. Area is at most 5 square meters. Charge is at most $5. Density is at most 5 kilograms per square meter. Load Alpha weighs at most 725 parcels. Load Beta weighs at most 25 parcels. Plan A charges at most 5 dollars. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
+        let mut flc = catalog().candidates[1].evidence.clone();
+        flc.evidence_id = "flc".into();
+        flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
+        let mut ager = catalog().candidates[0].evidence.clone();
+        ager.evidence_id = "ager".into();
+        ager.exact_quote = "Agricultural employers (AGERs) and agricultural associations (AGAS) are subject to MSPA if they recruit a migrant worker.".into();
+        let mut combined_actors = catalog().candidates[0].evidence.clone();
+        combined_actors.evidence_id = "combined-actors".into();
+        combined_actors.exact_quote = "Farm labor contractors (FLCs), agricultural employers (AGERs), and agricultural associations (AGAS) recruit migrant workers, while FLCs receive money or other valuable consideration for recruiting.".into();
+        let mut coordinated_actors = catalog().candidates[1].evidence.clone();
+        coordinated_actors.evidence_id = "coordinated-actors".into();
+        coordinated_actors.exact_quote = "Farm labor contractors (FLCs) are subject to the rule if they recruit workers and agricultural employers (AGERs) are subject to the rule if they recruit for money.".into();
+        let mut negative_actor_condition = catalog().candidates[0].evidence.clone();
+        negative_actor_condition.evidence_id = "negative-actor-condition".into();
+        negative_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they don't recruit for compensation.".into();
+        let mut unless_actor_condition = catalog().candidates[1].evidence.clone();
+        unless_actor_condition.evidence_id = "unless-actor-condition".into();
+        unless_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA unless they recruit for compensation.".into();
+        let mut except_actor_condition = catalog().candidates[0].evidence.clone();
+        except_actor_condition.evidence_id = "except-actor-condition".into();
+        except_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA except when they recruit for compensation.".into();
+        let mut only_if_actor_condition = catalog().candidates[1].evidence.clone();
+        only_if_actor_condition.evidence_id = "only-if-actor-condition".into();
+        only_if_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA only if they recruit for compensation.".into();
+        let mut contracted_bound = catalog().candidates[1].evidence.clone();
+        contracted_bound.evidence_id = "contracted-bound".into();
+        contracted_bound.exact_quote = "The limit isn't more than 500 units.".into();
+        let mut leading_decimal = catalog().candidates[0].evidence.clone();
+        leading_decimal.evidence_id = "leading-decimal".into();
+        leading_decimal.exact_quote = "The fraction is at least 0.5.".into();
+        let mut contextual_bound = catalog().candidates[1].evidence.clone();
+        contextual_bound.evidence_id = "contextual-bound".into();
+        contextual_bound.exact_quote =
+            "Total annual capacity Sigma is capped at 400 units. Total annual capacity Tau is more than 500 units.".into();
+        let mut suffix_currency = catalog().candidates[0].evidence.clone();
+        suffix_currency.evidence_id = "suffix-currency".into();
+        suffix_currency.exact_quote = "The fee is at most 5€.".into();
+        let mut plain_equality = catalog().candidates[1].evidence.clone();
+        plain_equality.evidence_id = "plain-equality".into();
+        plain_equality.exact_quote = "The capacity is 500 units.".into();
+        let mut negative_equality = catalog().candidates[0].evidence.clone();
+        negative_equality.evidence_id = "negative-equality".into();
+        negative_equality.exact_quote = "The threshold is not 500 units.".into();
+        let mut transport = catalog().candidates[1].evidence.clone();
+        transport.evidence_id = "transport".into();
+        transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
+        let mut inverted_transport = catalog().candidates[0].evidence.clone();
+        inverted_transport.evidence_id = "inverted-transport".into();
+        inverted_transport.exact_quote =
+            "The employer must transport workers to the workplace from living quarters.".into();
+        let mut actor_transport = catalog().candidates[1].evidence.clone();
+        actor_transport.evidence_id = "actor-transport".into();
+        actor_transport.exact_quote = "Plan A transports workers from housing to workplace. Plan B transports workers from station to field. Plan C manages records.".into();
+        let mut coordinated_route = catalog().candidates[0].evidence.clone();
+        coordinated_route.evidence_id = "coordinated-route".into();
+        coordinated_route.exact_quote = "Plan A and Plan B transport workers from station to field. Plan C is documented separately.".into();
+        let mut disjunctive_route = catalog().candidates[1].evidence.clone();
+        disjunctive_route.evidence_id = "disjunctive-route".into();
+        disjunctive_route.exact_quote =
+            "Plan A or Plan B transport workers from station to field.".into();
+        let mut temporally_scoped_route = catalog().candidates[0].evidence.clone();
+        temporally_scoped_route.evidence_id = "temporally-scoped-route".into();
+        temporally_scoped_route.exact_quote =
+            "Plan A transports workers from station to field during harvest.".into();
+        let mut explicit_evaluation = catalog().candidates[0].evidence.clone();
+        explicit_evaluation.evidence_id = "evaluation".into();
+        explicit_evaluation.exact_quote =
+            "These measures are essential for worker safety and health.".into();
+        let mut procedure_a = catalog().candidates[0].evidence.clone();
+        procedure_a.evidence_id = "procedure-a".into();
+        procedure_a.exact_quote = "Procedure A is essential.".into();
+        let mut procedure_b = catalog().candidates[1].evidence.clone();
+        procedure_b.evidence_id = "procedure-b".into();
+        procedure_b.exact_quote = "Procedure B is documented separately.".into();
+        let mut shared_procedures = catalog().candidates[0].evidence.clone();
+        shared_procedures.evidence_id = "shared-procedures".into();
+        shared_procedures.exact_quote =
+            "Procedure A and Procedure B are essential. Procedure C is documented separately."
+                .into();
+        let mut qualified_procedure = catalog().candidates[1].evidence.clone();
+        qualified_procedure.evidence_id = "qualified-procedure".into();
+        qualified_procedure.exact_quote = "Procedure K review is essential.".into();
+        let mut lexical_evaluations = catalog().candidates[0].evidence.clone();
+        lexical_evaluations.evidence_id = "lexical-evaluations".into();
+        lexical_evaluations.exact_quote =
+            "Procedure L is ineffective. Procedure M is unsafe. Procedure N is unhealthy. Procedure O is unimportant. Procedure P is unnecessary. Procedure Q is nonessential.".into();
+        let mut negative_evaluation = catalog().candidates[1].evidence.clone();
+        negative_evaluation.evidence_id = "negative-evaluation".into();
+        negative_evaluation.exact_quote = "Procedure C is not essential.".into();
+        let mut compound_evaluations = catalog().candidates[0].evidence.clone();
+        compound_evaluations.evidence_id = "compound-evaluations".into();
+        compound_evaluations.exact_quote =
+            "Procedure D is essential and Procedure E is critical.".into();
+        let mut sentence_boundary = catalog().candidates[1].evidence.clone();
+        sentence_boundary.evidence_id = "sentence-boundary".into();
+        sentence_boundary.exact_quote =
+            "The result is not unusual. More than 500 cases trigger review.".into();
+        let mut comparative_relative = catalog().candidates[0].evidence.clone();
+        comparative_relative.evidence_id = "comparative-relative".into();
+        comparative_relative.exact_quote = "Costs fell compared with last year.".into();
+        let mut additive_evaluation = catalog().candidates[1].evidence.clone();
+        additive_evaluation.evidence_id = "additive-evaluation".into();
+        additive_evaluation.exact_quote =
+            "Procedure F is not only essential but also effective.".into();
+        let mut shared_copula = catalog().candidates[0].evidence.clone();
+        shared_copula.evidence_id = "shared-copula".into();
+        shared_copula.exact_quote =
+            "Procedure G is essential and is effective. Procedure H is documented separately."
+                .into();
+        let mut transitive_evaluation = catalog().candidates[1].evidence.clone();
+        transitive_evaluation.evidence_id = "transitive-evaluation".into();
+        transitive_evaluation.exact_quote =
+            "Procedure I ensures safety. Procedure J is documented separately.".into();
+        let mut nonliteral_evaluation = catalog().candidates[0].evidence.clone();
+        nonliteral_evaluation.evidence_id = "nonliteral-evaluation".into();
+        nonliteral_evaluation.exact_quote = "Helmets prevent worker injuries.".into();
+        let mut immediate_family = catalog().candidates[1].evidence.clone();
+        immediate_family.evidence_id = "immediate-family".into();
+        immediate_family.exact_quote =
+            "Eligibility is limited to immediate family members of the owner.".into();
+        let mut mixed_family = catalog().candidates[0].evidence.clone();
+        mixed_family.evidence_id = "mixed-family".into();
+        mixed_family.exact_quote = "Immediate family members qualify under exemption A. Family members qualify under exemption B.".into();
+        let mut modal = catalog().candidates[0].evidence.clone();
+        modal.evidence_id = "modal".into();
+        modal.exact_quote = "The interpreter should retain the operating context.".into();
+        let mut mixed_modal = catalog().candidates[1].evidence.clone();
+        mixed_modal.evidence_id = "mixed-modal".into();
+        mixed_modal.exact_quote =
+            "Plan A may accept applications. Plan B must accept applications. Plan E must not accept reports.".into();
+        let mut contracted_modal = catalog().candidates[0].evidence.clone();
+        contracted_modal.evidence_id = "contracted-modal".into();
+        contracted_modal.exact_quote =
+            "Plan C shouldn't accept applications. Plan D cannot accept reports.".into();
+        let evidence = vec![
+            first,
+            flc,
+            ager,
+            combined_actors,
+            coordinated_actors,
+            negative_actor_condition,
+            unless_actor_condition,
+            except_actor_condition,
+            only_if_actor_condition,
+            contracted_bound,
+            leading_decimal,
+            contextual_bound,
+            suffix_currency,
+            plain_equality,
+            negative_equality,
+            transport,
+            inverted_transport,
+            actor_transport,
+            coordinated_route,
+            disjunctive_route,
+            temporally_scoped_route,
+            explicit_evaluation,
+            procedure_a,
+            procedure_b,
+            shared_procedures,
+            qualified_procedure,
+            lexical_evaluations,
+            negative_evaluation,
+            compound_evaluations,
+            sentence_boundary,
+            comparative_relative,
+            additive_evaluation,
+            shared_copula,
+            transitive_evaluation,
+            nonliteral_evaluation,
+            immediate_family,
+            mixed_family,
+            modal,
+            mixed_modal,
+            contracted_modal,
+        ];
+
+        let claims = vec![
+            CitedClaim {
+                claim_id: "supported-boundary".into(),
+                text: "The exemption applies when the employer used at most 500 man-days."
+                    .into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-boundary".into(),
+                text: "The exemption applies when the employer used fewer than 500 man-days."
+                    .into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-spelled-boundary".into(),
+                text: "The exemption applies when the employer used at most five hundred man-days."
+                    .into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-spelled-boundary".into(),
+                text: "The exemption applies when the employer used more than five hundred man-days."
+                    .into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-symbol-upper-boundary".into(),
+                text: "The exemption applies when the employer used ≤ 500 man-days.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-symbol-upper-boundary".into(),
+                text: "The exemption applies when the employer used > 500 man-days.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-symbol-lower-boundary".into(),
+                text: "Eligibility requires ≥ 18 years.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-symbol-lower-boundary".into(),
+                text: "Eligibility requires < 18 years.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-contracted-boundary".into(),
+                text: "The limit is at most 500 units.".into(),
+                evidence_ids: vec!["contracted-bound".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-contracted-boundary".into(),
+                text: "The limit is more than 500 units.".into(),
+                evidence_ids: vec!["contracted-bound".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-leading-decimal".into(),
+                text: "The fraction is at least .5.".into(),
+                evidence_ids: vec!["leading-decimal".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-leading-decimal".into(),
+                text: "The fraction is less than .5.".into(),
+                evidence_ids: vec!["leading-decimal".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-inclusive-boundary".into(),
+                text: "The floor is at least 600 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negated-inclusive-boundary".into(),
+                text: "The floor is not at least 600 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-under-boundary".into(),
+                text: "Clearance remains under 700 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negated-under-boundary".into(),
+                text: "Clearance is not under 700 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-exact-boundary".into(),
+                text: "The exact limit is exactly 650 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negated-exact-boundary".into(),
+                text: "The exact limit is not exactly 650 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-weakened-boundary".into(),
+                text: "The count is at most 450 cases.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-bound-unit".into(),
+                text: "Plan A charges at most 5 dollars.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-bound-unit".into(),
+                text: "Plan A charges at most 5 percent.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-weaker-value".into(),
+                text: "The quota is at most 500 cases.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-stronger-value".into(),
+                text: "The quota is at most 300 cases.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-compound-unit".into(),
+                text: "Outdoor temperature is at most 5 degrees Celsius.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-compound-unit".into(),
+                text: "Outdoor temperature is at most 5 degrees Fahrenheit.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-single-subject-auxiliary".into(),
+                text: "Capacity can be at most 750 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-single-subject-auxiliary".into(),
+                text: "Capacity can be at most 5 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-generic-unit".into(),
+                text: "Cargo weighs at most 5 kilograms.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-generic-unit".into(),
+                text: "Cargo weighs at most 5 pounds.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-symbolic-percent-unit".into(),
+                text: "The rate is at most 5 percent.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-symbolic-percent-unit".into(),
+                text: "The rate is at most 5 dollars.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-cannot-bound".into(),
+                text: "The numeric cap cannot be more than 525 widgets.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-cannot-bound".into(),
+                text: "The numeric cap is more than 525 widgets.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-compound-area-unit".into(),
+                text: "Area is at most 5 square metres.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-compound-area-unit".into(),
+                text: "Area is at most 5 square feet.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-prefix-currency".into(),
+                text: "Charge is at most 5 dollars.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-prefix-currency".into(),
+                text: "Charge is at most 5 percent.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-suffix-currency".into(),
+                text: "The fee is at most 5 euros.".into(),
+                evidence_ids: vec!["suffix-currency".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-suffix-currency".into(),
+                text: "The fee is at most 5 dollars.".into(),
+                evidence_ids: vec!["suffix-currency".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-nested-compound-unit".into(),
+                text: "Density is at most 5 kilograms per square metres.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-nested-compound-unit".into(),
+                text: "Density is at most 5 kilograms per square feet.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-ordinary-bound-predicate".into(),
+                text: "Load Alpha can weigh at most 725 parcels.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-ordinary-bound-predicate".into(),
+                text: "Load Alpha can weigh at most 25 parcels.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "deferred-unrelated-same-value-conflict".into(),
+                text: "Total annual capacity Sigma is at most 500 units.".into(),
+                evidence_ids: vec!["contextual-bound".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-contextual-same-value".into(),
+                text: "Total annual capacity Tau is at most 500 units.".into(),
+                evidence_ids: vec!["contextual-bound".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-copular-equality-bound".into(),
+                text: "The capacity is at most 500 units.".into(),
+                evidence_ids: vec!["plain-equality".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-copular-equality-bound".into(),
+                text: "The capacity is less than 500 units.".into(),
+                evidence_ids: vec!["plain-equality".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-positive-copular-equality-polarity".into(),
+                text: "The capacity is not 500 units.".into(),
+                evidence_ids: vec!["plain-equality".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-negative-copular-equality".into(),
+                text: "The threshold is not 500 units.".into(),
+                evidence_ids: vec!["negative-equality".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negative-copular-equality-polarity".into(),
+                text: "The threshold is 500 units.".into(),
+                evidence_ids: vec!["negative-equality".into()],
+            },
+            CitedClaim {
+                claim_id: "broadened-enumeration".into(),
+                text: "A family member of the owner qualifies for the exemption.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-immediate-family".into(),
+                text: "An immediate family member of the owner is eligible.".into(),
+                evidence_ids: vec!["immediate-family".into()],
+            },
+            CitedClaim {
+                claim_id: "broadened-immediate-family".into(),
+                text: "A family member of the owner is eligible.".into(),
+                evidence_ids: vec!["immediate-family".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-mixed-family-scope".into(),
+                text: "A family member qualifies under exemption B.".into(),
+                evidence_ids: vec!["mixed-family".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-formatted-integer".into(),
+                text: "The separate threshold is at most 1000.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-formatted-decimal".into(),
+                text: "The ratio is at least 1.5.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-formatted-decimal".into(),
+                text: "The ratio is more than 1.5.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-negative-boundary".into(),
+                text: "Temperatures must remain at least -5 degrees.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negative-boundary".into(),
+                text: "Temperatures must remain at least 5 degrees.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-maximum-of".into(),
+                text: "Capacity is at most 750 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-minimum-of".into(),
+                text: "Eligibility requires at least 18 years.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-bound-subject".into(),
+                text: "Plan A accepts at most 900 applications.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-bound-subject".into(),
+                text: "Plan B accepts at most 900 applications.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-passive-bound-subject".into(),
+                text: "At most 900 applications are accepted by Plan A.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-passive-bound-subject".into(),
+                text: "At most 900 applications are accepted by Plan B.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-article-bound-subject".into(),
+                text: "Plan B accepts a maximum of 900 applications.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-auxiliary-bound-subject".into(),
+                text: "Plan A can accept at most 900 applications.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-auxiliary-bound-subject".into(),
+                text: "Plan B can accept at most 900 applications.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-shared-prefix-bound-subject".into(),
+                text: "Health Plan A can accept at most 900 reports.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-shared-prefix-bound-subject".into(),
+                text: "Health Plan B can accept at most 900 reports.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-actors".into(),
+                text: "FLCs, AGERs, and AGAS are subject to MSPA if they recruit migrant workers."
+                    .into(),
+                evidence_ids: vec!["flc".into(), "ager".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-condition".into(),
+                text: "FLCs, AGERs, and AGAS are subject to MSPA if they recruit migrant workers for compensation."
+                    .into(),
+                evidence_ids: vec!["flc".into(), "ager".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-condition-full-names".into(),
+                text: "Farm labor contractors, agricultural employers, and agricultural associations are subject to MSPA if they recruit migrant workers for money or valuable consideration."
+                    .into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-condition-coordinated".into(),
+                text: "FLCs and AGERs are subject to the rule if they recruit workers for money."
+                    .into(),
+                evidence_ids: vec!["coordinated-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-single-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit workers for money.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-single-actor-condition".into(),
+                text: "AGERs are subject to MSPA if they recruit workers for money.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-leading-condition".into(),
+                text: "If they recruit workers for money, FLCs are subject to MSPA.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-leading-condition".into(),
+                text: "If they recruit workers for money, AGERs are subject to MSPA.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-leading-then-condition".into(),
+                text: "If they recruit workers for money then FLCs are subject to MSPA.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-leading-then-condition".into(),
+                text: "If they recruit workers for money then AGERs are subject to MSPA.".into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-negative-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they do not recruit for compensation."
+                    .into(),
+                evidence_ids: vec!["negative-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negative-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
+                evidence_ids: vec!["negative-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-unless-actor-condition".into(),
+                text: "FLCs are subject to MSPA unless they recruit for compensation.".into(),
+                evidence_ids: vec!["unless-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-unless-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
+                evidence_ids: vec!["unless-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-except-actor-condition".into(),
+                text: "FLCs are subject to MSPA except when they recruit for compensation.".into(),
+                evidence_ids: vec!["except-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-except-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
+                evidence_ids: vec!["except-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-only-if-actor-condition".into(),
+                text: "FLCs are subject to MSPA only if they recruit for compensation.".into(),
+                evidence_ids: vec!["only-if-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-only-if-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
+                evidence_ids: vec!["only-if-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "added-only-if-actor-condition".into(),
+                text: "FLCs are subject to MSPA only if they recruit for compensation.".into(),
+                evidence_ids: vec!["flc".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-compound-actor-conditions".into(),
+                text: "FLCs are subject to MSPA if they recruit workers for money, and AGERs are subject to MSPA if they recruit workers."
+                    .into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-compound-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit workers for money, and AGERs are subject to MSPA if they recruit workers for money."
+                    .into(),
+                evidence_ids: vec!["combined-actors".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-endpoints".into(),
+                text: "The employer must provide transportation from housing to the work site each morning. The policy identifies this route."
+                    .into(),
+                evidence_ids: vec!["transport".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-endpoint".into(),
+                text: "The employer must provide transportation from the workplace to the living quarters."
+                    .into(),
+                evidence_ids: vec!["transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-inverted-source-endpoints".into(),
+                text: "The employer must transport workers from housing to the work site."
+                    .into(),
+                evidence_ids: vec!["inverted-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-inverted-source-endpoints".into(),
+                text: "The employer must transport workers from the workplace to living quarters."
+                    .into(),
+                evidence_ids: vec!["inverted-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-home-endpoint".into(),
+                text: "The employer must provide transportation from home to the workplace."
+                    .into(),
+                evidence_ids: vec!["transport".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-one-known-endpoint".into(),
+                text: "The employer must provide transportation from the workplace to home."
+                    .into(),
+                evidence_ids: vec!["transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-actor-endpoints".into(),
+                text: "Plan A transports workers from housing to the workplace.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-actor-endpoints".into(),
+                text: "Plan A transports workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-paraphrased-actor-endpoints".into(),
+                text: "Plan A carries workers from housing to the workplace.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-paraphrased-actor-endpoints".into(),
+                text: "Plan A carries workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-unlisted-route-predicate".into(),
+                text: "Plan A moves workers from housing to the workplace.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-unlisted-route-predicate".into(),
+                text: "Plan A moves workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-cited-nonroute-actor".into(),
+                text: "Plan C transports workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-unlisted-cited-nonroute-actor".into(),
+                text: "Plan C moves workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "deferred-unknown-route-actor".into(),
+                text: "Plan D transports workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-passive-route-agent".into(),
+                text: "Workers are transported by Plan B from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-passive-route-agent".into(),
+                text: "Workers are transported by Plan C from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-coordinated-route-actor".into(),
+                text: "Plan A transports workers from station to field.".into(),
+                evidence_ids: vec!["coordinated-route".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-coordinated-route-actor".into(),
+                text: "Plan C transports workers from station to field.".into(),
+                evidence_ids: vec!["coordinated-route".into()],
+            },
+            CitedClaim {
+                claim_id: "deferred-disjunctive-route-actor".into(),
+                text: "Plan A transports workers from station to field.".into(),
+                evidence_ids: vec!["disjunctive-route".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-temporally-scoped-route".into(),
+                text: "Plan A transports workers from station to field during harvest.".into(),
+                evidence_ids: vec!["temporally-scoped-route".into()],
+            },
+            CitedClaim {
+                claim_id: "broadened-temporally-scoped-route".into(),
+                text: "Plan A transports workers from station to field.".into(),
+                evidence_ids: vec!["temporally-scoped-route".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-evaluation".into(),
+                text: "The measures are critical for worker safety and health.".into(),
+                evidence_ids: vec!["evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-bound-evaluation".into(),
+                text: "Procedure A is critical.".into(),
+                evidence_ids: vec!["procedure-a".into(), "procedure-b".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-evaluation".into(),
+                text: "Procedure B is critical.".into(),
+                evidence_ids: vec!["procedure-a".into(), "procedure-b".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-shared-evaluation".into(),
+                text: "Procedure B is critical.".into(),
+                evidence_ids: vec!["shared-procedures".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-coordinated-evaluation".into(),
+                text: "Procedure A and Procedure B are critical.".into(),
+                evidence_ids: vec!["shared-procedures".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-coordinated-evaluation".into(),
+                text: "Procedure A and Procedure C are critical.".into(),
+                evidence_ids: vec!["shared-procedures".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-qualified-evaluation-subject".into(),
+                text: "Procedure K review is critical.".into(),
+                evidence_ids: vec!["qualified-procedure".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-evaluation-subphrase".into(),
+                text: "Procedure K is critical.".into(),
+                evidence_ids: vec!["qualified-procedure".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-ineffective".into(),
+                text: "Procedure L is not effective.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-ineffective".into(),
+                text: "Procedure L is effective.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-unsafe".into(),
+                text: "Procedure M is not safe.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-unsafe".into(),
+                text: "Procedure M is safe.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-unhealthy".into(),
+                text: "Procedure N is not healthy.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-unhealthy".into(),
+                text: "Procedure N is healthy.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-unimportant".into(),
+                text: "Procedure O is not important.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-unimportant".into(),
+                text: "Procedure O is important.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-unnecessary".into(),
+                text: "Procedure P is not necessary.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-unnecessary".into(),
+                text: "Procedure P is necessary.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-nonessential".into(),
+                text: "Procedure Q is not essential.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-nonessential".into(),
+                text: "Procedure Q is essential.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-negative-evaluation".into(),
+                text: "Procedure C is not critical.".into(),
+                evidence_ids: vec!["negative-evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-evaluation-polarity".into(),
+                text: "Procedure C is critical.".into(),
+                evidence_ids: vec!["negative-evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-compound-evaluation".into(),
+                text: "Procedure E is critical.".into(),
+                evidence_ids: vec!["compound-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-after-negative-sentence".into(),
+                text: "More than 500 cases trigger review.".into(),
+                evidence_ids: vec!["sentence-boundary".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-comparative-relative".into(),
+                text: "Costs fell relative to last year.".into(),
+                evidence_ids: vec!["comparative-relative".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-additive-evaluation".into(),
+                text: "Procedure F is essential.".into(),
+                evidence_ids: vec!["additive-evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-shared-copula-evaluation".into(),
+                text: "Procedure G is effective.".into(),
+                evidence_ids: vec!["shared-copula".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-shared-copula-evaluation".into(),
+                text: "Procedure H is effective.".into(),
+                evidence_ids: vec!["shared-copula".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-transitive-evaluation".into(),
+                text: "Procedure I ensures safety.".into(),
+                evidence_ids: vec!["transitive-evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-transitive-evaluation".into(),
+                text: "Procedure J ensures safety.".into(),
+                evidence_ids: vec!["transitive-evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-modal".into(),
+                text: "The interpreter should retain the operating context.".into(),
+                evidence_ids: vec!["modal".into()],
+            },
+            CitedClaim {
+                claim_id: "strengthened-modal".into(),
+                text: "The interpreter must retain the operating context.".into(),
+                evidence_ids: vec!["modal".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-strong-modal-subject".into(),
+                text: "Plan B must accept applications.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-negative-strong-modal".into(),
+                text: "Plan E must not accept reports.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-positive-strong-modal-polarity".into(),
+                text: "Plan B must not accept applications.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negative-strong-modal-polarity".into(),
+                text: "Plan E must accept reports.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-strong-modal-subject".into(),
+                text: "Plan A must accept applications.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "strengthened-contracted-modal".into(),
+                text: "Plan C must not accept applications.".into(),
+                evidence_ids: vec!["contracted-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "strengthened-cannot-modal".into(),
+                text: "Plan D must not accept reports.".into(),
+                evidence_ids: vec!["contracted-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "deferred-nonliteral-evaluation".into(),
+                text: "Helmets improve worker safety.".into(),
+                evidence_ids: vec!["nonliteral-evaluation".into()],
+            },
+            CitedClaim {
+                claim_id: "already-ambiguous".into(),
+                text: "The transport rule is essential for worker safety and health.".into(),
+                evidence_ids: vec!["transport".into()],
+            },
+        ];
+        let mut verifications = claims
+            .iter()
+            .map(|claim| ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: if claim.claim_id == "already-ambiguous" {
+                    ClaimVerdict::Ambiguous
+                } else {
+                    ClaimVerdict::Supported
+                },
+            })
+            .collect::<Vec<_>>();
+
+        apply_semantic_fidelity_guards(&claims, &evidence, &mut verifications).unwrap();
+
+        let verdict = |claim_id: &str| {
+            verifications
+                .iter()
+                .find(|verification| verification.claim_id == claim_id)
+                .map(|verification| verification.verdict.clone())
+                .expect("every fixture claim should have a verdict")
+        };
+        for claim_id in [
+            "supported-boundary",
+            "supported-spelled-boundary",
+            "supported-symbol-upper-boundary",
+            "supported-symbol-lower-boundary",
+            "supported-contracted-boundary",
+            "supported-leading-decimal",
+            "supported-inclusive-boundary",
+            "supported-under-boundary",
+            "supported-exact-boundary",
+            "supported-weakened-boundary",
+            "supported-bound-unit",
+            "supported-weaker-value",
+            "supported-compound-unit",
+            "supported-single-subject-auxiliary",
+            "supported-generic-unit",
+            "supported-symbolic-percent-unit",
+            "supported-cannot-bound",
+            "supported-compound-area-unit",
+            "supported-prefix-currency",
+            "supported-suffix-currency",
+            "supported-nested-compound-unit",
+            "supported-ordinary-bound-predicate",
+            "deferred-unrelated-same-value-conflict",
+            "supported-copular-equality-bound",
+            "supported-negative-copular-equality",
+            "supported-immediate-family",
+            "supported-mixed-family-scope",
+            "supported-formatted-integer",
+            "supported-formatted-decimal",
+            "supported-negative-boundary",
+            "supported-maximum-of",
+            "supported-minimum-of",
+            "supported-bound-subject",
+            "supported-passive-bound-subject",
+            "supported-auxiliary-bound-subject",
+            "supported-shared-prefix-bound-subject",
+            "supported-actors",
+            "supported-single-actor-condition",
+            "supported-leading-condition",
+            "supported-leading-then-condition",
+            "supported-negative-actor-condition",
+            "supported-unless-actor-condition",
+            "supported-except-actor-condition",
+            "supported-only-if-actor-condition",
+            "supported-compound-actor-conditions",
+            "supported-endpoints",
+            "supported-inverted-source-endpoints",
+            "supported-home-endpoint",
+            "supported-actor-endpoints",
+            "supported-paraphrased-actor-endpoints",
+            "supported-unlisted-route-predicate",
+            "deferred-unknown-route-actor",
+            "supported-passive-route-agent",
+            "supported-coordinated-route-actor",
+            "deferred-disjunctive-route-actor",
+            "supported-temporally-scoped-route",
+            "supported-evaluation",
+            "supported-bound-evaluation",
+            "supported-shared-evaluation",
+            "supported-coordinated-evaluation",
+            "supported-qualified-evaluation-subject",
+            "supported-lexical-ineffective",
+            "supported-lexical-unsafe",
+            "supported-lexical-unhealthy",
+            "supported-lexical-unimportant",
+            "supported-lexical-unnecessary",
+            "supported-lexical-nonessential",
+            "supported-negative-evaluation",
+            "supported-compound-evaluation",
+            "supported-after-negative-sentence",
+            "supported-comparative-relative",
+            "supported-additive-evaluation",
+            "supported-shared-copula-evaluation",
+            "supported-transitive-evaluation",
+            "deferred-nonliteral-evaluation",
+            "supported-modal",
+            "supported-strong-modal-subject",
+            "supported-negative-strong-modal",
+        ] {
+            assert_eq!(verdict(claim_id), ClaimVerdict::Supported, "{claim_id}");
+        }
+        for claim_id in [
+            "changed-boundary",
+            "changed-spelled-boundary",
+            "changed-symbol-upper-boundary",
+            "changed-symbol-lower-boundary",
+            "changed-contracted-boundary",
+            "changed-leading-decimal",
+            "changed-negated-inclusive-boundary",
+            "changed-negated-under-boundary",
+            "changed-negated-exact-boundary",
+            "changed-bound-unit",
+            "changed-stronger-value",
+            "changed-compound-unit",
+            "transferred-single-subject-auxiliary",
+            "changed-generic-unit",
+            "changed-symbolic-percent-unit",
+            "changed-cannot-bound",
+            "changed-compound-area-unit",
+            "changed-prefix-currency",
+            "changed-suffix-currency",
+            "changed-nested-compound-unit",
+            "transferred-ordinary-bound-predicate",
+            "changed-contextual-same-value",
+            "changed-copular-equality-bound",
+            "changed-positive-copular-equality-polarity",
+            "changed-negative-copular-equality-polarity",
+            "broadened-enumeration",
+            "broadened-immediate-family",
+            "changed-formatted-decimal",
+            "changed-negative-boundary",
+            "transferred-bound-subject",
+            "transferred-passive-bound-subject",
+            "transferred-article-bound-subject",
+            "transferred-auxiliary-bound-subject",
+            "transferred-shared-prefix-bound-subject",
+            "transferred-condition",
+            "transferred-condition-full-names",
+            "transferred-condition-coordinated",
+            "transferred-single-actor-condition",
+            "transferred-leading-condition",
+            "transferred-leading-then-condition",
+            "changed-negative-actor-condition",
+            "changed-unless-actor-condition",
+            "changed-except-actor-condition",
+            "changed-only-if-actor-condition",
+            "added-only-if-actor-condition",
+            "transferred-compound-actor-condition",
+            "changed-endpoint",
+            "changed-inverted-source-endpoints",
+            "changed-one-known-endpoint",
+            "transferred-actor-endpoints",
+            "transferred-paraphrased-actor-endpoints",
+            "transferred-unlisted-route-predicate",
+            "transferred-cited-nonroute-actor",
+            "transferred-unlisted-cited-nonroute-actor",
+            "transferred-passive-route-agent",
+            "transferred-coordinated-route-actor",
+            "broadened-temporally-scoped-route",
+            "transferred-evaluation",
+            "transferred-coordinated-evaluation",
+            "transferred-evaluation-subphrase",
+            "changed-lexical-ineffective",
+            "changed-lexical-unsafe",
+            "changed-lexical-unhealthy",
+            "changed-lexical-unimportant",
+            "changed-lexical-unnecessary",
+            "changed-lexical-nonessential",
+            "changed-evaluation-polarity",
+            "transferred-shared-copula-evaluation",
+            "transferred-transitive-evaluation",
+            "strengthened-modal",
+            "transferred-strong-modal-subject",
+            "changed-positive-strong-modal-polarity",
+            "changed-negative-strong-modal-polarity",
+            "strengthened-contracted-modal",
+            "strengthened-cannot-modal",
+        ] {
+            assert_eq!(verdict(claim_id), ClaimVerdict::Unsupported, "{claim_id}");
+        }
+        assert_eq!(
+            verdict("already-ambiguous"),
+            ClaimVerdict::Ambiguous,
+            "a deterministic guard must not promote or relabel an existing non-passing verdict"
+        );
+    }
+
+    #[test]
+    fn semantic_fidelity_guard_fails_closed_on_partial_or_mismatched_inputs() {
+        let evidence = vec![catalog().candidates[0].evidence.clone()];
+        let claim = CitedClaim {
+            claim_id: "claim-1".into(),
+            text: "The source states a supported fact.".into(),
+            evidence_ids: vec![evidence[0].evidence_id.clone()],
+        };
+        let verification = ClaimVerification {
+            claim_id: claim.claim_id.clone(),
+            evidence_ids: claim.evidence_ids.clone(),
+            verdict: ClaimVerdict::Supported,
+        };
+
+        let length_error =
+            apply_semantic_fidelity_guards(std::slice::from_ref(&claim), &evidence, &mut [])
+                .expect_err("partial verdict coverage must fail closed");
+        assert_eq!(length_error.code, "INVALID_VERIFICATION_RESPONSE");
+
+        let mut mismatched = ClaimVerification {
+            claim_id: "different-claim".into(),
+            ..verification.clone()
+        };
+        let identity_error = apply_semantic_fidelity_guards(
+            std::slice::from_ref(&claim),
+            &evidence,
+            std::slice::from_mut(&mut mismatched),
+        )
+        .expect_err("mismatched verdict identity must fail closed");
+        assert_eq!(identity_error.code, "INVALID_VERIFICATION_RESPONSE");
+
+        let unknown_claim = CitedClaim {
+            evidence_ids: vec!["missing-evidence".into()],
+            ..claim
+        };
+        let mut unknown_verification = ClaimVerification {
+            evidence_ids: unknown_claim.evidence_ids.clone(),
+            ..verification
+        };
+        let evidence_error = apply_semantic_fidelity_guards(
+            std::slice::from_ref(&unknown_claim),
+            &evidence,
+            std::slice::from_mut(&mut unknown_verification),
+        )
+        .expect_err("unknown cited evidence must fail closed");
+        assert_eq!(evidence_error.code, "INVALID_SYNTHESIZED_DOCUMENT");
     }
 
     #[test]

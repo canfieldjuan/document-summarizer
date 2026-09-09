@@ -2657,3 +2657,223 @@ complete
   not establish semantic support; representative output still requires the
   documented human comparison. This is one public document on one qualified
   local model, not a measured reliability result.
+
+## Slice 28 — Semantic Support Hardening (2026-09-08)
+
+**Status**: implementation, automated gates and focused live-model acceptance
+complete
+
+**Verified root cause and implemented behavior**:
+- The shared semantic prompt was already explicit, but the qualified
+  `qwen3-30b-a3b:latest` verifier still returned `supported` for isolated probes
+  that changed `no more than 500` to `fewer than 500`, replaced five named
+  relationships with `family member`, and transferred the FLC consideration
+  condition to AGERs/AGASs. It correctly rejected a changed transportation
+  endpoint. Model verdicts alone therefore do not enforce these exact
+  relationships.
+- Current coherent verification now applies a deterministic post-verdict veto
+  before filtering or rendering to either coherent summary units or the claim
+  ledger when the current coherent fallback mode presents that ledger. Historical
+  legacy-list verification paths retain their existing versioned behavior. It checks numeric comparison inclusivity,
+  broadened family enumerations, mechanically identifiable `from`/`to`
+  reversals or recombinations, conditions transferred across source-defined
+  actors, literal evaluative concepts transferred across named subjects or
+  polarity, and modal strengthening. The
+  check can only retain or downgrade a model verdict; it never promotes an
+  unsupported or ambiguous verdict.
+- Actor matching supports both source-defined acronyms and their full labels.
+  This matters because the live synthesizer sometimes writes `farm labor
+  contractors` instead of `FLCs`. Actor qualifiers are bound to their source
+  relationship inside compound sentences and when a condition leads the main
+  actor clause. Evaluative conclusions are bound to every named subject when
+  both claim and source expose the same literal concept; nonliteral evaluative
+  paraphrases remain for the model verifier rather than being mechanically
+  rejected. Numeric relations retain
+  signs, normalize bounded English cardinal wording, compare exact normalized
+  decimal thresholds, bind ordinary following unit tokens and explicit
+  temperature-scale qualifiers when both source and claim expose them, retain
+  `%` as the canonical `percent` unit, attach common prefix or suffix currency
+  symbols to their number, and retain structurally marked compound units using
+  `square`, `cubic`, or `per`, including a compound denominator, while
+  excluding grammatical continuations, accept only logically entailed weak-bound
+  paraphrases, and bind an explicit constraint to its nearby subject/predicate
+  when cited text exposes the same context. Plain copular values are treated as
+  exact equality, allowing only logically entailed weaker bounds. A contradictory relation on the same
+  numeric value is considered only when source and claim share that established
+  context or the same complete normalized subject anchor; an unrelated
+  same-valued constraint therefore cannot veto an otherwise
+  supported claim. Restrictive `immediate family`
+  wording must remain explicit in a family-member claim when every cited family
+  occurrence is restricted, while singular and plural `member` forms are
+  equivalent and an explicit unqualified source occurrence remains usable. Directional parsing
+  accepts both `from … to …` and `to … from …` syntax and binds a route to its
+  mechanically known local actor independently of predicate wording when the
+  claim prefix identifies an actor already attached to a cited route, and an
+  explicit passive `by` agent owns its route. Conjunctive source actors are
+  retained as individual owners of their shared route. A disjunctive actor does
+  not establish which alternative owns the route, so the deterministic check
+  leaves that verdict to the model. An `and` starts a new route clause only
+  after a prior route predicate or endpoint. Evaluative relations retain negation while treating additive
+  `not only … but also` wording as affirmative. The kinship backstop recognizes
+  clear noun uses such as `relative of` without treating comparative `relative
+  to` as a family enumeration. Passive numeric wording binds a leading bound to
+  an explicit trailing `by …` subject, and actor qualifier matching retains
+  negation polarity. Shared negation normalization covers expanded and contracted
+  auxiliary forms, and numeric comparator context ignores optional articles.
+  Exact numeric subject anchors recognize ordinary and contracted linking verbs,
+  explicit requirement and local-use predicates, negative modal forms and
+  symbolic comparator tokens. Conditions bind to the local subject after their
+  connector; shared words outside or inside distinct multi-token subjects are
+  not sufficient.
+  Relation parsing stays within sentence or clause boundaries so a negation or
+  endpoint in one sentence cannot affect the next. Leading decimals normalize
+  to their zero-prefixed value. Numeric subject comparison accepts a shared
+  prefix only when both following tokens begin the predicate, so auxiliaries do
+  not hide a named-plan transfer and entities with shared name prefixes remain
+  distinct; the same predicate check admits a mechanically known one-token
+  subject, matches ordinary predicate words across an optional auxiliary only
+  when their normalized words agree, and rejects different predicates or name
+  components. Explicit negation inverts inclusive word or symbol comparators,
+  `under`/`over` forms, exact equality, and one-word `cannot`. Modal comparisons bind force and
+  polarity to the same local subject and object context, including contracted
+  weak-modality negation and one-word `cannot`; an already-strong source must
+  match the strong claim's polarity in both directions.
+  Leading conditions accept either a comma or `then`, and compound claims check
+  every completed actor-condition relation; the declared exclusion connectors
+  (`unless`, `except`, `excluding`, `absent`, and `without`) remain inside the
+  parsed condition and contribute exclusionary polarity when a qualifier is
+  compared. A restrictive `only if` remains bound to the same actor and
+  compensation condition: neither adding nor removing `only` can pass as plain
+  `if`. Directional
+  checks reject a known reversed endpoint even when the other endpoint is new
+  and reject a route transferred to an actor named at the start of another cited
+  clause, including when the claim uses an unlisted route predicate. A
+  mechanically unknown actor absent from cited clause starts remains for model judgment,
+  shared-copula evaluations inherit their prior concrete subject, transitive
+  `ensure`/`guarantee` evaluations bind directly to their subject, and a
+  coordinated evaluation whose full subject phrase is not cited is retained
+  only when every individually cited component has the same supported
+  evaluation and polarity. A literal evaluation otherwise requires the exact
+  cited subject or an explicit conjunctive subject component; it cannot move
+  from a qualified subject such as a procedure's review to the shorter procedure
+  name. The lexical negatives `unimportant`, `ineffective`, `unsafe`,
+  `unhealthy`, `unnecessary`, and `nonessential` carry negative polarity when
+  compared with their positive evaluation concepts. A source-side temporal
+  route restriction introduced by `during`, `until`, or `throughout` must
+  survive in a mechanically compared route claim; otherwise that broader claim
+  is downgraded. A temporal phrase found only in a claim still remains for the
+  model verifier. Plain copular numeric equality recognizes an intervening
+  `not`, so both equality-to-inequality and inequality-to-equality changes are
+  rejected.
+- Verification artifacts now use version `8.0.0`. The previous coherent
+  `7.0.0` contract remains readable, while new results cannot be mistaken for
+  artifacts produced without the deterministic veto. Synthesis, summary,
+  citation, database and UI schemas are unchanged.
+
+**Acceptance evidence so far**:
+- Paired deterministic probes preserve equivalent `at most 500` wording,
+  spelled-out cardinal values, symbolic `≤`/`≥` bounds, comma/decimal and signed
+  number formatting, `maximum of`/`minimum of` wording, source-supported actor
+  grouping, a correctly qualified single actor, and a correctly bound leading
+  condition, including a source-supported contracted negative condition. They
+  also preserve a contracted inclusive numeric bound, entailed same-value and
+  cross-value weak-bound paraphrases with the same known unit, a weak bound
+  entailed by a plain copular equality, an active bound paraphrased
+  with its correct passive `by …` subject, a harmless auxiliary change on the
+  same named plan, distinct plans with a shared name prefix, a leading decimal,
+  a one-token numeric subject across an auxiliary change,
+  comma- and `then`-delimited conditions, multiple correctly qualified actor
+  relations in one claim, an unchanged `only if` restriction,
+  synonymous transport endpoints including `home`, inverted source-route syntax,
+  a route retained on its source actor across carry and unlisted-predicate paraphrases,
+  a route claim for a mechanically unknown actor left to model verification,
+  either member of a coordinated source actor retaining the shared route, a
+  disjunctive actor alternative left to model verification, a retained
+  source-side temporal route restriction,
+  an unchanged Celsius qualifier, a generic unchanged mass unit, a square-unit
+  spelling variant including a nested compound denominator, an ordinary
+  predicate across an inserted auxiliary, a symbolic percent source retained as `percent`, a prefix
+  dollar source paraphrased as `dollars`, a suffix euro source paraphrased as
+  `euros`, explicit
+  `immediate family` scope across singular/plural wording, and an unqualified
+  family claim when cited evidence contains both restricted and unrestricted scopes,
+  comparative `relative to`, additive, subject-bound, shared-subject,
+  shared-copula, transitive, compound, coordinated, qualified-subject, explicit
+  and lexical negative evaluations including `unimportant`, `unnecessary`, and
+  `nonessential`, a nonliteral
+  safety paraphrase left to model verification, and qualified modality including
+  a negative strong source retained with the same polarity.
+  Opposite probes reject an exclusive
+  `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
+  changed from dollars to percent, percent or a prefix dollar value changed to
+  the other unit, Celsius to Fahrenheit, kilograms to pounds, or square meters
+  to square feet,
+  a stronger numeric
+  threshold, a removed negative sign,
+  a same-value boundary reversal scoped to its matching complete subject while
+  a same-value constraint for a different subject sharing only its first word is
+  ignored, a strict boundary not entailed by a plain equality,
+  a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
+  distinct rules in one item or compound sentence, and a single actor borrowing
+  another actor's qualifier, including a leading condition), an active or
+  passive bound moved between named plans, the same transfer hidden by an
+  optional comparator article, contracted numeric or actor negation reversed to
+  affirmative, an `unless`, `except`, or `only if` condition weakened to `if`,
+  plain `if` strengthened to `only if`, a contracted or `cannot`
+  weak modal strengthened to a strong modal, a `cannot be more than` numeric
+  constraint reversed to affirmative `more than`,
+  explicitly negated inclusive, `under`, and exact comparators, both polarity
+  changes around a negated copular equality, a leading-decimal
+  bound reversal, a named-plan transfer hidden by an auxiliary, ordinary
+  predicate, or shared name prefix, comma-less and compound actor-condition transfers, endpoint reversal from
+  either source-route syntax even with one newly worded endpoint, a route moved
+  from one mechanically known actor to another even when the route predicate is
+  paraphrased with an unlisted verb or when the target actor is named only in a
+  cited non-route clause, including both conditions together, a passive route assigned to the wrong explicit agent,
+  or a coordinated route assigned to a cited non-owner, omission of a cited
+  temporal route restriction,
+  removal of the restrictive
+  `immediate` family modifier, an evaluation
+  moved between named procedures including shared-copula, transitive and
+  coordinated wording or from a qualified evaluation subject to its shorter
+  subphrase, lexical negative evaluations including `unimportant`,
+  `unnecessary`, and `nonessential` reversed to positive, removed
+  evaluation negation, `should`-to-`must` strengthening, strong modality
+  transferred between named plans, and either polarity reversal of an existing
+  strong modal. Separate probes
+  reject partial verdict coverage, mismatched identities and unknown evidence,
+  and preserve an already-ambiguous verdict.
+- An end-to-end fixture makes the model return `supported` for a mechanically
+  unsupported broadened family category. The production verification boundary downgrades it,
+  persists the auditable failed attempt and creates no summary artifact.
+- A separate end-to-end fallback fixture makes the model return `supported` for
+  a broadened ledger claim, forces the verified-ledger presentation, and proves
+  the guard downgrades and omits that claim while rendering the remaining
+  supported ledger claims. An ordinary fallback control still retains its
+  supported source claims.
+- `cargo test --all-targets` passed 429 library tests with 10 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting, the
+  TypeScript/Vite production build and `git diff --check` passed.
+- A temporary 25-page public DOL excerpt completed through Ollama on the
+  qualified model. The pre-fix run published the transferred FLC consideration
+  condition. The post-fix run withheld that unit, retained the supported FLSA
+  and H-2A prose, cited 24 of 25 native-text pages, and completed with the
+  existing `SEMANTIC_CLAIMS_WITHHELD` and `SUMMARY_COVERAGE_SHORTFALL` warnings.
+  It used 59 bounded model requests and reported a 0.96 supported-evidence
+  fraction.
+
+**Non-scope and remaining limits**:
+- This is a high-precision backstop for relationships that can be compared
+  mechanically. It is not a general entailment proof; manual semantic review
+  remains necessary for representative output, and future failure classes need
+  their own evidence before expanding the guard.
+- Two attempts to rerun the complete 111-page fixture produced the same
+  unfinished synthesis response and failed before verification with
+  `MODEL_SUMMARY_RESPONSE_INVALID`. The captured synthesis response hash was
+  `063ce498b825257f26d8a4ed5599abc66076daac4e86e6780ccbddce762d0cb8`.
+  That pre-verification output-budget behavior is deferred rather than folded
+  into this slice.
+- Long Story and Contract synthesis, automatic routing, ingestion, OCR,
+  persistence schema, UI, model training and unrelated synthesis repair remain
+  outside this slice.

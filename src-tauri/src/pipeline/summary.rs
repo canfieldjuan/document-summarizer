@@ -44,7 +44,7 @@ const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
 pub const SYNTHESIS_VERSION: &str = "6.0.0";
-pub const VERIFICATION_VERSION: &str = "7.0.0";
+pub const VERIFICATION_VERSION: &str = "8.0.0";
 pub const SUMMARY_VERSION: &str = "6.0.0";
 pub const CITATION_VERSION: &str = "4.0.0";
 
@@ -59,6 +59,7 @@ const PREVIOUS_SYNTHESIS_VERSION: &str = "3.0.0";
 const LEGACY_SYNTHESIS_VERSION: &str = "2.0.0";
 const HIERARCHICAL_VERIFICATION_VERSION: &str = "4.0.0";
 const DIRECT_VERIFICATION_VERSION: &str = "5.0.0";
+const PREVIOUS_COHERENT_VERIFICATION_VERSION: &str = "7.0.0";
 const PREVIOUS_VERIFICATION_VERSION: &str = "3.0.0";
 const LEGACY_VERIFICATION_VERSION: &str = "2.0.0";
 const HIERARCHICAL_SUMMARY_VERSION: &str = "4.0.0";
@@ -739,7 +740,7 @@ pub(crate) fn complete_verified_document_with_delivery(
         DIRECT_VERIFICATION_VERSION | DIRECT_KEY_POINTS_VERIFICATION_VERSION => {
             DIRECT_SUMMARY_VERSION
         }
-        VERIFICATION_VERSION => SUMMARY_VERSION,
+        PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION => SUMMARY_VERSION,
         _ => unreachable!("verified document validation rejects unknown versions"),
     };
     let mut summary = SummaryArtifact {
@@ -1062,7 +1063,7 @@ fn verify(
     let ledger_prompt = verification_prompt(&synthesized.claims, &ledger_evidence)?;
     let verification_claim_budget = verification_claim_budget(synthesized, normalized)?;
     let mut next_request_ordinal = 0;
-    let claim_verifications = classify_claim_support(
+    let mut claim_verifications = classify_claim_support(
         runtime,
         &ledger_prompt,
         &synthesized.claims,
@@ -1071,6 +1072,13 @@ fn verify(
         &mut next_request_ordinal,
         control,
     )?;
+    if synthesized.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback {
+        coherent::apply_semantic_fidelity_guards(
+            &synthesized.claims,
+            &ledger_evidence,
+            &mut claim_verifications,
+        )?;
+    }
     cancellation_checkpoint(control, PipelineStage::Verify)?;
     let claims = synthesized
         .claims
@@ -1095,6 +1103,11 @@ fn verify(
             control,
         )?
     };
+    coherent::apply_semantic_fidelity_guards(
+        &synthesized.summary_claims,
+        &synthesized.synthesis_evidence,
+        &mut summary_claim_verifications,
+    )?;
     if let Some(required_evidence_ids) =
         coherent::required_short_contract_evidence_ids(summary_profile, chunked, normalized)?
     {
@@ -3800,7 +3813,10 @@ fn validate_verified_document(
             analyzed,
         );
     }
-    if verified.verification_version == VERIFICATION_VERSION {
+    if matches!(
+        verified.verification_version.as_str(),
+        PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION
+    ) {
         return validate_coherent_verified_document(verified, synthesized, analyzed);
     }
 
@@ -3881,7 +3897,10 @@ fn validate_coherent_verified_document(
 ) -> Result<(), PipelineFailure> {
     let metadata_valid = synthesized.synthesis_version == SYNTHESIS_VERSION
         && verified.document_id == synthesized.document_id
-        && verified.verification_version == VERIFICATION_VERSION
+        && matches!(
+            verified.verification_version.as_str(),
+            PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION
+        )
         && verified.synthesis_attempt_ordinal == 0
         && verified.presentation_mode == synthesized.presentation_mode
         && verified.synthesis_evidence == synthesized.synthesis_evidence
@@ -3950,7 +3969,10 @@ fn validate_coherent_verified_document(
             "coherent validation: metadata={metadata_valid} synth_version={} document={} verify_version={} ordinal={} mode={} evidence={} runtime={} model={} chunks={} ledger_verdicts={} summary_verdicts={} ledger_coverage={ledger_coverage_valid} summary_coverage={summary_coverage_valid} ledger_claims={} summary_claims={} text={} key_points={} warnings={}",
             synthesized.synthesis_version == SYNTHESIS_VERSION,
             verified.document_id == synthesized.document_id,
-            verified.verification_version == VERIFICATION_VERSION,
+            matches!(
+                verified.verification_version.as_str(),
+                PREVIOUS_COHERENT_VERIFICATION_VERSION | VERIFICATION_VERSION
+            ),
             verified.synthesis_attempt_ordinal == 0,
             verified.presentation_mode == synthesized.presentation_mode,
             verified.synthesis_evidence == synthesized.synthesis_evidence,
@@ -4982,12 +5004,15 @@ mod tests {
         LedgerUnsupportedSummarySupported,
         ShortfallThenSupported,
         ShortfallThenUnsupported,
+        ModelSupportsSemanticallyInvalidSummary,
+        ModelSupportsSemanticallyInvalidFallback,
     }
 
     struct VerificationFixtureRuntime {
         mode: VerificationFixtureMode,
         verification_calls: AtomicUsize,
         synthesis_calls: AtomicUsize,
+        analysis_mutations: AtomicUsize,
     }
 
     struct LowSynthesisContextRuntime {
@@ -5106,6 +5131,7 @@ mod tests {
                 mode,
                 verification_calls: AtomicUsize::new(0),
                 synthesis_calls: AtomicUsize::new(0),
+                analysis_mutations: AtomicUsize::new(0),
             }
         }
     }
@@ -5283,6 +5309,10 @@ mod tests {
                                 VerificationFixtureMode::AllUnsupported => {
                                     ClaimVerdict::Unsupported
                                 }
+                                VerificationFixtureMode::ModelSupportsSemanticallyInvalidSummary
+                                | VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback => {
+                                    ClaimVerdict::Supported
+                                }
                                 VerificationFixtureMode::LedgerUnsupportedSummarySupported
                                     if verification_call == 0 =>
                                 {
@@ -5326,9 +5356,74 @@ mod tests {
                     serde_json::to_string(&RawVerificationResponse { verdicts })
                         .expect("verification fixture response should serialize")
                 }
+                ModelOutputFormat::JsonSchema { name, .. }
+                    if name == pages::PARAPHRASE_SCHEMA
+                        && matches!(
+                            self.mode,
+                            VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback
+                        ) =>
+                {
+                    if self.analysis_mutations.fetch_add(1, Ordering::SeqCst) == 0 {
+                        json!({
+                            "claim_text":
+                                "A family member of the owner qualifies for the exemption."
+                        })
+                        .to_string()
+                    } else {
+                        fixture_model_output(request)
+                    }
+                }
+                ModelOutputFormat::JsonSchema { name, .. }
+                    if name == ANALYSIS_SCHEMA_NAME
+                        && matches!(
+                            self.mode,
+                            VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback
+                        ) =>
+                {
+                    let prompt: AnalysisPrompt = serde_json::from_str(&request.user_prompt)
+                        .expect("analysis fixture prompt should deserialize");
+                    let mutate_first = self.analysis_mutations.fetch_add(1, Ordering::SeqCst) == 0;
+                    let evidence = prompt
+                        .quote_candidates
+                        .into_iter()
+                        .take(prompt.maximum_evidence)
+                        .enumerate()
+                        .map(|(index, candidate)| {
+                            let claim_text = if mutate_first && index == 0 {
+                                "A family member of the owner qualifies for the exemption."
+                                    .to_string()
+                            } else {
+                                candidate
+                                    .exact_quote
+                                    .chars()
+                                    .take(MAX_ANALYSIS_CLAIM_CHARACTERS)
+                                    .collect()
+                            };
+                            RawEvidenceItem {
+                                quote_id: candidate.quote_id,
+                                claim_text,
+                            }
+                        })
+                        .collect();
+                    serde_json::to_string(&RawEvidenceResponse { evidence })
+                        .expect("analysis fixture response should serialize")
+                }
                 ModelOutputFormat::JsonSchema { name, .. } if coherent::uses_schema_name(name) => {
                     self.synthesis_calls.fetch_add(1, Ordering::SeqCst);
-                    coherent::fixture_model_output(request)
+                    if matches!(
+                        self.mode,
+                        VerificationFixtureMode::ModelSupportsSemanticallyInvalidSummary
+                    ) {
+                        json!({
+                            "units": [{
+                                "text": "A family member of the owner qualifies for the exemption.",
+                                "source_ids": ["s1"]
+                            }]
+                        })
+                        .to_string()
+                    } else {
+                        coherent::fixture_model_output(request)
+                    }
                 }
                 ModelOutputFormat::JsonSchema { name, .. } if name == SYNTHESIS_SCHEMA_NAME => {
                     let synthesis_call = self.synthesis_calls.fetch_add(1, Ordering::SeqCst);
@@ -5349,6 +5444,23 @@ mod tests {
                 model_id: self.model_id().to_string(),
                 request_attempts: Vec::new(),
             })
+        }
+
+        fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            if request.stage == PipelineStage::Synthesize
+                && matches!(
+                    self.mode,
+                    VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback
+                )
+            {
+                return Err(ModelRuntimeFailure {
+                    code: "MODEL_CONTEXT_EXCEEDED".to_string(),
+                    message: "fixture forces the verified-ledger fallback".to_string(),
+                    recoverable: false,
+                    request_attempts: Vec::new(),
+                });
+            }
+            Ok(())
         }
 
         fn health(&self) -> Result<(), ModelRuntimeFailure> {
@@ -9660,7 +9772,8 @@ mod tests {
         assert_eq!(DIRECT_SYNTHESIS_VERSION, "5.0.0");
         assert_eq!(DIRECT_VERIFICATION_VERSION, "5.0.0");
         assert_eq!(DIRECT_KEY_POINTS_VERIFICATION_VERSION, "6.0.0");
-        assert_eq!(VERIFICATION_VERSION, "7.0.0");
+        assert_eq!(PREVIOUS_COHERENT_VERIFICATION_VERSION, "7.0.0");
+        assert_eq!(VERIFICATION_VERSION, "8.0.0");
         assert_eq!(SUMMARY_VERSION, "6.0.0");
         assert_eq!(direct::VERSION, DIRECT_SYNTHESIS_VERSION);
         assert_eq!(HIERARCHICAL_SYNTHESIS_VERSION, "4.0.0");
@@ -9735,6 +9848,88 @@ mod tests {
             get_pipeline_run(&conn, &run_id).unwrap().unwrap().state,
             PipelineState::Failed
         );
+    }
+
+    #[test]
+    fn deterministic_semantic_guard_overrides_a_false_positive_model_verdict() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = VerificationFixtureRuntime::new(
+            VerificationFixtureMode::ModelSupportsSemanticallyInvalidSummary,
+        );
+
+        let error = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect_err("a mechanically unsupported relationship must not be published");
+
+        assert_eq!(error.code(), "NO_SEMANTICALLY_SUPPORTED_CLAIMS");
+        let verified = get_verification_attempt(&conn, &run_id, 0)
+            .unwrap()
+            .expect("the rejected verification attempt must remain auditable");
+        assert_eq!(verified.summary_claim_verifications.len(), 1);
+        assert_eq!(
+            verified.summary_claim_verifications[0].verdict,
+            ClaimVerdict::Unsupported
+        );
+        assert!(verified.summary_claims.is_empty());
+        assert!(verified
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "SEMANTIC_CLAIMS_WITHHELD"));
+        assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn fallback_ledger_applies_semantic_guard_before_rendering() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = VerificationFixtureRuntime::new(
+            VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback,
+        );
+
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("other supported ledger claims should preserve a fallback summary");
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+        let unsupported = synthesized
+            .claims
+            .iter()
+            .zip(&verified.claim_verifications)
+            .find(|(claim, _)| claim.text.contains("A family member of the owner"))
+            .expect("the fixture must produce the model-supported broadened ledger claim");
+
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert_eq!(unsupported.1.verdict, ClaimVerdict::Unsupported);
+        assert!(verified
+            .claims
+            .iter()
+            .all(|claim| claim.claim_id != unsupported.0.claim_id));
+        assert!(!completed
+            .summary
+            .text
+            .contains("A family member of the owner"));
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn previous_coherent_verification_version_remains_readable() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        summarize_chunked_document(&mut conn, &FakeRuntime::healthy(), &run_id)
+            .expect("the current coherent fixture should summarize");
+        let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
+        let chunked = get_chunked_document(&conn, &run_id).unwrap().unwrap();
+        let analyzed = get_analyzed_document(&conn, &run_id).unwrap().unwrap();
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let mut verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+        assert_eq!(verified.verification_version, VERIFICATION_VERSION);
+
+        verified.verification_version = PREVIOUS_COHERENT_VERIFICATION_VERSION.into();
+        validate_verified_document(&verified, &synthesized, &analyzed, &chunked, &normalized)
+            .expect("the prior coherent verification contract must remain readable");
     }
 
     #[test]
