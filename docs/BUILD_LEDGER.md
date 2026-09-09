@@ -2898,20 +2898,25 @@ complete
 - One bounded repair asks the model to shorten only incomplete capped units and
   preserve complete units and their source IDs. A valid repair is accepted only
   if it contains every validated original sibling's exact text and normalized
-  evidence IDs in order. Ordinal-derived claim IDs are intentionally excluded
-  because repairing an earlier unit can move a later sibling. If the repair
-  remains invalid, omits a sibling or rewrites one, the application may retain
-  complete sibling units from the original response only after normal
-  source, window, completion, modality and evidence validation.
+  evidence IDs in order and covers every clipped unit's source evidence, with
+  repeated references counted separately. Safe siblings are consumed before
+  replacement coverage is checked, so they cannot double as a replacement.
+  Ordinal-derived claim IDs are intentionally excluded because repairing an
+  earlier unit can move a later sibling. If the repair remains invalid, omits a
+  sibling, rewrites one or drops clipped material, the application may retain
+  complete sibling units from the original response only after normal source,
+  window, completion, modality and evidence validation.
   Modality is evaluated per sibling: one strengthened sibling is excluded from
   the preservation baseline without erasing a separate safe sibling or its
   canonical evidence. A separate mixed-window sibling is likewise withheld
-  without erasing structurally valid siblings; other structural errors still
-  fail closed.
+  without erasing structurally valid siblings, regardless of whether that unit
+  precedes or follows the clipped unit; other structural errors still fail
+  closed.
   It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`, plus
   `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD` when the delivered fallback
-  also excluded a mixed-window sibling. An all-clipped response
-  cannot supply an original fallback; if its repair remains invalid, it fails
+  also excluded a mixed-window sibling. An all-clipped response carries its
+  source-coverage requirement into repair but cannot supply an original
+  fallback; if its repair omits required evidence or remains invalid, it fails
   closed. The schema and its 1,200-character limit are unchanged.
 
 **Acceptance evidence so far**:
@@ -2921,14 +2926,16 @@ complete
   sibling and reports the clipped-unit fallback. Repairs that omit or rewrite
   the complete sibling also return the unchanged validated sibling, while a
   repaired leading clip preserves and accepts a later sibling across its
-  ordinal-derived claim-ID change. A mixed response with one safe sibling and
-  one modal-strengthened sibling proves that a repair cannot omit the safe one
-  after correcting the other. A separate clipped-plus-mixed-window probe proves
-  the same preservation and both warning outcomes. A nested clipped-then-window
-  repair probe proves that a newer window fallback cannot replace the original
-  safe sibling baseline. Negative probes reject a 1,199-character fragment, an
-  all-clipped response, empty, duplicate, foreign and nine-source metadata,
-  unwindowed General catalogs, and Story catalogs.
+  ordinal-derived claim-ID change. Dropping only the clipped material returns
+  the warned safe fallback. A mixed response with one safe sibling and one
+  modal-strengthened sibling proves that a repair cannot omit the safe one after
+  correcting the other. Clipped-plus-mixed-window probes cover both unit orders
+  and both warning outcomes. A nested clipped-then-window repair probe proves
+  that a newer window fallback cannot replace the original safe sibling
+  baseline. The all-clipped probe rejects unrelated replacement evidence and
+  accepts the required evidence. Negative probes reject a 1,199-character
+  fragment, empty, duplicate, foreign and nine-source metadata, unwindowed
+  General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the

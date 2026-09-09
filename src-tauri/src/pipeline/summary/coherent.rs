@@ -44,6 +44,7 @@ struct GeneratedSummaryContent {
 struct SafeSiblingFallback {
     claims: Vec<CitedClaim>,
     evidence: Vec<EvidenceItem>,
+    required_clipped_evidence_ids: Vec<String>,
     withheld_cross_window_unit: bool,
 }
 
@@ -832,7 +833,39 @@ fn generate_summary_with_validation_repair(
         })?;
         validate_runtime_response(runtime, &response, PipelineStage::Synthesize)?;
 
-        let parsed = match parse_response(profile, &response.text, document_id, catalog) {
+        let parsed_response = parse_response(profile, &response.text, document_id, catalog);
+        if clipped_repairs == 0
+            && window_fallback.is_none()
+            && parsed_response.as_ref().is_err_and(|failure| {
+                failure.code == UNIT_CLIPPED_RESPONSE_CODE
+                    || failure.code == WINDOW_MIXED_RESPONSE_CODE
+            })
+        {
+            clipped_fallback =
+                parse_response_without_clipped_units(profile, &response.text, document_id, catalog)
+                    .ok()
+                    .and_then(retain_individually_modal_safe_claims);
+            if clipped_fallback.is_some() {
+                let feedback = vec![format!(
+                    "One or more text fields reached the {MAX_UNIT_CHARACTERS}-character decoder limit before the sentence ended. Keep every complete unit and its source_ids unchanged; shorten each incomplete unit to a complete short paragraph ending in terminal punctuation"
+                )];
+                request_prompt = prompt_with_validation_feedback(&request_prompt, &feedback)?;
+                if synthesis_request_characters(profile, &request_prompt, &output_schema)?
+                    > input_limit
+                {
+                    return Err(stage_failure(
+                        PipelineStage::Synthesize,
+                        "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
+                        "The bounded summary validation repair cannot fit the synthesis context",
+                        false,
+                    ));
+                }
+                clipped_repairs += 1;
+                request_ordinal += 1;
+                continue;
+            }
+        }
+        let parsed = match parsed_response {
             Ok(parsed) => parsed,
             Err(failure) if failure.code == WINDOW_MIXED_RESPONSE_CODE && window_repairs == 0 => {
                 window_fallback = parse_response_without_mixed_windows(
@@ -847,9 +880,9 @@ fn generate_summary_with_validation_repair(
                         .is_ok_and(|feedback| feedback.is_empty())
                 })
                 .filter(|parsed| {
-                    clipped_fallback.as_ref().is_none_or(|fallback| {
-                        preserves_claims_in_order(&parsed.0, &fallback.claims)
-                    })
+                    clipped_fallback
+                        .as_ref()
+                        .is_none_or(|fallback| satisfies_clipped_recovery(&parsed.0, fallback))
                 });
                 let feedback = vec![
                     "Only units that cite source_ids from different selection_window values are invalid. Keep every other unit and its wording unchanged; split only the invalid units so every resulting unit cites exactly one selection_window"
@@ -870,38 +903,6 @@ fn generate_summary_with_validation_repair(
                 request_ordinal += 1;
                 continue;
             }
-            Err(failure)
-                if failure.code == UNIT_CLIPPED_RESPONSE_CODE
-                    && profile == SummaryProfile::General
-                    && window_fallback.is_none()
-                    && clipped_repairs == 0 =>
-            {
-                clipped_fallback = parse_response_without_clipped_units(
-                    profile,
-                    &response.text,
-                    document_id,
-                    catalog,
-                )
-                .ok()
-                .and_then(retain_individually_modal_safe_claims);
-                let feedback = vec![format!(
-                    "One or more text fields reached the {MAX_UNIT_CHARACTERS}-character decoder limit before the sentence ended. Keep every complete unit and its source_ids unchanged; shorten each incomplete unit to a complete short paragraph ending in terminal punctuation"
-                )];
-                request_prompt = prompt_with_validation_feedback(&request_prompt, &feedback)?;
-                if synthesis_request_characters(profile, &request_prompt, &output_schema)?
-                    > input_limit
-                {
-                    return Err(stage_failure(
-                        PipelineStage::Synthesize,
-                        "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
-                        "The bounded summary validation repair cannot fit the synthesis context",
-                        false,
-                    ));
-                }
-                clipped_repairs += 1;
-                request_ordinal += 1;
-                continue;
-            }
             Err(failure) => {
                 if let Some((claims, evidence)) = window_fallback.take() {
                     return Ok(GeneratedSummaryContent {
@@ -910,19 +911,22 @@ fn generate_summary_with_validation_repair(
                         withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
                     });
                 }
-                if let Some(fallback) = clipped_fallback.take() {
-                    return Ok(generated_from_clipped_fallback(fallback));
+                if let Some(generated) = clipped_fallback
+                    .take()
+                    .and_then(generated_from_clipped_fallback)
+                {
+                    return Ok(generated);
                 }
                 return Err(failure);
             }
         };
-        let repaired_clipped_response_changed_siblings = clipped_repairs > 0
+        let repaired_clipped_response_is_incomplete = clipped_repairs > 0
             && clipped_fallback
                 .as_ref()
-                .is_some_and(|fallback| !preserves_claims_in_order(&parsed.0, &fallback.claims));
-        if repaired_clipped_response_changed_siblings {
+                .is_some_and(|fallback| !satisfies_clipped_recovery(&parsed.0, fallback));
+        if repaired_clipped_response_is_incomplete {
             if let Some(fallback) = clipped_fallback.take() {
-                return Ok(generated_from_clipped_fallback(fallback));
+                return generated_from_clipped_fallback(fallback).ok_or_else(clipped_unit_response);
             }
         }
         let mut feedback = modal_strengthening_feedback(&parsed.0, &parsed.1)?;
@@ -949,8 +953,11 @@ fn generate_summary_with_validation_repair(
                     withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
                 });
             }
-            if let Some(fallback) = clipped_fallback.take() {
-                return Ok(generated_from_clipped_fallback(fallback));
+            if let Some(generated) = clipped_fallback
+                .take()
+                .and_then(generated_from_clipped_fallback)
+            {
+                return Ok(generated);
             }
             return Err(if profile == SummaryProfile::Contract {
                 contract_validation_failure()
@@ -972,25 +979,62 @@ fn generate_summary_with_validation_repair(
     }
 }
 
-fn preserves_claims_in_order(candidate: &[CitedClaim], required: &[CitedClaim]) -> bool {
-    let mut candidate = candidate.iter();
-    required.iter().all(|required| {
-        candidate
-            .any(|claim| claim.text == required.text && claim.evidence_ids == required.evidence_ids)
-    })
+fn satisfies_clipped_recovery(candidate: &[CitedClaim], recovery: &SafeSiblingFallback) -> bool {
+    let mut consumed = vec![false; candidate.len()];
+    let mut next_candidate = 0usize;
+    for required in &recovery.claims {
+        let Some(relative_index) = candidate[next_candidate..].iter().position(|claim| {
+            claim.text == required.text && claim.evidence_ids == required.evidence_ids
+        }) else {
+            return false;
+        };
+        let index = next_candidate + relative_index;
+        consumed[index] = true;
+        next_candidate = index + 1;
+    }
+
+    let mut available_evidence = HashMap::new();
+    for (index, claim) in candidate.iter().enumerate() {
+        if consumed[index] {
+            continue;
+        }
+        for evidence_id in &claim.evidence_ids {
+            *available_evidence
+                .entry(evidence_id.as_str())
+                .or_insert(0usize) += 1;
+        }
+    }
+    recovery
+        .required_clipped_evidence_ids
+        .iter()
+        .all(|evidence_id| {
+            let Some(remaining) = available_evidence.get_mut(evidence_id.as_str()) else {
+                return false;
+            };
+            if *remaining == 0 {
+                return false;
+            }
+            *remaining -= 1;
+            true
+        })
 }
 
-fn generated_from_clipped_fallback(fallback: SafeSiblingFallback) -> GeneratedSummaryContent {
+fn generated_from_clipped_fallback(
+    fallback: SafeSiblingFallback,
+) -> Option<GeneratedSummaryContent> {
+    if fallback.claims.is_empty() {
+        return None;
+    }
     let withheld_unit_kind = if fallback.withheld_cross_window_unit {
         WithheldUnitKind::CrossWindowAndDecoderClipped
     } else {
         WithheldUnitKind::DecoderClipped
     };
-    GeneratedSummaryContent {
+    Some(GeneratedSummaryContent {
         claims: fallback.claims,
         evidence: fallback.evidence,
         withheld_unit_kind: Some(withheld_unit_kind),
-    }
+    })
 }
 
 fn retain_individually_modal_safe_claims(
@@ -999,6 +1043,7 @@ fn retain_individually_modal_safe_claims(
     let SafeSiblingFallback {
         claims,
         evidence,
+        required_clipped_evidence_ids,
         withheld_cross_window_unit,
     } = fallback;
     let mut retained_claims = Vec::with_capacity(claims.len());
@@ -1008,9 +1053,6 @@ fn retain_individually_modal_safe_claims(
         if feedback.is_empty() {
             retained_claims.push(claim);
         }
-    }
-    if retained_claims.is_empty() {
-        return None;
     }
     let referenced = retained_claims
         .iter()
@@ -1023,6 +1065,7 @@ fn retain_individually_modal_safe_claims(
     Some(SafeSiblingFallback {
         claims: retained_claims,
         evidence: retained_evidence,
+        required_clipped_evidence_ids,
         withheld_cross_window_unit,
     })
 }
@@ -2066,13 +2109,14 @@ fn parse_response_without_clipped_units(
     if raw.units.is_empty() || raw.units.len() > maximum_summary_units_for_catalog(catalog) {
         return Err(invalid_response());
     }
-    let known_source_ids = catalog
+    let known_sources = catalog
         .candidates
         .iter()
-        .map(|candidate| candidate.request_id.as_str())
-        .collect::<HashSet<_>>();
+        .map(|candidate| (candidate.request_id.as_str(), candidate))
+        .collect::<HashMap<_, _>>();
     let mut retained = Vec::with_capacity(raw.units.len());
     let mut withheld = 0usize;
+    let mut required_clipped_evidence_ids = Vec::new();
     let mut withheld_cross_window_unit = false;
     for unit in raw.units {
         let clipped = canonical_bounded_text(&unit.text, MAX_UNIT_CHARACTERS)
@@ -2087,10 +2131,18 @@ fn parse_response_without_clipped_units(
             if unit.source_ids.is_empty()
                 || unit.source_ids.len() > MAX_SOURCES_PER_UNIT
                 || unique_source_ids.len() != unit.source_ids.len()
-                || !unique_source_ids.is_subset(&known_source_ids)
+                || !unique_source_ids
+                    .iter()
+                    .all(|source_id| known_sources.contains_key(*source_id))
             {
                 return Err(invalid_response());
             }
+            required_clipped_evidence_ids.extend(unit.source_ids.iter().map(|source_id| {
+                known_sources[source_id.as_str()]
+                    .evidence
+                    .evidence_id
+                    .clone()
+            }));
             withheld += 1;
         } else {
             let singleton = serde_json::to_string(&RawResponse {
@@ -2106,15 +2158,20 @@ fn parse_response_without_clipped_units(
             }
         }
     }
-    if withheld == 0 || retained.is_empty() {
+    if withheld == 0 {
         return Err(clipped_unit_response());
     }
-    let retained =
-        serde_json::to_string(&RawResponse { units: retained }).map_err(|_| invalid_response())?;
-    let (claims, evidence) = parse_response(profile, &retained, document_id, catalog)?;
+    let (claims, evidence) = if retained.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let retained = serde_json::to_string(&RawResponse { units: retained })
+            .map_err(|_| invalid_response())?;
+        parse_response(profile, &retained, document_id, catalog)?
+    };
     Ok(SafeSiblingFallback {
         claims,
         evidence,
+        required_clipped_evidence_ids,
         withheld_cross_window_unit,
     })
 }
@@ -2576,10 +2633,12 @@ mod tests {
         Correct,
         CorrectWithLeadingClip,
         Repeat,
+        OmitClippedUnit,
         OmitSibling,
         RewriteSibling,
         RepairModalAndOmitSafeSibling,
         RepairMixedWindowAndOmitSafeSibling,
+        MixedWindowBeforeClipAndOmitSafeSibling,
         NestedWindowRepairOmitsSafeSibling,
     }
 
@@ -2773,6 +2832,17 @@ mod tests {
             } else if !is_repair
                 && matches!(
                     self.behavior,
+                    ClippedRepairBehavior::MixedWindowBeforeClipAndOmitSafeSibling
+                )
+            {
+                json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"The mixed source is complete.","source_ids":["s2","s3"]},
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s5","s6"]}
+                ])
+            } else if !is_repair
+                && matches!(
+                    self.behavior,
                     ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling
                 )
             {
@@ -2795,7 +2865,7 @@ mod tests {
             } else if !is_repair {
                 json!([
                     {"text":"The first source remains supported.","source_ids":["s1"]},
-                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2","s3"]}
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s5","s6"]}
                 ])
             } else if matches!(
                 self.behavior,
@@ -2819,7 +2889,7 @@ mod tests {
                 match self.behavior {
                     ClippedRepairBehavior::Correct => json!([
                         {"text":"The first source remains supported.","source_ids":["s1"]},
-                        {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                        {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]}
                     ]),
                     ClippedRepairBehavior::CorrectWithLeadingClip => json!([
                         {"text":"The first sources are summarized completely.","source_ids":["s1","s2"]},
@@ -2827,20 +2897,25 @@ mod tests {
                     ]),
                     ClippedRepairBehavior::Repeat => json!([
                     {"text":"The first source remains supported.","source_ids":["s1"]},
-                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2","s3"]}
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s5","s6"]}
+                    ]),
+                    ClippedRepairBehavior::OmitClippedUnit => json!([
+                        {"text":"The first source remains supported.","source_ids":["s1"]}
                     ]),
                     ClippedRepairBehavior::OmitSibling => json!([
-                        {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                        {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]}
                     ]),
                     ClippedRepairBehavior::RewriteSibling => json!([
                         {"text":"The first source was rewritten.","source_ids":["s1"]},
-                        {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                        {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]}
                     ]),
                     ClippedRepairBehavior::RepairModalAndOmitSafeSibling => json!([
                         {"text":"The operator should inspect the record.","source_ids":["s4"]},
-                        {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                        {"text":"The second source is summarized completely.","source_ids":["s2"]},
+                        {"text":"The third source is summarized completely.","source_ids":["s3"]}
                     ]),
-                    ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling => json!([
+                    ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling
+                    | ClippedRepairBehavior::MixedWindowBeforeClipAndOmitSafeSibling => json!([
                         {"text":"The local source is complete.","source_ids":["s2"]},
                         {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]}
                     ]),
@@ -4346,6 +4421,10 @@ mod tests {
         );
         assert_eq!(fallback.evidence.len(), 1);
         assert_eq!(fallback.evidence[0].evidence_id, "evidence-1");
+        assert_eq!(
+            fallback.required_clipped_evidence_ids,
+            vec!["evidence-2", "evidence-3"]
+        );
         assert!(!fallback.withheld_cross_window_unit);
 
         let complete_at_limit = response(
@@ -4409,13 +4488,57 @@ mod tests {
             }]
         })
         .to_string();
-        assert!(parse_response_without_clipped_units(
+        let all_clipped_recovery = parse_response_without_clipped_units(
             SummaryProfile::General,
             &all_clipped,
             "document-1",
             &catalog,
         )
-        .is_err());
+        .expect("all-clipped output still needs a replacement contract");
+        assert!(all_clipped_recovery.claims.is_empty());
+        assert!(all_clipped_recovery.evidence.is_empty());
+        assert_eq!(
+            all_clipped_recovery.required_clipped_evidence_ids,
+            vec!["evidence-1"]
+        );
+        let unrelated_repair = json!({
+            "units": [{
+                "text":"An unrelated source is complete.",
+                "source_ids":["s2"]
+            }]
+        })
+        .to_string();
+        let unrelated_claims = parse_response(
+            SummaryProfile::General,
+            &unrelated_repair,
+            "document-1",
+            &catalog,
+        )
+        .unwrap()
+        .0;
+        assert!(!satisfies_clipped_recovery(
+            &unrelated_claims,
+            &all_clipped_recovery
+        ));
+        let required_repair = json!({
+            "units": [{
+                "text":"The clipped source is summarized completely.",
+                "source_ids":["s1"]
+            }]
+        })
+        .to_string();
+        let required_claims = parse_response(
+            SummaryProfile::General,
+            &required_repair,
+            "document-1",
+            &catalog,
+        )
+        .unwrap()
+        .0;
+        assert!(satisfies_clipped_recovery(
+            &required_claims,
+            &all_clipped_recovery
+        ));
 
         let mut unwindowed = catalog.clone();
         for candidate in &mut unwindowed.candidates {
@@ -4488,7 +4611,7 @@ mod tests {
         )
         .expect("one bounded repair should replace a decoder-clipped unit");
         assert_eq!(claims.len(), 2);
-        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence.len(), 3);
         assert_eq!(withheld_unit_kind, None);
         let requests = correcting.requests();
         assert_eq!(requests.len(), 2);
@@ -4544,6 +4667,32 @@ mod tests {
         assert_eq!(evidence.len(), 1);
         assert_eq!(withheld_unit_kind, Some(WithheldUnitKind::DecoderClipped));
         assert_eq!(repeating.requests().len(), 2);
+
+        let omitting_clip = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::OmitClippedUnit);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &omitting_clip,
+            "document-1",
+            &catalog,
+            prompt.clone(),
+            schema.clone(),
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("omitting the clipped unit must deliver the warned safe fallback");
+        assert_eq!(generated.claims.len(), 1);
+        assert_eq!(
+            generated.claims[0].text,
+            "The first source remains supported."
+        );
+        assert_eq!(generated.evidence.len(), 1);
+        assert_eq!(
+            generated.withheld_unit_kind,
+            Some(WithheldUnitKind::DecoderClipped)
+        );
+        assert_eq!(omitting_clip.requests().len(), 2);
 
         for behavior in [
             ClippedRepairBehavior::OmitSibling,
@@ -4604,36 +4753,39 @@ mod tests {
         );
         assert_eq!(modal_omitting.requests().len(), 2);
 
-        let mixed_omitting = ClippedUnitRepairRuntime::new(
+        for behavior in [
             ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling,
-        );
-        let (mixed_prompt, mixed_schema) =
-            prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
-        let generated = generate_summary_with_validation_repair(
-            SummaryProfile::General,
-            &mixed_omitting,
-            "document-1",
-            &catalog,
-            mixed_prompt,
-            mixed_schema,
-            usize::MAX,
-            0,
-            1,
-            &UNCONTROLLED_EXECUTION,
-        )
-        .expect("one mixed-window sibling must not erase a separate safe sibling baseline");
-        assert_eq!(generated.claims.len(), 1);
-        assert_eq!(
-            generated.claims[0].text,
-            "The first source remains supported."
-        );
-        assert_eq!(generated.evidence.len(), 1);
-        assert_eq!(generated.evidence[0].evidence_id, "evidence-1");
-        assert_eq!(
-            generated.withheld_unit_kind,
-            Some(WithheldUnitKind::CrossWindowAndDecoderClipped)
-        );
-        assert_eq!(mixed_omitting.requests().len(), 2);
+            ClippedRepairBehavior::MixedWindowBeforeClipAndOmitSafeSibling,
+        ] {
+            let mixed_omitting = ClippedUnitRepairRuntime::new(behavior);
+            let (mixed_prompt, mixed_schema) =
+                prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+            let generated = generate_summary_with_validation_repair(
+                SummaryProfile::General,
+                &mixed_omitting,
+                "document-1",
+                &catalog,
+                mixed_prompt,
+                mixed_schema,
+                usize::MAX,
+                0,
+                1,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .expect("combined defects must preserve safe siblings in either unit order");
+            assert_eq!(generated.claims.len(), 1);
+            assert_eq!(
+                generated.claims[0].text,
+                "The first source remains supported."
+            );
+            assert_eq!(generated.evidence.len(), 1);
+            assert_eq!(generated.evidence[0].evidence_id, "evidence-1");
+            assert_eq!(
+                generated.withheld_unit_kind,
+                Some(WithheldUnitKind::CrossWindowAndDecoderClipped)
+            );
+            assert_eq!(mixed_omitting.requests().len(), 2);
+        }
 
         let nested_omitting = ClippedUnitRepairRuntime::new(
             ClippedRepairBehavior::NestedWindowRepairOmitsSafeSibling,
