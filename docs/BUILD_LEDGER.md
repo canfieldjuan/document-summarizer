@@ -3069,3 +3069,75 @@ complete
 - Long Contract source selection, Story decoder-cap recovery, automatic routing,
   UI, persistence, ingestion, OCR, model training and unrelated verification
   policy remain outside this slice.
+
+## Slice 31 — Bounded Long Contract Synthesis (2026-09-09)
+
+**Status**: implementation, automated gates and live-model acceptance complete
+
+**Verified root cause and implemented behavior**:
+- A complete Contract source catalog used coherent synthesis only while the full
+  request fit the model context. The oversized-request branch admitted bounded
+  selection for General and Story, but excluded Contract, so an otherwise
+  complete long Contract returned the verified claim-ledger fallback before a
+  Contract synthesis request.
+- Contract now reuses the existing bounded, ordered source-selection pipeline
+  with a distinct Contract prompt and schema. The selector prioritizes operative
+  terms and keeps conditions or exceptions with the terms they limit. General
+  and Story retain their existing prompt and schema contracts.
+- Complete contracts of six or fewer distinct, simply numbered clauses remain
+  outside lossy selection because their existing acceptance contract requires a
+  material term from every supplied clause. Structurally mixed or larger
+  complete Contract catalogs may use bounded selection; incomplete catalogs
+  still use the verified claim ledger.
+- Small eligible Contract catalogs retain three quarters of their sources,
+  rounded toward preserving context, while catalogs above the existing
+  16-source target use that target. Every iteration must still strictly shrink,
+  preserve canonical source order, fit the calculated and provider preflight
+  bounds, and stay within the existing request and candidate limits.
+- Contract selection separates ordinary choices from typed identity/scope and
+  risk/exit arrays without increasing the requested total. A single window
+  reserves identity/scope first and risk/exit when a second slot is available;
+  for multiple windows, the first reserves identity/scope and the final window
+  reserves risk/exit. Missing arrays, wrong counts, duplicate, overlapping or
+  foreign IDs, and fields belonging to another profile fail closed.
+- Selected Contract sources retain their originating windows. The Contract
+  synthesis prompt and response parser prevent a paragraph from combining
+  separate windows, and bounded repair may retain a valid Contract sibling when
+  another unit violates that boundary. The synthesis prompt also keeps dates
+  attached to their sourced actor-action-object relationship instead of
+  converting an engagement period into an agreement effective term.
+
+**Acceptance evidence so far**:
+- A deterministic low-context end-to-end test forces a complete long Contract
+  beyond one synthesis request and proves that the persisted result remains in
+  coherent Contract mode, uses the Contract selection and synthesis schemas,
+  reaches provider preflight, and completes verification and citation rendering
+  without the source-context fallback warning.
+- Boundary probes cover the protected short-contract limit, mixed and larger
+  admission, zero and over-limit counts, one- and two-slot Contract role
+  allocation, first/final multi-window roles, missing, duplicate, overlapping
+  and foreign IDs, cross-profile fields, canonical ordering, mixed
+  selected/unselected sources, cross-window summary units, and profile schema
+  isolation.
+- The ignored live harness ran the configured Contract selection and synthesis
+  path on a synthetic ten-clause agreement through
+  `qwen3-30b-a3b:latest` at 100% GPU. Bounded selection kept clauses 1–7 and 9:
+  the parties and engagement dates, service and payment duties, the expense and
+  confidentiality exceptions, termination and cure rules, the data-security
+  deadline, and the liability cap with its exceptions. The resulting three
+  cited paragraphs preserved the responsible parties, amounts, timing,
+  conditions and exceptions without adding a legal conclusion or unsupported
+  relationship, and no unit was withheld.
+- `cargo test --all-targets` passed 433 library tests with 12 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting, the
+  TypeScript/Vite production build and `git diff --check` passed.
+
+**Non-scope and remaining limits**:
+- The live bounded selection omitted the ownership and governing-law/amendment
+  clauses. This is an explicit compression tradeoff; the summary does not imply
+  that those omitted terms were covered. Selection improves representative
+  coverage but does not guarantee an exhaustive review of a long agreement.
+- This slice does not change short-Contract exhaustive coverage, General or
+  Story selection behavior, automatic routing, UI, persistence, ingestion, OCR,
+  model training, decoder-cap recovery or semantic-verification policy.
