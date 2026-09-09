@@ -9,6 +9,7 @@ mod semantic_support;
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
 pub(super) const MAX_SUMMARY_CLAIMS: usize = 8;
 pub(super) const FALLBACK_WARNING_CODE: &str = "COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE";
+pub(super) const SOURCE_SELECTION_WARNING_CODE: &str = "COHERENT_SUMMARY_SOURCE_SELECTION_APPLIED";
 const WINDOW_WITHHELD_WARNING_CODE: &str = "COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD";
 
 pub(super) const SCHEMA_NAME: &str = "document_general_summary_v1";
@@ -316,6 +317,7 @@ pub(super) fn synthesize(
         || request_exceeds_runtime_context(runtime, &full_request)?;
 
     let mut model_health_checked = false;
+    let mut selected_source_counts = None;
     let synthesis_catalog = if full_request_too_large {
         if !supports_source_selection_for_catalog(profile, &catalog) {
             let result = fallback_document(
@@ -352,6 +354,8 @@ pub(super) fn synthesize(
             validate_for_runtime(profile, &result, analyzed, chunked, normalized, runtime)?;
             return Ok(result);
         };
+        selected_source_counts = (selected.candidates.len() < catalog.candidates.len())
+            .then_some((selected.candidates.len(), catalog.candidates.len()));
         selected
     } else {
         catalog.clone()
@@ -381,6 +385,15 @@ pub(super) fn synthesize(
     )?;
     let summary_text = render_cited_summary_with_evidence(&summary_claims, &synthesis_evidence)?;
     let mut warnings = analyzed.warnings.clone();
+    if let Some((selected_count, available_count)) = selected_source_counts {
+        warnings.push(PipelineWarning {
+            code: SOURCE_SELECTION_WARNING_CODE.to_string(),
+            message: format!(
+                "Long-document synthesis selected {selected_count} of {available_count} available source segments to fit bounded model context; the summary may omit details outside the selected evidence"
+            ),
+            stage: Some(PipelineStage::Synthesize),
+        });
+    }
     if matches!(
         withheld_unit_kind,
         Some(

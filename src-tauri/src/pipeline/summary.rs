@@ -9233,8 +9233,9 @@ mod tests {
     }
 
     #[test]
-    fn specialized_profiles_use_source_aware_synthesis_and_exact_citation_context() {
+    fn profiles_use_source_aware_synthesis_and_exact_citation_context() {
         for (profile, expected_schema) in [
+            (SummaryProfile::General, coherent::SCHEMA_NAME),
             (SummaryProfile::Story, coherent::STORY_SCHEMA_NAME),
             (SummaryProfile::Contract, coherent::CONTRACT_SCHEMA_NAME),
         ] {
@@ -9257,6 +9258,10 @@ mod tests {
             );
             assert!(!synthesized.summary_claims.is_empty());
             assert!(!synthesized.synthesis_evidence.is_empty());
+            assert!(synthesized
+                .warnings
+                .iter()
+                .all(|warning| warning.code != coherent::SOURCE_SELECTION_WARNING_CODE));
             let normalized = get_normalized_document(&conn, &run_id)
                 .expect("normalized query should succeed")
                 .expect("normalized specialized source should persist");
@@ -9294,10 +9299,18 @@ mod tests {
                 &request.output_format,
                 ModelOutputFormat::JsonSchema { name, .. } if name == expected_schema
             )));
-            assert!(!requests.iter().any(|request| matches!(
-                &request.output_format,
-                ModelOutputFormat::JsonSchema { name, .. } if name == coherent::SCHEMA_NAME
-            )));
+            for other_schema in [
+                coherent::SCHEMA_NAME,
+                coherent::STORY_SCHEMA_NAME,
+                coherent::CONTRACT_SCHEMA_NAME,
+            ] {
+                if other_schema != expected_schema {
+                    assert!(!requests.iter().any(|request| matches!(
+                        &request.output_format,
+                        ModelOutputFormat::JsonSchema { name, .. } if name == other_schema
+                    )));
+                }
+            }
         }
     }
 
@@ -9524,6 +9537,15 @@ mod tests {
             .warnings
             .iter()
             .all(|warning| warning.code != coherent::FALLBACK_WARNING_CODE));
+        let selection_warning = synthesized
+            .warnings
+            .iter()
+            .find(|warning| warning.code == coherent::SOURCE_SELECTION_WARNING_CODE)
+            .expect("bounded General selection should be disclosed");
+        assert_eq!(selection_warning.stage, Some(PipelineStage::Synthesize));
+        assert!(selection_warning
+            .message
+            .contains("available source segments"));
         let schema_names = runtime.schema_names.lock().unwrap();
         assert!(schema_names
             .iter()
@@ -9544,6 +9566,8 @@ mod tests {
         );
         assert!(!completed.citations.summary_claims.is_empty());
         assert!(!completed.citations.claims.is_empty());
+        assert_eq!(synthesized.warnings, verified.warnings);
+        assert_eq!(completed.summary.warnings, verified.warnings);
     }
 
     #[test]
@@ -9571,6 +9595,10 @@ mod tests {
             .warnings
             .iter()
             .all(|warning| warning.code != coherent::FALLBACK_WARNING_CODE));
+        assert!(synthesized
+            .warnings
+            .iter()
+            .any(|warning| warning.code == coherent::SOURCE_SELECTION_WARNING_CODE));
         let schema_names = runtime.schema_names.lock().unwrap();
         assert!(schema_names
             .iter()
@@ -9594,6 +9622,8 @@ mod tests {
         );
         assert!(!completed.citations.summary_claims.is_empty());
         assert!(!completed.citations.claims.is_empty());
+        assert_eq!(synthesized.warnings, verified.warnings);
+        assert_eq!(completed.summary.warnings, verified.warnings);
     }
 
     #[test]
@@ -9621,6 +9651,10 @@ mod tests {
             .warnings
             .iter()
             .all(|warning| warning.code != coherent::FALLBACK_WARNING_CODE));
+        assert!(synthesized
+            .warnings
+            .iter()
+            .any(|warning| warning.code == coherent::SOURCE_SELECTION_WARNING_CODE));
         let schema_names = runtime.schema_names.lock().unwrap();
         assert!(schema_names
             .iter()
@@ -9645,6 +9679,8 @@ mod tests {
         );
         assert!(!completed.citations.summary_claims.is_empty());
         assert!(!completed.citations.claims.is_empty());
+        assert_eq!(synthesized.warnings, verified.warnings);
+        assert_eq!(completed.summary.warnings, verified.warnings);
     }
 
     #[test]
@@ -9668,6 +9704,10 @@ mod tests {
             warning.code == coherent::FALLBACK_WARNING_CODE
                 && warning.stage == Some(PipelineStage::Synthesize)
         }));
+        assert!(synthesized
+            .warnings
+            .iter()
+            .all(|warning| warning.code != coherent::SOURCE_SELECTION_WARNING_CODE));
         assert!(runtime
             .requests
             .lock()

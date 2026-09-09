@@ -3141,3 +3141,42 @@ complete
 - This slice does not change short-Contract exhaustive coverage, General or
   Story selection behavior, automatic routing, UI, persistence, ingestion, OCR,
   model training, decoder-cap recovery or semantic-verification policy.
+
+## Slice 32: disclose bounded source selection
+
+**Status**: implementation and automated gates complete
+
+**Verified root cause and implemented behavior**:
+- Long General, Story and Contract synthesis can replace the complete source
+  catalog with a smaller, model-selected catalog. The selected catalog resets
+  its internal omission counter because it is complete relative to the selected
+  request, so the delivered coherent summary previously gave no explicit notice
+  that source segments had been excluded before synthesis.
+- When bounded selection strictly reduces the available catalog and that
+  coherent result is delivered, synthesis now emits
+  `COHERENT_SUMMARY_SOURCE_SELECTION_APPLIED`. The warning records the selected
+  and available source-segment counts and states that details outside the
+  selected evidence may be omitted.
+- The warning uses the existing synthesis-warning persistence and presentation
+  path. Full-context coherent summaries and verified claim-ledger fallbacks do
+  not receive it.
+
+**Acceptance evidence**:
+- Deterministic low-context end-to-end tests for General, Story and Contract
+  force bounded selection, require the warning, and prove that verification and
+  the completed result preserve it.
+- The full-context source-aware end-to-end test covers all three profiles and
+  proves that none receives the warning without a reduced catalog. The exact
+  selection-context rejection test proves that fallback output receives only
+  the existing fallback notice.
+- `cargo test --all-targets` passed 433 library tests with 12 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy and the TypeScript/Vite production
+  build passed.
+
+**Non-scope and remaining limits**:
+- This warning makes lossy selection visible; it does not change which source
+  segments are selected, make a long summary exhaustive, or establish semantic
+  support for the generated wording.
+- This slice does not change prompts, profile routing, model calls, summary or
+  citation schemas, persistence schema, source-selection policy, or UI layout.
