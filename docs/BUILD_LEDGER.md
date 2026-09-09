@@ -2919,7 +2919,10 @@ complete
   also excluded a mixed-window sibling. An all-clipped response carries its
   source-coverage requirement into repair but cannot supply an original
   fallback; if its repair omits required evidence or remains invalid, it fails
-  closed. The schema and its 1,200-character limit are unchanged.
+  closed. If feedback would exceed the configured input or runtime context, the
+  best already-validated fallback is returned with its warning; the size error
+  remains for responses with no deliverable fallback. The schema and its
+  1,200-character limit are unchanged.
 
 **Acceptance evidence so far**:
 - Paired tests accept a complete sentence at exactly 1,200 characters and prove
@@ -2935,10 +2938,12 @@ complete
   and both warning outcomes. A nested clipped-then-window repair probe proves
   that a newer window fallback cannot replace the original safe sibling
   baseline. A shared-evidence probe proves that correcting a modal sibling does
-  not also satisfy a clipped replacement. The all-clipped probe rejects
-  unrelated replacement evidence and accepts the required evidence. Negative
-  probes reject a 1,199-character fragment, empty, duplicate, foreign and
-  nine-source metadata, unwindowed General catalogs, and Story catalogs.
+  not also satisfy a clipped replacement. A repair-budget probe returns the
+  warned safe fallback when feedback cannot fit and keeps the size error for an
+  all-clipped response. The all-clipped source probe rejects unrelated
+  replacement evidence and accepts the required evidence. Negative probes
+  reject a 1,199-character fragment, empty, duplicate, foreign and nine-source
+  metadata, unwindowed General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the

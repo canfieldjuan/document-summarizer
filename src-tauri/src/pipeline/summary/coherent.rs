@@ -820,6 +820,11 @@ fn generate_summary_with_validation_repair(
             generation_seed,
         );
         if request_ordinal > 0 && request_exceeds_runtime_context(runtime, &request)? {
+            if let Some(generated) =
+                take_generated_fallback(&mut window_fallback, &mut clipped_fallback)
+            {
+                return Ok(generated);
+            }
             return Err(stage_failure(
                 PipelineStage::Synthesize,
                 "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
@@ -854,6 +859,11 @@ fn generate_summary_with_validation_repair(
                 if synthesis_request_characters(profile, &request_prompt, &output_schema)?
                     > input_limit
                 {
+                    if let Some(generated) =
+                        take_generated_fallback(&mut window_fallback, &mut clipped_fallback)
+                    {
+                        return Ok(generated);
+                    }
                     return Err(stage_failure(
                         PipelineStage::Synthesize,
                         "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
@@ -893,6 +903,11 @@ fn generate_summary_with_validation_repair(
                 if synthesis_request_characters(profile, &request_prompt, &output_schema)?
                     > input_limit
                 {
+                    if let Some(generated) =
+                        take_generated_fallback(&mut window_fallback, &mut clipped_fallback)
+                    {
+                        return Ok(generated);
+                    }
                     return Err(stage_failure(
                         PipelineStage::Synthesize,
                         "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
@@ -905,16 +920,8 @@ fn generate_summary_with_validation_repair(
                 continue;
             }
             Err(failure) => {
-                if let Some((claims, evidence)) = window_fallback.take() {
-                    return Ok(GeneratedSummaryContent {
-                        claims,
-                        evidence,
-                        withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
-                    });
-                }
-                if let Some(generated) = clipped_fallback
-                    .take()
-                    .and_then(generated_from_clipped_fallback)
+                if let Some(generated) =
+                    take_generated_fallback(&mut window_fallback, &mut clipped_fallback)
                 {
                     return Ok(generated);
                 }
@@ -947,16 +954,8 @@ fn generate_summary_with_validation_repair(
             });
         }
         if validation_repairs >= maximum_repairs {
-            if let Some((claims, evidence)) = window_fallback.take() {
-                return Ok(GeneratedSummaryContent {
-                    claims,
-                    evidence,
-                    withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
-                });
-            }
-            if let Some(generated) = clipped_fallback
-                .take()
-                .and_then(generated_from_clipped_fallback)
+            if let Some(generated) =
+                take_generated_fallback(&mut window_fallback, &mut clipped_fallback)
             {
                 return Ok(generated);
             }
@@ -968,6 +967,11 @@ fn generate_summary_with_validation_repair(
         }
         request_prompt = prompt_with_validation_feedback(&request_prompt, &feedback)?;
         if synthesis_request_characters(profile, &request_prompt, &output_schema)? > input_limit {
+            if let Some(generated) =
+                take_generated_fallback(&mut window_fallback, &mut clipped_fallback)
+            {
+                return Ok(generated);
+            }
             return Err(stage_failure(
                 PipelineStage::Synthesize,
                 "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
@@ -978,6 +982,22 @@ fn generate_summary_with_validation_repair(
         validation_repairs += 1;
         request_ordinal += 1;
     }
+}
+
+fn take_generated_fallback(
+    window_fallback: &mut Option<(Vec<CitedClaim>, Vec<EvidenceItem>)>,
+    clipped_fallback: &mut Option<SafeSiblingFallback>,
+) -> Option<GeneratedSummaryContent> {
+    if let Some((claims, evidence)) = window_fallback.take() {
+        return Some(GeneratedSummaryContent {
+            claims,
+            evidence,
+            withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
+        });
+    }
+    clipped_fallback
+        .take()
+        .and_then(generated_from_clipped_fallback)
 }
 
 fn satisfies_clipped_recovery(candidate: &[CitedClaim], recovery: &SafeSiblingFallback) -> bool {
@@ -2657,6 +2677,7 @@ mod tests {
     enum ClippedRepairBehavior {
         Correct,
         CorrectWithLeadingClip,
+        AllClipped,
         Repeat,
         OmitClippedUnit,
         OmitSibling,
@@ -2855,6 +2876,10 @@ mod tests {
                     {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s1","s2"]},
                     {"text":"The later source remains supported.","source_ids":["s3"]}
                 ])
+            } else if !is_repair && matches!(self.behavior, ClippedRepairBehavior::AllClipped) {
+                json!([
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s5","s6"]}
+                ])
             } else if !is_repair
                 && matches!(
                     self.behavior,
@@ -2931,6 +2956,9 @@ mod tests {
                     ClippedRepairBehavior::CorrectWithLeadingClip => json!([
                         {"text":"The first sources are summarized completely.","source_ids":["s1","s2"]},
                         {"text":"The later source remains supported.","source_ids":["s3"]}
+                    ]),
+                    ClippedRepairBehavior::AllClipped => json!([
+                        {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]}
                     ]),
                     ClippedRepairBehavior::Repeat => json!([
                     {"text":"The first source remains supported.","source_ids":["s1"]},
@@ -4662,6 +4690,50 @@ mod tests {
             .is_some_and(|feedback| feedback.iter().any(|item| item
                 .as_str()
                 .is_some_and(|message| message.contains("1200-character decoder limit")))));
+
+        let initial_request_characters =
+            synthesis_request_characters(SummaryProfile::General, &prompt, &schema).unwrap();
+        let constrained = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::Correct);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &constrained,
+            "document-1",
+            &catalog,
+            prompt.clone(),
+            schema.clone(),
+            initial_request_characters,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("a repair prompt that exceeds the limit must return the warned safe fallback");
+        assert_eq!(generated.claims.len(), 1);
+        assert_eq!(
+            generated.claims[0].text,
+            "The first source remains supported."
+        );
+        assert_eq!(
+            generated.withheld_unit_kind,
+            Some(WithheldUnitKind::DecoderClipped)
+        );
+        assert_eq!(constrained.requests().len(), 1);
+
+        let all_clipped = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::AllClipped);
+        let failure = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &all_clipped,
+            "document-1",
+            &catalog,
+            prompt.clone(),
+            schema.clone(),
+            initial_request_characters,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect_err("an all-clipped response has no deliverable size fallback");
+        assert_eq!(failure.code, "SYNTHESIS_REPAIR_INPUT_TOO_LARGE");
+        assert_eq!(all_clipped.requests().len(), 1);
 
         let leading = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::CorrectWithLeadingClip);
         let generated = generate_summary_with_validation_repair(
