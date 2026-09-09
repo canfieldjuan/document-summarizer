@@ -4262,6 +4262,10 @@ mod tests {
         let mut leading_decimal = catalog().candidates[0].evidence.clone();
         leading_decimal.evidence_id = "leading-decimal".into();
         leading_decimal.exact_quote = "The fraction is at least 0.5.".into();
+        let mut contextual_bound = catalog().candidates[1].evidence.clone();
+        contextual_bound.evidence_id = "contextual-bound".into();
+        contextual_bound.exact_quote =
+            "Capacity Sigma is capped at 400 units. Quota Sigma is more than 500 units.".into();
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
         transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
@@ -4275,6 +4279,10 @@ mod tests {
         let mut coordinated_route = catalog().candidates[0].evidence.clone();
         coordinated_route.evidence_id = "coordinated-route".into();
         coordinated_route.exact_quote = "Plan A and Plan B transport workers from station to field. Plan C is documented separately.".into();
+        let mut disjunctive_route = catalog().candidates[1].evidence.clone();
+        disjunctive_route.evidence_id = "disjunctive-route".into();
+        disjunctive_route.exact_quote =
+            "Plan A or Plan B transport workers from station to field.".into();
         let mut explicit_evaluation = catalog().candidates[0].evidence.clone();
         explicit_evaluation.evidence_id = "evaluation".into();
         explicit_evaluation.exact_quote =
@@ -4290,6 +4298,9 @@ mod tests {
         shared_procedures.exact_quote =
             "Procedure A and Procedure B are essential. Procedure C is documented separately."
                 .into();
+        let mut qualified_procedure = catalog().candidates[1].evidence.clone();
+        qualified_procedure.evidence_id = "qualified-procedure".into();
+        qualified_procedure.exact_quote = "Procedure K review is essential.".into();
         let mut negative_evaluation = catalog().candidates[1].evidence.clone();
         negative_evaluation.evidence_id = "negative-evaluation".into();
         negative_evaluation.exact_quote = "Procedure C is not essential.".into();
@@ -4349,14 +4360,17 @@ mod tests {
             except_actor_condition,
             contracted_bound,
             leading_decimal,
+            contextual_bound,
             transport,
             inverted_transport,
             actor_transport,
             coordinated_route,
+            disjunctive_route,
             explicit_evaluation,
             procedure_a,
             procedure_b,
             shared_procedures,
+            qualified_procedure,
             negative_evaluation,
             compound_evaluations,
             sentence_boundary,
@@ -4581,6 +4595,16 @@ mod tests {
                 claim_id: "transferred-ordinary-bound-predicate".into(),
                 text: "Load Alpha can weigh at most 25 parcels.".into(),
                 evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "deferred-unrelated-same-value-conflict".into(),
+                text: "Capacity Sigma is at most 500 units.".into(),
+                evidence_ids: vec!["contextual-bound".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-contextual-same-value".into(),
+                text: "Quota Sigma is at most 500 units.".into(),
+                evidence_ids: vec!["contextual-bound".into()],
             },
             CitedClaim {
                 claim_id: "broadened-enumeration".into(),
@@ -4876,6 +4900,11 @@ mod tests {
                 evidence_ids: vec!["coordinated-route".into()],
             },
             CitedClaim {
+                claim_id: "deferred-disjunctive-route-actor".into(),
+                text: "Plan A transports workers from station to field.".into(),
+                evidence_ids: vec!["disjunctive-route".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-evaluation".into(),
                 text: "The measures are critical for worker safety and health.".into(),
                 evidence_ids: vec!["evaluation".into()],
@@ -4904,6 +4933,16 @@ mod tests {
                 claim_id: "transferred-coordinated-evaluation".into(),
                 text: "Procedure A and Procedure C are critical.".into(),
                 evidence_ids: vec!["shared-procedures".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-qualified-evaluation-subject".into(),
+                text: "Procedure K review is critical.".into(),
+                evidence_ids: vec!["qualified-procedure".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-evaluation-subphrase".into(),
+                text: "Procedure K is critical.".into(),
+                evidence_ids: vec!["qualified-procedure".into()],
             },
             CitedClaim {
                 claim_id: "supported-negative-evaluation".into(),
@@ -5040,6 +5079,7 @@ mod tests {
             "supported-prefix-currency",
             "supported-nested-compound-unit",
             "supported-ordinary-bound-predicate",
+            "deferred-unrelated-same-value-conflict",
             "supported-immediate-family",
             "supported-mixed-family-scope",
             "supported-formatted-integer",
@@ -5068,10 +5108,12 @@ mod tests {
             "deferred-unknown-route-actor",
             "supported-passive-route-agent",
             "supported-coordinated-route-actor",
+            "deferred-disjunctive-route-actor",
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
             "supported-coordinated-evaluation",
+            "supported-qualified-evaluation-subject",
             "supported-negative-evaluation",
             "supported-compound-evaluation",
             "supported-after-negative-sentence",
@@ -5106,6 +5148,7 @@ mod tests {
             "changed-prefix-currency",
             "changed-nested-compound-unit",
             "transferred-ordinary-bound-predicate",
+            "changed-contextual-same-value",
             "broadened-enumeration",
             "broadened-immediate-family",
             "changed-formatted-decimal",
@@ -5136,6 +5179,7 @@ mod tests {
             "transferred-coordinated-route-actor",
             "transferred-evaluation",
             "transferred-coordinated-evaluation",
+            "transferred-evaluation-subphrase",
             "changed-evaluation-polarity",
             "transferred-shared-copula-evaluation",
             "transferred-transitive-evaluation",

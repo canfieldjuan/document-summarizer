@@ -2697,16 +2697,22 @@ complete
   `square`, `cubic`, or `per`, including a compound denominator, while
   excluding grammatical continuations, accept only logically entailed weak-bound
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
-  when cited text exposes the same context. Restrictive `immediate family`
+  when cited text exposes the same context. A contradictory relation on the same
+  numeric value is considered only when source and claim share that established
+  context, the same leading normalized content anchor, or a normalized content
+  bigram; an unrelated same-valued constraint therefore cannot veto an otherwise
+  supported claim. Restrictive `immediate family`
   wording must remain explicit in a family-member claim when every cited family
   occurrence is restricted, while singular and plural `member` forms are
   equivalent and an explicit unqualified source occurrence remains usable. Directional parsing
   accepts both `from … to …` and `to … from …` syntax and binds a route to its
   mechanically known local actor independently of predicate wording when the
   claim prefix identifies an actor already attached to a cited route, and an
-  explicit passive `by` agent owns its route. Coordinated source actors are
-  retained as individual owners of their shared route, while an `and` starts a
-  new route clause only after a prior route predicate or endpoint. Evaluative relations retain negation while treating additive
+  explicit passive `by` agent owns its route. Conjunctive source actors are
+  retained as individual owners of their shared route. A disjunctive actor does
+  not establish which alternative owns the route, so the deterministic check
+  leaves that verdict to the model. An `and` starts a new route clause only
+  after a prior route predicate or endpoint. Evaluative relations retain negation while treating additive
   `not only … but also` wording as affirmative. The kinship backstop recognizes
   clear noun uses such as `relative of` without treating comparative `relative
   to` as a family enumeration. Passive numeric wording binds a leading bound to
@@ -2737,7 +2743,10 @@ complete
   `ensure`/`guarantee` evaluations bind directly to their subject, and a
   coordinated evaluation whose full subject phrase is not cited is retained
   only when every individually cited component has the same supported
-  evaluation and polarity.
+  evaluation and polarity. A literal evaluation otherwise requires the exact
+  cited subject or an explicit conjunctive subject component; it cannot move
+  from a qualified subject such as a procedure's review to the shorter procedure
+  name.
 - Verification artifacts now use version `8.0.0`. The previous coherent
   `7.0.0` contract remains readable, while new results cannot be mistaken for
   artifacts produced without the deterministic veto. Synthesis, summary,
@@ -2759,7 +2768,8 @@ complete
   synonymous transport endpoints including `home`, inverted source-route syntax,
   a route retained on its source actor across carry and unlisted-predicate paraphrases,
   a route claim for a mechanically unknown actor left to model verification,
-  either member of a coordinated source actor retaining the shared route,
+  either member of a coordinated source actor retaining the shared route, a
+  disjunctive actor alternative left to model verification,
   an unchanged Celsius qualifier, a generic unchanged mass unit, a square-unit
   spelling variant including a nested compound denominator, an ordinary
   predicate across an inserted auxiliary, a symbolic percent source retained as `percent`, a prefix
@@ -2767,7 +2777,7 @@ complete
   `immediate family` scope across singular/plural wording, and an unqualified
   family claim when cited evidence contains both restricted and unrestricted scopes,
   comparative `relative to`, additive, subject-bound, shared-subject,
-  shared-copula, transitive, compound, coordinated and negative evaluations, a nonliteral
+  shared-copula, transitive, compound, coordinated, qualified-subject and negative evaluations, a nonliteral
   safety paraphrase left to model verification, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
@@ -2776,6 +2786,8 @@ complete
   to square feet,
   a stronger numeric
   threshold, a removed negative sign,
+  a same-value boundary reversal scoped to its matching content anchor while an
+  unrelated same-value constraint is ignored,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
   distinct rules in one item or compound sentence, and a single actor borrowing
   another actor's qualifier, including a leading condition), an active or
@@ -2795,7 +2807,8 @@ complete
   removal of the restrictive
   `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula, transitive and
-  coordinated wording, removed
+  coordinated wording or from a qualified evaluation subject to its shorter
+  subphrase, removed
   evaluation negation, `should`-to-`must` strengthening, and strong modality
   transferred between named plans. Separate probes
   reject partial verdict coverage, mismatched identities and unknown evidence,

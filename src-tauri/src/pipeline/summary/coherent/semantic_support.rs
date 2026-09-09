@@ -760,6 +760,77 @@ fn numeric_contexts_match(source: &NumericReference, claim: &NumericReference) -
             && contains_sequence(&source.context, &claim.trailing_subject))
 }
 
+fn normalized_numeric_context_word(word: &str) -> Option<String> {
+    if matches!(
+        word,
+        "a" | "an"
+            | "the"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "be"
+            | "been"
+            | "being"
+            | "has"
+            | "have"
+            | "had"
+            | "do"
+            | "does"
+            | "did"
+            | "can"
+            | "could"
+            | "may"
+            | "might"
+            | "must"
+            | "shall"
+            | "should"
+            | "will"
+            | "would"
+            | "not"
+            | "no"
+            | "never"
+            | "when"
+            | "if"
+            | "unless"
+            | "provided"
+    ) {
+        return None;
+    }
+    Some(if let Some(stem) = word.strip_suffix("ies") {
+        format!("{stem}y")
+    } else if let Some(stem) = word.strip_suffix('d').filter(|stem| stem.ends_with('e')) {
+        stem.to_string()
+    } else if let Some(stem) = word.strip_suffix("ed") {
+        stem.to_string()
+    } else if let Some(stem) = word.strip_suffix("ing") {
+        stem.to_string()
+    } else {
+        word.strip_suffix('s').unwrap_or(word).to_string()
+    })
+}
+
+fn numeric_context_anchors_match(source: &[String], claim: &[String]) -> bool {
+    let source = source
+        .iter()
+        .filter_map(|word| normalized_numeric_context_word(word))
+        .collect::<Vec<_>>();
+    let claim = claim
+        .iter()
+        .filter_map(|word| normalized_numeric_context_word(word))
+        .collect::<Vec<_>>();
+    let same_leading_anchor = source
+        .first()
+        .zip(claim.first())
+        .is_some_and(|(source_anchor, claim_anchor)| source_anchor == claim_anchor);
+    same_leading_anchor
+        || (source.len() >= 2
+            && claim.len() >= 2
+            && source
+                .windows(2)
+                .any(|source_pair| claim.windows(2).any(|claim_pair| source_pair == claim_pair)))
+}
+
 fn constraint_reference(constraint: &NumericConstraint) -> NumericReference {
     NumericReference {
         context: constraint.context.clone(),
@@ -887,18 +958,29 @@ fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
         {
             return true;
         }
-        let same_value_entails = source_constraints.iter().any(|source| {
-            source.value == constraint.value
-                && numeric_value_order(&source.value, &constraint.value).is_some_and(|order| {
-                    numeric_relation_supports(source.relation, constraint.relation, order)
-                })
-                && numeric_units_match(source, &constraint)
+        let contextual_same_value = source_constraints
+            .iter()
+            .filter(|source| {
+                source.value == constraint.value
+                    && ((source.context.is_empty()
+                        && source.trailing_subject.is_empty()
+                        && constraint.context.is_empty()
+                        && constraint.trailing_subject.is_empty())
+                        || numeric_contexts_match(&constraint_reference(source), &claim_reference)
+                        || numeric_context_anchors_match(&source.context, &constraint.context))
+            })
+            .collect::<Vec<_>>();
+        let same_value_entails = contextual_same_value.iter().any(|source| {
+            numeric_value_order(&source.value, &constraint.value).is_some_and(|order| {
+                numeric_relation_supports(source.relation, constraint.relation, order)
+            }) && numeric_units_match(source, &constraint)
         });
-        if !same_value_entails
-            && source_constraints
-                .iter()
-                .any(|source| source.value == constraint.value)
-        {
+        let same_value_conflicts = contextual_same_value.iter().any(|source| {
+            !numeric_value_order(&source.value, &constraint.value).is_some_and(|order| {
+                numeric_relation_supports(source.relation, constraint.relation, order)
+            }) || !numeric_units_match(source, &constraint)
+        });
+        if same_value_conflicts && !same_value_entails {
             return false;
         }
         (constraint.context.is_empty() && constraint.trailing_subject.is_empty())
@@ -1179,9 +1261,17 @@ fn relations_match(left: &DirectionalRelation, right: &DirectionalRelation) -> b
 
 fn directional_actor_components(actor: &[String]) -> Vec<&[String]> {
     actor
-        .split(|word| matches!(word.as_str(), "and" | "or"))
+        .split(|word| word == "and")
         .filter(|component| !component.is_empty())
         .collect()
+}
+
+fn disjunctive_directional_actor_contains(source: &[String], claim: &[String]) -> bool {
+    source.iter().any(|word| word == "or")
+        && source
+            .split(|word| word == "or")
+            .filter(|component| !component.is_empty())
+            .any(|component| component == claim)
 }
 
 fn directional_actor_supports(source: &[String], claim: &[String]) -> bool {
@@ -1246,6 +1336,12 @@ fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
             if source_relations.iter().any(|source| {
                 endpoint_pairs_match(source, &relation)
                     && directional_actor_supports(&source.actor, &relation_actor)
+            }) {
+                return true;
+            }
+            if source_relations.iter().any(|source| {
+                endpoint_pairs_match(source, &relation)
+                    && disjunctive_directional_actor_contains(&source.actor, &relation_actor)
             }) {
                 return true;
             }
@@ -1699,6 +1795,15 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                 }) {
                     subject.pop();
                 }
+            } else if let Some(previous_evaluation) =
+                subject.iter().position(|word| is_evaluative_word(word))
+            {
+                if let Some(previous_link) = subject[..previous_evaluation]
+                    .iter()
+                    .rposition(|word| is_evaluation_link(word))
+                {
+                    subject.truncate(previous_link);
+                }
             }
             if subject.first().is_some_and(|word| {
                 matches!(
@@ -1722,12 +1827,15 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
 }
 
 fn evaluated_subject_matches(source: &[String], claim: &[String]) -> bool {
-    source == claim || source.windows(claim.len()).any(|window| window == claim)
+    source == claim
+        || evaluation_subject_components(source)
+            .into_iter()
+            .any(|component| component == claim)
 }
 
 fn evaluation_subject_components(subject: &[String]) -> Vec<&[String]> {
     subject
-        .split(|word| matches!(word.as_str(), "and" | "or"))
+        .split(|word| word == "and")
         .filter(|component| !component.is_empty())
         .collect()
 }
