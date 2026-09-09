@@ -2692,14 +2692,14 @@ complete
   signs, normalize bounded English cardinal wording, compare exact normalized
   decimal thresholds, bind ordinary following unit tokens and explicit
   temperature-scale qualifiers when both source and claim expose them, retain
-  `%` as the canonical `percent` unit, attach common prefix currency symbols to
-  their following number, and retain structurally marked compound units using
+  `%` as the canonical `percent` unit, attach common prefix or suffix currency
+  symbols to their number, and retain structurally marked compound units using
   `square`, `cubic`, or `per`, including a compound denominator, while
   excluding grammatical continuations, accept only logically entailed weak-bound
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
   when cited text exposes the same context. A contradictory relation on the same
   numeric value is considered only when source and claim share that established
-  context, the same leading normalized content anchor, or a normalized content
+  context, the same complete normalized subject anchor, or a normalized content
   bigram; an unrelated same-valued constraint therefore cannot veto an otherwise
   supported claim. Restrictive `immediate family`
   wording must remain explicit in a family-member claim when every cited family
@@ -2719,6 +2719,9 @@ complete
   an explicit trailing `by …` subject, and actor qualifier matching retains
   negation polarity. Shared negation normalization covers expanded and contracted
   auxiliary forms, and numeric comparator context ignores optional articles.
+  Exact numeric subject anchors recognize ordinary and contracted linking verbs,
+  explicit requirement predicates and symbolic comparator tokens; a shared first
+  word is not sufficient for distinct multi-token subjects.
   Relation parsing stays within sentence or clause boundaries so a negation or
   endpoint in one sentence cannot affect the next. Leading decimals normalize
   to their zero-prefixed value. Numeric subject comparison accepts a shared
@@ -2735,7 +2738,8 @@ complete
   every completed actor-condition relation; the declared exclusion connectors
   (`unless`, `except`, `excluding`, `absent`, and `without`) remain inside the
   parsed condition and contribute exclusionary polarity when a qualifier is
-  compared. Directional
+  compared. A restrictive `only if` remains bound to the same actor and
+  compensation condition, including when a claim omits `only`. Directional
   checks reject a known reversed endpoint even when the other endpoint is new
   and reject a route transferred to an actor named at the start of another cited
   clause; an actor absent from cited clause starts remains for model judgment,
@@ -2746,7 +2750,8 @@ complete
   evaluation and polarity. A literal evaluation otherwise requires the exact
   cited subject or an explicit conjunctive subject component; it cannot move
   from a qualified subject such as a procedure's review to the shorter procedure
-  name.
+  name. The lexical negatives `ineffective`, `unsafe`, and `unhealthy` carry
+  negative polarity when compared with their positive evaluation concepts.
 - Verification artifacts now use version `8.0.0`. The previous coherent
   `7.0.0` contract remains readable, while new results cannot be mistaken for
   artifacts produced without the deterministic veto. Synthesis, summary,
@@ -2764,7 +2769,7 @@ complete
   same named plan, distinct plans with a shared name prefix, a leading decimal,
   a one-token numeric subject across an auxiliary change,
   comma- and `then`-delimited conditions, multiple correctly qualified actor
-  relations in one claim,
+  relations in one claim, an unchanged `only if` restriction,
   synonymous transport endpoints including `home`, inverted source-route syntax,
   a route retained on its source actor across carry and unlisted-predicate paraphrases,
   a route claim for a mechanically unknown actor left to model verification,
@@ -2773,11 +2778,13 @@ complete
   an unchanged Celsius qualifier, a generic unchanged mass unit, a square-unit
   spelling variant including a nested compound denominator, an ordinary
   predicate across an inserted auxiliary, a symbolic percent source retained as `percent`, a prefix
-  dollar source paraphrased as `dollars`, explicit
+  dollar source paraphrased as `dollars`, a suffix euro source paraphrased as
+  `euros`, explicit
   `immediate family` scope across singular/plural wording, and an unqualified
   family claim when cited evidence contains both restricted and unrestricted scopes,
   comparative `relative to`, additive, subject-bound, shared-subject,
-  shared-copula, transitive, compound, coordinated, qualified-subject and negative evaluations, a nonliteral
+  shared-copula, transitive, compound, coordinated, qualified-subject, explicit
+  and lexical negative evaluations, a nonliteral
   safety paraphrase left to model verification, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
@@ -2786,14 +2793,15 @@ complete
   to square feet,
   a stronger numeric
   threshold, a removed negative sign,
-  a same-value boundary reversal scoped to its matching content anchor while an
-  unrelated same-value constraint is ignored,
+  a same-value boundary reversal scoped to its matching complete subject while
+  a same-value constraint for a different subject sharing only its first word is
+  ignored,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
   distinct rules in one item or compound sentence, and a single actor borrowing
   another actor's qualifier, including a leading condition), an active or
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
-  affirmative, an `unless` or `except` condition reversed to `if`, a contracted or `cannot`
+  affirmative, an `unless`, `except`, or `only if` condition weakened to `if`, a contracted or `cannot`
   weak modal strengthened to a strong modal, a `cannot be more than` numeric
   constraint reversed to affirmative `more than`,
   explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
@@ -2808,7 +2816,7 @@ complete
   `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula, transitive and
   coordinated wording or from a qualified evaluation subject to its shorter
-  subphrase, removed
+  subphrase, lexical negative evaluations reversed to positive, removed
   evaluation negation, `should`-to-`must` strengthening, and strong modality
   transferred between named plans. Separate probes
   reject partial verdict coverage, mismatched identities and unknown evidence,

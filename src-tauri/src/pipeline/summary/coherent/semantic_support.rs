@@ -625,6 +625,9 @@ fn numeric_unit(tokens: &[String], start: usize, end: usize) -> Option<String> {
     if let Some(unit) = tokens.get(start).and_then(|word| currency_token_unit(word)) {
         return Some(unit.to_string());
     }
+    if let Some(unit) = tokens.get(end).and_then(|word| currency_token_unit(word)) {
+        return Some(unit.to_string());
+    }
     let mut index = end;
     if tokens.get(index).is_some_and(|word| word == "or")
         && tokens
@@ -810,7 +813,67 @@ fn normalized_numeric_context_word(word: &str) -> Option<String> {
     })
 }
 
+fn numeric_context_subject_anchor(context: &[String]) -> Option<Vec<String>> {
+    let context = strip_leading_article(context);
+    let predicate = context.iter().position(|word| {
+        matches!(
+            word.as_str(),
+            "is" | "are"
+                | "was"
+                | "were"
+                | "be"
+                | "been"
+                | "being"
+                | "has"
+                | "have"
+                | "had"
+                | "can"
+                | "could"
+                | "may"
+                | "might"
+                | "must"
+                | "shall"
+                | "should"
+                | "will"
+                | "would"
+                | "require"
+                | "requires"
+                | "required"
+                | "remain"
+                | "remains"
+                | "remained"
+                | "isn"
+                | "aren"
+                | "wasn"
+                | "weren"
+                | "don"
+                | "doesn"
+                | "didn"
+                | "won"
+                | "wouldn"
+                | "shouldn"
+                | "couldn"
+                | "mustn"
+                | "hasn"
+                | "haven"
+                | "hadn"
+                | "__lt"
+                | "__le"
+                | "__gt"
+                | "__ge"
+        )
+    })?;
+    let anchor = context[..predicate]
+        .iter()
+        .filter_map(|word| normalized_numeric_context_word(word))
+        .collect::<Vec<_>>();
+    (!anchor.is_empty()).then_some(anchor)
+}
+
 fn numeric_context_anchors_match(source: &[String], claim: &[String]) -> bool {
+    let same_subject_anchor = numeric_context_subject_anchor(source)
+        .zip(numeric_context_subject_anchor(claim))
+        .is_some_and(|(source_anchor, claim_anchor)| source_anchor == claim_anchor);
     let source = source
         .iter()
         .filter_map(|word| normalized_numeric_context_word(word))
@@ -819,11 +882,7 @@ fn numeric_context_anchors_match(source: &[String], claim: &[String]) -> bool {
         .iter()
         .filter_map(|word| normalized_numeric_context_word(word))
         .collect::<Vec<_>>();
-    let same_leading_anchor = source
-        .first()
-        .zip(claim.first())
-        .is_some_and(|(source_anchor, claim_anchor)| source_anchor == claim_anchor);
-    same_leading_anchor
+    same_subject_anchor
         || (source.len() >= 2
             && claim.len() >= 2
             && source
@@ -1566,6 +1625,10 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         return true;
     };
     let leading_condition = condition_index == 0;
+    let condition_start = condition_index
+        .checked_sub(1)
+        .filter(|previous| ACTOR_QUALIFIER_CONCEPTS[1].contains(&claim_words[*previous].as_str()))
+        .unwrap_or(condition_index);
     let (subject_words, condition) = if leading_condition {
         if let Some(comma) = claim.find(',') {
             (words(&claim[comma + 1..]), claim[..comma].to_string())
@@ -1579,8 +1642,8 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
         }
     } else {
         (
-            claim_words[..condition_index].to_vec(),
-            claim_words[condition_index..].join(" "),
+            claim_words[..condition_start].to_vec(),
+            claim_words[condition_start..].join(" "),
         )
     };
     let subject_end = subject_words
@@ -1624,6 +1687,19 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
     ACTOR_QUALIFIER_CONCEPTS.iter().all(|concept| {
         let claim_polarities = qualifier_polarities(&condition_tokens, concept);
         if claim_polarities.is_empty() {
+            if *concept == ACTOR_QUALIFIER_CONCEPTS[1]
+                && tokens_contain_any(&condition_tokens, ACTOR_QUALIFIER_CONCEPTS[0])
+            {
+                let source_relations = actor_relation_segments(evidence, &source_actors, concept);
+                let source_has_matching_restriction = source_relations.iter().any(|relation| {
+                    tokens_contain_any(relation, concept)
+                        && tokens_contain_any(relation, ACTOR_QUALIFIER_CONCEPTS[0])
+                        && claimed_actors
+                            .iter()
+                            .any(|(actor, label)| tokens_mention_actor(relation, actor, label))
+                });
+                return !source_has_matching_restriction;
+            }
             return true;
         }
         let source_relations = actor_relation_segments(evidence, &source_actors, concept);
@@ -1691,10 +1767,22 @@ const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
     &["essential", "critical", "vital", "necessary"],
     &["ensure", "ensures", "ensuring", "guarantee", "guarantees"],
     &["important", "importance"],
-    &["effective", "effectiveness"],
-    &["safe", "safety"],
-    &["healthy", "health"],
+    &[
+        "effective",
+        "effectiveness",
+        "ineffective",
+        "ineffectiveness",
+    ],
+    &["safe", "safety", "unsafe"],
+    &["healthy", "health", "unhealthy"],
 ];
+
+fn is_lexically_negated_evaluation(word: &str) -> bool {
+    matches!(
+        word,
+        "ineffective" | "ineffectiveness" | "unsafe" | "unhealthy"
+    )
+}
 
 fn is_evaluative_word(word: &str) -> bool {
     EVALUATIVE_CONCEPTS
@@ -1820,7 +1908,8 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                 );
             subject_is_concrete.then(|| EvaluationRelation {
                 subject,
-                negated: negation_present(&tokens[subject_end.saturating_sub(3)..=concept_index]),
+                negated: negation_present(&tokens[subject_end.saturating_sub(3)..=concept_index])
+                    ^ is_lexically_negated_evaluation(&tokens[concept_index]),
             })
         })
         .collect()

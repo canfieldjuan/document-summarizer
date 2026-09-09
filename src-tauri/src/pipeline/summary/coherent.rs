@@ -4256,6 +4256,9 @@ mod tests {
         let mut except_actor_condition = catalog().candidates[0].evidence.clone();
         except_actor_condition.evidence_id = "except-actor-condition".into();
         except_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA except when they recruit for compensation.".into();
+        let mut only_if_actor_condition = catalog().candidates[1].evidence.clone();
+        only_if_actor_condition.evidence_id = "only-if-actor-condition".into();
+        only_if_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA only if they recruit for compensation.".into();
         let mut contracted_bound = catalog().candidates[1].evidence.clone();
         contracted_bound.evidence_id = "contracted-bound".into();
         contracted_bound.exact_quote = "The limit isn't more than 500 units.".into();
@@ -4265,7 +4268,10 @@ mod tests {
         let mut contextual_bound = catalog().candidates[1].evidence.clone();
         contextual_bound.evidence_id = "contextual-bound".into();
         contextual_bound.exact_quote =
-            "Capacity Sigma is capped at 400 units. Quota Sigma is more than 500 units.".into();
+            "Capacity Sigma is capped at 400 units. Capacity Tau is more than 500 units.".into();
+        let mut suffix_currency = catalog().candidates[0].evidence.clone();
+        suffix_currency.evidence_id = "suffix-currency".into();
+        suffix_currency.exact_quote = "The fee is at most 5€.".into();
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
         transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
@@ -4301,6 +4307,10 @@ mod tests {
         let mut qualified_procedure = catalog().candidates[1].evidence.clone();
         qualified_procedure.evidence_id = "qualified-procedure".into();
         qualified_procedure.exact_quote = "Procedure K review is essential.".into();
+        let mut lexical_evaluations = catalog().candidates[0].evidence.clone();
+        lexical_evaluations.evidence_id = "lexical-evaluations".into();
+        lexical_evaluations.exact_quote =
+            "Procedure L is ineffective. Procedure M is unsafe. Procedure N is unhealthy.".into();
         let mut negative_evaluation = catalog().candidates[1].evidence.clone();
         negative_evaluation.evidence_id = "negative-evaluation".into();
         negative_evaluation.exact_quote = "Procedure C is not essential.".into();
@@ -4358,9 +4368,11 @@ mod tests {
             negative_actor_condition,
             unless_actor_condition,
             except_actor_condition,
+            only_if_actor_condition,
             contracted_bound,
             leading_decimal,
             contextual_bound,
+            suffix_currency,
             transport,
             inverted_transport,
             actor_transport,
@@ -4371,6 +4383,7 @@ mod tests {
             procedure_b,
             shared_procedures,
             qualified_procedure,
+            lexical_evaluations,
             negative_evaluation,
             compound_evaluations,
             sentence_boundary,
@@ -4577,6 +4590,16 @@ mod tests {
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
+                claim_id: "supported-suffix-currency".into(),
+                text: "The fee is at most 5 euros.".into(),
+                evidence_ids: vec!["suffix-currency".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-suffix-currency".into(),
+                text: "The fee is at most 5 dollars.".into(),
+                evidence_ids: vec!["suffix-currency".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-nested-compound-unit".into(),
                 text: "Density is at most 5 kilograms per square metres.".into(),
                 evidence_ids: vec!["flsa".into()],
@@ -4603,7 +4626,7 @@ mod tests {
             },
             CitedClaim {
                 claim_id: "changed-contextual-same-value".into(),
-                text: "Quota Sigma is at most 500 units.".into(),
+                text: "Capacity Tau is at most 500 units.".into(),
                 evidence_ids: vec!["contextual-bound".into()],
             },
             CitedClaim {
@@ -4792,6 +4815,16 @@ mod tests {
                 evidence_ids: vec!["except-actor-condition".into()],
             },
             CitedClaim {
+                claim_id: "supported-only-if-actor-condition".into(),
+                text: "FLCs are subject to MSPA only if they recruit for compensation.".into(),
+                evidence_ids: vec!["only-if-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-only-if-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
+                evidence_ids: vec!["only-if-actor-condition".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-compound-actor-conditions".into(),
                 text: "FLCs are subject to MSPA if they recruit workers for money, and AGERs are subject to MSPA if they recruit workers."
                     .into(),
@@ -4945,6 +4978,36 @@ mod tests {
                 evidence_ids: vec!["qualified-procedure".into()],
             },
             CitedClaim {
+                claim_id: "supported-lexical-ineffective".into(),
+                text: "Procedure L is not effective.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-ineffective".into(),
+                text: "Procedure L is effective.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-unsafe".into(),
+                text: "Procedure M is not safe.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-unsafe".into(),
+                text: "Procedure M is safe.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-unhealthy".into(),
+                text: "Procedure N is not healthy.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-unhealthy".into(),
+                text: "Procedure N is healthy.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-negative-evaluation".into(),
                 text: "Procedure C is not critical.".into(),
                 evidence_ids: vec!["negative-evaluation".into()],
@@ -5077,6 +5140,7 @@ mod tests {
             "supported-cannot-bound",
             "supported-compound-area-unit",
             "supported-prefix-currency",
+            "supported-suffix-currency",
             "supported-nested-compound-unit",
             "supported-ordinary-bound-predicate",
             "deferred-unrelated-same-value-conflict",
@@ -5098,6 +5162,7 @@ mod tests {
             "supported-negative-actor-condition",
             "supported-unless-actor-condition",
             "supported-except-actor-condition",
+            "supported-only-if-actor-condition",
             "supported-compound-actor-conditions",
             "supported-endpoints",
             "supported-inverted-source-endpoints",
@@ -5114,6 +5179,9 @@ mod tests {
             "supported-shared-evaluation",
             "supported-coordinated-evaluation",
             "supported-qualified-evaluation-subject",
+            "supported-lexical-ineffective",
+            "supported-lexical-unsafe",
+            "supported-lexical-unhealthy",
             "supported-negative-evaluation",
             "supported-compound-evaluation",
             "supported-after-negative-sentence",
@@ -5146,6 +5214,7 @@ mod tests {
             "changed-cannot-bound",
             "changed-compound-area-unit",
             "changed-prefix-currency",
+            "changed-suffix-currency",
             "changed-nested-compound-unit",
             "transferred-ordinary-bound-predicate",
             "changed-contextual-same-value",
@@ -5167,6 +5236,7 @@ mod tests {
             "changed-negative-actor-condition",
             "changed-unless-actor-condition",
             "changed-except-actor-condition",
+            "changed-only-if-actor-condition",
             "transferred-compound-actor-condition",
             "changed-endpoint",
             "changed-inverted-source-endpoints",
@@ -5180,6 +5250,9 @@ mod tests {
             "transferred-evaluation",
             "transferred-coordinated-evaluation",
             "transferred-evaluation-subphrase",
+            "changed-lexical-ineffective",
+            "changed-lexical-unsafe",
+            "changed-lexical-unhealthy",
             "changed-evaluation-polarity",
             "transferred-shared-copula-evaluation",
             "transferred-transitive-evaluation",
