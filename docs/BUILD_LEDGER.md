@@ -2917,7 +2917,12 @@ complete
   unit. A later window fallback may omit that mixed unit while it must still
   preserve safe siblings, corrected modal evidence and recovered clipped
   evidence. That newer validated fallback takes precedence if the window repair
-  is invalid or incomplete. Other structural errors still fail closed.
+  is invalid or incomplete. A fully recovered response that still strengthens
+  source modality likewise snapshots its individually safe units before the
+  modality retry. If that retry fails, the newer safe content is delivered with
+  `COHERENT_SUMMARY_MODAL_STRENGTHENED_UNITS_WITHHELD`; this also gives an
+  all-clipped original a deliverable fallback when at least one repaired unit is
+  modality-safe. Other structural errors still fail closed.
   It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`, plus
   `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD` when the delivered fallback
   also excluded a mixed-window sibling. An all-clipped response carries its
@@ -2947,10 +2952,12 @@ complete
   all-clipped response. A leading modal-invalid sibling probe validates the
   rematerialized ID of the later retained safe claim. Two nested window probes
   prove that a recovered clipped unit survives both an invalid repair and a
-  structurally valid but incomplete repair. The all-clipped source probe rejects
-  unrelated replacement evidence and accepts the required evidence. Negative
-  probes reject a 1,199-character fragment, empty, duplicate, foreign and
-  nine-source metadata, unwindowed General catalogs, and Story catalogs.
+  structurally valid but incomplete repair. Two nested modality probes prove
+  that recovered safe units survive a repeated strengthening failure for both a
+  mixed original and an all-clipped original. The all-clipped source probe
+  rejects unrelated replacement evidence and accepts the required evidence.
+  Negative probes reject a 1,199-character fragment, empty, duplicate, foreign
+  and nine-source metadata, unwindowed General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the
