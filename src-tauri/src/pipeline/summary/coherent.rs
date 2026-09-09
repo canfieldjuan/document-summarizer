@@ -4312,7 +4312,7 @@ mod tests {
         let mut immediate_family = catalog().candidates[1].evidence.clone();
         immediate_family.evidence_id = "immediate-family".into();
         immediate_family.exact_quote =
-            "Eligibility is limited to an immediate family member of the owner.".into();
+            "Eligibility is limited to immediate family members of the owner.".into();
         let mut modal = catalog().candidates[0].evidence.clone();
         modal.evidence_id = "modal".into();
         modal.exact_quote = "The interpreter should retain the operating context.".into();
@@ -4322,7 +4322,8 @@ mod tests {
             "Plan A may accept applications. Plan B must accept applications.".into();
         let mut contracted_modal = catalog().candidates[0].evidence.clone();
         contracted_modal.evidence_id = "contracted-modal".into();
-        contracted_modal.exact_quote = "Plan C shouldn't accept applications.".into();
+        contracted_modal.exact_quote =
+            "Plan C shouldn't accept applications. Plan D cannot accept reports.".into();
         let evidence = vec![
             first,
             flc,
@@ -4722,6 +4723,16 @@ mod tests {
                 evidence_ids: vec!["actor-transport".into()],
             },
             CitedClaim {
+                claim_id: "supported-unlisted-route-predicate".into(),
+                text: "Plan A moves workers from housing to the workplace.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-unlisted-route-predicate".into(),
+                text: "Plan A moves workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
                 claim_id: "transferred-cited-nonroute-actor".into(),
                 text: "Plan C transports workers from station to field.".into(),
                 evidence_ids: vec!["actor-transport".into()],
@@ -4827,6 +4838,11 @@ mod tests {
                 evidence_ids: vec!["contracted-modal".into()],
             },
             CitedClaim {
+                claim_id: "strengthened-cannot-modal".into(),
+                text: "Plan D must not accept reports.".into(),
+                evidence_ids: vec!["contracted-modal".into()],
+            },
+            CitedClaim {
                 claim_id: "deferred-nonliteral-evaluation".into(),
                 text: "Helmets improve worker safety.".into(),
                 evidence_ids: vec!["nonliteral-evaluation".into()],
@@ -4895,6 +4911,7 @@ mod tests {
             "supported-home-endpoint",
             "supported-actor-endpoints",
             "supported-paraphrased-actor-endpoints",
+            "supported-unlisted-route-predicate",
             "deferred-unknown-route-actor",
             "supported-evaluation",
             "supported-bound-evaluation",
@@ -4948,6 +4965,7 @@ mod tests {
             "changed-one-known-endpoint",
             "transferred-actor-endpoints",
             "transferred-paraphrased-actor-endpoints",
+            "transferred-unlisted-route-predicate",
             "transferred-cited-nonroute-actor",
             "transferred-evaluation",
             "changed-evaluation-polarity",
@@ -4956,6 +4974,7 @@ mod tests {
             "strengthened-modal",
             "transferred-strong-modal-subject",
             "strengthened-contracted-modal",
+            "strengthened-cannot-modal",
         ] {
             assert_eq!(verdict(claim_id), ClaimVerdict::Unsupported, "{claim_id}");
         }

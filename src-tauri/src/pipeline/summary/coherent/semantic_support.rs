@@ -784,14 +784,15 @@ fn contains_words(text: &str, phrase: &[&str]) -> bool {
 }
 
 fn broader_enumeration_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
-    for phrase in [&["family", "member"][..], &["family", "members"][..]] {
-        if contains_words(claim, phrase)
-            && !evidence
-                .iter()
-                .any(|item| contains_words(&item.exact_quote, phrase))
-        {
-            return false;
-        }
+    let has_family_member = |text: &str| {
+        contains_words(text, &["family", "member"]) || contains_words(text, &["family", "members"])
+    };
+    if has_family_member(claim)
+        && !evidence
+            .iter()
+            .any(|item| has_family_member(&item.exact_quote))
+    {
+        return false;
     }
     let source_has_immediate_family = evidence.iter().any(|item| {
         contains_words(&item.exact_quote, &["immediate", "family", "member"])
@@ -842,6 +843,7 @@ struct DirectionalRelation {
     origin: Vec<String>,
     destination: Vec<String>,
     actor: Vec<String>,
+    prefix: Vec<String>,
 }
 
 fn directional_actor(tokens: &[String], anchor: usize) -> Vec<String> {
@@ -919,6 +921,7 @@ fn directional_relations_in_clause(clause: &str) -> Vec<DirectionalRelation> {
                 origin,
                 destination,
                 actor: directional_actor(&tokens, from),
+                prefix: strip_leading_article(&tokens[..from]).to_vec(),
             });
         }
     }
@@ -951,6 +954,7 @@ fn directional_relations_in_clause(clause: &str) -> Vec<DirectionalRelation> {
                 origin,
                 destination,
                 actor: directional_actor(&tokens, to),
+                prefix: strip_leading_article(&tokens[..to]).to_vec(),
             });
         }
     }
@@ -1020,6 +1024,22 @@ fn directional_actor_is_cited(actor: &[String], evidence: &[&EvidenceItem]) -> b
         })
 }
 
+fn effective_directional_actor(
+    relation: &DirectionalRelation,
+    source_relations: &[DirectionalRelation],
+) -> Vec<String> {
+    if !relation.actor.is_empty() {
+        return relation.actor.clone();
+    }
+    source_relations
+        .iter()
+        .filter(|source| !source.actor.is_empty())
+        .map(|source| &source.actor)
+        .find(|actor| relation.prefix.starts_with(actor))
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     let source_relations = evidence
         .iter()
@@ -1036,13 +1056,19 @@ fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
             .iter()
             .any(|source| endpoint_pairs_match(source, &relation))
         {
-            if relation.actor.is_empty() {
+            let relation_actor = effective_directional_actor(&relation, &source_relations);
+            if relation_actor.is_empty() {
+                return true;
+            }
+            if source_relations.iter().any(|source| {
+                endpoint_pairs_match(source, &relation) && source.actor == relation_actor
+            }) {
                 return true;
             }
             let actor_is_known = source_relations
                 .iter()
-                .any(|source| source.actor == relation.actor)
-                || directional_actor_is_cited(&relation.actor, evidence);
+                .any(|source| source.actor == relation_actor)
+                || directional_actor_is_cited(&relation_actor, evidence);
             let route_has_known_actor = source_relations
                 .iter()
                 .any(|source| endpoint_pairs_match(source, &relation) && !source.actor.is_empty());
@@ -1557,6 +1583,12 @@ fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
                 let mut normalized = Vec::with_capacity(tokens.len());
                 let mut index = 0;
                 while index < tokens.len() {
+                    if tokens[index] == "cannot" {
+                        normalized.push("can".into());
+                        normalized.push("not".into());
+                        index += 1;
+                        continue;
+                    }
                     let contraction = tokens.get(index + 1).is_some_and(|word| word == "t")
                         && matches!(
                             tokens[index].as_str(),

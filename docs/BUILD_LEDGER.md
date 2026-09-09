@@ -2694,10 +2694,11 @@ complete
   when both source and claim expose them, accept only logically entailed weak-bound
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
   when cited text exposes the same context. Restrictive `immediate family`
-  wording must remain explicit in a family-member claim. Directional parsing
+  wording must remain explicit in a family-member claim, while singular and
+  plural `member` forms are equivalent. Directional parsing
   accepts both `from … to …` and `to … from …` syntax and binds a route to its
-  mechanically known local actor independently of supported transport/carry
-  predicate wording. Evaluative relations retain negation while treating additive
+  mechanically known local actor independently of predicate wording when the
+  claim prefix identifies an actor already attached to a cited route. Evaluative relations retain negation while treating additive
   `not only … but also` wording as affirmative. The kinship backstop recognizes
   clear noun uses such as `relative of` without treating comparative `relative
   to` as a family enumeration. Passive numeric wording binds a leading bound to
@@ -2713,7 +2714,7 @@ complete
   subject. Explicit negation inverts inclusive word or symbol comparators,
   `under`/`over` forms, and exact equality. Modal comparisons bind force and
   polarity to the same local subject and object context, including contracted
-  weak-modality negation.
+  weak-modality negation and one-word `cannot`.
   Leading conditions accept either a comma or `then`, and compound claims check
   every completed actor-condition relation. Directional
   checks reject a known reversed endpoint even when the other endpoint is new
@@ -2740,9 +2741,10 @@ complete
   comma- and `then`-delimited conditions, multiple correctly qualified actor
   relations in one claim,
   synonymous transport endpoints including `home`, inverted source-route syntax,
-  a route retained on its source actor across a transport/carry paraphrase,
+  a route retained on its source actor across carry and unlisted-predicate paraphrases,
   a route claim for a mechanically unknown actor left to model verification,
-  an unchanged Celsius qualifier, explicit `immediate family` scope,
+  an unchanged Celsius qualifier, explicit `immediate family` scope across
+  singular/plural wording,
   comparative `relative to`, additive, subject-bound, shared-subject,
   shared-copula, transitive, compound and negative evaluations, a nonliteral
   safety paraphrase left to model verification, and qualified modality.
@@ -2755,13 +2757,14 @@ complete
   another actor's qualifier, including a leading condition), an active or
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
-  affirmative, a contracted weak modal strengthened to a strong modal,
+  affirmative, a contracted or `cannot` weak modal strengthened to a strong modal,
   explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
   bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
   prefix, comma-less and compound actor-condition transfers, endpoint reversal from
   either source-route syntax even with one newly worded endpoint, a route moved
   from one mechanically known actor to another even when the route predicate is
-  paraphrased or when the target actor is named only in a cited non-route clause,
+  paraphrased with an unlisted verb or when the target actor is named only in a
+  cited non-route clause,
   removal of the restrictive
   `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula and transitive wording, removed
