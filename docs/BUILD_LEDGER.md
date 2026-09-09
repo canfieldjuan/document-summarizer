@@ -3198,3 +3198,76 @@ complete
   support for the generated wording.
 - This slice does not change prompts, profile routing, model calls, summary or
   citation schemas, persistence schema, source-selection policy, or UI layout.
+
+## Slice 33 — Combined Profile Release Acceptance (2026-09-09)
+
+**Status**: combined harness and live-model baseline complete; General semantic
+release acceptance exposed issue #49
+
+**Implemented acceptance boundary**:
+- `scripts/profile-release-acceptance.sh` runs the existing automatic-routing,
+  bounded long-Story, bounded long-Contract and complete persisted long-General
+  live gates in one fixed sequence. It changes no product behavior.
+- The command accepts only the documented public DOL deck by SHA-256 before it
+  enables model-response and summary tracing. It builds the current frontend
+  sources and fails before Rust testing when that build fails, the selected
+  Ollama model is not resident, or the model row does not report `100% GPU`.
+- `docs/OFFICE_ACCEPTANCE.md` distinguishes the mechanical contract checked by
+  the tests from the profile-specific semantic review still required of the
+  printed representative output.
+
+**Acceptance evidence**:
+- Shell syntax passed. A missing fixture argument was rejected with exit 64,
+  and a present file with the wrong SHA-256 was rejected with exit 65 before a
+  test ran. An unloaded Ollama model, a different base URL, an inherited
+  `OLLAMA_HOST` and an alternate model-settings path were each rejected with
+  exit 69. After the model was loaded, `ollama ps` reported
+  `qwen3-30b-a3b:latest`, `100% GPU` and an 8,192-token context.
+- The combined command passed all four fully qualified opt-in tests. Automatic
+  routing classified the agreement as Contract, the legal story as Story, and
+  the contract article, anecdotal report and mixed collection as General. Its
+  test finished in 2.07 seconds. Long Story finished in 3.07 seconds and long
+  Contract in 4.10 seconds. The complete persisted General pipeline finished in
+  110.55 seconds.
+- The Story output preserved Mara's goal, the destroyed bridge and prohibition,
+  the risky alternate path, the rope-to-clinic causal link, and the reopening,
+  recovery and archive resolution without adding a motivation. The Contract
+  output preserved the named parties, engagement dates, service and payment
+  duties, expense and confidentiality exceptions, termination/cure conditions,
+  security deadline, and liability-cap exceptions with clause and page
+  references.
+- The 111-page General run ended `CompleteWithWarnings`, made 186 model
+  requests, delivered 82 supported claims in a 4,436-character coherent
+  summary, persisted citations and integrity metadata, and exposed
+  `COHERENT_SUMMARY_SOURCE_SELECTION_APPLIED` alongside its other warnings.
+- The combined command's TypeScript/Vite production build passed. The remaining
+  required local gates also passed: Rust
+  formatting, strict all-target/all-feature Clippy and `git diff --check`. The
+  full Rust suite passed 435 library tests with 12 intentional live ignores,
+  three office tests with three opt-in ignores, and all three release-contract
+  tests.
+
+**Semantic finding and next repair boundary**:
+- The General output converted content under the source heading `Common
+  Problems` into the unqualified sentence that employees paid a piece rate may
+  fall below the minimum wage and that deductions may bring them below it. The
+  exact page citation exists, but dropping the heading's problem framing can
+  make prohibited or deficient pay sound permissible. Mechanical source-ID,
+  quotation and model-verdict checks did not catch that loss of meaning.
+- Issue #49 records the separate repair slice. It must first trace whether the
+  framing is lost during extraction, evidence construction, synthesis input or
+  generation. Slice 33 does not change prompts or infer the fix.
+
+**Non-scope and remaining limits**:
+- This slice does not change product prompts, schemas, routing, persistence,
+  source selection, warnings, rendering, ingestion, OCR or model settings.
+- The automatic live case stops after classification, and the Story and
+  Contract live cases exercise bounded selection and synthesis directly. The
+  deterministic suite separately covers expected-hash admission, effective
+  profile persistence, warnings, citations and reopen behavior. This harness
+  does not drive the native file dialog or establish those steps in one live UI
+  invocation.
+- The combined command proves the configured model passed one fixed public and
+  synthetic corpus run. It does not turn model output into deterministic quality
+  evidence, and a green mechanical result remains insufficient without semantic
+  review.
