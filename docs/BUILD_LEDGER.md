@@ -2709,12 +2709,16 @@ complete
   to their zero-prefixed value. Numeric subject comparison accepts a shared
   prefix only when both following tokens begin the predicate, so auxiliaries do
   not hide a named-plan transfer and entities with shared name prefixes remain
-  distinct. Explicit negation inverts inclusive word or symbol comparators,
+  distinct; the same predicate check admits a mechanically known one-token
+  subject. Explicit negation inverts inclusive word or symbol comparators,
   `under`/`over` forms, and exact equality. Modal comparisons bind force and
-  polarity to the same local subject and object context.
+  polarity to the same local subject and object context, including contracted
+  weak-modality negation.
   Leading conditions accept either a comma or `then`, and compound claims check
   every completed actor-condition relation. Directional
-  checks reject a known reversed endpoint even when the other endpoint is new,
+  checks reject a known reversed endpoint even when the other endpoint is new
+  and reject a route transferred to an actor named at the start of another cited
+  clause; an actor absent from cited clause starts remains for model judgment,
   shared-copula evaluations inherit their prior concrete subject, and transitive
   `ensure`/`guarantee` evaluations bind directly to their subject.
 - Verification artifacts now use version `8.0.0`. The previous coherent
@@ -2732,10 +2736,12 @@ complete
   cross-value weak-bound paraphrases with the same known unit, an active bound paraphrased
   with its correct passive `by …` subject, a harmless auxiliary change on the
   same named plan, distinct plans with a shared name prefix, a leading decimal,
+  a one-token numeric subject across an auxiliary change,
   comma- and `then`-delimited conditions, multiple correctly qualified actor
   relations in one claim,
   synonymous transport endpoints including `home`, inverted source-route syntax,
   a route retained on its source actor across a transport/carry paraphrase,
+  a route claim for a mechanically unknown actor left to model verification,
   an unchanged Celsius qualifier, explicit `immediate family` scope,
   comparative `relative to`, additive, subject-bound, shared-subject,
   shared-copula, transitive, compound and negative evaluations, a nonliteral
@@ -2749,12 +2755,14 @@ complete
   another actor's qualifier, including a leading condition), an active or
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
-  affirmative, explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
+  affirmative, a contracted weak modal strengthened to a strong modal,
+  explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
   bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
   prefix, comma-less and compound actor-condition transfers, endpoint reversal from
   either source-route syntax even with one newly worded endpoint, a route moved
   from one mechanically known actor to another even when the route predicate is
-  paraphrased, removal of the restrictive
+  paraphrased or when the target actor is named only in a cited non-route clause,
+  removal of the restrictive
   `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula and transitive wording, removed
   evaluation negation, `should`-to-`must` strengthening, and strong modality

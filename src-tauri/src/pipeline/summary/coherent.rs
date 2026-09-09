@@ -4234,7 +4234,7 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The count is less than 450 cases. The quota is at most 400 cases. Outdoor temperature is at most 5 degrees Celsius. Plan A charges at most 5 dollars. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Quota is at most 5 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The count is less than 450 cases. The quota is at most 400 cases. Outdoor temperature is at most 5 degrees Celsius. Plan A charges at most 5 dollars. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
@@ -4265,7 +4265,7 @@ mod tests {
             "The employer must transport workers to the workplace from living quarters.".into();
         let mut actor_transport = catalog().candidates[1].evidence.clone();
         actor_transport.evidence_id = "actor-transport".into();
-        actor_transport.exact_quote = "Plan A transports workers from housing to workplace. Plan B transports workers from station to field.".into();
+        actor_transport.exact_quote = "Plan A transports workers from housing to workplace. Plan B transports workers from station to field. Plan C manages records.".into();
         let mut explicit_evaluation = catalog().candidates[0].evidence.clone();
         explicit_evaluation.evidence_id = "evaluation".into();
         explicit_evaluation.exact_quote =
@@ -4320,6 +4320,9 @@ mod tests {
         mixed_modal.evidence_id = "mixed-modal".into();
         mixed_modal.exact_quote =
             "Plan A may accept applications. Plan B must accept applications.".into();
+        let mut contracted_modal = catalog().candidates[0].evidence.clone();
+        contracted_modal.evidence_id = "contracted-modal".into();
+        contracted_modal.exact_quote = "Plan C shouldn't accept applications.".into();
         let evidence = vec![
             first,
             flc,
@@ -4347,6 +4350,7 @@ mod tests {
             immediate_family,
             modal,
             mixed_modal,
+            contracted_modal,
         ];
 
         let claims = vec![
@@ -4477,6 +4481,16 @@ mod tests {
             CitedClaim {
                 claim_id: "changed-compound-unit".into(),
                 text: "Outdoor temperature is at most 5 degrees Fahrenheit.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-single-subject-auxiliary".into(),
+                text: "Capacity can be at most 750 units.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-single-subject-auxiliary".into(),
+                text: "Capacity can be at most 5 units.".into(),
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
@@ -4708,6 +4722,16 @@ mod tests {
                 evidence_ids: vec!["actor-transport".into()],
             },
             CitedClaim {
+                claim_id: "transferred-cited-nonroute-actor".into(),
+                text: "Plan C transports workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "deferred-unknown-route-actor".into(),
+                text: "Plan D transports workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-evaluation".into(),
                 text: "The measures are critical for worker safety and health.".into(),
                 evidence_ids: vec!["evaluation".into()],
@@ -4798,6 +4822,11 @@ mod tests {
                 evidence_ids: vec!["mixed-modal".into()],
             },
             CitedClaim {
+                claim_id: "strengthened-contracted-modal".into(),
+                text: "Plan C must not accept applications.".into(),
+                evidence_ids: vec!["contracted-modal".into()],
+            },
+            CitedClaim {
                 claim_id: "deferred-nonliteral-evaluation".into(),
                 text: "Helmets improve worker safety.".into(),
                 evidence_ids: vec!["nonliteral-evaluation".into()],
@@ -4844,6 +4873,7 @@ mod tests {
             "supported-bound-unit",
             "supported-weaker-value",
             "supported-compound-unit",
+            "supported-single-subject-auxiliary",
             "supported-immediate-family",
             "supported-formatted-integer",
             "supported-formatted-decimal",
@@ -4865,6 +4895,7 @@ mod tests {
             "supported-home-endpoint",
             "supported-actor-endpoints",
             "supported-paraphrased-actor-endpoints",
+            "deferred-unknown-route-actor",
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
@@ -4894,6 +4925,7 @@ mod tests {
             "changed-bound-unit",
             "changed-stronger-value",
             "changed-compound-unit",
+            "transferred-single-subject-auxiliary",
             "broadened-enumeration",
             "broadened-immediate-family",
             "changed-formatted-decimal",
@@ -4916,12 +4948,14 @@ mod tests {
             "changed-one-known-endpoint",
             "transferred-actor-endpoints",
             "transferred-paraphrased-actor-endpoints",
+            "transferred-cited-nonroute-actor",
             "transferred-evaluation",
             "changed-evaluation-polarity",
             "transferred-shared-copula-evaluation",
             "transferred-transitive-evaluation",
             "strengthened-modal",
             "transferred-strong-modal-subject",
+            "strengthened-contracted-modal",
         ] {
             assert_eq!(verdict(claim_id), ClaimVerdict::Unsupported, "{claim_id}");
         }

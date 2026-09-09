@@ -614,7 +614,7 @@ fn numeric_contexts_match(source: &NumericReference, claim: &NumericReference) -
         )
     };
     (!source_context.is_empty() && source_context == claim_context)
-        || (shared_subject_prefix >= 2
+        || (shared_subject_prefix >= 1
             && source_context
                 .get(shared_subject_prefix)
                 .is_some_and(begins_predicate)
@@ -1010,6 +1010,16 @@ fn directional_relations(text: &str) -> Vec<DirectionalRelation> {
         .collect()
 }
 
+fn directional_actor_is_cited(actor: &[String], evidence: &[&EvidenceItem]) -> bool {
+    !actor.is_empty()
+        && evidence.iter().any(|item| {
+            semantic_clauses(&item.exact_quote).any(|clause| {
+                let tokens = words(clause);
+                strip_leading_article(&tokens).starts_with(actor)
+            })
+        })
+}
+
 fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     let source_relations = evidence
         .iter()
@@ -1031,7 +1041,8 @@ fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
             }
             let actor_is_known = source_relations
                 .iter()
-                .any(|source| source.actor == relation.actor);
+                .any(|source| source.actor == relation.actor)
+                || directional_actor_is_cited(&relation.actor, evidence);
             let route_has_known_actor = source_relations
                 .iter()
                 .any(|source| endpoint_pairs_match(source, &relation) && !source.actor.is_empty());
@@ -1539,22 +1550,71 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
 }
 
 fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
+    let guarded_modal_predicates = |text: &str, strong: bool| {
+        text.split(['.', '?', '!', ';', ',', '\n', '\r'])
+            .flat_map(|clause| {
+                let tokens = words(clause);
+                let mut normalized = Vec::with_capacity(tokens.len());
+                let mut index = 0;
+                while index < tokens.len() {
+                    let contraction = tokens.get(index + 1).is_some_and(|word| word == "t")
+                        && matches!(
+                            tokens[index].as_str(),
+                            "can"
+                                | "couldn"
+                                | "mayn"
+                                | "mightn"
+                                | "mustn"
+                                | "shalln"
+                                | "shouldn"
+                                | "won"
+                                | "wouldn"
+                        );
+                    if contraction {
+                        normalized.push(
+                            match tokens[index].as_str() {
+                                "couldn" => "could",
+                                "mayn" => "may",
+                                "mightn" => "might",
+                                "mustn" => "must",
+                                "shalln" => "shall",
+                                "shouldn" => "should",
+                                "won" => "will",
+                                "wouldn" => "would",
+                                "can" => "can",
+                                _ => unreachable!("modal contraction is exhaustively matched"),
+                            }
+                            .to_string(),
+                        );
+                        normalized.push("not".into());
+                        index += 2;
+                    } else {
+                        normalized.push(tokens[index].clone());
+                        index += 1;
+                    }
+                }
+                modal_predicates(&normalized.join(" "), strong)
+            })
+            .collect::<Vec<_>>()
+    };
     let weak_source = evidence
         .iter()
-        .flat_map(|item| modal_predicates(&item.exact_quote, false))
+        .flat_map(|item| guarded_modal_predicates(&item.exact_quote, false))
         .collect::<Vec<_>>();
     let strong_source = evidence
         .iter()
-        .flat_map(|item| modal_predicates(&item.exact_quote, true))
+        .flat_map(|item| guarded_modal_predicates(&item.exact_quote, true))
         .collect::<Vec<_>>();
-    modal_predicates(claim, true).into_iter().all(|predicate| {
-        !weak_source
-            .iter()
-            .any(|source| modal_statements_match(&predicate, source, false))
-            || strong_source
+    guarded_modal_predicates(claim, true)
+        .into_iter()
+        .all(|predicate| {
+            !weak_source
                 .iter()
-                .any(|source| modal_statements_match(&predicate, source, true))
-    })
+                .any(|source| modal_statements_match(&predicate, source, false))
+                || strong_source
+                    .iter()
+                    .any(|source| modal_statements_match(&predicate, source, true))
+        })
 }
 
 fn semantic_fidelity_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
