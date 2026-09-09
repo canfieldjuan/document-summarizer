@@ -797,7 +797,7 @@ fn generate_summary_with_validation_repair(
     let mut window_repairs = 0;
     let mut window_fallback = None;
     let mut clipped_repairs = 0;
-    let mut clipped_fallback = None;
+    let mut clipped_fallback: Option<SafeSiblingFallback> = None;
     loop {
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
         let ordinal = starting_request_ordinal
@@ -845,6 +845,11 @@ fn generate_summary_with_validation_repair(
                 .filter(|parsed| {
                     modal_strengthening_feedback(&parsed.0, &parsed.1)
                         .is_ok_and(|feedback| feedback.is_empty())
+                })
+                .filter(|parsed| {
+                    clipped_fallback.as_ref().is_none_or(|fallback| {
+                        preserves_claims_in_order(&parsed.0, &fallback.claims)
+                    })
                 });
                 let feedback = vec![
                     "Only units that cite source_ids from different selection_window values are invalid. Keep every other unit and its wording unchanged; split only the invalid units so every resulting unit cites exactly one selection_window"
@@ -2575,6 +2580,7 @@ mod tests {
         RewriteSibling,
         RepairModalAndOmitSafeSibling,
         RepairMixedWindowAndOmitSafeSibling,
+        NestedWindowRepairOmitsSafeSibling,
     }
 
     struct ClippedUnitRepairRuntime {
@@ -2749,7 +2755,14 @@ mod tests {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             self.requests.lock().unwrap().push(request.clone());
             let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
-            let is_repair = prompt.get("validation_feedback").is_some();
+            let feedback = prompt
+                .get("validation_feedback")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            let is_repair = !feedback.is_empty();
             let units = if !is_repair
                 && matches!(self.behavior, ClippedRepairBehavior::CorrectWithLeadingClip)
             {
@@ -2784,6 +2797,24 @@ mod tests {
                     {"text":"The first source remains supported.","source_ids":["s1"]},
                     {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s2","s3"]}
                 ])
+            } else if matches!(
+                self.behavior,
+                ClippedRepairBehavior::NestedWindowRepairOmitsSafeSibling
+            ) && feedback
+                .iter()
+                .any(|message| message.contains("decoder limit"))
+            {
+                json!([
+                    {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]},
+                    {"text":"The mixed source is complete.","source_ids":["s2","s3"]}
+                ])
+            } else if matches!(
+                self.behavior,
+                ClippedRepairBehavior::NestedWindowRepairOmitsSafeSibling
+            ) {
+                json!([
+                    {"text":"The mixed source remains invalid.","source_ids":["s2","s3"]}
+                ])
             } else {
                 match self.behavior {
                     ClippedRepairBehavior::Correct => json!([
@@ -2813,6 +2844,7 @@ mod tests {
                         {"text":"The local source is complete.","source_ids":["s2"]},
                         {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]}
                     ]),
+                    ClippedRepairBehavior::NestedWindowRepairOmitsSafeSibling => unreachable!(),
                 }
             };
             Ok(ModelResponse {
@@ -4602,6 +4634,37 @@ mod tests {
             Some(WithheldUnitKind::CrossWindowAndDecoderClipped)
         );
         assert_eq!(mixed_omitting.requests().len(), 2);
+
+        let nested_omitting = ClippedUnitRepairRuntime::new(
+            ClippedRepairBehavior::NestedWindowRepairOmitsSafeSibling,
+        );
+        let (nested_prompt, nested_schema) =
+            prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &nested_omitting,
+            "document-1",
+            &catalog,
+            nested_prompt,
+            nested_schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("a nested window repair must not replace the original safe sibling baseline");
+        assert_eq!(generated.claims.len(), 1);
+        assert_eq!(
+            generated.claims[0].text,
+            "The first source remains supported."
+        );
+        assert_eq!(generated.evidence.len(), 1);
+        assert_eq!(generated.evidence[0].evidence_id, "evidence-1");
+        assert_eq!(
+            generated.withheld_unit_kind,
+            Some(WithheldUnitKind::DecoderClipped)
+        );
+        assert_eq!(nested_omitting.requests().len(), 3);
     }
 
     #[test]

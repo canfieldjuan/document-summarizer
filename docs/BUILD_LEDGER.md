@@ -2924,9 +2924,11 @@ complete
   ordinal-derived claim-ID change. A mixed response with one safe sibling and
   one modal-strengthened sibling proves that a repair cannot omit the safe one
   after correcting the other. A separate clipped-plus-mixed-window probe proves
-  the same preservation and both warning outcomes. Negative probes reject a 1,199-character
-  fragment, an all-clipped response, empty, duplicate, foreign and nine-source
-  metadata, unwindowed General catalogs, and Story catalogs.
+  the same preservation and both warning outcomes. A nested clipped-then-window
+  repair probe proves that a newer window fallback cannot replace the original
+  safe sibling baseline. Negative probes reject a 1,199-character fragment, an
+  all-clipped response, empty, duplicate, foreign and nine-source metadata,
+  unwindowed General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the
