@@ -2691,7 +2691,8 @@ complete
   rejected. Numeric relations retain
   signs, normalize bounded English cardinal wording, compare exact normalized
   decimal thresholds, bind ordinary following unit tokens and explicit
-  temperature-scale qualifiers when both source and claim expose them while
+  temperature-scale qualifiers when both source and claim expose them, retain
+  `%` as the canonical `percent` unit, while
   excluding grammatical continuations, accept only logically entailed weak-bound
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
   when cited text exposes the same context. Restrictive `immediate family`
@@ -2719,13 +2720,18 @@ complete
   polarity to the same local subject and object context, including contracted
   weak-modality negation and one-word `cannot`.
   Leading conditions accept either a comma or `then`, and compound claims check
-  every completed actor-condition relation; `unless` contributes exclusionary
-  polarity when a qualifier is compared. Directional
+  every completed actor-condition relation; the declared exclusion connectors
+  (`unless`, `except`, `excluding`, `absent`, and `without`) remain inside the
+  parsed condition and contribute exclusionary polarity when a qualifier is
+  compared. Directional
   checks reject a known reversed endpoint even when the other endpoint is new
   and reject a route transferred to an actor named at the start of another cited
   clause; an actor absent from cited clause starts remains for model judgment,
-  shared-copula evaluations inherit their prior concrete subject, and transitive
-  `ensure`/`guarantee` evaluations bind directly to their subject.
+  shared-copula evaluations inherit their prior concrete subject, transitive
+  `ensure`/`guarantee` evaluations bind directly to their subject, and a
+  coordinated evaluation whose full subject phrase is not cited is retained
+  only when every individually cited component has the same supported
+  evaluation and polarity.
 - Verification artifacts now use version `8.0.0`. The previous coherent
   `7.0.0` contract remains readable, while new results cannot be mistaken for
   artifacts produced without the deterministic veto. Synthesis, summary,
@@ -2747,15 +2753,17 @@ complete
   synonymous transport endpoints including `home`, inverted source-route syntax,
   a route retained on its source actor across carry and unlisted-predicate paraphrases,
   a route claim for a mechanically unknown actor left to model verification,
-  an unchanged Celsius qualifier, a generic unchanged mass unit, explicit
+  an unchanged Celsius qualifier, a generic unchanged mass unit, a symbolic
+  percent source retained as `percent`, explicit
   `immediate family` scope across singular/plural wording, and an unqualified
   family claim when cited evidence contains both restricted and unrestricted scopes,
   comparative `relative to`, additive, subject-bound, shared-subject,
-  shared-copula, transitive, compound and negative evaluations, a nonliteral
+  shared-copula, transitive, compound, coordinated and negative evaluations, a nonliteral
   safety paraphrase left to model verification, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
-  changed from dollars to percent, Celsius to Fahrenheit, or kilograms to pounds,
+  changed from dollars to percent, percent to dollars, Celsius to Fahrenheit,
+  or kilograms to pounds,
   a stronger numeric
   threshold, a removed negative sign,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
@@ -2763,7 +2771,7 @@ complete
   another actor's qualifier, including a leading condition), an active or
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
-  affirmative, an `unless` condition reversed to `if`, a contracted or `cannot`
+  affirmative, an `unless` or `except` condition reversed to `if`, a contracted or `cannot`
   weak modal strengthened to a strong modal,
   explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
   bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
@@ -2774,7 +2782,8 @@ complete
   cited non-route clause, a passive route assigned to the wrong explicit agent,
   removal of the restrictive
   `immediate` family modifier, an evaluation
-  moved between named procedures including shared-copula and transitive wording, removed
+  moved between named procedures including shared-copula, transitive and
+  coordinated wording, removed
   evaluation negation, `should`-to-`must` strengthening, and strong modality
   transferred between named plans. Separate probes
   reject partial verdict coverage, mismatched identities and unknown evidence,

@@ -427,6 +427,10 @@ fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
             continue;
         }
         flush_token(&mut token, &mut clause);
+        if character == '%' {
+            clause.push("percent".into());
+            continue;
+        }
         if matches!(character, '<' | '>' | '≤' | '≥') {
             let followed_by_equals = characters.get(index + 1).is_some_and(|value| *value == '=');
             clause.push(
@@ -1347,16 +1351,23 @@ fn qualifier_polarities(tokens: &[String], concept: &[&str]) -> HashSet<bool> {
         .filter(|(_, word)| concept.contains(&word.as_str()))
         .map(|(index, _)| {
             let context = &tokens[index.saturating_sub(6)..index];
-            negation_present(context) || context.iter().any(|word| word == "unless")
+            negation_present(context)
+                || context
+                    .iter()
+                    .any(|word| ACTOR_QUALIFIER_CONCEPTS[2].contains(&word.as_str()))
         })
         .collect()
+}
+
+fn is_actor_condition_connector(word: &str) -> bool {
+    matches!(word, "if" | "when" | "provided") || ACTOR_QUALIFIER_CONCEPTS[2].contains(&word)
 }
 
 fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     let claim_words = words(claim);
     let Some(condition_index) = claim_words
         .iter()
-        .position(|word| matches!(word.as_str(), "if" | "when" | "unless" | "provided"))
+        .position(|word| is_actor_condition_connector(word))
     else {
         return true;
     };
@@ -1456,7 +1467,7 @@ fn actor_qualifications_supported(claim: &str, evidence: &[&EvidenceItem]) -> bo
             let tokens = words(clause);
             if tokens
                 .first()
-                .is_some_and(|word| matches!(word.as_str(), "if" | "when" | "unless" | "provided"))
+                .is_some_and(|word| is_actor_condition_connector(word))
             {
                 vec![clause.to_string()]
             } else {
@@ -1616,6 +1627,13 @@ fn evaluated_subject_matches(source: &[String], claim: &[String]) -> bool {
     source == claim || source.windows(claim.len()).any(|window| window == claim)
 }
 
+fn evaluation_subject_components(subject: &[String]) -> Vec<&[String]> {
+    subject
+        .split(|word| matches!(word.as_str(), "and" | "or"))
+        .filter(|component| !component.is_empty())
+        .collect()
+}
+
 fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     let source_clauses = evidence
         .iter()
@@ -1645,12 +1663,31 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
                 let subject_is_cited = evidence
                     .iter()
                     .any(|item| contains_owned_words(&item.exact_quote, &claim_relation.subject));
-                if subject_is_cited
-                    && !evaluated_relations.is_empty()
-                    && !evaluated_relations.iter().any(|source| {
+                let subject_components = evaluation_subject_components(&claim_relation.subject);
+                let components_are_cited = subject_components.len() > 1
+                    && subject_components.iter().all(|component| {
+                        evidence
+                            .iter()
+                            .any(|item| contains_owned_words(&item.exact_quote, component))
+                    });
+                let relation_is_supported = if subject_is_cited {
+                    evaluated_relations.iter().any(|source| {
                         evaluated_subject_matches(&source.subject, &claim_relation.subject)
                             && source.negated == claim_relation.negated
                     })
+                } else if components_are_cited {
+                    subject_components.iter().all(|component| {
+                        evaluated_relations.iter().any(|source| {
+                            evaluated_subject_matches(&source.subject, component)
+                                && source.negated == claim_relation.negated
+                        })
+                    })
+                } else {
+                    true
+                };
+                if (subject_is_cited || components_are_cited)
+                    && !evaluated_relations.is_empty()
+                    && !relation_is_supported
                 {
                     return false;
                 }

@@ -4234,7 +4234,7 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Quota is at most 5 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The count is less than 450 cases. The quota is at most 400 cases. Outdoor temperature is at most 5 degrees Celsius. Cargo weighs at most 5 kilograms. Plan A charges at most 5 dollars. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Quota is at most 5 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The count is less than 450 cases. The quota is at most 400 cases. Outdoor temperature is at most 5 degrees Celsius. Cargo weighs at most 5 kilograms. The rate is at most 5%. Plan A charges at most 5 dollars. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
@@ -4253,6 +4253,9 @@ mod tests {
         let mut unless_actor_condition = catalog().candidates[1].evidence.clone();
         unless_actor_condition.evidence_id = "unless-actor-condition".into();
         unless_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA unless they recruit for compensation.".into();
+        let mut except_actor_condition = catalog().candidates[0].evidence.clone();
+        except_actor_condition.evidence_id = "except-actor-condition".into();
+        except_actor_condition.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA except when they recruit for compensation.".into();
         let mut contracted_bound = catalog().candidates[1].evidence.clone();
         contracted_bound.evidence_id = "contracted-bound".into();
         contracted_bound.exact_quote = "The limit isn't more than 500 units.".into();
@@ -4281,7 +4284,9 @@ mod tests {
         procedure_b.exact_quote = "Procedure B is documented separately.".into();
         let mut shared_procedures = catalog().candidates[0].evidence.clone();
         shared_procedures.evidence_id = "shared-procedures".into();
-        shared_procedures.exact_quote = "Procedure A and Procedure B are essential.".into();
+        shared_procedures.exact_quote =
+            "Procedure A and Procedure B are essential. Procedure C is documented separately."
+                .into();
         let mut negative_evaluation = catalog().candidates[1].evidence.clone();
         negative_evaluation.evidence_id = "negative-evaluation".into();
         negative_evaluation.exact_quote = "Procedure C is not essential.".into();
@@ -4338,6 +4343,7 @@ mod tests {
             coordinated_actors,
             negative_actor_condition,
             unless_actor_condition,
+            except_actor_condition,
             contracted_bound,
             leading_decimal,
             transport,
@@ -4510,6 +4516,16 @@ mod tests {
             CitedClaim {
                 claim_id: "changed-generic-unit".into(),
                 text: "Cargo weighs at most 5 pounds.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-symbolic-percent-unit".into(),
+                text: "The rate is at most 5 percent.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-symbolic-percent-unit".into(),
+                text: "The rate is at most 5 dollars.".into(),
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
@@ -4688,6 +4704,16 @@ mod tests {
                 evidence_ids: vec!["unless-actor-condition".into()],
             },
             CitedClaim {
+                claim_id: "supported-except-actor-condition".into(),
+                text: "FLCs are subject to MSPA except when they recruit for compensation.".into(),
+                evidence_ids: vec!["except-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-except-actor-condition".into(),
+                text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
+                evidence_ids: vec!["except-actor-condition".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-compound-actor-conditions".into(),
                 text: "FLCs are subject to MSPA if they recruit workers for money, and AGERs are subject to MSPA if they recruit workers."
                     .into(),
@@ -4803,6 +4829,16 @@ mod tests {
             CitedClaim {
                 claim_id: "supported-shared-evaluation".into(),
                 text: "Procedure B is critical.".into(),
+                evidence_ids: vec!["shared-procedures".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-coordinated-evaluation".into(),
+                text: "Procedure A and Procedure B are critical.".into(),
+                evidence_ids: vec!["shared-procedures".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-coordinated-evaluation".into(),
+                text: "Procedure A and Procedure C are critical.".into(),
                 evidence_ids: vec!["shared-procedures".into()],
             },
             CitedClaim {
@@ -4934,6 +4970,7 @@ mod tests {
             "supported-compound-unit",
             "supported-single-subject-auxiliary",
             "supported-generic-unit",
+            "supported-symbolic-percent-unit",
             "supported-immediate-family",
             "supported-mixed-family-scope",
             "supported-formatted-integer",
@@ -4951,6 +4988,7 @@ mod tests {
             "supported-leading-then-condition",
             "supported-negative-actor-condition",
             "supported-unless-actor-condition",
+            "supported-except-actor-condition",
             "supported-compound-actor-conditions",
             "supported-endpoints",
             "supported-inverted-source-endpoints",
@@ -4963,6 +5001,7 @@ mod tests {
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
+            "supported-coordinated-evaluation",
             "supported-negative-evaluation",
             "supported-compound-evaluation",
             "supported-after-negative-sentence",
@@ -4991,6 +5030,7 @@ mod tests {
             "changed-compound-unit",
             "transferred-single-subject-auxiliary",
             "changed-generic-unit",
+            "changed-symbolic-percent-unit",
             "broadened-enumeration",
             "broadened-immediate-family",
             "changed-formatted-decimal",
@@ -5008,6 +5048,7 @@ mod tests {
             "transferred-leading-then-condition",
             "changed-negative-actor-condition",
             "changed-unless-actor-condition",
+            "changed-except-actor-condition",
             "transferred-compound-actor-condition",
             "changed-endpoint",
             "changed-inverted-source-endpoints",
@@ -5018,6 +5059,7 @@ mod tests {
             "transferred-cited-nonroute-actor",
             "transferred-passive-route-agent",
             "transferred-evaluation",
+            "transferred-coordinated-evaluation",
             "changed-evaluation-polarity",
             "transferred-shared-copula-evaluation",
             "transferred-transitive-evaluation",
