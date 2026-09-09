@@ -2694,7 +2694,7 @@ complete
   temperature-scale qualifiers when both source and claim expose them, retain
   `%` as the canonical `percent` unit, attach common prefix currency symbols to
   their following number, and retain structurally marked compound units using
-  `square`, `cubic`, or `per`, while
+  `square`, `cubic`, or `per`, including a compound denominator, while
   excluding grammatical continuations, accept only logically entailed weak-bound
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
   when cited text exposes the same context. Restrictive `immediate family`
@@ -2704,7 +2704,9 @@ complete
   accepts both `from … to …` and `to … from …` syntax and binds a route to its
   mechanically known local actor independently of predicate wording when the
   claim prefix identifies an actor already attached to a cited route, and an
-  explicit passive `by` agent owns its route. Evaluative relations retain negation while treating additive
+  explicit passive `by` agent owns its route. Coordinated source actors are
+  retained as individual owners of their shared route, while an `and` starts a
+  new route clause only after a prior route predicate or endpoint. Evaluative relations retain negation while treating additive
   `not only … but also` wording as affirmative. The kinship backstop recognizes
   clear noun uses such as `relative of` without treating comparative `relative
   to` as a family enumeration. Passive numeric wording binds a leading bound to
@@ -2717,7 +2719,9 @@ complete
   prefix only when both following tokens begin the predicate, so auxiliaries do
   not hide a named-plan transfer and entities with shared name prefixes remain
   distinct; the same predicate check admits a mechanically known one-token
-  subject. Explicit negation inverts inclusive word or symbol comparators,
+  subject, matches ordinary predicate words across an optional auxiliary only
+  when their normalized words agree, and rejects different predicates or name
+  components. Explicit negation inverts inclusive word or symbol comparators,
   `under`/`over` forms, exact equality, and one-word `cannot`. Modal comparisons bind force and
   polarity to the same local subject and object context, including contracted
   weak-modality negation and one-word `cannot`.
@@ -2755,8 +2759,10 @@ complete
   synonymous transport endpoints including `home`, inverted source-route syntax,
   a route retained on its source actor across carry and unlisted-predicate paraphrases,
   a route claim for a mechanically unknown actor left to model verification,
+  either member of a coordinated source actor retaining the shared route,
   an unchanged Celsius qualifier, a generic unchanged mass unit, a square-unit
-  spelling variant, a symbolic percent source retained as `percent`, a prefix
+  spelling variant including a nested compound denominator, an ordinary
+  predicate across an inserted auxiliary, a symbolic percent source retained as `percent`, a prefix
   dollar source paraphrased as `dollars`, explicit
   `immediate family` scope across singular/plural wording, and an unqualified
   family claim when cited evidence contains both restricted and unrestricted scopes,
@@ -2779,12 +2785,13 @@ complete
   weak modal strengthened to a strong modal, a `cannot be more than` numeric
   constraint reversed to affirmative `more than`,
   explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
-  bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
-  prefix, comma-less and compound actor-condition transfers, endpoint reversal from
+  bound reversal, a named-plan transfer hidden by an auxiliary, ordinary
+  predicate, or shared name prefix, comma-less and compound actor-condition transfers, endpoint reversal from
   either source-route syntax even with one newly worded endpoint, a route moved
   from one mechanically known actor to another even when the route predicate is
   paraphrased with an unlisted verb or when the target actor is named only in a
   cited non-route clause, a passive route assigned to the wrong explicit agent,
+  or a coordinated route assigned to a cited non-owner,
   removal of the restrictive
   `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula, transitive and

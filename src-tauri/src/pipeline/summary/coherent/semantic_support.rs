@@ -603,6 +603,24 @@ fn numeric_unit_stop(word: &str) -> bool {
     )
 }
 
+fn structured_unit_component(tokens: &[String], index: usize) -> Option<(String, usize)> {
+    let raw_unit = tokens.get(index)?.as_str();
+    if raw_unit == "per" || numeric_unit_stop(raw_unit) {
+        return None;
+    }
+    if matches!(raw_unit, "square" | "cubic") {
+        let component = tokens.get(index + 1)?.as_str();
+        if component == "per" || numeric_unit_stop(component) {
+            return None;
+        }
+        return Some((
+            format!("{raw_unit} {}", numeric_unit_word(component)),
+            index + 2,
+        ));
+    }
+    Some((numeric_unit_word(raw_unit), index + 1))
+}
+
 fn numeric_unit(tokens: &[String], start: usize, end: usize) -> Option<String> {
     if let Some(unit) = tokens.get(start).and_then(|word| currency_token_unit(word)) {
         return Some(unit.to_string());
@@ -615,18 +633,8 @@ fn numeric_unit(tokens: &[String], start: usize, end: usize) -> Option<String> {
     {
         index += 2;
     }
-    let raw_unit = tokens.get(index)?.as_str();
-    if numeric_unit_stop(raw_unit) {
-        return None;
-    }
-    let mut unit = numeric_unit_word(raw_unit);
-    index += 1;
-    if matches!(raw_unit, "square" | "cubic") {
-        let component = tokens.get(index).filter(|word| !numeric_unit_stop(word))?;
-        unit.push(' ');
-        unit.push_str(&numeric_unit_word(component));
-        index += 1;
-    } else if unit == "degree"
+    let (mut unit, mut index) = structured_unit_component(tokens, index)?;
+    if unit == "degree"
         && tokens.get(index).is_some_and(|word| {
             matches!(
                 word.as_str(),
@@ -639,12 +647,9 @@ fn numeric_unit(tokens: &[String], start: usize, end: usize) -> Option<String> {
         index += 1;
     }
     if tokens.get(index).is_some_and(|word| word == "per") {
-        if let Some(component) = tokens
-            .get(index + 1)
-            .filter(|word| !numeric_unit_stop(word))
-        {
+        if let Some((component, _)) = structured_unit_component(tokens, index + 1) {
             unit.push_str(" per ");
-            unit.push_str(&numeric_unit_word(component));
+            unit.push_str(&component);
         }
     }
     Some(unit)
@@ -714,7 +719,7 @@ fn numeric_contexts_match(source: &NumericReference, claim: &NumericReference) -
         .zip(claim_context)
         .take_while(|(source, claim)| source == claim)
         .count();
-    let begins_predicate = |word: &String| {
+    let is_auxiliary = |word: &String| {
         matches!(
             word.as_str(),
             "is" | "are"
@@ -723,14 +728,6 @@ fn numeric_contexts_match(source: &NumericReference, claim: &NumericReference) -
                 | "be"
                 | "been"
                 | "being"
-                | "accept"
-                | "accepts"
-                | "accepted"
-                | "accepting"
-                | "require"
-                | "requires"
-                | "required"
-                | "requiring"
                 | "has"
                 | "have"
                 | "had"
@@ -743,20 +740,19 @@ fn numeric_contexts_match(source: &NumericReference, claim: &NumericReference) -
                 | "should"
                 | "will"
                 | "would"
-                | "remain"
-                | "remains"
-                | "remained"
-                | "remaining"
         )
     };
+    let predicate_word = |context: &[String]| {
+        context
+            .iter()
+            .find(|word| !is_auxiliary(word))
+            .map(|word| word.strip_suffix('s').unwrap_or(word).to_string())
+    };
+    let remaining_predicates_match = shared_subject_prefix >= 1
+        && predicate_word(&source_context[shared_subject_prefix..])
+            == predicate_word(&claim_context[shared_subject_prefix..]);
     (!source_context.is_empty() && source_context == claim_context)
-        || (shared_subject_prefix >= 1
-            && source_context
-                .get(shared_subject_prefix)
-                .is_some_and(begins_predicate)
-            && claim_context
-                .get(shared_subject_prefix)
-                .is_some_and(begins_predicate))
+        || remaining_predicates_match
         || (!source.trailing_subject.is_empty()
             && (source.trailing_subject == claim.trailing_subject
                 || contains_sequence(&claim.context, &source.trailing_subject)))
@@ -1011,7 +1007,7 @@ fn directional_actor(tokens: &[String], anchor: usize) -> Vec<String> {
             return agent.iter().take(4).cloned().collect();
         }
     }
-    let Some(predicate) = context.iter().rposition(|word| {
+    let is_route_predicate = |word: &String| {
         matches!(
             word.as_str(),
             "transport"
@@ -1027,12 +1023,21 @@ fn directional_actor(tokens: &[String], anchor: usize) -> Vec<String> {
                 | "provided"
                 | "providing"
         )
-    }) else {
+    };
+    let Some(predicate) = context.iter().rposition(is_route_predicate) else {
         return Vec::new();
     };
     let start = context[..predicate]
         .iter()
-        .rposition(|word| matches!(word.as_str(), "and" | "but" | "while" | "whereas"))
+        .enumerate()
+        .rfind(|(index, word)| {
+            matches!(word.as_str(), "but" | "while" | "whereas")
+                || (word.as_str() == "and"
+                    && context[..*index].iter().any(|prior| {
+                        is_route_predicate(prior) || matches!(prior.as_str(), "from" | "to")
+                    }))
+        })
+        .map(|(index, _)| index)
         .map_or(0, |index| index + 1);
     let mut actor = context[start..predicate].to_vec();
     if actor
@@ -1168,7 +1173,22 @@ fn endpoint_pairs_match(left: &DirectionalRelation, right: &DirectionalRelation)
 
 fn relations_match(left: &DirectionalRelation, right: &DirectionalRelation) -> bool {
     endpoint_pairs_match(left, right)
-        && ((left.actor.is_empty() && right.actor.is_empty()) || left.actor == right.actor)
+        && ((left.actor.is_empty() && right.actor.is_empty())
+            || directional_actor_supports(&left.actor, &right.actor))
+}
+
+fn directional_actor_components(actor: &[String]) -> Vec<&[String]> {
+    actor
+        .split(|word| matches!(word.as_str(), "and" | "or"))
+        .filter(|component| !component.is_empty())
+        .collect()
+}
+
+fn directional_actor_supports(source: &[String], claim: &[String]) -> bool {
+    source == claim
+        || directional_actor_components(source)
+            .into_iter()
+            .any(|component| component == claim)
 }
 
 fn directional_relations(text: &str) -> Vec<DirectionalRelation> {
@@ -1197,9 +1217,9 @@ fn effective_directional_actor(
     source_relations
         .iter()
         .filter(|source| !source.actor.is_empty())
-        .map(|source| &source.actor)
+        .flat_map(|source| directional_actor_components(&source.actor))
         .find(|actor| relation.prefix.starts_with(actor))
-        .cloned()
+        .map(<[String]>::to_vec)
         .unwrap_or_default()
 }
 
@@ -1224,13 +1244,14 @@ fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
                 return true;
             }
             if source_relations.iter().any(|source| {
-                endpoint_pairs_match(source, &relation) && source.actor == relation_actor
+                endpoint_pairs_match(source, &relation)
+                    && directional_actor_supports(&source.actor, &relation_actor)
             }) {
                 return true;
             }
             let actor_is_known = source_relations
                 .iter()
-                .any(|source| source.actor == relation_actor)
+                .any(|source| directional_actor_supports(&source.actor, &relation_actor))
                 || directional_actor_is_cited(&relation_actor, evidence);
             let route_has_known_actor = source_relations
                 .iter()
