@@ -3003,3 +3003,69 @@ complete
 - This slice does not change output or context budgets, structured schema
   limits, Story or Contract behavior, automatic routing, persistence, UI,
   ingestion, OCR, model training or semantic-verification policy.
+
+## Slice 30 — Bounded Long Story Synthesis (2026-09-09)
+
+**Status**: implementation, automated gates and live-model acceptance complete
+
+**Verified root cause and implemented behavior**:
+- A complete Story source catalog used coherent synthesis only while the full
+  request fit the model context. The oversized-request branch admitted bounded
+  source selection for General alone, so an otherwise complete long Story
+  returned the verified claim-ledger fallback before a Story synthesis request.
+- Story now reuses the existing bounded, ordered source-selection pipeline with
+  its own prompt and schema. General keeps its established prompt, one-array
+  response contract and reduction target; Contract remains outside this path.
+- Small Story catalogs retain three quarters of their sources, rounded toward
+  preserving context, while catalogs above the existing 16-source target use
+  that target. Every selection iteration must still strictly shrink, stay
+  within the existing request count and candidate limits, preserve canonical
+  source order and fit both the calculated and provider preflight bounds.
+- The Story selector separates ordinary choices from typed conflict,
+  turning-point and ending source arrays without increasing the requested total.
+  For multiple windows, the first window reserves the conflict source and the
+  final window reserves the ending plus a turning point when its quota permits.
+  A single window reserves the ending first, then the conflict, then the turning
+  point as one-, two- and three-source budgets permit. Missing arrays, wrong
+  counts, duplicate or foreign IDs, role overlap and role fields returned under
+  General fail closed.
+- Selected Story sources carry their originating window into synthesis. The
+  Story prompt forbids combining different selection windows in one unit, and
+  response parsing plus bounded repair enforce the same rule. Incomplete Story
+  catalogs still use the verified claim ledger, and Story does not inherit the
+  General-only decoder-cap recovery policy.
+
+**Acceptance evidence so far**:
+- A deterministic low-context end-to-end test forces a complete Story beyond
+  one synthesis request and proves that the persisted result remains in
+  coherent Story mode, uses the Story selection and synthesis schemas, reaches
+  provider preflight and completes verification and citation rendering without
+  the source-context fallback warning.
+- Boundary probes cover zero and over-limit counts, exact and one-character-low
+  request budgets, the maximum selection request count and one request beyond
+  it, one-, two- and three-slot Story role allocation, first/final multi-window
+  roles, duplicate, missing, overlapping and foreign IDs, canonical ordering,
+  mixed selected/unselected sources, cross-window summary units, General
+  isolation and Contract rejection.
+- `cargo test --all-targets` passed 432 library tests with 11 intentional
+  ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
+  tests. Strict all-target/all-feature Clippy, Rust formatting, the
+  TypeScript/Vite production build and `git diff --check` passed.
+- The ignored live harness ran `qwen3-30b-a3b:latest` through Ollama at 100% GPU
+  with an 8,192-token context. Forced compression selected five of six synthetic
+  sources: Mara's goal, the destroyed bridge and Soren's prohibition, the old
+  footpath and unstable cliffs, Len's rope and clinic consequence, and the
+  reopening/recovery/archive resolution. The generated two-paragraph synopsis
+  cited pages 1-3 and 5-6, preserved those stated identities, obstacles, causal
+  link and resolution, added no unsupported motivation, and required no unit
+  withholding. The omitted source stated that Ivo's worsening fever caused Mara
+  to ask Len for help; this is a bounded coverage tradeoff and the output does
+  not imply that omitted reason.
+
+**Non-scope and remaining limits**:
+- This selection policy preserves an explicit arc under bounded compression; it
+  does not guarantee exhaustive event coverage, and semantic review remains
+  necessary for representative Story output.
+- Long Contract source selection, Story decoder-cap recovery, automatic routing,
+  UI, persistence, ingestion, OCR, model training and unrelated verification
+  policy remain outside this slice.
