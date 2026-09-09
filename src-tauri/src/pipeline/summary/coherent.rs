@@ -31,6 +31,7 @@ const CLIPPED_UNIT_WITHHELD_WARNING_CODE: &str = "COHERENT_SUMMARY_CLIPPED_UNITS
 enum WithheldUnitKind {
     CrossWindow,
     DecoderClipped,
+    CrossWindowAndDecoderClipped,
 }
 
 #[derive(Debug)]
@@ -38,6 +39,12 @@ struct GeneratedSummaryContent {
     claims: Vec<CitedClaim>,
     evidence: Vec<EvidenceItem>,
     withheld_unit_kind: Option<WithheldUnitKind>,
+}
+
+struct SafeSiblingFallback {
+    claims: Vec<CitedClaim>,
+    evidence: Vec<EvidenceItem>,
+    withheld_cross_window_unit: bool,
 }
 
 fn maximum_summary_units(source_count: usize) -> usize {
@@ -133,7 +140,7 @@ struct RawResponse {
     units: Vec<RawUnit>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawUnit {
     text: String,
@@ -305,20 +312,27 @@ pub(super) fn synthesize(
     )?;
     let summary_text = render_cited_summary_with_evidence(&summary_claims, &synthesis_evidence)?;
     let mut warnings = analyzed.warnings.clone();
-    match withheld_unit_kind {
-        Some(WithheldUnitKind::CrossWindow) => warnings.push(PipelineWarning {
+    if matches!(
+        withheld_unit_kind,
+        Some(WithheldUnitKind::CrossWindow | WithheldUnitKind::CrossWindowAndDecoderClipped)
+    ) {
+        warnings.push(PipelineWarning {
             code: WINDOW_WITHHELD_WARNING_CODE.to_string(),
             message: "One or more generated summary units combined separate source windows and were withheld after one bounded repair"
                 .to_string(),
             stage: Some(PipelineStage::Synthesize),
-        }),
-        Some(WithheldUnitKind::DecoderClipped) => warnings.push(PipelineWarning {
+        });
+    }
+    if matches!(
+        withheld_unit_kind,
+        Some(WithheldUnitKind::DecoderClipped | WithheldUnitKind::CrossWindowAndDecoderClipped)
+    ) {
+        warnings.push(PipelineWarning {
             code: CLIPPED_UNIT_WITHHELD_WARNING_CODE.to_string(),
             message: "One or more generated summary units reached the decoder text limit without a complete sentence and were withheld after one bounded repair"
                 .to_string(),
             stage: Some(PipelineStage::Synthesize),
-        }),
-        None => {}
+        });
     }
     let result = SynthesizedDocument {
         document_id: analyzed.document_id.clone(),
@@ -891,12 +905,8 @@ fn generate_summary_with_validation_repair(
                         withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
                     });
                 }
-                if let Some((claims, evidence)) = clipped_fallback.take() {
-                    return Ok(GeneratedSummaryContent {
-                        claims,
-                        evidence,
-                        withheld_unit_kind: Some(WithheldUnitKind::DecoderClipped),
-                    });
+                if let Some(fallback) = clipped_fallback.take() {
+                    return Ok(generated_from_clipped_fallback(fallback));
                 }
                 return Err(failure);
             }
@@ -904,14 +914,10 @@ fn generate_summary_with_validation_repair(
         let repaired_clipped_response_changed_siblings = clipped_repairs > 0
             && clipped_fallback
                 .as_ref()
-                .is_some_and(|(claims, _)| !preserves_claims_in_order(&parsed.0, claims));
+                .is_some_and(|fallback| !preserves_claims_in_order(&parsed.0, &fallback.claims));
         if repaired_clipped_response_changed_siblings {
-            if let Some((claims, evidence)) = clipped_fallback.take() {
-                return Ok(GeneratedSummaryContent {
-                    claims,
-                    evidence,
-                    withheld_unit_kind: Some(WithheldUnitKind::DecoderClipped),
-                });
+            if let Some(fallback) = clipped_fallback.take() {
+                return Ok(generated_from_clipped_fallback(fallback));
             }
         }
         let mut feedback = modal_strengthening_feedback(&parsed.0, &parsed.1)?;
@@ -938,12 +944,8 @@ fn generate_summary_with_validation_repair(
                     withheld_unit_kind: Some(WithheldUnitKind::CrossWindow),
                 });
             }
-            if let Some((claims, evidence)) = clipped_fallback.take() {
-                return Ok(GeneratedSummaryContent {
-                    claims,
-                    evidence,
-                    withheld_unit_kind: Some(WithheldUnitKind::DecoderClipped),
-                });
+            if let Some(fallback) = clipped_fallback.take() {
+                return Ok(generated_from_clipped_fallback(fallback));
             }
             return Err(if profile == SummaryProfile::Contract {
                 contract_validation_failure()
@@ -973,10 +975,27 @@ fn preserves_claims_in_order(candidate: &[CitedClaim], required: &[CitedClaim]) 
     })
 }
 
+fn generated_from_clipped_fallback(fallback: SafeSiblingFallback) -> GeneratedSummaryContent {
+    let withheld_unit_kind = if fallback.withheld_cross_window_unit {
+        WithheldUnitKind::CrossWindowAndDecoderClipped
+    } else {
+        WithheldUnitKind::DecoderClipped
+    };
+    GeneratedSummaryContent {
+        claims: fallback.claims,
+        evidence: fallback.evidence,
+        withheld_unit_kind: Some(withheld_unit_kind),
+    }
+}
+
 fn retain_individually_modal_safe_claims(
-    parsed: (Vec<CitedClaim>, Vec<EvidenceItem>),
-) -> Option<(Vec<CitedClaim>, Vec<EvidenceItem>)> {
-    let (claims, evidence) = parsed;
+    fallback: SafeSiblingFallback,
+) -> Option<SafeSiblingFallback> {
+    let SafeSiblingFallback {
+        claims,
+        evidence,
+        withheld_cross_window_unit,
+    } = fallback;
     let mut retained_claims = Vec::with_capacity(claims.len());
     for claim in claims {
         let feedback =
@@ -996,7 +1015,11 @@ fn retain_individually_modal_safe_claims(
         .into_iter()
         .filter(|item| referenced.contains(item.evidence_id.as_str()))
         .collect::<Vec<_>>();
-    Some((retained_claims, retained_evidence))
+    Some(SafeSiblingFallback {
+        claims: retained_claims,
+        evidence: retained_evidence,
+        withheld_cross_window_unit,
+    })
 }
 
 fn summary_request(
@@ -2030,7 +2053,7 @@ fn parse_response_without_clipped_units(
     response: &str,
     document_id: &str,
     catalog: &SourceCatalog,
-) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
+) -> Result<SafeSiblingFallback, PipelineFailure> {
     if !is_windowed_general_catalog(profile, catalog) {
         return Err(clipped_unit_response());
     }
@@ -2045,6 +2068,7 @@ fn parse_response_without_clipped_units(
         .collect::<HashSet<_>>();
     let mut retained = Vec::with_capacity(raw.units.len());
     let mut withheld = 0usize;
+    let mut withheld_cross_window_unit = false;
     for unit in raw.units {
         let clipped = canonical_bounded_text(&unit.text, MAX_UNIT_CHARACTERS)
             && unit.text.chars().count() == MAX_UNIT_CHARACTERS
@@ -2064,7 +2088,17 @@ fn parse_response_without_clipped_units(
             }
             withheld += 1;
         } else {
-            retained.push(unit);
+            let singleton = serde_json::to_string(&RawResponse {
+                units: vec![unit.clone()],
+            })
+            .map_err(|_| invalid_response())?;
+            match parse_response(profile, &singleton, document_id, catalog) {
+                Ok(_) => retained.push(unit),
+                Err(failure) if failure.code == WINDOW_MIXED_RESPONSE_CODE => {
+                    withheld_cross_window_unit = true;
+                }
+                Err(failure) => return Err(failure),
+            }
         }
     }
     if withheld == 0 || retained.is_empty() {
@@ -2072,7 +2106,12 @@ fn parse_response_without_clipped_units(
     }
     let retained =
         serde_json::to_string(&RawResponse { units: retained }).map_err(|_| invalid_response())?;
-    parse_response(profile, &retained, document_id, catalog)
+    let (claims, evidence) = parse_response(profile, &retained, document_id, catalog)?;
+    Ok(SafeSiblingFallback {
+        claims,
+        evidence,
+        withheld_cross_window_unit,
+    })
 }
 
 #[cfg(test)]
@@ -2535,6 +2574,7 @@ mod tests {
         OmitSibling,
         RewriteSibling,
         RepairModalAndOmitSafeSibling,
+        RepairMixedWindowAndOmitSafeSibling,
     }
 
     struct ClippedUnitRepairRuntime {
@@ -2720,6 +2760,17 @@ mod tests {
             } else if !is_repair
                 && matches!(
                     self.behavior,
+                    ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling
+                )
+            {
+                json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s5","s6"]},
+                    {"text":"The mixed source is complete.","source_ids":["s2","s3"]}
+                ])
+            } else if !is_repair
+                && matches!(
+                    self.behavior,
                     ClippedRepairBehavior::RepairModalAndOmitSafeSibling
                 )
             {
@@ -2757,6 +2808,10 @@ mod tests {
                     ClippedRepairBehavior::RepairModalAndOmitSafeSibling => json!([
                         {"text":"The operator should inspect the record.","source_ids":["s4"]},
                         {"text":"The later source is summarized completely.","source_ids":["s3"]}
+                    ]),
+                    ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling => json!([
+                        {"text":"The local source is complete.","source_ids":["s2"]},
+                        {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]}
                     ]),
                 }
             };
@@ -4245,17 +4300,21 @@ mod tests {
         let failure = parse_response(SummaryProfile::General, &clipped, "document-1", &catalog)
             .expect_err("the decoder-capped incomplete unit must be classified explicitly");
         assert_eq!(failure.code, UNIT_CLIPPED_RESPONSE_CODE);
-        let (claims, evidence) = parse_response_without_clipped_units(
+        let fallback = parse_response_without_clipped_units(
             SummaryProfile::General,
             &clipped,
             "document-1",
             &catalog,
         )
         .expect("a complete sibling unit may be retained from long General synthesis");
-        assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0].text, "The first source remains supported.");
-        assert_eq!(evidence.len(), 1);
-        assert_eq!(evidence[0].evidence_id, "evidence-1");
+        assert_eq!(fallback.claims.len(), 1);
+        assert_eq!(
+            fallback.claims[0].text,
+            "The first source remains supported."
+        );
+        assert_eq!(fallback.evidence.len(), 1);
+        assert_eq!(fallback.evidence[0].evidence_id, "evidence-1");
+        assert!(!fallback.withheld_cross_window_unit);
 
         let complete_at_limit = response(
             format!("{}.", "x".repeat(MAX_UNIT_CHARACTERS - 1)),
@@ -4512,6 +4571,37 @@ mod tests {
             Some(WithheldUnitKind::DecoderClipped)
         );
         assert_eq!(modal_omitting.requests().len(), 2);
+
+        let mixed_omitting = ClippedUnitRepairRuntime::new(
+            ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling,
+        );
+        let (mixed_prompt, mixed_schema) =
+            prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &mixed_omitting,
+            "document-1",
+            &catalog,
+            mixed_prompt,
+            mixed_schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("one mixed-window sibling must not erase a separate safe sibling baseline");
+        assert_eq!(generated.claims.len(), 1);
+        assert_eq!(
+            generated.claims[0].text,
+            "The first source remains supported."
+        );
+        assert_eq!(generated.evidence.len(), 1);
+        assert_eq!(generated.evidence[0].evidence_id, "evidence-1");
+        assert_eq!(
+            generated.withheld_unit_kind,
+            Some(WithheldUnitKind::CrossWindowAndDecoderClipped)
+        );
+        assert_eq!(mixed_omitting.requests().len(), 2);
     }
 
     #[test]

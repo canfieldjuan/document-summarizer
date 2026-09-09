@@ -2905,8 +2905,12 @@ complete
   source, window, completion, modality and evidence validation.
   Modality is evaluated per sibling: one strengthened sibling is excluded from
   the preservation baseline without erasing a separate safe sibling or its
-  canonical evidence.
-  It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`. An all-clipped response
+  canonical evidence. A separate mixed-window sibling is likewise withheld
+  without erasing structurally valid siblings; other structural errors still
+  fail closed.
+  It records `COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD`, plus
+  `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD` when the delivered fallback
+  also excluded a mixed-window sibling. An all-clipped response
   cannot supply an original fallback; if its repair remains invalid, it fails
   closed. The schema and its 1,200-character limit are unchanged.
 
@@ -2919,7 +2923,8 @@ complete
   repaired leading clip preserves and accepts a later sibling across its
   ordinal-derived claim-ID change. A mixed response with one safe sibling and
   one modal-strengthened sibling proves that a repair cannot omit the safe one
-  after correcting the other. Negative probes reject a 1,199-character
+  after correcting the other. A separate clipped-plus-mixed-window probe proves
+  the same preservation and both warning outcomes. Negative probes reject a 1,199-character
   fragment, an all-clipped response, empty, duplicate, foreign and nine-source
   metadata, unwindowed General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
