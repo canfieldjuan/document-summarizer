@@ -271,24 +271,57 @@ fn possible_framing_boundary(text: &str) -> bool {
         .is_some_and(|character| character.is_uppercase())
 }
 
-fn source_framing_for_segment(normalized_block: &str, exact_quote: &str) -> Option<SourceFraming> {
+fn source_framing_after_paragraph(
+    current: Option<SourceFraming>,
+    paragraph: &str,
+) -> Option<SourceFraming> {
+    if let Some(next) = framing_from_heading(paragraph) {
+        Some(next)
+    } else if possible_framing_boundary(paragraph) {
+        None
+    } else {
+        current
+    }
+}
+
+fn source_framing_after_block(
+    normalized_block: &str,
+    inherited: Option<SourceFraming>,
+) -> Option<SourceFraming> {
+    normalized_block
+        .split("\n\n")
+        .fold(inherited, source_framing_after_paragraph)
+}
+
+fn source_framing_at_block_starts(
+    normalized: &NormalizedDocument,
+) -> HashMap<String, Option<SourceFraming>> {
+    let mut framing = None;
+    let mut starts = HashMap::new();
+    for block in normalized.pages.iter().flat_map(|page| &page.content) {
+        starts.insert(block.block_id.clone(), framing);
+        framing = source_framing_after_block(&block.text, framing);
+    }
+    starts
+}
+
+fn source_framing_for_segment(
+    normalized_block: &str,
+    exact_quote: &str,
+    inherited: Option<SourceFraming>,
+) -> Option<SourceFraming> {
     let mut matches = normalized_block.match_indices(exact_quote);
     let (segment_start, _) = matches.next()?;
     if matches.next().is_some() {
         return None;
     }
-    let mut framing = None;
+    let mut framing = inherited;
     let mut paragraph_start = 0usize;
     for paragraph in normalized_block.split("\n\n") {
         if paragraph_start > segment_start {
             break;
         }
-        let heading = paragraph.trim();
-        if let Some(next) = framing_from_heading(heading) {
-            framing = Some(next);
-        } else if possible_framing_boundary(heading) {
-            framing = None;
-        }
+        framing = source_framing_after_paragraph(framing, paragraph.trim());
         paragraph_start = paragraph_start
             .saturating_add(paragraph.len())
             .saturating_add(2);
@@ -304,6 +337,7 @@ pub(super) fn verification_source_framing(
     if profile != SummaryProfile::General {
         return HashMap::new();
     }
+    let framing_at_block_starts = source_framing_at_block_starts(normalized);
     let blocks = normalized
         .pages
         .iter()
@@ -313,9 +347,16 @@ pub(super) fn verification_source_framing(
     evidence
         .iter()
         .filter_map(|item| {
-            let framing = blocks
-                .get(item.block_id.as_str())
-                .and_then(|block| source_framing_for_segment(&block.text, &item.exact_quote))?;
+            let framing = blocks.get(item.block_id.as_str()).and_then(|block| {
+                source_framing_for_segment(
+                    &block.text,
+                    &item.exact_quote,
+                    framing_at_block_starts
+                        .get(item.block_id.as_str())
+                        .copied()
+                        .flatten(),
+                )
+            })?;
             Some((item.evidence_id.clone(), framing.label().to_string()))
         })
         .collect()
@@ -3278,6 +3319,7 @@ fn source_catalog_for_synthesis_version(
     analyzed: Option<&AnalyzedDocument>,
 ) -> Result<SourceCatalog, PipelineFailure> {
     let blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
+    let framing_at_block_starts = source_framing_at_block_starts(normalized);
     let mut candidates = Vec::new();
     let mut omitted_source_units = 0usize;
     let mut evidence_ids = HashSet::new();
@@ -3328,7 +3370,14 @@ fn source_catalog_for_synthesis_version(
                     false,
                 )
             })?;
-            let source_framing = source_framing_for_segment(&block.text, &source.exact_quote);
+            let source_framing = source_framing_for_segment(
+                &block.text,
+                &source.exact_quote,
+                framing_at_block_starts
+                    .get(source.block_id.as_str())
+                    .copied()
+                    .flatten(),
+            );
             let evidence_id = deterministic_id(
                 "summary-evidence",
                 &[
@@ -4339,7 +4388,7 @@ mod tests {
 
         let sectioned = "Common Problems\n\nFirst problem. Later problem.\n\nHow to avoid common problems\n\nEnsure workers receive minimum wage\n\nNo Known Issues\n\nNo defects were found.\n\nKey Risks\n\nRisk detail.";
         assert_eq!(
-            source_framing_for_segment(sectioned, "Later problem."),
+            source_framing_for_segment(sectioned, "Later problem.", None),
             Some(SourceFraming::Problem)
         );
         for unframed in [
@@ -4347,16 +4396,17 @@ mod tests {
             "Ensure workers receive minimum wage",
             "No defects were found.",
         ] {
-            assert_eq!(source_framing_for_segment(sectioned, unframed), None);
+            assert_eq!(source_framing_for_segment(sectioned, unframed, None), None);
         }
         assert_eq!(
-            source_framing_for_segment(sectioned, "Risk detail."),
+            source_framing_for_segment(sectioned, "Risk detail.", None),
             Some(SourceFraming::Risk)
         );
         assert_eq!(
             source_framing_for_segment(
                 "Common Problems\n\nRepeated.\n\nSolutions\n\nRepeated.",
                 "Repeated.",
+                None,
             ),
             None
         );
@@ -4630,41 +4680,72 @@ mod tests {
     }
 
     #[test]
-    fn source_catalog_keeps_split_segments_in_document_order() {
+    fn source_catalog_carries_split_sections_across_pages_in_order() {
         let first = format!("Common Problems\n\n{}.", "A".repeat(399));
         let second = format!("{}!", "B".repeat(399));
-        let third = format!("How to avoid common problems\n\n{}.", "C".repeat(399));
+        let third = format!("{}.", "C".repeat(399));
         let fourth = format!("{}!", "D".repeat(399));
-        let first_block_text = format!("{first} {second}\n\n{third} {fourth}");
+        let fifth = format!("How to avoid common problems\n\n{}.", "E".repeat(399));
+        let sixth = format!("{}!", "F".repeat(399));
+        let first_block_text = format!("{first} {second}");
+        let continuation_block_text = format!("{third} {fourth}");
+        let solution_block_text = format!("{fifth} {sixth}");
         let later = "Later ordinary block.".to_string();
-        let source_span = SourceSpan {
-            page_start: 1,
-            page_end: 1,
+        let source_span = |page_number| SourceSpan {
+            page_start: page_number,
+            page_end: page_number,
             section_id: None,
             source_type: SourceType::NativeText,
         };
         let normalized = NormalizedDocument {
             document_id: "document-1".into(),
             normalization_version: "test-normalization".into(),
-            pages: vec![NormalizedPage {
-                page_number: 1,
-                content: vec![
-                    NormalizedBlock {
+            pages: vec![
+                NormalizedPage {
+                    page_number: 1,
+                    content: vec![NormalizedBlock {
                         block_id: "block-a".into(),
                         kind: NormalizedBlockKind::Text,
                         text: first_block_text.clone(),
-                        source: source_span.clone(),
-                    },
-                    NormalizedBlock {
+                        source: source_span(1),
+                    }],
+                    warnings: Vec::new(),
+                    requires_visual_processing: false,
+                },
+                NormalizedPage {
+                    page_number: 2,
+                    content: vec![NormalizedBlock {
                         block_id: "block-b".into(),
                         kind: NormalizedBlockKind::Text,
+                        text: continuation_block_text.clone(),
+                        source: source_span(2),
+                    }],
+                    warnings: Vec::new(),
+                    requires_visual_processing: false,
+                },
+                NormalizedPage {
+                    page_number: 3,
+                    content: vec![NormalizedBlock {
+                        block_id: "block-c".into(),
+                        kind: NormalizedBlockKind::Text,
+                        text: solution_block_text.clone(),
+                        source: source_span(3),
+                    }],
+                    warnings: Vec::new(),
+                    requires_visual_processing: false,
+                },
+                NormalizedPage {
+                    page_number: 4,
+                    content: vec![NormalizedBlock {
+                        block_id: "block-d".into(),
+                        kind: NormalizedBlockKind::Text,
                         text: later.clone(),
-                        source: source_span.clone(),
-                    },
-                ],
-                warnings: Vec::new(),
-                requires_visual_processing: false,
-            }],
+                        source: source_span(4),
+                    }],
+                    warnings: Vec::new(),
+                    requires_visual_processing: false,
+                },
+            ],
             warnings: Vec::new(),
         };
         let chunked = ChunkedDocument {
@@ -4674,9 +4755,16 @@ mod tests {
                 chunk_id: "chunk-1".into(),
                 ordinal: 0,
                 structure_node_id: "node-1".into(),
-                text: format!("{first_block_text}\n\n{later}"),
-                block_ids: vec!["block-a".into(), "block-b".into()],
-                source_spans: vec![source_span.clone(), source_span],
+                text: format!(
+                    "{first_block_text}\n\n{continuation_block_text}\n\n{solution_block_text}\n\n{later}"
+                ),
+                block_ids: vec![
+                    "block-a".into(),
+                    "block-b".into(),
+                    "block-c".into(),
+                    "block-d".into(),
+                ],
+                source_spans: (1..=4).map(source_span).collect(),
                 warnings: Vec::new(),
             }],
             warnings: Vec::new(),
@@ -4689,7 +4777,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.evidence.block_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["block-a", "block-a", "block-a", "block-a", "block-b"]
+            vec!["block-a", "block-a", "block-b", "block-b", "block-c", "block-c", "block-d"]
         );
         assert_eq!(
             catalog
@@ -4702,6 +4790,8 @@ mod tests {
                 second.as_str(),
                 third.as_str(),
                 fourth.as_str(),
+                fifth.as_str(),
+                sixth.as_str(),
                 later.as_str(),
             ]
         );
@@ -4711,7 +4801,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.request_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["s1", "s2", "s3", "s4", "s5"]
+            vec!["s1", "s2", "s3", "s4", "s5", "s6", "s7"]
         );
 
         let analyzed = AnalyzedDocument {
@@ -4722,7 +4812,11 @@ mod tests {
             chunks: vec![ChunkAnalysis {
                 chunk_id: "chunk-1".into(),
                 summary_text: "A concise extracted claim.".into(),
-                source_spans: vec![normalized.pages[0].content[0].source.clone()],
+                source_spans: normalized
+                    .pages
+                    .iter()
+                    .map(|page| page.content[0].source.clone())
+                    .collect(),
                 evidence: vec![
                     EvidenceItem {
                         evidence_id: "analysis-evidence-1".into(),
@@ -4736,15 +4830,23 @@ mod tests {
                         evidence_id: "analysis-evidence-2".into(),
                         chunk_id: "chunk-1".into(),
                         block_id: "block-b".into(),
+                        claim_text: "Continuation extracted claim.".into(),
+                        exact_quote: third.clone(),
+                        source_span: normalized.pages[1].content[0].source.clone(),
+                    },
+                    EvidenceItem {
+                        evidence_id: "analysis-evidence-3".into(),
+                        chunk_id: "chunk-1".into(),
+                        block_id: "block-d".into(),
                         claim_text: "Later extracted claim.".into(),
                         exact_quote: later.clone(),
-                        source_span: normalized.pages[0].content[1].source.clone(),
+                        source_span: normalized.pages[3].content[0].source.clone(),
                     },
                 ],
             }],
             warnings: Vec::new(),
             omissions: Vec::new(),
-            inspected_pages: vec![1],
+            inspected_pages: vec![1, 2, 3, 4],
         };
         let enriched = source_catalog(&chunked, &normalized, Some(&analyzed)).unwrap();
         assert_eq!(
@@ -4763,25 +4865,19 @@ mod tests {
             enriched.candidates[0].evidence.claim_text,
             enriched.candidates[0].evidence.exact_quote
         );
-        assert_eq!(
-            enriched.candidates[0].source_framing,
-            Some(SourceFraming::Problem)
-        );
-        assert!(enriched.candidates[0].drafting_claim.is_none());
-        assert_eq!(
-            enriched.candidates[1].source_framing,
-            Some(SourceFraming::Problem)
-        );
-        assert_eq!(
-            enriched.candidates[1].evidence.claim_text,
-            enriched.candidates[1].evidence.exact_quote
-        );
-        assert!(enriched.candidates[1].drafting_claim.is_none());
-        for candidate in &enriched.candidates[2..] {
+        for candidate in &enriched.candidates[..4] {
+            assert_eq!(candidate.source_framing, Some(SourceFraming::Problem));
+            assert_eq!(
+                candidate.evidence.claim_text,
+                candidate.evidence.exact_quote
+            );
+            assert!(candidate.drafting_claim.is_none());
+        }
+        for candidate in &enriched.candidates[4..] {
             assert_eq!(candidate.source_framing, None);
         }
         assert_eq!(
-            enriched.candidates[4].drafting_claim.as_deref(),
+            enriched.candidates[6].drafting_claim.as_deref(),
             Some("Later extracted claim.")
         );
         let verification_evidence = enriched
@@ -4794,8 +4890,8 @@ mod tests {
             &verification_evidence,
             &normalized,
         );
-        assert_eq!(verification_framing.len(), 2);
-        for candidate in &enriched.candidates[..2] {
+        assert_eq!(verification_framing.len(), 4);
+        for candidate in &enriched.candidates[..4] {
             assert_eq!(
                 verification_framing
                     .get(&candidate.evidence.evidence_id)
@@ -4803,7 +4899,7 @@ mod tests {
                 Some("problem")
             );
         }
-        for candidate in &enriched.candidates[2..] {
+        for candidate in &enriched.candidates[4..] {
             assert!(!verification_framing.contains_key(&candidate.evidence.evidence_id));
         }
         assert!(verification_source_framing(
@@ -4814,15 +4910,15 @@ mod tests {
         .is_empty());
         let (prompt, _) = prompt_and_schema(SummaryProfile::General, &enriched).unwrap();
         let prompt: Value = serde_json::from_str(&prompt).unwrap();
-        assert_eq!(prompt["source_segments"][0]["source_framing"], "problem");
-        assert!(prompt["source_segments"][0].get("source_claim").is_none());
-        assert_eq!(prompt["source_segments"][1]["source_framing"], "problem");
-        assert!(prompt["source_segments"][1].get("source_claim").is_none());
-        for source in &prompt["source_segments"].as_array().unwrap()[2..] {
+        for source in &prompt["source_segments"].as_array().unwrap()[..4] {
+            assert_eq!(source["source_framing"], "problem");
+            assert!(source.get("source_claim").is_none());
+        }
+        for source in &prompt["source_segments"].as_array().unwrap()[4..] {
             assert!(source.get("source_framing").is_none());
         }
         assert_eq!(
-            prompt["source_segments"][4]["source_claim"],
+            prompt["source_segments"][6]["source_claim"],
             "Later extracted claim."
         );
     }
