@@ -2930,10 +2930,14 @@ complete
   was separately excluded for stronger modality. An all-clipped response
   carries its source-coverage requirement into repair but cannot supply an
   original fallback; if its repair omits required evidence or remains invalid,
-  it fails closed. If feedback would exceed the configured input or runtime
-  context, the best already-validated fallback is returned with its warning;
-  the size error remains for responses with no deliverable fallback. The schema
-  and its 1,200-character limit are unchanged.
+  it fails closed. A clipped unit produced by the window repair may use the same
+  single decoder-repair attempt when its complete siblings still contain the
+  prior safe window baseline. Successful recovery delivers the newer content;
+  a repeated clip or omitted baseline returns the prior fallback with both
+  window and clipped warnings. If feedback would exceed the configured input
+  or runtime context, the best already-validated fallback is returned with its
+  warning; the size error remains for responses with no deliverable fallback.
+  The schema and its 1,200-character limit are unchanged.
 
 **Acceptance evidence so far**:
 - Paired tests accept a complete sentence at exactly 1,200 characters and prove
@@ -2959,9 +2963,11 @@ complete
   mixed original and an all-clipped original. The all-clipped source probe
   rejects unrelated replacement evidence and accepts the required evidence.
   Withholding-state probes cover clipped-only, clipped-plus-window,
-  clipped-plus-modality and all three combined. Negative probes reject a
-  1,199-character fragment, empty, duplicate, foreign and nine-source metadata,
-  unwindowed General catalogs, and Story catalogs.
+  clipped-plus-modality and all three combined. Window-then-clipped probes prove
+  successful recovery, repeated-clip fallback and rejection of a repair that
+  omits the prior safe window baseline. Negative probes reject a 1,199-character
+  fragment, empty, duplicate, foreign and nine-source metadata, unwindowed
+  General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the
