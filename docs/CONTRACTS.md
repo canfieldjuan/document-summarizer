@@ -490,9 +490,11 @@ mode, supported prose claims, ledger claims, their exact evidence and the canoni
 rendered text. The desktop shows coherent paragraphs first and keeps any supported
 ledger claims available as supporting detail.
 
-Current artifacts use synthesis 6.0.0, verification 7.0.0, summary 6.0.0 and
-citation 4.0.0. Direct version-5 and older artifacts retain their original
-validation, rendering and citation contracts when loaded.
+Current artifacts use synthesis 7.0.0, verification 9.0.0, summary 7.0.0 and
+citation 4.0.0. Completed pre-disclosure coherent artifacts retain synthesis
+6.0.0 with verification 7.0.0 or 8.0.0 and summary 6.0.0 compatibility. Direct
+version-5 and older artifacts retain their original validation, rendering and
+citation contracts when loaded.
 
 Connect delivery-policy runs continue to use the version-5 direct claim-ledger
 synthesis path. Its delivered result has an independent distributed page
