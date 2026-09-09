@@ -2900,10 +2900,12 @@ complete
   if it contains every validated original sibling's exact text and normalized
   evidence IDs in order and covers every clipped unit's source evidence, with
   repeated references counted separately. Safe siblings are consumed before
-  replacement coverage is checked, followed by evidence needed to correct any
-  modal-strengthened or mixed-window complete sibling. One repaired sibling
-  therefore cannot also count as replacement for a clipped unit that cited the
-  same evidence. Ordinal-derived claim IDs are intentionally excluded because
+  replacement coverage is checked. Each modal-strengthened or mixed-window
+  complete sibling keeps its own source-evidence group; candidate claims are
+  reserved whole only when their combined evidence exactly matches that group.
+  Clipped coverage is checked afterward, so one repaired sibling cannot also
+  count as replacement for a clipped unit through shared or added evidence.
+  Ordinal-derived claim IDs are intentionally excluded because
   repairing an earlier unit can move a later sibling. If the repair remains
   invalid, omits a sibling, rewrites one or drops clipped material, the
   application may retain complete sibling units from the original response only
@@ -2955,8 +2957,9 @@ complete
   correcting the other. Clipped-plus-mixed-window probes cover both unit orders
   and both warning outcomes. A nested clipped-then-window repair probe proves
   that a newer window fallback cannot replace the original safe sibling
-  baseline. A shared-evidence probe proves that correcting a modal sibling does
-  not also satisfy a clipped replacement. A repair-budget probe returns the
+  baseline. Shared- and added-evidence probes prove that correcting a modal
+  sibling does not also satisfy a clipped replacement, including when the same
+  candidate claim adds a clipped source ID. A repair-budget probe returns the
   warned safe fallback when feedback cannot fit and keeps the size error for an
   all-clipped response. A leading modal-invalid sibling probe validates the
   rematerialized ID of the later retained safe claim. Two nested window probes
