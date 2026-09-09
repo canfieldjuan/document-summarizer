@@ -2900,12 +2900,14 @@ complete
   if it contains every validated original sibling's exact text and normalized
   evidence IDs in order and covers every clipped unit's source evidence, with
   repeated references counted separately. Safe siblings are consumed before
-  replacement coverage is checked, so they cannot double as a replacement.
-  Ordinal-derived claim IDs are intentionally excluded because repairing an
-  earlier unit can move a later sibling. If the repair remains invalid, omits a
-  sibling, rewrites one or drops clipped material, the application may retain
-  complete sibling units from the original response only after normal source,
-  window, completion, modality and evidence validation.
+  replacement coverage is checked, followed by evidence needed to correct any
+  modal-strengthened or mixed-window complete sibling. One repaired sibling
+  therefore cannot also count as replacement for a clipped unit that cited the
+  same evidence. Ordinal-derived claim IDs are intentionally excluded because
+  repairing an earlier unit can move a later sibling. If the repair remains
+  invalid, omits a sibling, rewrites one or drops clipped material, the
+  application may retain complete sibling units from the original response only
+  after normal source, window, completion, modality and evidence validation.
   Modality is evaluated per sibling: one strengthened sibling is excluded from
   the preservation baseline without erasing a separate safe sibling or its
   canonical evidence. A separate mixed-window sibling is likewise withheld
@@ -2932,10 +2934,11 @@ complete
   correcting the other. Clipped-plus-mixed-window probes cover both unit orders
   and both warning outcomes. A nested clipped-then-window repair probe proves
   that a newer window fallback cannot replace the original safe sibling
-  baseline. The all-clipped probe rejects unrelated replacement evidence and
-  accepts the required evidence. Negative probes reject a 1,199-character
-  fragment, empty, duplicate, foreign and nine-source metadata, unwindowed
-  General catalogs, and Story catalogs.
+  baseline. A shared-evidence probe proves that correcting a modal sibling does
+  not also satisfy a clipped replacement. The all-clipped probe rejects
+  unrelated replacement evidence and accepts the required evidence. Negative
+  probes reject a 1,199-character fragment, empty, duplicate, foreign and
+  nine-source metadata, unwindowed General catalogs, and Story catalogs.
 - `cargo test --all-targets` passed 431 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the

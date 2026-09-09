@@ -44,6 +44,7 @@ struct GeneratedSummaryContent {
 struct SafeSiblingFallback {
     claims: Vec<CitedClaim>,
     evidence: Vec<EvidenceItem>,
+    required_repaired_sibling_evidence_ids: Vec<String>,
     required_clipped_evidence_ids: Vec<String>,
     withheld_cross_window_unit: bool,
 }
@@ -1004,19 +1005,29 @@ fn satisfies_clipped_recovery(candidate: &[CitedClaim], recovery: &SafeSiblingFa
                 .or_insert(0usize) += 1;
         }
     }
-    recovery
-        .required_clipped_evidence_ids
-        .iter()
-        .all(|evidence_id| {
-            let Some(remaining) = available_evidence.get_mut(evidence_id.as_str()) else {
-                return false;
-            };
-            if *remaining == 0 {
-                return false;
-            }
-            *remaining -= 1;
-            true
-        })
+    consume_required_evidence(
+        &mut available_evidence,
+        &recovery.required_repaired_sibling_evidence_ids,
+    ) && consume_required_evidence(
+        &mut available_evidence,
+        &recovery.required_clipped_evidence_ids,
+    )
+}
+
+fn consume_required_evidence(
+    available_evidence: &mut HashMap<&str, usize>,
+    required_evidence_ids: &[String],
+) -> bool {
+    required_evidence_ids.iter().all(|evidence_id| {
+        let Some(remaining) = available_evidence.get_mut(evidence_id.as_str()) else {
+            return false;
+        };
+        if *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+        true
+    })
 }
 
 fn generated_from_clipped_fallback(
@@ -1043,6 +1054,7 @@ fn retain_individually_modal_safe_claims(
     let SafeSiblingFallback {
         claims,
         evidence,
+        mut required_repaired_sibling_evidence_ids,
         required_clipped_evidence_ids,
         withheld_cross_window_unit,
     } = fallback;
@@ -1052,6 +1064,8 @@ fn retain_individually_modal_safe_claims(
             modal_strengthening_feedback(std::slice::from_ref(&claim), &evidence).ok()?;
         if feedback.is_empty() {
             retained_claims.push(claim);
+        } else {
+            required_repaired_sibling_evidence_ids.extend(claim.evidence_ids);
         }
     }
     let referenced = retained_claims
@@ -1065,6 +1079,7 @@ fn retain_individually_modal_safe_claims(
     Some(SafeSiblingFallback {
         claims: retained_claims,
         evidence: retained_evidence,
+        required_repaired_sibling_evidence_ids,
         required_clipped_evidence_ids,
         withheld_cross_window_unit,
     })
@@ -2116,6 +2131,7 @@ fn parse_response_without_clipped_units(
         .collect::<HashMap<_, _>>();
     let mut retained = Vec::with_capacity(raw.units.len());
     let mut withheld = 0usize;
+    let mut required_repaired_sibling_evidence_ids = Vec::new();
     let mut required_clipped_evidence_ids = Vec::new();
     let mut withheld_cross_window_unit = false;
     for unit in raw.units {
@@ -2152,6 +2168,14 @@ fn parse_response_without_clipped_units(
             match parse_response(profile, &singleton, document_id, catalog) {
                 Ok(_) => retained.push(unit),
                 Err(failure) if failure.code == WINDOW_MIXED_RESPONSE_CODE => {
+                    required_repaired_sibling_evidence_ids.extend(unit.source_ids.iter().map(
+                        |source_id| {
+                            known_sources[source_id.as_str()]
+                                .evidence
+                                .evidence_id
+                                .clone()
+                        },
+                    ));
                     withheld_cross_window_unit = true;
                 }
                 Err(failure) => return Err(failure),
@@ -2171,6 +2195,7 @@ fn parse_response_without_clipped_units(
     Ok(SafeSiblingFallback {
         claims,
         evidence,
+        required_repaired_sibling_evidence_ids,
         required_clipped_evidence_ids,
         withheld_cross_window_unit,
     })
@@ -2637,6 +2662,7 @@ mod tests {
         OmitSibling,
         RewriteSibling,
         RepairModalAndOmitSafeSibling,
+        RepairModalSharingClippedEvidenceAndOmitClip,
         RepairMixedWindowAndOmitSafeSibling,
         MixedWindowBeforeClipAndOmitSafeSibling,
         NestedWindowRepairOmitsSafeSibling,
@@ -2854,6 +2880,17 @@ mod tests {
             } else if !is_repair
                 && matches!(
                     self.behavior,
+                    ClippedRepairBehavior::RepairModalSharingClippedEvidenceAndOmitClip
+                )
+            {
+                json!([
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"The operator must inspect the record.","source_ids":["s4"]},
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s4"]}
+                ])
+            } else if !is_repair
+                && matches!(
+                    self.behavior,
                     ClippedRepairBehavior::RepairModalAndOmitSafeSibling
                 )
             {
@@ -2913,6 +2950,10 @@ mod tests {
                         {"text":"The operator should inspect the record.","source_ids":["s4"]},
                         {"text":"The second source is summarized completely.","source_ids":["s2"]},
                         {"text":"The third source is summarized completely.","source_ids":["s3"]}
+                    ]),
+                    ClippedRepairBehavior::RepairModalSharingClippedEvidenceAndOmitClip => json!([
+                        {"text":"The first source remains supported.","source_ids":["s1"]},
+                        {"text":"The operator should inspect the record.","source_ids":["s4"]}
                     ]),
                     ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling
                     | ClippedRepairBehavior::MixedWindowBeforeClipAndOmitSafeSibling => json!([
@@ -4752,6 +4793,37 @@ mod tests {
             Some(WithheldUnitKind::DecoderClipped)
         );
         assert_eq!(modal_omitting.requests().len(), 2);
+
+        let shared_modal = ClippedUnitRepairRuntime::new(
+            ClippedRepairBehavior::RepairModalSharingClippedEvidenceAndOmitClip,
+        );
+        let (shared_prompt, shared_schema) =
+            prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &shared_modal,
+            "document-1",
+            &catalog,
+            shared_prompt,
+            shared_schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("one corrected modal unit cannot also replace a clipped unit on the same evidence");
+        assert_eq!(generated.claims.len(), 1);
+        assert_eq!(
+            generated.claims[0].text,
+            "The first source remains supported."
+        );
+        assert_eq!(generated.evidence.len(), 1);
+        assert_eq!(generated.evidence[0].evidence_id, "evidence-1");
+        assert_eq!(
+            generated.withheld_unit_kind,
+            Some(WithheldUnitKind::DecoderClipped)
+        );
+        assert_eq!(shared_modal.requests().len(), 2);
 
         for behavior in [
             ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling,
