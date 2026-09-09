@@ -163,28 +163,82 @@ enum SourceFraming {
 
 impl SourceFraming {
     fn preserved_by(self, text: &str) -> bool {
+        let markers: &[&str] = match self {
+            Self::Problem => &[
+                "problem",
+                "problems",
+                "problematic",
+                "issue",
+                "issues",
+                "concern",
+                "concerns",
+                "defect",
+                "defects",
+                "deficiency",
+                "deficiencies",
+            ],
+            Self::Risk => &[
+                "risk",
+                "risks",
+                "risky",
+                "hazard",
+                "hazards",
+                "hazardous",
+                "danger",
+                "dangers",
+                "dangerous",
+                "threat",
+                "threats",
+            ],
+            Self::Warning => &[
+                "warn",
+                "warns",
+                "warned",
+                "warning",
+                "warnings",
+                "caution",
+                "cautions",
+                "cautioned",
+                "cautionary",
+                "alert",
+                "alerts",
+                "alerted",
+            ],
+            Self::Exception => &[
+                "except",
+                "exception",
+                "exceptions",
+                "exempt",
+                "exempts",
+                "exempted",
+                "exemption",
+                "exemptions",
+                "exclude",
+                "excludes",
+                "excluded",
+                "excluding",
+                "exclusion",
+                "exclusions",
+            ],
+            Self::Limitation => &[
+                "limit",
+                "limits",
+                "limited",
+                "limitation",
+                "limitations",
+                "restrict",
+                "restricts",
+                "restricted",
+                "restriction",
+                "restrictions",
+                "constraint",
+                "constraints",
+                "constrained",
+            ],
+        };
         let words = framing_words(text).collect::<Vec<_>>();
         words.iter().enumerate().any(|(index, word)| {
-            let is_marker = match self {
-                Self::Problem => {
-                    matches!(word.as_str(), "problem" | "problems" | "issue" | "issues")
-                }
-                Self::Risk => matches!(word.as_str(), "risk" | "risks" | "hazard" | "hazards"),
-                Self::Warning => matches!(
-                    word.as_str(),
-                    "warn"
-                        | "warns"
-                        | "warned"
-                        | "warning"
-                        | "warnings"
-                        | "caution"
-                        | "cautions"
-                        | "cautioned"
-                ),
-                Self::Exception => matches!(word.as_str(), "exception" | "exceptions"),
-                Self::Limitation => matches!(word.as_str(), "limitation" | "limitations"),
-            };
-            is_marker && framing_marker_is_affirmative(&words, index)
+            markers.contains(&word.as_str()) && framing_marker_is_affirmative(&words, index)
         })
     }
 }
@@ -4212,6 +4266,14 @@ mod tests {
                 SourceFraming::Limitation,
                 "The document states a limitation.",
             ),
+            (
+                SourceFraming::Exception,
+                "Seasonal workers are exempt from this requirement.",
+            ),
+            (
+                SourceFraming::Limitation,
+                "The policy restricts covered uses.",
+            ),
         ] {
             assert!(framing.preserved_by(preserved));
         }
@@ -4221,6 +4283,7 @@ mod tests {
             (SourceFraming::Problem, "The practice is problem-free."),
             (SourceFraming::Risk, "The arrangement is risk-free."),
             (SourceFraming::Exception, "The agreement is exceptional."),
+            (SourceFraming::Exception, "Seasonal workers are not exempt."),
             (SourceFraming::Limitation, "The remedy is limitless."),
         ] {
             assert!(!framing.preserved_by(bypass));
