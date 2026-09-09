@@ -386,6 +386,19 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
             },
         );
     }
+    if before
+        .last()
+        .is_some_and(|word| matches!(word.as_str(), "is" | "are" | "was" | "were" | "equals"))
+    {
+        let prefix = &before[..before.len().saturating_sub(1)];
+        return Some(
+            if negation_present(&prefix[prefix.len().saturating_sub(4)..]) {
+                NumericRelation::NotEqual
+            } else {
+                NumericRelation::Equal
+            },
+        );
+    }
     None
 }
 
@@ -1734,10 +1747,16 @@ fn actor_qualification_clause_supported(claim: &str, evidence: &[&EvidenceItem])
                     .iter()
                     .any(|(actor, label)| tokens_mention_actor(relation, actor, label))
         });
-        !source_has_actor_qualifier
-            || claimed_actors
-                .iter()
-                .all(|(actor, label)| supports_actor(actor, label))
+        let every_actor_is_supported = claimed_actors
+            .iter()
+            .all(|(actor, label)| supports_actor(actor, label));
+        if *concept == ACTOR_QUALIFIER_CONCEPTS[1]
+            && tokens_contain_any(&condition_tokens, ACTOR_QUALIFIER_CONCEPTS[0])
+        {
+            every_actor_is_supported
+        } else {
+            !source_has_actor_qualifier || every_actor_is_supported
+        }
     })
 }
 
@@ -2075,12 +2094,17 @@ fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     guarded_modal_predicates(claim, true)
         .into_iter()
         .all(|predicate| {
-            !weak_source
+            let matching_weak_source = weak_source
                 .iter()
-                .any(|source| modal_statements_match(&predicate, source, false))
-                || strong_source
-                    .iter()
-                    .any(|source| modal_statements_match(&predicate, source, true))
+                .any(|source| modal_statements_match(&predicate, source, false));
+            let matching_strong_source = strong_source
+                .iter()
+                .any(|source| modal_statements_match(&predicate, source, false));
+            let matching_strong_polarity = strong_source
+                .iter()
+                .any(|source| modal_statements_match(&predicate, source, true));
+            (!matching_weak_source || matching_strong_polarity)
+                && (!matching_strong_source || matching_strong_polarity)
         })
 }
 

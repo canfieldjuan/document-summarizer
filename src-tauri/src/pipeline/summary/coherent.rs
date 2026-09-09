@@ -4272,6 +4272,9 @@ mod tests {
         let mut suffix_currency = catalog().candidates[0].evidence.clone();
         suffix_currency.evidence_id = "suffix-currency".into();
         suffix_currency.exact_quote = "The fee is at most 5€.".into();
+        let mut plain_equality = catalog().candidates[1].evidence.clone();
+        plain_equality.evidence_id = "plain-equality".into();
+        plain_equality.exact_quote = "The capacity is 500 units.".into();
         let mut transport = catalog().candidates[1].evidence.clone();
         transport.evidence_id = "transport".into();
         transport.exact_quote = "The employer must provide transportation from living quarters to the workplace. Trip records are retained.".into();
@@ -4354,7 +4357,7 @@ mod tests {
         let mut mixed_modal = catalog().candidates[1].evidence.clone();
         mixed_modal.evidence_id = "mixed-modal".into();
         mixed_modal.exact_quote =
-            "Plan A may accept applications. Plan B must accept applications.".into();
+            "Plan A may accept applications. Plan B must accept applications. Plan E must not accept reports.".into();
         let mut contracted_modal = catalog().candidates[0].evidence.clone();
         contracted_modal.evidence_id = "contracted-modal".into();
         contracted_modal.exact_quote =
@@ -4373,6 +4376,7 @@ mod tests {
             leading_decimal,
             contextual_bound,
             suffix_currency,
+            plain_equality,
             transport,
             inverted_transport,
             actor_transport,
@@ -4630,6 +4634,16 @@ mod tests {
                 evidence_ids: vec!["contextual-bound".into()],
             },
             CitedClaim {
+                claim_id: "supported-copular-equality-bound".into(),
+                text: "The capacity is at most 500 units.".into(),
+                evidence_ids: vec!["plain-equality".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-copular-equality-bound".into(),
+                text: "The capacity is less than 500 units.".into(),
+                evidence_ids: vec!["plain-equality".into()],
+            },
+            CitedClaim {
                 claim_id: "broadened-enumeration".into(),
                 text: "A family member of the owner qualifies for the exemption.".into(),
                 evidence_ids: vec!["flsa".into()],
@@ -4823,6 +4837,11 @@ mod tests {
                 claim_id: "changed-only-if-actor-condition".into(),
                 text: "FLCs are subject to MSPA if they recruit for compensation.".into(),
                 evidence_ids: vec!["only-if-actor-condition".into()],
+            },
+            CitedClaim {
+                claim_id: "added-only-if-actor-condition".into(),
+                text: "FLCs are subject to MSPA only if they recruit for compensation.".into(),
+                evidence_ids: vec!["flc".into()],
             },
             CitedClaim {
                 claim_id: "supported-compound-actor-conditions".into(),
@@ -5088,6 +5107,21 @@ mod tests {
                 evidence_ids: vec!["mixed-modal".into()],
             },
             CitedClaim {
+                claim_id: "supported-negative-strong-modal".into(),
+                text: "Plan E must not accept reports.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-positive-strong-modal-polarity".into(),
+                text: "Plan B must not accept applications.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-negative-strong-modal-polarity".into(),
+                text: "Plan E must accept reports.".into(),
+                evidence_ids: vec!["mixed-modal".into()],
+            },
+            CitedClaim {
                 claim_id: "transferred-strong-modal-subject".into(),
                 text: "Plan A must accept applications.".into(),
                 evidence_ids: vec!["mixed-modal".into()],
@@ -5159,6 +5193,7 @@ mod tests {
             "supported-nested-compound-unit",
             "supported-ordinary-bound-predicate",
             "deferred-unrelated-same-value-conflict",
+            "supported-copular-equality-bound",
             "supported-immediate-family",
             "supported-mixed-family-scope",
             "supported-formatted-integer",
@@ -5208,6 +5243,7 @@ mod tests {
             "deferred-nonliteral-evaluation",
             "supported-modal",
             "supported-strong-modal-subject",
+            "supported-negative-strong-modal",
         ] {
             assert_eq!(verdict(claim_id), ClaimVerdict::Supported, "{claim_id}");
         }
@@ -5234,6 +5270,7 @@ mod tests {
             "changed-nested-compound-unit",
             "transferred-ordinary-bound-predicate",
             "changed-contextual-same-value",
+            "changed-copular-equality-bound",
             "broadened-enumeration",
             "broadened-immediate-family",
             "changed-formatted-decimal",
@@ -5253,6 +5290,7 @@ mod tests {
             "changed-unless-actor-condition",
             "changed-except-actor-condition",
             "changed-only-if-actor-condition",
+            "added-only-if-actor-condition",
             "transferred-compound-actor-condition",
             "changed-endpoint",
             "changed-inverted-source-endpoints",
@@ -5276,6 +5314,8 @@ mod tests {
             "transferred-transitive-evaluation",
             "strengthened-modal",
             "transferred-strong-modal-subject",
+            "changed-positive-strong-modal-polarity",
+            "changed-negative-strong-modal-polarity",
             "strengthened-contracted-modal",
             "strengthened-cannot-modal",
         ] {

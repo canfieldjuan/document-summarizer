@@ -2697,7 +2697,8 @@ complete
   `square`, `cubic`, or `per`, including a compound denominator, while
   excluding grammatical continuations, accept only logically entailed weak-bound
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
-  when cited text exposes the same context. A contradictory relation on the same
+  when cited text exposes the same context. Plain copular values are treated as
+  exact equality, allowing only logically entailed weaker bounds. A contradictory relation on the same
   numeric value is considered only when source and claim share that established
   context or the same complete normalized subject anchor; an unrelated
   same-valued constraint therefore cannot veto an otherwise
@@ -2735,13 +2736,15 @@ complete
   components. Explicit negation inverts inclusive word or symbol comparators,
   `under`/`over` forms, exact equality, and one-word `cannot`. Modal comparisons bind force and
   polarity to the same local subject and object context, including contracted
-  weak-modality negation and one-word `cannot`.
+  weak-modality negation and one-word `cannot`; an already-strong source must
+  match the strong claim's polarity in both directions.
   Leading conditions accept either a comma or `then`, and compound claims check
   every completed actor-condition relation; the declared exclusion connectors
   (`unless`, `except`, `excluding`, `absent`, and `without`) remain inside the
   parsed condition and contribute exclusionary polarity when a qualifier is
   compared. A restrictive `only if` remains bound to the same actor and
-  compensation condition, including when a claim omits `only`. Directional
+  compensation condition: neither adding nor removing `only` can pass as plain
+  `if`. Directional
   checks reject a known reversed endpoint even when the other endpoint is new
   and reject a route transferred to an actor named at the start of another cited
   clause, including when the claim uses an unlisted route predicate. A
@@ -2768,7 +2771,8 @@ complete
   grouping, a correctly qualified single actor, and a correctly bound leading
   condition, including a source-supported contracted negative condition. They
   also preserve a contracted inclusive numeric bound, entailed same-value and
-  cross-value weak-bound paraphrases with the same known unit, an active bound paraphrased
+  cross-value weak-bound paraphrases with the same known unit, a weak bound
+  entailed by a plain copular equality, an active bound paraphrased
   with its correct passive `by …` subject, a harmless auxiliary change on the
   same named plan, distinct plans with a shared name prefix, a leading decimal,
   a one-token numeric subject across an auxiliary change,
@@ -2789,7 +2793,8 @@ complete
   comparative `relative to`, additive, subject-bound, shared-subject,
   shared-copula, transitive, compound, coordinated, qualified-subject, explicit
   and lexical negative evaluations including `unimportant`, a nonliteral
-  safety paraphrase left to model verification, and qualified modality.
+  safety paraphrase left to model verification, and qualified modality including
+  a negative strong source retained with the same polarity.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
   changed from dollars to percent, percent or a prefix dollar value changed to
@@ -2799,13 +2804,14 @@ complete
   threshold, a removed negative sign,
   a same-value boundary reversal scoped to its matching complete subject while
   a same-value constraint for a different subject sharing only its first word is
-  ignored,
+  ignored, a strict boundary not entailed by a plain equality,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
   distinct rules in one item or compound sentence, and a single actor borrowing
   another actor's qualifier, including a leading condition), an active or
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
-  affirmative, an `unless`, `except`, or `only if` condition weakened to `if`, a contracted or `cannot`
+  affirmative, an `unless`, `except`, or `only if` condition weakened to `if`,
+  plain `if` strengthened to `only if`, a contracted or `cannot`
   weak modal strengthened to a strong modal, a `cannot be more than` numeric
   constraint reversed to affirmative `more than`,
   explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
@@ -2821,8 +2827,9 @@ complete
   moved between named procedures including shared-copula, transitive and
   coordinated wording or from a qualified evaluation subject to its shorter
   subphrase, lexical negative evaluations including `unimportant` reversed to positive, removed
-  evaluation negation, `should`-to-`must` strengthening, and strong modality
-  transferred between named plans. Separate probes
+  evaluation negation, `should`-to-`must` strengthening, strong modality
+  transferred between named plans, and either polarity reversal of an existing
+  strong modal. Separate probes
   reject partial verdict coverage, mismatched identities and unknown evidence,
   and preserve an already-ambiguous verdict.
 - An end-to-end fixture makes the model return `supported` for a mechanically
