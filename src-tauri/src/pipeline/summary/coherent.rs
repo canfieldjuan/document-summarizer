@@ -441,14 +441,7 @@ fn framing_clauses(text: &str) -> impl Iterator<Item = Vec<String>> + '_ {
                 .split(|word| {
                     matches!(
                         word.as_str(),
-                        "and"
-                            | "but"
-                            | "while"
-                            | "whereas"
-                            | "however"
-                            | "although"
-                            | "though"
-                            | "yet"
+                        "but" | "while" | "whereas" | "however" | "although" | "though" | "yet"
                     )
                 })
                 .filter(|clause| !clause.is_empty())
@@ -473,6 +466,20 @@ fn framing_content_words(text: &str) -> HashSet<String> {
                         | "must"
                         | "shall"
                         | "should"
+                        | "are"
+                        | "been"
+                        | "being"
+                        | "can"
+                        | "could"
+                        | "did"
+                        | "does"
+                        | "had"
+                        | "has"
+                        | "have"
+                        | "was"
+                        | "were"
+                        | "will"
+                        | "would"
                         | "that"
                         | "this"
                         | "those"
@@ -500,10 +507,6 @@ fn framing_content_words(text: &str) -> HashSet<String> {
                         | "state"
                         | "states"
                         | "stated"
-                        | "employee"
-                        | "employees"
-                        | "worker"
-                        | "workers"
                 )
                 && ![
                     SourceFraming::Problem,
@@ -523,10 +526,16 @@ fn source_framing_preserved_by_claim(exact_quote: &str, claim: &str) -> bool {
         return true;
     };
     let body_words = framing_content_words(body);
-    !body_words.is_empty()
+    let required_overlap = body_words.len().min(2);
+    required_overlap > 0
         && framing_clauses(claim).any(|clause| {
             framing.has_affirmative_marker(&clause)
-                && clause.iter().any(|word| body_words.contains(word))
+                && clause
+                    .iter()
+                    .filter(|word| body_words.contains(*word))
+                    .collect::<HashSet<_>>()
+                    .len()
+                    >= required_overlap
         })
 }
 
@@ -4554,6 +4563,10 @@ mod tests {
                 "Common Problems\n\nPiece-rate pay may fall below the minimum wage.",
                 "Piece-rate pay that does not meet the minimum wage is a problem.",
             ),
+            (
+                "Key Risks\n\nEmployees and employers are affected.",
+                "This risk means employees and employers are affected.",
+            ),
         ] {
             assert!(source_framing_preserved_by_claim(source, preserved));
         }
@@ -4609,6 +4622,10 @@ mod tests {
         assert!(!source_framing_preserved_by_claim(
             &problem.exact_quote,
             "Employees are paid a piece rate. Schedule changes are a problem.",
+        ));
+        assert!(!source_framing_preserved_by_claim(
+            "Common Problems\n\nThe payroll policy permits deductions.",
+            "The payroll policy permits deductions. The leave policy is a problem.",
         ));
         let neutral_claim = CitedClaim {
             claim_id: "neutral-claim".into(),

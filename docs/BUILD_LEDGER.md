@@ -3305,8 +3305,9 @@ release acceptance exposed issue #49
   quote still begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multiline, overlong and unrelated headings. Framing checks reject prefix-only,
-  negated, category-free and proposition-mismatched wording while accepting
-  direct synonyms such as `exempt`. Tests also prove neutral and framed General
+  negated, category-free and proposition-mismatched wording by requiring two
+  meaningful body terms when available, while accepting direct synonyms and
+  coordinated actors such as `employees and employers`. Tests also prove neutral and framed General
   verdicts, mixed evidence, Story/Contract isolation, lossy drafting-claim
   suppression and exact version-pair retry behavior. The full Rust library suite
   passed 438 tests with 12 intentional ignores.
