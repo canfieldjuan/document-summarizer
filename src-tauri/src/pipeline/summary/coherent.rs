@@ -216,7 +216,7 @@ fn framing_from_heading(heading: &str) -> Option<SourceFraming> {
     if heading.is_empty() || heading.contains('\n') || heading.chars().count() > 80 {
         return None;
     }
-    let heading = numbered_heading_title(heading).unwrap_or(heading);
+    let heading = marked_heading_title(heading).unwrap_or(heading);
     let words = heading
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -247,16 +247,35 @@ fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
         .flatten()
 }
 
-fn numbered_heading_title(heading: &str) -> Option<&str> {
+fn marked_heading_title(heading: &str) -> Option<&str> {
     let separator = heading.find(char::is_whitespace)?;
-    let marker = heading[..separator].trim_end_matches(['.', ')', ':']);
+    let raw_marker = &heading[..separator];
+    let stripped_marker = raw_marker
+        .strip_suffix('.')
+        .or_else(|| raw_marker.strip_suffix(')'))
+        .or_else(|| raw_marker.strip_suffix(':'));
+    let (marker, has_marker_punctuation) = stripped_marker
+        .map(|marker| (marker, true))
+        .unwrap_or((raw_marker, false));
     let title = heading[separator..].trim();
-    (!title.is_empty()
-        && marker.split('.').all(|part| {
-            part.parse::<u32>()
-                .is_ok_and(|component| (1..=999).contains(&component))
-        }))
-    .then_some(title)
+    if marker.is_empty() || marker.ends_with(['.', ')', ':']) {
+        return None;
+    }
+    let decimal = marker.split('.').all(|part| {
+        part.parse::<u32>()
+            .is_ok_and(|component| (1..=999).contains(&component))
+    });
+    let alphabetic = has_marker_punctuation
+        && marker.chars().count() == 1
+        && marker
+            .chars()
+            .all(|character| character.is_ascii_uppercase());
+    let roman = has_marker_punctuation
+        && (2..=8).contains(&marker.chars().count())
+        && marker
+            .chars()
+            .all(|character| matches!(character, 'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'));
+    (!title.is_empty() && (decimal || alphabetic || roman)).then_some(title)
 }
 
 fn possible_framing_boundary(text: &str) -> bool {
@@ -264,8 +283,8 @@ fn possible_framing_boundary(text: &str) -> bool {
     if heading.is_empty() || heading.contains('\n') || heading.chars().count() > 80 {
         return false;
     }
-    let numbered_title = numbered_heading_title(heading);
-    let title = numbered_title
+    let marked_title = marked_heading_title(heading);
+    let title = marked_title
         .unwrap_or(heading)
         .trim_end_matches(['.', '?', '!', ';', ':']);
     let words = title
@@ -324,11 +343,7 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "why"
     );
     starts_uppercase
-        && (all_uppercase
-            || title_case
-            || sentence_case_lead
-            || numbered_title.is_some()
-            || heading.ends_with(':'))
+        && (all_uppercase || title_case || sentence_case_lead || heading.ends_with(':'))
 }
 
 fn source_framing_after_paragraph(
@@ -358,9 +373,17 @@ fn source_framing_at_block_starts(
 ) -> HashMap<String, Option<SourceFraming>> {
     let mut framing = None;
     let mut starts = HashMap::new();
-    for block in normalized.pages.iter().flat_map(|page| &page.content) {
-        starts.insert(block.block_id.clone(), framing);
-        framing = source_framing_after_block(&block.text, framing);
+    for page in &normalized.pages {
+        if page.requires_visual_processing || page.content.is_empty() {
+            framing = None;
+        }
+        for block in &page.content {
+            starts.insert(block.block_id.clone(), framing);
+            framing = source_framing_after_block(&block.text, framing);
+        }
+        if page.requires_visual_processing {
+            framing = None;
+        }
     }
     starts
 }
@@ -4412,6 +4435,8 @@ mod tests {
         for (heading, expected) in [
             ("Common Problems", SourceFraming::Problem),
             ("2. Common Problems.", SourceFraming::Problem),
+            ("IV. Risks", SourceFraming::Risk),
+            ("A. Exceptions", SourceFraming::Exception),
             ("Key Risks", SourceFraming::Risk),
             ("Safety Warning", SourceFraming::Warning),
             ("Important Exceptions", SourceFraming::Exception),
@@ -4425,6 +4450,7 @@ mod tests {
         for unclassified in [
             "Common Problems",
             "0. Common Problems\n\nBody text.",
+            "1.. Common Problems\n\nBody text.",
             "2026 Common Problems\n\nBody text.",
             "No Known Issues\n\nNo defects were found.",
             "Avoiding Common Problems\n\nUse the documented solution.",
@@ -4451,6 +4477,8 @@ mod tests {
         assert!(possible_framing_boundary("How to avoid common problems"));
         for body in [
             "2",
+            "1. Workers may fall from ladders.",
+            "A. Workers may fall from ladders.",
             "Employees paid by piece rate",
             "employees below minimum wage",
             "This is a complete sentence.",
@@ -4496,6 +4524,56 @@ mod tests {
             source_framing_for_segment(mixed_segment, "Common Problems\n\nProblem detail.", None,),
             Some(SourceFraming::Problem)
         );
+        let numbered_list = "Key Risks\n\n1. Workers may fall from ladders.";
+        assert_eq!(
+            source_framing_for_segment(numbered_list, numbered_list, None),
+            Some(SourceFraming::Risk)
+        );
+    }
+
+    #[test]
+    fn source_framing_stops_at_unavailable_pages() {
+        let source_span = |page_number| SourceSpan {
+            page_start: page_number,
+            page_end: page_number,
+            section_id: None,
+            source_type: SourceType::NativeText,
+        };
+        let text_page =
+            |page_number, block_id: &str, text: &str, requires_visual_processing| NormalizedPage {
+                page_number,
+                content: vec![NormalizedBlock {
+                    block_id: block_id.into(),
+                    kind: NormalizedBlockKind::Text,
+                    text: text.into(),
+                    source: source_span(page_number),
+                }],
+                warnings: Vec::new(),
+                requires_visual_processing,
+            };
+        let normalized = NormalizedDocument {
+            document_id: "document-1".into(),
+            normalization_version: "test-normalization".into(),
+            pages: vec![
+                text_page(1, "framed", "Common Problems\n\nProblem detail.", false),
+                text_page(2, "continuation", "Continuation detail.", false),
+                NormalizedPage {
+                    page_number: 3,
+                    content: Vec::new(),
+                    warnings: Vec::new(),
+                    requires_visual_processing: true,
+                },
+                text_page(4, "after-empty", "Key Risks\n\nRisk detail.", false),
+                text_page(5, "visual", "Key Risks\n\nVisible risk detail.", true),
+                text_page(6, "after-visual", "Later detail.", false),
+            ],
+            warnings: Vec::new(),
+        };
+        let starts = source_framing_at_block_starts(&normalized);
+        assert_eq!(starts["continuation"], Some(SourceFraming::Problem));
+        assert_eq!(starts["after-empty"], None);
+        assert_eq!(starts["visual"], None);
+        assert_eq!(starts["after-visual"], None);
     }
 
     #[test]

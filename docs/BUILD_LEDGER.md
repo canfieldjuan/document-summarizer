@@ -3285,9 +3285,12 @@ release acceptance exposed issue #49
   label only from a bounded heading ending in problem, risk, warning, exception
   or limitation. Bounded source segments inherit the
   nearest reliable section heading in canonical document order, including later
-  segments and continuation pages that no longer contain it. A subsequent
-  bounded heading-shaped paragraph, including a numbered, punctuated or
-  sentence-case heading with an explicit heading signal, resets the label; a
+  segments and fully available continuation pages that no longer contain it.
+  Empty or visual-processing pages reset inherited state before and after the
+  page because their complete governing text is unavailable. A subsequent
+  bounded heading-shaped paragraph, including
+  a decimal, Roman or letter-marked heading or a sentence-case heading with an
+  explicit heading signal, resets the label; numbering alone does not. A
   recognized framing heading replaces it. A bounded source segment
   that crosses either transition remains unframed because one relationship does
   not govern all of its text. General
@@ -3309,23 +3312,24 @@ release acceptance exposed issue #49
   a page-21 paragraph beginning `Employees paid a piece rate may fall below the
   minimum wage` while its cited exact quote began `Common Problems`.
 - The final implementation's run used `qwen3-30b-a3b:latest` at 100% GPU and
-  passed in 104.37 seconds. Its delivered page-21 paragraph begins `The document
+  passed in 103.07 seconds. Its delivered page-21 paragraph begins `The document
   presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multiline, overlong, negated, solution-oriented and unrelated headings. Tests
   also prove application-owned framing of neutral General units, propagation to
   later segments and page blocks of a split section, reset at a later
-  sentence-case or punctuated numbered solution section, retention across a
-  short capitalized body fragment, fail-closed mixed verification context, Story
-  isolation, and rejection of a short source segment spanning both problem and
-  solution sections,
+  sentence-case or punctuated marked solution section, retention across short
+  capitalized and numbered-list body paragraphs, reset across empty and
+  visual-processing pages, decimal/Roman/letter framing headings, fail-closed
+  mixed verification context, Story isolation, and rejection of a short source
+  segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry
   behavior. A focused live GPU probe accepted a final framed claim whose exact
   segment omitted the heading and rejected framing applied to an invented
-  resolution. The full Rust library suite passed 439 tests with 13 intentional
+  resolution. The full Rust library suite passed 440 tests with 13 intentional
   ignores.
-- `cargo test --all-targets` passed those 439 library tests, 3 office tests and
+- `cargo test --all-targets` passed those 440 library tests, 3 office tests and
   all 3 release-contract tests; 13 opt-in library tests and 3 opt-in office
   tests remained ignored. Strict all-target/all-feature Clippy, Rust formatting,
   the TypeScript/Vite production build and `git diff --check` passed.
