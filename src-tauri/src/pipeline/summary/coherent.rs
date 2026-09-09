@@ -216,6 +216,7 @@ fn framing_from_heading(heading: &str) -> Option<SourceFraming> {
     if heading.is_empty() || heading.contains('\n') || heading.chars().count() > 80 {
         return None;
     }
+    let heading = numbered_heading_title(heading).unwrap_or(heading);
     let words = heading
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -246,29 +247,88 @@ fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
         .flatten()
 }
 
+fn numbered_heading_title(heading: &str) -> Option<&str> {
+    let separator = heading.find(char::is_whitespace)?;
+    let marker = heading[..separator].trim_end_matches(['.', ')', ':']);
+    let title = heading[separator..].trim();
+    (!title.is_empty()
+        && marker.split('.').all(|part| {
+            part.parse::<u32>()
+                .is_ok_and(|component| (1..=999).contains(&component))
+        }))
+    .then_some(title)
+}
+
 fn possible_framing_boundary(text: &str) -> bool {
     let heading = text.trim();
-    if heading.is_empty()
-        || heading.contains('\n')
-        || heading.chars().count() > 80
-        || heading.ends_with(['.', '?', '!', ';'])
-    {
+    if heading.is_empty() || heading.contains('\n') || heading.chars().count() > 80 {
         return false;
     }
-    let words = heading
+    let numbered_title = numbered_heading_title(heading);
+    let title = numbered_title
+        .unwrap_or(heading)
+        .trim_end_matches(['.', '?', '!', ';', ':']);
+    let words = title
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>();
-    if words.is_empty() || words.len() > 8 {
+    if words.is_empty()
+        || words.len() > 8
+        || !title.chars().any(|character| character.is_alphabetic())
+    {
         return false;
     }
-    // Resetting is intentionally broader than creating a framing label: an
-    // uncertain boundary drops inherited context instead of applying it to a
-    // later section that may have a different purpose.
-    heading
+    let starts_uppercase = title
         .chars()
         .find(|character| character.is_alphabetic())
-        .is_some_and(|character| character.is_uppercase())
+        .is_some_and(|character| character.is_uppercase());
+    let all_uppercase = title
+        .chars()
+        .filter(|character| character.is_alphabetic())
+        .all(|character| character.is_uppercase());
+    let title_case = words.iter().enumerate().all(|(index, word)| {
+        let connector = matches!(
+            word.to_ascii_lowercase().as_str(),
+            "a" | "an" | "and" | "for" | "in" | "of" | "on" | "or" | "the" | "to" | "with"
+        );
+        index > 0 && connector
+            || word
+                .chars()
+                .find(|character| character.is_alphabetic())
+                .is_some_and(|character| character.is_uppercase())
+    });
+    let sentence_case_lead = matches!(
+        words[0].to_ascii_lowercase().as_str(),
+        "about"
+            | "appendix"
+            | "background"
+            | "conclusion"
+            | "conclusions"
+            | "definitions"
+            | "how"
+            | "introduction"
+            | "next"
+            | "overview"
+            | "recommendation"
+            | "recommendations"
+            | "references"
+            | "resources"
+            | "scope"
+            | "solution"
+            | "solutions"
+            | "summary"
+            | "what"
+            | "when"
+            | "where"
+            | "who"
+            | "why"
+    );
+    starts_uppercase
+        && (all_uppercase
+            || title_case
+            || sentence_case_lead
+            || numbered_title.is_some()
+            || heading.ends_with(':'))
 }
 
 fn source_framing_after_paragraph(
@@ -4351,6 +4411,7 @@ mod tests {
     fn source_framing_classification_is_conservative() {
         for (heading, expected) in [
             ("Common Problems", SourceFraming::Problem),
+            ("2. Common Problems.", SourceFraming::Problem),
             ("Key Risks", SourceFraming::Risk),
             ("Safety Warning", SourceFraming::Warning),
             ("Important Exceptions", SourceFraming::Exception),
@@ -4363,6 +4424,8 @@ mod tests {
         }
         for unclassified in [
             "Common Problems",
+            "0. Common Problems\n\nBody text.",
+            "2026 Common Problems\n\nBody text.",
             "No Known Issues\n\nNo defects were found.",
             "Avoiding Common Problems\n\nUse the documented solution.",
             "Solutions to Common Problems\n\nUse the documented solution.",
@@ -4379,13 +4442,16 @@ mod tests {
             "Solutions",
             "Scope and Services",
             "2. Remedies",
+            "2. Solutions.",
             "KNOWN ISSUES",
+            "How to avoid common problems?",
         ] {
             assert!(possible_framing_boundary(heading));
         }
         assert!(possible_framing_boundary("How to avoid common problems"));
         for body in [
             "2",
+            "Employees paid by piece rate",
             "employees below minimum wage",
             "This is a complete sentence.",
             "A heading with far too many separate words to fit the supported boundary",
@@ -4393,13 +4459,17 @@ mod tests {
             assert!(!possible_framing_boundary(body));
         }
 
-        let sectioned = "Common Problems\n\nFirst problem. Later problem.\n\nHow to avoid common problems\n\nEnsure workers receive minimum wage\n\nNo Known Issues\n\nNo defects were found.\n\nKey Risks\n\nRisk detail.";
+        let sectioned = "Common Problems\n\nFirst problem. Later problem.\n\nEmployees paid by piece rate\n\nmay fall below minimum wage.\n\n2. Solutions.\n\nEnsure workers receive minimum wage\n\nNo Known Issues\n\nNo defects were found.\n\nKey Risks\n\nRisk detail.";
         assert_eq!(
             source_framing_for_segment(sectioned, "Later problem.", None),
             Some(SourceFraming::Problem)
         );
+        assert_eq!(
+            source_framing_for_segment(sectioned, "may fall below minimum wage.", None),
+            Some(SourceFraming::Problem)
+        );
         for unframed in [
-            "How to avoid common problems\n\nEnsure workers receive minimum wage",
+            "2. Solutions.\n\nEnsure workers receive minimum wage",
             "Ensure workers receive minimum wage",
             "No defects were found.",
         ] {
