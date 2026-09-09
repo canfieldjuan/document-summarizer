@@ -4268,7 +4268,7 @@ mod tests {
         let mut contextual_bound = catalog().candidates[1].evidence.clone();
         contextual_bound.evidence_id = "contextual-bound".into();
         contextual_bound.exact_quote =
-            "Capacity Sigma is capped at 400 units. Capacity Tau is more than 500 units.".into();
+            "Total annual capacity Sigma is capped at 400 units. Total annual capacity Tau is more than 500 units.".into();
         let mut suffix_currency = catalog().candidates[0].evidence.clone();
         suffix_currency.evidence_id = "suffix-currency".into();
         suffix_currency.exact_quote = "The fee is at most 5€.".into();
@@ -4310,7 +4310,7 @@ mod tests {
         let mut lexical_evaluations = catalog().candidates[0].evidence.clone();
         lexical_evaluations.evidence_id = "lexical-evaluations".into();
         lexical_evaluations.exact_quote =
-            "Procedure L is ineffective. Procedure M is unsafe. Procedure N is unhealthy.".into();
+            "Procedure L is ineffective. Procedure M is unsafe. Procedure N is unhealthy. Procedure O is unimportant.".into();
         let mut negative_evaluation = catalog().candidates[1].evidence.clone();
         negative_evaluation.evidence_id = "negative-evaluation".into();
         negative_evaluation.exact_quote = "Procedure C is not essential.".into();
@@ -4621,12 +4621,12 @@ mod tests {
             },
             CitedClaim {
                 claim_id: "deferred-unrelated-same-value-conflict".into(),
-                text: "Capacity Sigma is at most 500 units.".into(),
+                text: "Total annual capacity Sigma is at most 500 units.".into(),
                 evidence_ids: vec!["contextual-bound".into()],
             },
             CitedClaim {
                 claim_id: "changed-contextual-same-value".into(),
-                text: "Capacity Tau is at most 500 units.".into(),
+                text: "Total annual capacity Tau is at most 500 units.".into(),
                 evidence_ids: vec!["contextual-bound".into()],
             },
             CitedClaim {
@@ -4908,6 +4908,11 @@ mod tests {
                 evidence_ids: vec!["actor-transport".into()],
             },
             CitedClaim {
+                claim_id: "transferred-unlisted-cited-nonroute-actor".into(),
+                text: "Plan C moves workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
                 claim_id: "deferred-unknown-route-actor".into(),
                 text: "Plan D transports workers from station to field.".into(),
                 evidence_ids: vec!["actor-transport".into()],
@@ -5005,6 +5010,16 @@ mod tests {
             CitedClaim {
                 claim_id: "changed-lexical-unhealthy".into(),
                 text: "Procedure N is healthy.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-lexical-unimportant".into(),
+                text: "Procedure O is not important.".into(),
+                evidence_ids: vec!["lexical-evaluations".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-lexical-unimportant".into(),
+                text: "Procedure O is important.".into(),
                 evidence_ids: vec!["lexical-evaluations".into()],
             },
             CitedClaim {
@@ -5182,6 +5197,7 @@ mod tests {
             "supported-lexical-ineffective",
             "supported-lexical-unsafe",
             "supported-lexical-unhealthy",
+            "supported-lexical-unimportant",
             "supported-negative-evaluation",
             "supported-compound-evaluation",
             "supported-after-negative-sentence",
@@ -5245,6 +5261,7 @@ mod tests {
             "transferred-paraphrased-actor-endpoints",
             "transferred-unlisted-route-predicate",
             "transferred-cited-nonroute-actor",
+            "transferred-unlisted-cited-nonroute-actor",
             "transferred-passive-route-agent",
             "transferred-coordinated-route-actor",
             "transferred-evaluation",
@@ -5253,6 +5270,7 @@ mod tests {
             "changed-lexical-ineffective",
             "changed-lexical-unsafe",
             "changed-lexical-unhealthy",
+            "changed-lexical-unimportant",
             "changed-evaluation-polarity",
             "transferred-shared-copula-evaluation",
             "transferred-transitive-evaluation",

@@ -735,6 +735,7 @@ fn numeric_contexts_match(source: &NumericReference, claim: &NumericReference) -
                 | "have"
                 | "had"
                 | "can"
+                | "cannot"
                 | "could"
                 | "may"
                 | "might"
@@ -814,7 +815,11 @@ fn normalized_numeric_context_word(word: &str) -> Option<String> {
 }
 
 fn numeric_context_subject_anchor(context: &[String]) -> Option<Vec<String>> {
-    let context = strip_leading_article(context);
+    let local_start = context
+        .iter()
+        .rposition(|word| matches!(word.as_str(), "when" | "if" | "unless" | "provided"))
+        .map_or(0, |connector| connector + 1);
+    let context = strip_leading_article(&context[local_start..]);
     let predicate = context.iter().position(|word| {
         matches!(
             word.as_str(),
@@ -827,6 +832,9 @@ fn numeric_context_subject_anchor(context: &[String]) -> Option<Vec<String>> {
                 | "has"
                 | "have"
                 | "had"
+                | "do"
+                | "does"
+                | "did"
                 | "can"
                 | "could"
                 | "may"
@@ -839,6 +847,9 @@ fn numeric_context_subject_anchor(context: &[String]) -> Option<Vec<String>> {
                 | "require"
                 | "requires"
                 | "required"
+                | "use"
+                | "uses"
+                | "used"
                 | "remain"
                 | "remains"
                 | "remained"
@@ -870,24 +881,10 @@ fn numeric_context_subject_anchor(context: &[String]) -> Option<Vec<String>> {
     (!anchor.is_empty()).then_some(anchor)
 }
 
-fn numeric_context_anchors_match(source: &[String], claim: &[String]) -> bool {
-    let same_subject_anchor = numeric_context_subject_anchor(source)
+fn numeric_context_subjects_match(source: &[String], claim: &[String]) -> bool {
+    numeric_context_subject_anchor(source)
         .zip(numeric_context_subject_anchor(claim))
-        .is_some_and(|(source_anchor, claim_anchor)| source_anchor == claim_anchor);
-    let source = source
-        .iter()
-        .filter_map(|word| normalized_numeric_context_word(word))
-        .collect::<Vec<_>>();
-    let claim = claim
-        .iter()
-        .filter_map(|word| normalized_numeric_context_word(word))
-        .collect::<Vec<_>>();
-    same_subject_anchor
-        || (source.len() >= 2
-            && claim.len() >= 2
-            && source
-                .windows(2)
-                .any(|source_pair| claim.windows(2).any(|claim_pair| source_pair == claim_pair)))
+        .is_some_and(|(source_anchor, claim_anchor)| source_anchor == claim_anchor)
 }
 
 fn constraint_reference(constraint: &NumericConstraint) -> NumericReference {
@@ -1026,7 +1023,7 @@ fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
                         && constraint.context.is_empty()
                         && constraint.trailing_subject.is_empty())
                         || numeric_contexts_match(&constraint_reference(source), &claim_reference)
-                        || numeric_context_anchors_match(&source.context, &constraint.context))
+                        || numeric_context_subjects_match(&source.context, &constraint.context))
             })
             .collect::<Vec<_>>();
         let same_value_entails = contextual_same_value.iter().any(|source| {
@@ -1359,16 +1356,36 @@ fn directional_actor_is_cited(actor: &[String], evidence: &[&EvidenceItem]) -> b
 fn effective_directional_actor(
     relation: &DirectionalRelation,
     source_relations: &[DirectionalRelation],
+    evidence: &[&EvidenceItem],
 ) -> Vec<String> {
     if !relation.actor.is_empty() {
         return relation.actor.clone();
     }
-    source_relations
+    let source_actor = source_relations
         .iter()
         .filter(|source| !source.actor.is_empty())
         .flat_map(|source| directional_actor_components(&source.actor))
         .find(|actor| relation.prefix.starts_with(actor))
         .map(<[String]>::to_vec)
+        .unwrap_or_default();
+    if !source_actor.is_empty() {
+        return source_actor;
+    }
+    let prefix = strip_leading_article(&relation.prefix);
+    evidence
+        .iter()
+        .flat_map(|item| semantic_clauses(&item.exact_quote))
+        .map(words)
+        .map(|tokens| strip_leading_article(&tokens).to_vec())
+        .filter_map(|tokens| {
+            let shared = prefix
+                .iter()
+                .zip(&tokens)
+                .take_while(|(left, right)| left == right)
+                .count();
+            (shared >= 2).then(|| tokens[..shared].to_vec())
+        })
+        .max_by_key(Vec::len)
         .unwrap_or_default()
 }
 
@@ -1388,7 +1405,8 @@ fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
             .iter()
             .any(|source| endpoint_pairs_match(source, &relation))
         {
-            let relation_actor = effective_directional_actor(&relation, &source_relations);
+            let relation_actor =
+                effective_directional_actor(&relation, &source_relations, evidence);
             if relation_actor.is_empty() {
                 return true;
             }
@@ -1766,7 +1784,7 @@ struct EvaluationRelation {
 const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
     &["essential", "critical", "vital", "necessary"],
     &["ensure", "ensures", "ensuring", "guarantee", "guarantees"],
-    &["important", "importance"],
+    &["important", "importance", "unimportant"],
     &[
         "effective",
         "effectiveness",
@@ -1780,7 +1798,7 @@ const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
 fn is_lexically_negated_evaluation(word: &str) -> bool {
     matches!(
         word,
-        "ineffective" | "ineffectiveness" | "unsafe" | "unhealthy"
+        "unimportant" | "ineffective" | "ineffectiveness" | "unsafe" | "unhealthy"
     )
 }
 

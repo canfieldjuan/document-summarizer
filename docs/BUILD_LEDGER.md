@@ -2699,8 +2699,8 @@ complete
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
   when cited text exposes the same context. A contradictory relation on the same
   numeric value is considered only when source and claim share that established
-  context, the same complete normalized subject anchor, or a normalized content
-  bigram; an unrelated same-valued constraint therefore cannot veto an otherwise
+  context or the same complete normalized subject anchor; an unrelated
+  same-valued constraint therefore cannot veto an otherwise
   supported claim. Restrictive `immediate family`
   wording must remain explicit in a family-member claim when every cited family
   occurrence is restricted, while singular and plural `member` forms are
@@ -2720,8 +2720,10 @@ complete
   negation polarity. Shared negation normalization covers expanded and contracted
   auxiliary forms, and numeric comparator context ignores optional articles.
   Exact numeric subject anchors recognize ordinary and contracted linking verbs,
-  explicit requirement predicates and symbolic comparator tokens; a shared first
-  word is not sufficient for distinct multi-token subjects.
+  explicit requirement and local-use predicates, negative modal forms and
+  symbolic comparator tokens. Conditions bind to the local subject after their
+  connector; shared words outside or inside distinct multi-token subjects are
+  not sufficient.
   Relation parsing stays within sentence or clause boundaries so a negation or
   endpoint in one sentence cannot affect the next. Leading decimals normalize
   to their zero-prefixed value. Numeric subject comparison accepts a shared
@@ -2742,7 +2744,8 @@ complete
   compensation condition, including when a claim omits `only`. Directional
   checks reject a known reversed endpoint even when the other endpoint is new
   and reject a route transferred to an actor named at the start of another cited
-  clause; an actor absent from cited clause starts remains for model judgment,
+  clause, including when the claim uses an unlisted route predicate. A
+  mechanically unknown actor absent from cited clause starts remains for model judgment,
   shared-copula evaluations inherit their prior concrete subject, transitive
   `ensure`/`guarantee` evaluations bind directly to their subject, and a
   coordinated evaluation whose full subject phrase is not cited is retained
@@ -2750,8 +2753,9 @@ complete
   evaluation and polarity. A literal evaluation otherwise requires the exact
   cited subject or an explicit conjunctive subject component; it cannot move
   from a qualified subject such as a procedure's review to the shorter procedure
-  name. The lexical negatives `ineffective`, `unsafe`, and `unhealthy` carry
-  negative polarity when compared with their positive evaluation concepts.
+  name. The lexical negatives `unimportant`, `ineffective`, `unsafe`, and
+  `unhealthy` carry negative polarity when compared with their positive
+  evaluation concepts.
 - Verification artifacts now use version `8.0.0`. The previous coherent
   `7.0.0` contract remains readable, while new results cannot be mistaken for
   artifacts produced without the deterministic veto. Synthesis, summary,
@@ -2784,7 +2788,7 @@ complete
   family claim when cited evidence contains both restricted and unrestricted scopes,
   comparative `relative to`, additive, subject-bound, shared-subject,
   shared-copula, transitive, compound, coordinated, qualified-subject, explicit
-  and lexical negative evaluations, a nonliteral
+  and lexical negative evaluations including `unimportant`, a nonliteral
   safety paraphrase left to model verification, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
@@ -2810,13 +2814,13 @@ complete
   either source-route syntax even with one newly worded endpoint, a route moved
   from one mechanically known actor to another even when the route predicate is
   paraphrased with an unlisted verb or when the target actor is named only in a
-  cited non-route clause, a passive route assigned to the wrong explicit agent,
+  cited non-route clause, including both conditions together, a passive route assigned to the wrong explicit agent,
   or a coordinated route assigned to a cited non-owner,
   removal of the restrictive
   `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula, transitive and
   coordinated wording or from a qualified evaluation subject to its shorter
-  subphrase, lexical negative evaluations reversed to positive, removed
+  subphrase, lexical negative evaluations including `unimportant` reversed to positive, removed
   evaluation negation, `should`-to-`must` strengthening, and strong modality
   transferred between named plans. Separate probes
   reject partial verdict coverage, mismatched identities and unknown evidence,
