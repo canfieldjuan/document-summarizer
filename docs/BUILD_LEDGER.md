@@ -2692,7 +2692,9 @@ complete
   signs, normalize bounded English cardinal wording, compare exact normalized
   decimal thresholds, bind ordinary following unit tokens and explicit
   temperature-scale qualifiers when both source and claim expose them, retain
-  `%` as the canonical `percent` unit, while
+  `%` as the canonical `percent` unit, attach common prefix currency symbols to
+  their following number, and retain structurally marked compound units using
+  `square`, `cubic`, or `per`, while
   excluding grammatical continuations, accept only logically entailed weak-bound
   paraphrases, and bind an explicit constraint to its nearby subject/predicate
   when cited text exposes the same context. Restrictive `immediate family`
@@ -2716,7 +2718,7 @@ complete
   not hide a named-plan transfer and entities with shared name prefixes remain
   distinct; the same predicate check admits a mechanically known one-token
   subject. Explicit negation inverts inclusive word or symbol comparators,
-  `under`/`over` forms, and exact equality. Modal comparisons bind force and
+  `under`/`over` forms, exact equality, and one-word `cannot`. Modal comparisons bind force and
   polarity to the same local subject and object context, including contracted
   weak-modality negation and one-word `cannot`.
   Leading conditions accept either a comma or `then`, and compound claims check
@@ -2753,8 +2755,9 @@ complete
   synonymous transport endpoints including `home`, inverted source-route syntax,
   a route retained on its source actor across carry and unlisted-predicate paraphrases,
   a route claim for a mechanically unknown actor left to model verification,
-  an unchanged Celsius qualifier, a generic unchanged mass unit, a symbolic
-  percent source retained as `percent`, explicit
+  an unchanged Celsius qualifier, a generic unchanged mass unit, a square-unit
+  spelling variant, a symbolic percent source retained as `percent`, a prefix
+  dollar source paraphrased as `dollars`, explicit
   `immediate family` scope across singular/plural wording, and an unqualified
   family claim when cited evidence contains both restricted and unrestricted scopes,
   comparative `relative to`, additive, subject-bound, shared-subject,
@@ -2762,8 +2765,9 @@ complete
   safety paraphrase left to model verification, and qualified modality.
   Opposite probes reject an exclusive
   `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
-  changed from dollars to percent, percent to dollars, Celsius to Fahrenheit,
-  or kilograms to pounds,
+  changed from dollars to percent, percent or a prefix dollar value changed to
+  the other unit, Celsius to Fahrenheit, kilograms to pounds, or square meters
+  to square feet,
   a stronger numeric
   threshold, a removed negative sign,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
@@ -2772,7 +2776,8 @@ complete
   passive bound moved between named plans, the same transfer hidden by an
   optional comparator article, contracted numeric or actor negation reversed to
   affirmative, an `unless` or `except` condition reversed to `if`, a contracted or `cannot`
-  weak modal strengthened to a strong modal,
+  weak modal strengthened to a strong modal, a `cannot be more than` numeric
+  constraint reversed to affirmative `more than`,
   explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
   bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
   prefix, comma-less and compound actor-condition transfers, endpoint reversal from

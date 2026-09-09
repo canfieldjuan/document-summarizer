@@ -209,7 +209,22 @@ fn numeric_mentions(tokens: &[String]) -> Vec<NumericMention> {
     let mut mentions = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
-        if let Some(value) = numeric_value(&tokens[index]) {
+        if currency_token_unit(&tokens[index]).is_some() {
+            if let Some(value) = tokens.get(index + 1).and_then(|word| numeric_value(word)) {
+                mentions.push(NumericMention {
+                    value,
+                    start: index,
+                    end: index + 2,
+                });
+                index += 2;
+            } else if let Some(mut mention) = spelled_numeric_value(tokens, index + 1) {
+                mention.start = index;
+                index = mention.end;
+                mentions.push(mention);
+            } else {
+                index += 1;
+            }
+        } else if let Some(value) = numeric_value(&tokens[index]) {
             mentions.push(NumericMention {
                 value,
                 start: index,
@@ -230,7 +245,7 @@ fn negation_present(tokens: &[String]) -> bool {
     tokens.iter().enumerate().any(|(index, word)| {
         let additive_not =
             word == "not" && tokens.get(index + 1).is_some_and(|next| next == "only");
-        (!additive_not && matches!(word.as_str(), "not" | "no" | "never" | "without"))
+        (!additive_not && matches!(word.as_str(), "not" | "no" | "never" | "without" | "cannot"))
             || (matches!(
                 word.as_str(),
                 "isn"
@@ -380,6 +395,28 @@ fn semantic_clauses(text: &str) -> impl Iterator<Item = &str> {
         .filter(|clause| !clause.is_empty())
 }
 
+fn currency_symbol_token(character: char) -> Option<&'static str> {
+    Some(match character {
+        '$' => "__currency_dollar",
+        '€' => "__currency_euro",
+        '£' => "__currency_pound_sterling",
+        '¥' => "__currency_yen",
+        '₹' => "__currency_rupee",
+        _ => return None,
+    })
+}
+
+fn currency_token_unit(token: &str) -> Option<&'static str> {
+    Some(match token {
+        "__currency_dollar" => "dollar",
+        "__currency_euro" => "euro",
+        "__currency_pound_sterling" => "pound sterling",
+        "__currency_yen" => "yen",
+        "__currency_rupee" => "rupee",
+        _ => return None,
+    })
+}
+
 fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
     let characters = text.chars().collect::<Vec<_>>();
     let mut clauses = Vec::new();
@@ -427,6 +464,10 @@ fn comparison_clauses(text: &str) -> Vec<Vec<String>> {
             continue;
         }
         flush_token(&mut token, &mut clause);
+        if let Some(currency) = currency_symbol_token(character) {
+            clause.push(currency.into());
+            continue;
+        }
         if character == '%' {
             clause.push("percent".into());
             continue;
@@ -486,18 +527,33 @@ fn numeric_trailing_subject(tokens: &[String], end: usize) -> Vec<String> {
         .collect()
 }
 
-fn numeric_unit(tokens: &[String], end: usize) -> Option<String> {
-    let mut index = end;
-    if tokens.get(index).is_some_and(|word| word == "or")
-        && tokens
-            .get(index + 1)
-            .is_some_and(|word| matches!(word.as_str(), "fewer" | "less" | "more" | "greater"))
-    {
-        index += 2;
+fn numeric_unit_word(word: &str) -> String {
+    match word {
+        "dollar" | "dollars" | "usd" => "dollar",
+        "euro" | "euros" | "eur" => "euro",
+        "percent" | "percentage" | "percentages" => "percent",
+        "application" | "applications" => "application",
+        "report" | "reports" => "report",
+        "degree" | "degrees" => "degree",
+        "unit" | "units" => "unit",
+        "year" | "years" => "year",
+        "day" | "days" => "day",
+        "case" | "cases" => "case",
+        "worker" | "workers" => "worker",
+        "kilogram" | "kilograms" | "kg" | "kgs" => "kilogram",
+        "pound" | "pounds" | "lb" | "lbs" => "pound",
+        "foot" | "feet" | "ft" => "foot",
+        "meter" | "meters" | "metre" | "metres" | "m" => "meter",
+        "yen" | "jpy" => "yen",
+        "rupee" | "rupees" | "inr" => "rupee",
+        _ => word.strip_suffix('s').unwrap_or(word),
     }
-    let raw_unit = tokens.get(index)?.as_str();
-    if matches!(
-        raw_unit,
+    .to_string()
+}
+
+fn numeric_unit_stop(word: &str) -> bool {
+    matches!(
+        word,
         "a" | "an"
             | "the"
             | "and"
@@ -544,33 +600,54 @@ fn numeric_unit(tokens: &[String], end: usize) -> Option<String> {
             | "should"
             | "will"
             | "would"
-    ) {
+    )
+}
+
+fn numeric_unit(tokens: &[String], start: usize, end: usize) -> Option<String> {
+    if let Some(unit) = tokens.get(start).and_then(|word| currency_token_unit(word)) {
+        return Some(unit.to_string());
+    }
+    let mut index = end;
+    if tokens.get(index).is_some_and(|word| word == "or")
+        && tokens
+            .get(index + 1)
+            .is_some_and(|word| matches!(word.as_str(), "fewer" | "less" | "more" | "greater"))
+    {
+        index += 2;
+    }
+    let raw_unit = tokens.get(index)?.as_str();
+    if numeric_unit_stop(raw_unit) {
         return None;
     }
-    let unit = match raw_unit {
-        "dollar" | "dollars" => "dollar",
-        "percent" | "percentage" | "percentages" => "percent",
-        "application" | "applications" => "application",
-        "report" | "reports" => "report",
-        "degree" | "degrees" => "degree",
-        "unit" | "units" => "unit",
-        "year" | "years" => "year",
-        "day" | "days" => "day",
-        "case" | "cases" => "case",
-        "worker" | "workers" => "worker",
-        "kilogram" | "kilograms" | "kg" | "kgs" => "kilogram",
-        "pound" | "pounds" | "lb" | "lbs" => "pound",
-        _ => raw_unit.strip_suffix('s').unwrap_or(raw_unit),
+    let mut unit = numeric_unit_word(raw_unit);
+    index += 1;
+    if matches!(raw_unit, "square" | "cubic") {
+        let component = tokens.get(index).filter(|word| !numeric_unit_stop(word))?;
+        unit.push(' ');
+        unit.push_str(&numeric_unit_word(component));
+        index += 1;
+    } else if unit == "degree"
+        && tokens.get(index).is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "celsius" | "centigrade" | "fahrenheit" | "kelvin"
+            )
+        })
+    {
+        unit.push(' ');
+        unit.push_str(&numeric_unit_word(&tokens[index]));
+        index += 1;
     }
-    .to_string();
-    let qualifier = (unit == "degree")
-        .then(|| tokens.get(index + 1).map(String::as_str))
-        .flatten()
-        .filter(|word| matches!(*word, "celsius" | "centigrade" | "fahrenheit" | "kelvin"));
-    Some(match qualifier {
-        Some(qualifier) => format!("{unit} {qualifier}"),
-        None => unit,
-    })
+    if tokens.get(index).is_some_and(|word| word == "per") {
+        if let Some(component) = tokens
+            .get(index + 1)
+            .filter(|word| !numeric_unit_stop(word))
+        {
+            unit.push_str(" per ");
+            unit.push_str(&numeric_unit_word(component));
+        }
+    }
+    Some(unit)
 }
 
 fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
@@ -584,7 +661,7 @@ fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
                         NumericConstraint {
                             value: mention.value,
                             relation,
-                            unit: numeric_unit(&tokens, mention.end),
+                            unit: numeric_unit(&tokens, mention.start, mention.end),
                             context: numeric_context(&tokens, mention.start),
                             trailing_subject: numeric_trailing_subject(&tokens, mention.end),
                         }
