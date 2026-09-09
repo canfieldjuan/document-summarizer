@@ -3061,6 +3061,15 @@ fn source_catalog(
     normalized: &NormalizedDocument,
     analyzed: Option<&AnalyzedDocument>,
 ) -> Result<SourceCatalog, PipelineFailure> {
+    source_catalog_for_synthesis_version(VERSION, chunked, normalized, analyzed)
+}
+
+fn source_catalog_for_synthesis_version(
+    synthesis_version: &str,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+    analyzed: Option<&AnalyzedDocument>,
+) -> Result<SourceCatalog, PipelineFailure> {
     let blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
     let mut candidates = Vec::new();
     let mut omitted_source_units = 0usize;
@@ -3116,7 +3125,7 @@ fn source_catalog(
                 "summary-evidence",
                 &[
                     &chunked.document_id,
-                    VERSION,
+                    synthesis_version,
                     &chunk.chunk_id,
                     &source.block_id,
                     &source.page_number.to_string(),
@@ -3189,7 +3198,12 @@ pub(super) fn validate_for_runtime(
             false,
         ));
     }
-    let catalog = source_catalog(chunked, normalized, Some(analyzed))?;
+    let catalog = source_catalog_for_synthesis_version(
+        &synthesized.synthesis_version,
+        chunked,
+        normalized,
+        Some(analyzed),
+    )?;
     let expected_fallback = if incomplete_catalog_requires_fallback(profile, &catalog) {
         Some(FallbackReason::IncompleteCatalog)
     } else {
@@ -3305,7 +3319,12 @@ pub(super) fn validate_content(
             false,
         ));
     }
-    let catalog = source_catalog(chunked, normalized, Some(analyzed))?;
+    let catalog = source_catalog_for_synthesis_version(
+        &synthesized.synthesis_version,
+        chunked,
+        normalized,
+        Some(analyzed),
+    )?;
     match synthesized.presentation_mode {
         SummaryPresentationMode::Coherent => {
             if synthesized.summary_claims.is_empty()

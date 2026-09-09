@@ -10161,6 +10161,71 @@ mod tests {
         let mut citations = get_citation_artifact(&conn, &run_id).unwrap().unwrap();
         assert_eq!(verified.verification_version, VERIFICATION_VERSION);
 
+        let mut mixed_version_synthesis = synthesized.clone();
+        mixed_version_synthesis.synthesis_version = PRE_DISCLOSURE_SYNTHESIS_VERSION.into();
+        assert_eq!(
+            validate_synthesized_document_without_runtime(
+                &mixed_version_synthesis,
+                &analyzed,
+                &chunked,
+                &normalized,
+            )
+            .expect_err("v6 identity must reject v7 evidence IDs")
+            .code,
+            "INVALID_SYNTHESIZED_DOCUMENT"
+        );
+
+        let previous_evidence_ids = synthesized
+            .synthesis_evidence
+            .iter()
+            .map(|evidence| {
+                (
+                    evidence.evidence_id.clone(),
+                    deterministic_id(
+                        "summary-evidence",
+                        &[
+                            &synthesized.document_id,
+                            PRE_DISCLOSURE_SYNTHESIS_VERSION,
+                            &evidence.chunk_id,
+                            &evidence.block_id,
+                            &evidence.source_span.page_start.to_string(),
+                            &evidence.exact_quote,
+                        ],
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert!(previous_evidence_ids
+            .iter()
+            .all(|(current, previous)| current != previous));
+        let replace_evidence_ids = |ids: &mut Vec<String>| {
+            for evidence_id in ids {
+                if let Some(previous_id) = previous_evidence_ids.get(evidence_id) {
+                    *evidence_id = previous_id.clone();
+                }
+            }
+        };
+        for evidence in &mut synthesized.synthesis_evidence {
+            evidence.evidence_id = previous_evidence_ids[&evidence.evidence_id].clone();
+        }
+        for evidence in &mut verified.synthesis_evidence {
+            evidence.evidence_id = previous_evidence_ids[&evidence.evidence_id].clone();
+        }
+        for evidence in &mut citations.evidence {
+            if let Some(previous_id) = previous_evidence_ids.get(&evidence.evidence_id) {
+                evidence.evidence_id = previous_id.clone();
+            }
+        }
+        for claim in &mut synthesized.summary_claims {
+            replace_evidence_ids(&mut claim.evidence_ids);
+        }
+        for claim in &mut verified.summary_claims {
+            replace_evidence_ids(&mut claim.evidence_ids);
+        }
+        for verification in &mut verified.summary_claim_verifications {
+            replace_evidence_ids(&mut verification.evidence_ids);
+        }
+
         for (index, claim) in synthesized.summary_claims.iter_mut().enumerate() {
             let current_id = claim.claim_id.clone();
             let previous_id = deterministic_claim_id(

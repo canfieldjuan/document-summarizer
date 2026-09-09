@@ -3183,7 +3183,10 @@ complete
   legacy mechanical verification continuation remains supported. A two-sided
   fallback regression proves that pre-disclosure Synthesized and Verified
   fallback checkpoints both complete with the fallback warning and without the
-  bounded-selection warning.
+  bounded-selection warning. The completed coherent compatibility fixture
+  reconstructs real version-6 synthesis-evidence and prose-claim identities,
+  proves that pair remains readable, and rejects a version-6 artifact carrying
+  version-7 evidence identities.
 - `cargo test --all-targets` passed 435 library tests with 12 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy and the TypeScript/Vite production
