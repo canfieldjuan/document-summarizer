@@ -850,7 +850,9 @@ fn generate_summary_with_validation_repair(
             clipped_fallback =
                 parse_response_without_clipped_units(profile, &response.text, document_id, catalog)
                     .ok()
-                    .and_then(retain_individually_modal_safe_claims);
+                    .and_then(|fallback| {
+                        retain_individually_modal_safe_claims(fallback, document_id)
+                    });
             if clipped_fallback.is_some() {
                 let feedback = vec![format!(
                     "One or more text fields reached the {MAX_UNIT_CHARACTERS}-character decoder limit before the sentence ended. Keep every complete unit and its source_ids unchanged; shorten each incomplete unit to a complete short paragraph ending in terminal punctuation"
@@ -1070,6 +1072,7 @@ fn generated_from_clipped_fallback(
 
 fn retain_individually_modal_safe_claims(
     fallback: SafeSiblingFallback,
+    document_id: &str,
 ) -> Option<SafeSiblingFallback> {
     let SafeSiblingFallback {
         claims,
@@ -1083,11 +1086,15 @@ fn retain_individually_modal_safe_claims(
         let feedback =
             modal_strengthening_feedback(std::slice::from_ref(&claim), &evidence).ok()?;
         if feedback.is_empty() {
-            retained_claims.push(claim);
+            retained_claims.push(ValidatedClaim {
+                text: claim.text,
+                evidence_ids: claim.evidence_ids,
+            });
         } else {
             required_repaired_sibling_evidence_ids.extend(claim.evidence_ids);
         }
     }
+    let retained_claims = materialize_cited_claims(document_id, VERSION, retained_claims).ok()?;
     let referenced = retained_claims
         .iter()
         .flat_map(|claim| claim.evidence_ids.iter().map(String::as_str))
@@ -2684,6 +2691,7 @@ mod tests {
         RewriteSibling,
         RepairModalAndOmitSafeSibling,
         RepairModalSharingClippedEvidenceAndOmitClip,
+        LeadingModalThenSafe,
         RepairMixedWindowAndOmitSafeSibling,
         MixedWindowBeforeClipAndOmitSafeSibling,
         NestedWindowRepairOmitsSafeSibling,
@@ -2903,6 +2911,14 @@ mod tests {
                     {"text":"The mixed source is complete.","source_ids":["s2","s3"]}
                 ])
             } else if !is_repair
+                && matches!(self.behavior, ClippedRepairBehavior::LeadingModalThenSafe)
+            {
+                json!([
+                    {"text":"The operator must inspect the record.","source_ids":["s4"]},
+                    {"text":"The first source remains supported.","source_ids":["s1"]},
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s5","s6"]}
+                ])
+            } else if !is_repair
                 && matches!(
                     self.behavior,
                     ClippedRepairBehavior::RepairModalSharingClippedEvidenceAndOmitClip
@@ -2982,6 +2998,10 @@ mod tests {
                     ClippedRepairBehavior::RepairModalSharingClippedEvidenceAndOmitClip => json!([
                         {"text":"The first source remains supported.","source_ids":["s1"]},
                         {"text":"The operator should inspect the record.","source_ids":["s4"]}
+                    ]),
+                    ClippedRepairBehavior::LeadingModalThenSafe => json!([
+                        {"text":"The first source remains supported.","source_ids":["s1"]},
+                        {"text":"The clipped sources are summarized completely.","source_ids":["s5","s6"]}
                     ]),
                     ClippedRepairBehavior::RepairMixedWindowAndOmitSafeSibling
                     | ClippedRepairBehavior::MixedWindowBeforeClipAndOmitSafeSibling => json!([
@@ -4734,6 +4754,35 @@ mod tests {
         .expect_err("an all-clipped response has no deliverable size fallback");
         assert_eq!(failure.code, "SYNTHESIS_REPAIR_INPUT_TOO_LARGE");
         assert_eq!(all_clipped.requests().len(), 1);
+
+        let leading_modal =
+            ClippedUnitRepairRuntime::new(ClippedRepairBehavior::LeadingModalThenSafe);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &leading_modal,
+            "document-1",
+            &catalog,
+            prompt.clone(),
+            schema.clone(),
+            initial_request_characters,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("filtering a leading modal sibling must leave a valid safe fallback identity");
+        assert_eq!(generated.claims.len(), 1);
+        assert_eq!(
+            generated.claims[0].text,
+            "The first source remains supported."
+        );
+        validate_claims_with_evidence(
+            &generated.claims,
+            &generated.evidence,
+            "document-1",
+            VERSION,
+        )
+        .expect("the filtered fallback claim ID must match its new ordinal");
+        assert_eq!(leading_modal.requests().len(), 1);
 
         let leading = ClippedUnitRepairRuntime::new(ClippedRepairBehavior::CorrectWithLeadingClip);
         let generated = generate_summary_with_validation_repair(
