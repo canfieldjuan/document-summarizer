@@ -3161,10 +3161,12 @@ complete
   path. Full-context coherent summaries and verified claim-ledger fallbacks do
   not receive it.
 - Coherent synthesis, verification and final-summary versions advance with this
-  output contract. A pre-disclosure `Synthesized` or `Verified` checkpoint now
-  fails recoverably before final artifacts are written so retry regenerates it;
-  already completed pre-disclosure coherent summaries remain readable through
-  their exact historical version pairing.
+  output contract. A pre-disclosure coherent `Synthesized` or `Verified`
+  checkpoint now fails recoverably before final artifacts are written so retry
+  regenerates it; already completed pre-disclosure coherent summaries remain
+  readable through their exact historical version pairing. Pre-disclosure
+  claim-ledger fallback checkpoints remain continuable because they already
+  disclose their source-context limitation and never used bounded selection.
 
 **Acceptance evidence**:
 - Deterministic low-context end-to-end tests for General, Story and Contract
@@ -3178,8 +3180,11 @@ complete
   checkpoint versions and proves that each becomes a recoverable failed run
   without summary or citation artifacts. Paired historical-validation coverage
   proves that completed pre-disclosure coherent output still validates, and the
-  legacy mechanical verification continuation remains supported.
-- `cargo test --all-targets` passed 434 library tests with 12 intentional
+  legacy mechanical verification continuation remains supported. A two-sided
+  fallback regression proves that pre-disclosure Synthesized and Verified
+  fallback checkpoints both complete with the fallback warning and without the
+  bounded-selection warning.
+- `cargo test --all-targets` passed 435 library tests with 12 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy and the TypeScript/Vite production
   build passed.

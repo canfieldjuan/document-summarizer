@@ -160,7 +160,7 @@ fn coherent_checkpoint_requires_retry(
     synthesized: &SynthesizedDocument,
     verification_version: Option<&str>,
 ) -> bool {
-    synthesized.presentation_mode != SummaryPresentationMode::LegacyClaimList
+    synthesized.presentation_mode == SummaryPresentationMode::Coherent
         && (synthesized.synthesis_version == PRE_DISCLOSURE_SYNTHESIS_VERSION
             || verification_version.is_some_and(|version| {
                 matches!(
@@ -1239,6 +1239,11 @@ fn verify(
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
         SYNTHESIS_VERSION => VERIFICATION_VERSION,
+        PRE_DISCLOSURE_SYNTHESIS_VERSION
+            if synthesized.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback =>
+        {
+            PRE_DISCLOSURE_VERIFICATION_VERSION
+        }
         DIRECT_SYNTHESIS_VERSION if select_key_points => DIRECT_KEY_POINTS_VERIFICATION_VERSION,
         DIRECT_SYNTHESIS_VERSION => DIRECT_VERIFICATION_VERSION,
         _ => HIERARCHICAL_VERIFICATION_VERSION,
