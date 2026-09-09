@@ -2142,8 +2142,7 @@ fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
 fn source_framing_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     evidence
         .iter()
-        .filter_map(|item| required_source_framing(&item.exact_quote))
-        .all(|framing| framing.preserved_by(claim))
+        .all(|item| source_framing_preserved_by_claim(&item.exact_quote, claim))
 }
 
 fn semantic_fidelity_supported(

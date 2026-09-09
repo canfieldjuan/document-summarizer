@@ -3287,8 +3287,9 @@ release acceptance exposed issue #49
   authoritative exact quote; Story, Contract and source-selection prompts do not.
 - An extracted drafting claim is omitted when it loses a detected framing label.
   After model verification, the existing deterministic semantic guard withholds
-  General wording that still lacks the required framing. Exact source evidence,
-  source order, citation rendering and persisted schemas remain unchanged.
+  General wording unless an affirmatively framed clause also overlaps the framed
+  quote body. Exact source evidence, source order, citation rendering and
+  persisted schemas remain unchanged.
 - Synthesis, verification and final-summary versions advance for the changed
   output contract. Completed version-7 summaries remain readable; in-progress
   coherent version-7 checkpoints retry, while version-7 claim-ledger fallbacks
@@ -3304,7 +3305,8 @@ release acceptance exposed issue #49
   quote still begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multiline, overlong and unrelated headings. Framing checks reject prefix-only,
-  negated and category-free wording. Tests also prove neutral and framed General
+  negated, category-free and proposition-mismatched wording while accepting
+  direct synonyms such as `exempt`. Tests also prove neutral and framed General
   verdicts, mixed evidence, Story/Contract isolation, lossy drafting-claim
   suppression and exact version-pair retry behavior. The full Rust library suite
   passed 438 tests with 12 intentional ignores.

@@ -162,8 +162,8 @@ enum SourceFraming {
 }
 
 impl SourceFraming {
-    fn preserved_by(self, text: &str) -> bool {
-        let markers: &[&str] = match self {
+    fn markers(self) -> &'static [&'static str] {
+        match self {
             Self::Problem => &[
                 "problem",
                 "problems",
@@ -235,22 +235,196 @@ impl SourceFraming {
                 "constraints",
                 "constrained",
             ],
-        };
-        let words = framing_words(text).collect::<Vec<_>>();
+        }
+    }
+
+    fn has_affirmative_marker(self, words: &[String]) -> bool {
         words.iter().enumerate().any(|(index, word)| {
-            markers.contains(&word.as_str()) && framing_marker_is_affirmative(&words, index)
+            self.markers().contains(&word.as_str()) && framing_marker_is_affirmative(words, index)
         })
     }
 }
 
-fn framing_marker_is_affirmative(words: &[String], index: usize) -> bool {
-    let preceding = &words[index.saturating_sub(4)..index];
-    !preceding.iter().any(|word| {
+fn framing_marker_is_affirmative(words: &[String], marker_index: usize) -> bool {
+    if words
+        .get(marker_index + 1)
+        .is_some_and(|word| word == "free")
+    {
+        return false;
+    }
+    let framing_link = words[..marker_index].iter().rposition(|word| {
         matches!(
             word.as_str(),
-            "free" | "no" | "not" | "never" | "neither" | "without"
+            "call"
+                | "called"
+                | "calls"
+                | "characterize"
+                | "characterized"
+                | "characterizes"
+                | "classify"
+                | "classified"
+                | "classifies"
+                | "consider"
+                | "considered"
+                | "considers"
+                | "deem"
+                | "deemed"
+                | "deems"
+                | "describe"
+                | "described"
+                | "describes"
+                | "identify"
+                | "identified"
+                | "identifies"
+                | "label"
+                | "labeled"
+                | "labels"
+                | "present"
+                | "presented"
+                | "presents"
+                | "regard"
+                | "regarded"
+                | "regards"
+                | "treat"
+                | "treated"
+                | "treats"
+                | "view"
+                | "viewed"
+                | "views"
         )
-    }) && words.get(index + 1).is_none_or(|word| word != "free")
+    });
+    let relation_anchor = framing_link.unwrap_or(marker_index);
+    let scope_start = if let Some(link_index) = framing_link {
+        framing_link_auxiliary(words, link_index)
+    } else {
+        words[..marker_index]
+            .iter()
+            .rposition(|word| is_copular_auxiliary(word))
+            .or_else(|| {
+                words[..marker_index]
+                    .iter()
+                    .rposition(|word| is_do_or_modal_auxiliary(word))
+            })
+    };
+    if let Some(scope_start) = scope_start {
+        return !framing_negation_present(&words[scope_start..marker_index]);
+    }
+    !framing_relation_immediately_negated(words, relation_anchor)
+}
+
+fn framing_link_auxiliary(words: &[String], link_index: usize) -> Option<usize> {
+    let link = words.get(link_index)?.as_str();
+    let accepts_do_or_modal = matches!(
+        link,
+        "call"
+            | "characterize"
+            | "classify"
+            | "consider"
+            | "deem"
+            | "describe"
+            | "identify"
+            | "label"
+            | "present"
+            | "regard"
+            | "treat"
+            | "view"
+    );
+    let accepts_copular = matches!(
+        link,
+        "called"
+            | "characterized"
+            | "classified"
+            | "considered"
+            | "deemed"
+            | "described"
+            | "identified"
+            | "labeled"
+            | "presented"
+            | "regarded"
+            | "treated"
+            | "viewed"
+    );
+    words[..link_index].iter().rposition(|word| {
+        (accepts_do_or_modal && is_do_or_modal_auxiliary(word))
+            || (accepts_copular && is_copular_auxiliary(word))
+    })
+}
+
+fn is_copular_auxiliary(word: &str) -> bool {
+    matches!(
+        word,
+        "am" | "are" | "be" | "been" | "being" | "had" | "has" | "have" | "is" | "was" | "were"
+    )
+}
+
+fn is_do_or_modal_auxiliary(word: &str) -> bool {
+    matches!(
+        word,
+        "can"
+            | "cannot"
+            | "could"
+            | "did"
+            | "do"
+            | "does"
+            | "may"
+            | "might"
+            | "must"
+            | "shall"
+            | "should"
+            | "will"
+            | "would"
+    )
+}
+
+fn framing_relation_immediately_negated(words: &[String], relation_index: usize) -> bool {
+    let mut index = relation_index;
+    while index > 0 {
+        let preceding = &words[index - 1];
+        if preceding == "t" && index >= 2 {
+            return framing_negation_present(&words[index - 2..index]);
+        }
+        if preceding.ends_with("ly")
+            || matches!(
+                preceding.as_str(),
+                "a" | "an" | "as" | "be" | "been" | "being" | "of" | "the" | "to"
+            )
+        {
+            index -= 1;
+            continue;
+        }
+        return framing_negation_present(std::slice::from_ref(preceding));
+    }
+    false
+}
+
+fn framing_negation_present(words: &[String]) -> bool {
+    words.iter().enumerate().any(|(index, word)| {
+        let additive_not = word == "not" && words.get(index + 1).is_some_and(|next| next == "only");
+        (!additive_not
+            && matches!(
+                word.as_str(),
+                "free" | "no" | "not" | "never" | "neither" | "without" | "cannot"
+            ))
+            || (matches!(
+                word.as_str(),
+                "isn"
+                    | "aren"
+                    | "wasn"
+                    | "weren"
+                    | "don"
+                    | "doesn"
+                    | "didn"
+                    | "won"
+                    | "wouldn"
+                    | "shouldn"
+                    | "couldn"
+                    | "mustn"
+                    | "hasn"
+                    | "haven"
+                    | "hadn"
+                    | "can"
+            ) && words.get(index + 1).is_some_and(|next| next == "t"))
+    })
 }
 
 fn framing_words(text: &str) -> impl Iterator<Item = String> + '_ {
@@ -259,7 +433,104 @@ fn framing_words(text: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::to_lowercase)
 }
 
-fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
+fn framing_clauses(text: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+    text.split(['.', '?', '!', ';', '\n', '\r'])
+        .flat_map(|sentence| {
+            let words = framing_words(sentence).collect::<Vec<_>>();
+            words
+                .split(|word| {
+                    matches!(
+                        word.as_str(),
+                        "and"
+                            | "but"
+                            | "while"
+                            | "whereas"
+                            | "however"
+                            | "although"
+                            | "though"
+                            | "yet"
+                    )
+                })
+                .filter(|clause| !clause.is_empty())
+                .map(<[String]>::to_vec)
+                .collect::<Vec<_>>()
+        })
+}
+
+fn framing_content_words(text: &str) -> HashSet<String> {
+    framing_words(text)
+        .filter(|word| {
+            word.chars().count() >= 3
+                && !matches!(
+                    word.as_str(),
+                    "the"
+                        | "and"
+                        | "but"
+                        | "for"
+                        | "from"
+                        | "into"
+                        | "may"
+                        | "must"
+                        | "shall"
+                        | "should"
+                        | "that"
+                        | "this"
+                        | "those"
+                        | "these"
+                        | "with"
+                        | "without"
+                        | "document"
+                        | "source"
+                        | "describe"
+                        | "describes"
+                        | "described"
+                        | "identify"
+                        | "identifies"
+                        | "identified"
+                        | "include"
+                        | "includes"
+                        | "included"
+                        | "including"
+                        | "list"
+                        | "lists"
+                        | "listed"
+                        | "say"
+                        | "says"
+                        | "said"
+                        | "state"
+                        | "states"
+                        | "stated"
+                        | "employee"
+                        | "employees"
+                        | "worker"
+                        | "workers"
+                )
+                && ![
+                    SourceFraming::Problem,
+                    SourceFraming::Risk,
+                    SourceFraming::Warning,
+                    SourceFraming::Exception,
+                    SourceFraming::Limitation,
+                ]
+                .iter()
+                .any(|framing| framing.markers().contains(&word.as_str()))
+        })
+        .collect()
+}
+
+fn source_framing_preserved_by_claim(exact_quote: &str, claim: &str) -> bool {
+    let Some((framing, body)) = required_source_framing_and_body(exact_quote) else {
+        return true;
+    };
+    let body_words = framing_content_words(body);
+    !body_words.is_empty()
+        && framing_clauses(claim).any(|clause| {
+            framing.has_affirmative_marker(&clause)
+                && clause.iter().any(|word| body_words.contains(word))
+        })
+}
+
+fn required_source_framing_and_body(exact_quote: &str) -> Option<(SourceFraming, &str)> {
     let (heading, body) = exact_quote.trim_start().split_once("\n\n")?;
     let heading = heading.trim();
     if body.trim().is_empty()
@@ -273,19 +544,23 @@ fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
     if words.is_empty() || words.len() > 8 {
         return None;
     }
-    let last = words.last()?.as_str();
-    match last {
-        "problem" | "problems" | "issue" | "issues" => Some(SourceFraming::Problem),
-        "risk" | "risks" | "hazard" | "hazards" => Some(SourceFraming::Risk),
-        "warning" | "warnings" | "caution" | "cautions" => Some(SourceFraming::Warning),
-        "exception" | "exceptions" => Some(SourceFraming::Exception),
-        "limitation" | "limitations" => Some(SourceFraming::Limitation),
-        _ => None,
-    }
+    let framing = match words.last()?.as_str() {
+        "problem" | "problems" | "issue" | "issues" => SourceFraming::Problem,
+        "risk" | "risks" | "hazard" | "hazards" => SourceFraming::Risk,
+        "warning" | "warnings" | "caution" | "cautions" => SourceFraming::Warning,
+        "exception" | "exceptions" => SourceFraming::Exception,
+        "limitation" | "limitations" => SourceFraming::Limitation,
+        _ => return None,
+    };
+    Some((framing, body.trim()))
+}
+
+fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
+    required_source_framing_and_body(exact_quote).map(|(framing, _)| framing)
 }
 
 fn drafting_claim_preserves_source_framing(exact_quote: &str, claim: &str) -> bool {
-    required_source_framing(exact_quote).is_none_or(|framing| framing.preserved_by(claim))
+    source_framing_preserved_by_claim(exact_quote, claim)
 }
 
 #[derive(Debug, Serialize)]
@@ -4254,39 +4529,73 @@ mod tests {
         let overlong_heading = format!("{} Problems\n\nBody text.", "x".repeat(80));
         assert_eq!(required_source_framing(&overlong_heading), None);
 
-        for (framing, preserved) in [
-            (SourceFraming::Problem, "The document identifies an issue."),
-            (SourceFraming::Risk, "The document identifies a hazard."),
-            (SourceFraming::Warning, "The document warns readers."),
+        for (source, preserved) in [
             (
-                SourceFraming::Exception,
-                "The document states an exception.",
+                "Common Problems\n\nPayroll practices are listed.",
+                "The document identifies payroll practices as an issue.",
             ),
             (
-                SourceFraming::Limitation,
-                "The document states a limitation.",
+                "Key Risks\n\nCliff crossings are described.",
+                "The document identifies cliff crossings as a hazard.",
             ),
             (
-                SourceFraming::Exception,
+                "Safety Warning\n\nLadder use requires care.",
+                "The document warns readers about ladder use.",
+            ),
+            (
+                "Important Exceptions\n\nSeasonal workers receive different treatment.",
                 "Seasonal workers are exempt from this requirement.",
             ),
             (
-                SourceFraming::Limitation,
+                "Known Limitations\n\nThe policy covers specified uses.",
                 "The policy restricts covered uses.",
             ),
+            (
+                "Common Problems\n\nPiece-rate pay may fall below the minimum wage.",
+                "Piece-rate pay that does not meet the minimum wage is a problem.",
+            ),
         ] {
-            assert!(framing.preserved_by(preserved));
+            assert!(source_framing_preserved_by_claim(source, preserved));
         }
-        for (framing, bypass) in [
-            (SourceFraming::Problem, "The employer issued checks."),
-            (SourceFraming::Problem, "This is not a problem."),
-            (SourceFraming::Problem, "The practice is problem-free."),
-            (SourceFraming::Risk, "The arrangement is risk-free."),
-            (SourceFraming::Exception, "The agreement is exceptional."),
-            (SourceFraming::Exception, "Seasonal workers are not exempt."),
-            (SourceFraming::Limitation, "The remedy is limitless."),
+        for (source, bypass) in [
+            (
+                "Common Problems\n\nThe employer issued checks.",
+                "The employer issued checks.",
+            ),
+            (
+                "Common Problems\n\nThis practice is described.",
+                "This is not a problem.",
+            ),
+            (
+                "Common Problems\n\nThis practice is described.",
+                "The practice is problem-free.",
+            ),
+            (
+                "Key Risks\n\nThis arrangement is described.",
+                "The arrangement is risk-free.",
+            ),
+            (
+                "Important Exceptions\n\nThis agreement is described.",
+                "The agreement is exceptional.",
+            ),
+            (
+                "Important Exceptions\n\nSeasonal workers receive different treatment.",
+                "Seasonal workers are not exempt.",
+            ),
+            (
+                "Known Limitations\n\nThis remedy is described.",
+                "The remedy is limitless.",
+            ),
+            (
+                "Common Problems\n\nPiece-rate pay is described.",
+                "The document does not identify piece-rate pay as a problem.",
+            ),
+            (
+                "Common Problems\n\nPiece-rate pay is described.",
+                "The document does not, even after careful review, identify piece-rate pay as a problem.",
+            ),
         ] {
-            assert!(!framing.preserved_by(bypass));
+            assert!(!source_framing_preserved_by_claim(source, bypass));
         }
     }
 
@@ -4297,6 +4606,10 @@ mod tests {
             "Common Problems\n\nEmployees paid a piece rate may fall below the minimum wage."
                 .into();
         let ordinary = candidate("s2", "ordinary-evidence", 2).evidence;
+        assert!(!source_framing_preserved_by_claim(
+            &problem.exact_quote,
+            "Employees are paid a piece rate. Schedule changes are a problem.",
+        ));
         let neutral_claim = CitedClaim {
             claim_id: "neutral-claim".into(),
             text: "Employees paid a piece rate may fall below the minimum wage.".into(),
