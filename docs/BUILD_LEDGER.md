@@ -2689,10 +2689,13 @@ complete
   both claim and source expose the same literal concept; nonliteral evaluative
   paraphrases remain for the model verifier rather than being mechanically
   rejected. Numeric relations retain
-  signs, normalize bounded English cardinal wording, and bind an explicit
-  constraint to its nearby subject/predicate when cited text exposes the same
-  context. Directional parsing accepts both `from … to …` and `to … from …`
-  syntax. Evaluative relations retain negation while treating additive
+  signs, normalize bounded English cardinal wording, bind known units when
+  both source and claim expose them, accept only logically entailed weak-bound
+  paraphrases, and bind an explicit constraint to its nearby subject/predicate
+  when cited text exposes the same context. Restrictive `immediate family`
+  wording must remain explicit in a family-member claim. Directional parsing
+  accepts both `from … to …` and `to … from …` syntax and binds a route to its
+  mechanically known local actor context. Evaluative relations retain negation while treating additive
   `not only … but also` wording as affirmative. The kinship backstop recognizes
   clear noun uses such as `relative of` without treating comparative `relative
   to` as a family enumeration. Passive numeric wording binds a leading bound to
@@ -2723,17 +2726,20 @@ complete
   number formatting, `maximum of`/`minimum of` wording, source-supported actor
   grouping, a correctly qualified single actor, and a correctly bound leading
   condition, including a source-supported contracted negative condition. They
-  also preserve a contracted inclusive numeric bound, an active bound paraphrased
+  also preserve a contracted inclusive numeric bound, an entailed `less than`
+  to `at most` weakening with the same value and unit, an active bound paraphrased
   with its correct passive `by …` subject, a harmless auxiliary change on the
   same named plan, distinct plans with a shared name prefix, a leading decimal,
   comma- and `then`-delimited conditions, multiple correctly qualified actor
   relations in one claim,
   synonymous transport endpoints including `home`, inverted source-route syntax,
+  a route retained on its source actor, explicit `immediate family` scope,
   comparative `relative to`, additive, subject-bound, shared-subject,
   shared-copula, transitive, compound and negative evaluations, a nonliteral
   safety paraphrase left to model verification, and qualified modality.
   Opposite probes reject an exclusive
-  `fewer than 500` boundary, symbolic `>`/`<` opposites, a removed negative sign,
+  `fewer than 500` boundary, symbolic `>`/`<` opposites, a known numeric unit
+  changed from dollars to percent, a removed negative sign,
   a bound moved between named plans, broader kinship label, acronym and full-name actor transfer (including
   distinct rules in one item or compound sentence, and a single actor borrowing
   another actor's qualifier, including a leading condition), an active or
@@ -2742,7 +2748,9 @@ complete
   affirmative, explicitly negated inclusive, `under`, and exact comparators, a leading-decimal
   bound reversal, a named-plan transfer hidden by an auxiliary or a shared name
   prefix, comma-less and compound actor-condition transfers, endpoint reversal from
-  either source-route syntax even with one newly worded endpoint, an evaluation
+  either source-route syntax even with one newly worded endpoint, a route moved
+  from one mechanically known actor to another, removal of the restrictive
+  `immediate` family modifier, an evaluation
   moved between named procedures including shared-copula and transitive wording, removed
   evaluation negation, `should`-to-`must` strengthening, and strong modality
   transferred between named plans. Separate probes
@@ -2756,7 +2764,7 @@ complete
   the guard downgrades and omits that claim while rendering the remaining
   supported ledger claims. An ordinary fallback control still retains its
   supported source claims.
-- `cargo test --all-targets` passed 428 library tests with 10 intentional
+- `cargo test --all-targets` passed 429 library tests with 10 intentional
   ignores, 3 office tests with 3 opt-in ignores, and all 3 release-contract
   tests. Strict all-target/all-feature Clippy, Rust formatting, the
   TypeScript/Vite production build and `git diff --check` passed.

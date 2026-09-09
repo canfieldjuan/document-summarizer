@@ -4234,7 +4234,7 @@ mod tests {
     fn semantic_fidelity_guard_preserves_supported_paraphrases_and_rejects_scope_changes() {
         let mut first = catalog().candidates[0].evidence.clone();
         first.evidence_id = "flsa".into();
-        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
+        first.exact_quote = "Wage requirements do not apply when the employer did not use more than 500 man-days. A worker is either the spouse, parent, child, brother, or sister of the owner. A separate threshold is no more than 1,000. The ratio is at least 1.50. Temperatures must remain at least -5 degrees. Capacity has a maximum of 750 units. Eligibility has a minimum of 18 years. The floor is at least 600 units. Clearance remains under 700 units. The exact limit is exactly 650 units. The count is less than 450 cases. Plan A charges at most 5 dollars. The Plan A accepts at most 900 applications. The Plan B accepts 300 applications. Health Plan A accepts at most 900 reports. Health Plan B accepts 300 reports.".into();
         let mut flc = catalog().candidates[1].evidence.clone();
         flc.evidence_id = "flc".into();
         flc.exact_quote = "Farm labor contractors (FLCs) are subject to MSPA if they recruit a migrant worker for money or other valuable consideration.".into();
@@ -4263,6 +4263,9 @@ mod tests {
         inverted_transport.evidence_id = "inverted-transport".into();
         inverted_transport.exact_quote =
             "The employer must transport workers to the workplace from living quarters.".into();
+        let mut actor_transport = catalog().candidates[1].evidence.clone();
+        actor_transport.evidence_id = "actor-transport".into();
+        actor_transport.exact_quote = "Plan A transports workers from housing to workplace. Plan B transports workers from station to field.".into();
         let mut explicit_evaluation = catalog().candidates[0].evidence.clone();
         explicit_evaluation.evidence_id = "evaluation".into();
         explicit_evaluation.exact_quote =
@@ -4306,6 +4309,10 @@ mod tests {
         let mut nonliteral_evaluation = catalog().candidates[0].evidence.clone();
         nonliteral_evaluation.evidence_id = "nonliteral-evaluation".into();
         nonliteral_evaluation.exact_quote = "Helmets prevent worker injuries.".into();
+        let mut immediate_family = catalog().candidates[1].evidence.clone();
+        immediate_family.evidence_id = "immediate-family".into();
+        immediate_family.exact_quote =
+            "Eligibility is limited to an immediate family member of the owner.".into();
         let mut modal = catalog().candidates[0].evidence.clone();
         modal.evidence_id = "modal".into();
         modal.exact_quote = "The interpreter should retain the operating context.".into();
@@ -4324,6 +4331,7 @@ mod tests {
             leading_decimal,
             transport,
             inverted_transport,
+            actor_transport,
             explicit_evaluation,
             procedure_a,
             procedure_b,
@@ -4336,6 +4344,7 @@ mod tests {
             shared_copula,
             transitive_evaluation,
             nonliteral_evaluation,
+            immediate_family,
             modal,
             mixed_modal,
         ];
@@ -4436,9 +4445,34 @@ mod tests {
                 evidence_ids: vec!["flsa".into()],
             },
             CitedClaim {
+                claim_id: "supported-weakened-boundary".into(),
+                text: "The count is at most 450 cases.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-bound-unit".into(),
+                text: "Plan A charges at most 5 dollars.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "changed-bound-unit".into(),
+                text: "Plan A charges at most 5 percent.".into(),
+                evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
                 claim_id: "broadened-enumeration".into(),
                 text: "A family member of the owner qualifies for the exemption.".into(),
                 evidence_ids: vec!["flsa".into()],
+            },
+            CitedClaim {
+                claim_id: "supported-immediate-family".into(),
+                text: "An immediate family member of the owner is eligible.".into(),
+                evidence_ids: vec!["immediate-family".into()],
+            },
+            CitedClaim {
+                claim_id: "broadened-immediate-family".into(),
+                text: "A family member of the owner is eligible.".into(),
+                evidence_ids: vec!["immediate-family".into()],
             },
             CitedClaim {
                 claim_id: "supported-formatted-integer".into(),
@@ -4634,6 +4668,16 @@ mod tests {
                 evidence_ids: vec!["transport".into()],
             },
             CitedClaim {
+                claim_id: "supported-actor-endpoints".into(),
+                text: "Plan A transports workers from housing to the workplace.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
+                claim_id: "transferred-actor-endpoints".into(),
+                text: "Plan A transports workers from station to field.".into(),
+                evidence_ids: vec!["actor-transport".into()],
+            },
+            CitedClaim {
                 claim_id: "supported-evaluation".into(),
                 text: "The measures are critical for worker safety and health.".into(),
                 evidence_ids: vec!["evaluation".into()],
@@ -4766,6 +4810,9 @@ mod tests {
             "supported-inclusive-boundary",
             "supported-under-boundary",
             "supported-exact-boundary",
+            "supported-weakened-boundary",
+            "supported-bound-unit",
+            "supported-immediate-family",
             "supported-formatted-integer",
             "supported-formatted-decimal",
             "supported-negative-boundary",
@@ -4784,6 +4831,7 @@ mod tests {
             "supported-endpoints",
             "supported-inverted-source-endpoints",
             "supported-home-endpoint",
+            "supported-actor-endpoints",
             "supported-evaluation",
             "supported-bound-evaluation",
             "supported-shared-evaluation",
@@ -4810,7 +4858,9 @@ mod tests {
             "changed-negated-inclusive-boundary",
             "changed-negated-under-boundary",
             "changed-negated-exact-boundary",
+            "changed-bound-unit",
             "broadened-enumeration",
+            "broadened-immediate-family",
             "changed-formatted-decimal",
             "changed-negative-boundary",
             "transferred-bound-subject",
@@ -4829,6 +4879,7 @@ mod tests {
             "changed-endpoint",
             "changed-inverted-source-endpoints",
             "changed-one-known-endpoint",
+            "transferred-actor-endpoints",
             "transferred-evaluation",
             "changed-evaluation-polarity",
             "transferred-shared-copula-evaluation",

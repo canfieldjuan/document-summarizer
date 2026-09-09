@@ -16,6 +16,7 @@ enum NumericRelation {
 struct NumericConstraint {
     value: String,
     relation: NumericRelation,
+    unit: Option<String>,
     context: Vec<String>,
     trailing_subject: Vec<String>,
 }
@@ -481,6 +482,34 @@ fn numeric_trailing_subject(tokens: &[String], end: usize) -> Vec<String> {
         .collect()
 }
 
+fn numeric_unit(tokens: &[String], end: usize) -> Option<String> {
+    let mut index = end;
+    if tokens.get(index).is_some_and(|word| word == "or")
+        && tokens
+            .get(index + 1)
+            .is_some_and(|word| matches!(word.as_str(), "fewer" | "less" | "more" | "greater"))
+    {
+        index += 2;
+    }
+    let unit = tokens.get(index)?.as_str();
+    Some(
+        match unit {
+            "dollar" | "dollars" => "dollar",
+            "percent" | "percentage" | "percentages" => "percent",
+            "application" | "applications" => "application",
+            "report" | "reports" => "report",
+            "degree" | "degrees" => "degree",
+            "unit" | "units" => "unit",
+            "year" | "years" => "year",
+            "day" | "days" => "day",
+            "case" | "cases" => "case",
+            "worker" | "workers" => "worker",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
 fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
     comparison_clauses(text)
         .into_iter()
@@ -492,6 +521,7 @@ fn numeric_constraints(text: &str) -> Vec<NumericConstraint> {
                         NumericConstraint {
                             value: mention.value,
                             relation,
+                            unit: numeric_unit(&tokens, mention.end),
                             context: numeric_context(&tokens, mention.start),
                             trailing_subject: numeric_trailing_subject(&tokens, mention.end),
                         }
@@ -601,6 +631,23 @@ fn constraint_reference(constraint: &NumericConstraint) -> NumericReference {
     }
 }
 
+fn numeric_relation_supports(source: NumericRelation, claim: NumericRelation) -> bool {
+    source == claim
+        || matches!(
+            (source, claim),
+            (NumericRelation::LessThan, NumericRelation::AtMost)
+                | (NumericRelation::GreaterThan, NumericRelation::AtLeast)
+                | (
+                    NumericRelation::Equal,
+                    NumericRelation::AtMost | NumericRelation::AtLeast
+                )
+        )
+}
+
+fn numeric_units_match(source: &NumericConstraint, claim: &NumericConstraint) -> bool {
+    source.unit.is_none() || claim.unit.is_none() || source.unit == claim.unit
+}
+
 fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     let source_constraints = evidence
         .iter()
@@ -615,7 +662,9 @@ fn comparison_boundaries_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
         let matching_relation = source_constraints
             .iter()
             .filter(|source| {
-                source.value == constraint.value && source.relation == constraint.relation
+                source.value == constraint.value
+                    && numeric_relation_supports(source.relation, constraint.relation)
+                    && numeric_units_match(source, &constraint)
             })
             .collect::<Vec<_>>();
         if matching_relation
@@ -655,6 +704,17 @@ fn broader_enumeration_supported(claim: &str, evidence: &[&EvidenceItem]) -> boo
             return false;
         }
     }
+    let source_has_immediate_family = evidence.iter().any(|item| {
+        contains_words(&item.exact_quote, &["immediate", "family", "member"])
+            || contains_words(&item.exact_quote, &["immediate", "family", "members"])
+    });
+    let claim_has_family = contains_words(claim, &["family", "member"])
+        || contains_words(claim, &["family", "members"]);
+    let claim_preserves_immediate = contains_words(claim, &["immediate", "family", "member"])
+        || contains_words(claim, &["immediate", "family", "members"]);
+    if source_has_immediate_family && claim_has_family && !claim_preserves_immediate {
+        return false;
+    }
     let kinship_relative = |text: &str| {
         let tokens = words(text);
         tokens.iter().enumerate().any(|(index, word)| {
@@ -688,7 +748,18 @@ fn endpoint_word(word: &str) -> Option<String> {
     Some(word.to_string())
 }
 
-fn directional_relations_in_clause(clause: &str) -> Vec<(Vec<String>, Vec<String>)> {
+type DirectionalRelation = (Vec<String>, Vec<String>, Vec<String>);
+
+fn directional_context(tokens: &[String], anchor: usize) -> Vec<String> {
+    let context = &tokens[anchor.saturating_sub(8)..anchor];
+    context
+        .iter()
+        .filter(|word| !matches!(word.as_str(), "a" | "an" | "the"))
+        .cloned()
+        .collect()
+}
+
+fn directional_relations_in_clause(clause: &str) -> Vec<DirectionalRelation> {
     let tokens = words(clause);
     let mut relations = Vec::new();
     for (from, token) in tokens.iter().enumerate() {
@@ -716,7 +787,7 @@ fn directional_relations_in_clause(clause: &str) -> Vec<(Vec<String>, Vec<String
             .filter_map(|word| endpoint_word(word))
             .collect::<Vec<_>>();
         if !origin.is_empty() && !destination.is_empty() {
-            relations.push((origin, destination));
+            relations.push((origin, destination, directional_context(&tokens, from)));
         }
     }
     for (to, token) in tokens.iter().enumerate() {
@@ -744,7 +815,7 @@ fn directional_relations_in_clause(clause: &str) -> Vec<(Vec<String>, Vec<String
             .filter_map(|word| endpoint_word(word))
             .collect::<Vec<_>>();
         if !origin.is_empty() && !destination.is_empty() {
-            relations.push((origin, destination));
+            relations.push((origin, destination, directional_context(&tokens, to)));
         }
     }
     relations
@@ -787,11 +858,15 @@ fn endpoints_match(left: &[String], right: &[String]) -> bool {
     normalized_endpoint(left) == normalized_endpoint(right)
 }
 
-fn relations_match(left: &(Vec<String>, Vec<String>), right: &(Vec<String>, Vec<String>)) -> bool {
+fn endpoint_pairs_match(left: &DirectionalRelation, right: &DirectionalRelation) -> bool {
     endpoints_match(&left.0, &right.0) && endpoints_match(&left.1, &right.1)
 }
 
-fn directional_relations(text: &str) -> Vec<(Vec<String>, Vec<String>)> {
+fn relations_match(left: &DirectionalRelation, right: &DirectionalRelation) -> bool {
+    endpoint_pairs_match(left, right) && left.2 == right.2
+}
+
+fn directional_relations(text: &str) -> Vec<DirectionalRelation> {
     semantic_clauses(text)
         .flat_map(directional_relations_in_clause)
         .collect()
@@ -808,6 +883,12 @@ fn directional_endpoints_supported(claim: &str, evidence: &[&EvidenceItem]) -> b
             .any(|source| relations_match(source, &relation))
         {
             return true;
+        }
+        if source_relations
+            .iter()
+            .any(|source| endpoint_pairs_match(source, &relation))
+        {
+            return !source_relations.iter().any(|source| source.2 == relation.2);
         }
         let origin_is_source_origin = source_relations
             .iter()
