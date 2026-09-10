@@ -822,14 +822,28 @@ fn contrast_continuation_reintroduces_source_framing(
     if !matches!(active_framing, SourceFraming::Problem | SourceFraming::Risk) {
         return false;
     }
-    let words = contrast_body
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .take(17)
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
+    let mut words = Vec::new();
+    let mut clause_starts = Vec::new();
+    let mut clause_start = 0usize;
+    for segment in contrast_body.split_inclusive(|character: char| !character.is_alphanumeric()) {
+        let word = segment.trim_matches(|character: char| !character.is_alphanumeric());
+        if !word.is_empty() && words.len() < 17 {
+            clause_starts.push(clause_start);
+            words.push(word.to_ascii_lowercase());
+        }
+        if segment
+            .chars()
+            .any(|character| matches!(character, ',' | ';' | ':' | '.' | '?' | '!'))
+        {
+            clause_start = words.len();
+        }
+        if words.len() == 17 {
+            break;
+        }
+    }
     let predicate_is_affirmative = |predicate_start: usize| {
-        !words[..predicate_start].iter().any(|word| {
+        let clause_start = clause_starts.get(predicate_start).copied().unwrap_or(0);
+        !words[clause_start..predicate_start].iter().any(|word| {
             matches!(
                 word.as_str(),
                 "cannot" | "neither" | "never" | "no" | "none" | "not"
@@ -5684,6 +5698,10 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(!begins_with_section_denial(
+            "No risks were identified. However, if controls are not applied, fraud remains possible.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
             "No risks were identified. Risks subsequently emerged during testing.",
             SourceFraming::Risk,
         ));
@@ -5737,6 +5755,7 @@ mod tests {
             "No risks were identified. However, no fraud remains possible.",
             "No risks were identified. However, fraud does not remain possible.",
             "No risks were identified. However, fraud is not still possible.",
+            "No risks were identified. However, if controls are applied, no fraud remains possible.",
         ] {
             assert!(begins_with_section_denial(
                 negated_contrast,
@@ -6498,6 +6517,17 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
+        let conditional_post_denial_contrast = "Key Risks\nNo risks were identified. However, if controls are not applied, fraud remains possible.\nLater text.";
+        for framed in [
+            "However, if controls are not applied, fraud remains possible.",
+            "fraud remains possible.",
+            "Later text.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(conditional_post_denial_contrast, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
         let unrelated_post_denial_contrast = "Key Risks\nNo risks were identified. However, monitoring will continue.\nOverview follows.";
         for unframed in ["However, monitoring will continue.", "Overview follows."] {
             assert_eq!(
@@ -6515,6 +6545,17 @@ mod tests {
         for unframed in ["However, no fraud remains possible.", "Overview follows."] {
             assert_eq!(
                 source_framing_for_segment(negated_post_denial_contrast, unframed, None),
+                None
+            );
+        }
+        let conditional_negated_post_denial_contrast = "Key Risks\nNo risks were identified. However, if controls are applied, no fraud remains possible.\nOverview follows.";
+        for unframed in ["no fraud remains possible.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(
+                    conditional_negated_post_denial_contrast,
+                    unframed,
+                    None,
+                ),
                 None
             );
         }
