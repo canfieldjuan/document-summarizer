@@ -3316,6 +3316,8 @@ release acceptance exposed issue #49
   applicable` or `There are no known risks at this time` clears an active label.
   An implicit `None` denial or bounded `Not applicable` can clear any label; an
   explicit denial must name a noun in the active framing category.
+  Explicit denial noun phrases may use the same conservative framing modifiers
+  as headings; uncertainty modifiers remain outside the grammar.
   Direct `No`/`Neither` and existential denials must
   consist of a framing-noun phrase plus a bounded absence or reporting
   predicate; only the leading complete sentence is inspected so later prose on
@@ -3337,10 +3339,13 @@ release acceptance exposed issue #49
   labels cannot govern one generated unit. Exact source evidence, source order,
   citation rendering and persisted schemas remain unchanged. A model response
   that mixes framing in one unit receives one bounded repair instruction to
-  split only invalid units; a repeated violation fails closed. The General
-  unit ceiling is at least the number of distinct selection-window and framing
-  compatibility groups, while Story and Contract retain their prior generation
-  ceiling. Profile-neutral persisted-content validation admits that widest valid
+  split only invalid units; a repeated violation fails closed. The General unit
+  ceiling reserves the base unit budget times the greatest number of distinct
+  framing groups in any one selection window, capped by the existing global
+  maximum, so every initially permitted mixed unit can split while valid
+  siblings remain; the total compatibility-group count remains a floor. Story
+  and Contract retain their prior generation ceiling.
+  Profile-neutral persisted-content validation admits that widest valid
   current profile boundary so a correctly split General result reaches
   verification.
 - Synthesis, verification and final-summary versions advance for the changed
@@ -3376,14 +3381,16 @@ release acceptance exposed issue #49
   across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
   denial clearing in following-line and inline bodies with trailing prose and
-  repeated determiners, exact existential predicates, bounded `to report` and
-  bounded `Not applicable`, active-category noun matching, retention through
+  repeated determiners, conservative modifiers, exact existential predicates,
+  bounded `to report` and bounded `Not applicable`, active-category noun
+  matching, rejection of uncertainty modifiers, retention through
   interrogative denials, post-denial contrast sentences, explanatory `Not
   applicable because ...` and `No risks to report because ...` text and
   negative-rule, residual-risk, qualified-denial and `None of ...` retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
-  repair and repeated-response failure, compatibility-group unit capacity with
-  Story isolation, and zero/exact/over-limit persisted-count boundaries,
+  repair with an unchanged valid sibling, repeated-response failure,
+  worst-permitted compatibility-group split capacity with Story isolation, and
+  zero/exact/over-limit persisted-count boundaries,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry

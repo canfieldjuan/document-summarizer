@@ -195,19 +195,16 @@ fn heading_negates_framing(words: &[String]) -> bool {
 }
 
 fn heading_has_only_framing_modifiers(words: &[String]) -> bool {
-    words[..words.len().saturating_sub(1)].iter().all(|word| {
-        matches!(
-            word.as_str(),
-            "common"
-                | "important"
-                | "key"
-                | "known"
-                | "major"
-                | "material"
-                | "safety"
-                | "significant"
-        )
-    })
+    words[..words.len().saturating_sub(1)]
+        .iter()
+        .all(|word| is_source_framing_modifier(word))
+}
+
+fn is_source_framing_modifier(word: &str) -> bool {
+    matches!(
+        word,
+        "common" | "important" | "key" | "known" | "major" | "material" | "safety" | "significant"
+    )
 }
 
 fn framing_from_heading_candidate(
@@ -605,9 +602,9 @@ fn consume_section_denial_nouns(
         {
             cursor += 1;
         }
-        if words
+        while words
             .get(cursor)
-            .is_some_and(|word| matches!(word.as_str(), "applicable" | "known"))
+            .is_some_and(|word| word == "applicable" || is_source_framing_modifier(word.as_str()))
         {
             cursor += 1;
         }
@@ -912,8 +909,28 @@ fn maximum_summary_units_for_catalog(profile: SummaryProfile, catalog: &SourceCa
         })
         .collect::<HashSet<_>>()
         .len();
-    maximum_summary_units(catalog.candidates.len())
+    let base_units = maximum_summary_units(catalog.candidates.len());
+    let repair_capacity = if profile == SummaryProfile::General {
+        let mut framing_groups_by_window =
+            HashMap::<Option<usize>, HashSet<Option<SourceFraming>>>::new();
+        for candidate in &catalog.candidates {
+            framing_groups_by_window
+                .entry(candidate.selection_window)
+                .or_default()
+                .insert(candidate.source_framing);
+        }
+        let maximum_framing_groups_in_one_window = framing_groups_by_window
+            .values()
+            .map(HashSet::len)
+            .max()
+            .unwrap_or(1);
+        base_units.saturating_mul(maximum_framing_groups_in_one_window)
+    } else {
+        base_units
+    };
+    base_units
         .max(compatibility_groups)
+        .max(repair_capacity)
         .min(MAX_SUMMARY_CLAIMS)
 }
 
@@ -4393,11 +4410,13 @@ mod tests {
             let is_repair = prompt.get("validation_feedback").is_some();
             let units = if is_repair && self.corrects_repair {
                 json!([
+                    {"text":"The unchanged statement remains.","source_ids":["s2"]},
                     {"text":"Problem statement.","source_ids":["s1"]},
                     {"text":"Ordinary statement.","source_ids":["s3"]}
                 ])
             } else {
                 json!([
+                    {"text":"The unchanged statement remains.","source_ids":["s2"]},
                     {"text":"Combined statement.","source_ids":["s1","s3"]}
                 ])
             };
@@ -4999,6 +5018,14 @@ mod tests {
             "No risks to report.",
             SourceFraming::Risk,
         ));
+        assert!(begins_with_section_denial(
+            "No significant risks were identified.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
+            "No potential risks were identified.",
+            SourceFraming::Risk,
+        ));
         assert!(!begins_with_section_denial(
             "No risks to report because the review is incomplete.",
             SourceFraming::Risk,
@@ -5327,6 +5354,17 @@ mod tests {
         for unframed in ["No risks to report.", "Later unrelated text."] {
             assert_eq!(
                 source_framing_for_segment(no_risks_to_report, unframed, None),
+                None
+            );
+        }
+        let no_significant_risks =
+            "Key Risks\nNo significant risks were identified.\nLater unrelated text.";
+        for unframed in [
+            "No significant risks were identified.",
+            "Later unrelated text.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(no_significant_risks, unframed, None),
                 None
             );
         }
@@ -8662,6 +8700,14 @@ mod tests {
             candidates,
             omitted_source_units: 0,
         };
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::General, &catalog),
+            4
+        );
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::Story, &catalog),
+            2
+        );
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
         let runtime = FramingRepairRuntime::new(true);
         let generated = generate_summary_with_validation_repair(
@@ -8678,12 +8724,13 @@ mod tests {
         )
         .expect("one bounded repair should split mixed source framing");
         assert_eq!(generated.withheld_unit_kind, None);
-        assert_eq!(generated.claims.len(), 2);
+        assert_eq!(generated.claims.len(), 3);
+        assert_eq!(generated.claims[0].text, "The unchanged statement remains.");
         assert_eq!(
-            generated.claims[0].text,
+            generated.claims[1].text,
             "The document presents the following as a problem: Problem statement."
         );
-        assert_eq!(generated.claims[1].text, "Ordinary statement.");
+        assert_eq!(generated.claims[2].text, "Ordinary statement.");
         let requests = runtime.requests();
         assert_eq!(requests.len(), 2);
         let repair_prompt = serde_json::from_str::<Value>(&requests[1].user_prompt).unwrap();
