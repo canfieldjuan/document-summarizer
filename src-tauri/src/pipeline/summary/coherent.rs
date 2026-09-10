@@ -239,7 +239,7 @@ fn framing_from_heading(heading: &str) -> Option<SourceFraming> {
 
 #[cfg(test)]
 fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
-    let (heading, body) = exact_quote.trim_start().split_once("\n\n")?;
+    let (heading, body) = exact_quote.trim_start().split_once('\n')?;
     (!body.trim().is_empty())
         .then(|| framing_from_heading(heading))
         .flatten()
@@ -340,17 +340,17 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "who"
             | "why"
     );
-    starts_uppercase
-        && (all_uppercase || title_case || sentence_case_lead || heading.ends_with(':'))
+    starts_uppercase && (all_uppercase || title_case || sentence_case_lead)
 }
 
 fn source_framing_after_paragraph(
     current: Option<SourceFraming>,
     paragraph: &str,
 ) -> Option<SourceFraming> {
-    if let Some(next) = framing_from_heading(paragraph) {
+    let heading_candidate = paragraph.lines().next().unwrap_or_default().trim();
+    if let Some(next) = framing_from_heading(heading_candidate) {
         Some(next)
-    } else if possible_framing_boundary(paragraph) {
+    } else if possible_framing_boundary(heading_candidate) {
         None
     } else {
         current
@@ -4444,6 +4444,10 @@ mod tests {
                 required_source_framing(&format!("{heading}\n\nBody text.")),
                 Some(expected),
             );
+            assert_eq!(
+                required_source_framing(&format!("{heading}\nBody text.")),
+                Some(expected),
+            );
         }
         for unclassified in [
             "Common Problems",
@@ -4479,6 +4483,7 @@ mod tests {
             "2",
             "1. Workers may fall from ladders.",
             "A. Workers may fall from ladders.",
+            "Examples include:",
             "Employees paid by piece rate",
             "employees below minimum wage",
             "This is a complete sentence.",
@@ -4528,6 +4533,22 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(numbered_list, numbered_list, None),
             Some(SourceFraming::Risk)
+        );
+        let introductory_colon = "Common Problems\n\nExamples include:\n\nLate payment.";
+        assert_eq!(
+            source_framing_for_segment(introductory_colon, "Late payment.", None),
+            Some(SourceFraming::Problem)
+        );
+        let single_newline = "Common Problems\nLate payments are frequent.";
+        assert_eq!(
+            source_framing_for_segment(single_newline, "Late payments are frequent.", None),
+            Some(SourceFraming::Problem)
+        );
+        let single_newline_reset =
+            "Common Problems\n\nLate payment.\n\nSolutions\nPay workers promptly.";
+        assert_eq!(
+            source_framing_for_segment(single_newline_reset, "Pay workers promptly.", None),
+            None
         );
     }
 
