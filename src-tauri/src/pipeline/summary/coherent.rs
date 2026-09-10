@@ -250,7 +250,11 @@ fn framing_from_heading_candidate(
     has_explicit_inline_signal: bool,
 ) -> Option<SourceFraming> {
     let heading = heading.trim();
-    if heading.is_empty() || heading.contains(['\n', '?']) || heading.chars().count() > 80 {
+    if heading.is_empty()
+        || heading.contains('\n')
+        || heading.chars().any(is_source_question_terminal)
+        || heading.chars().count() > 80
+    {
         return None;
     }
     let marked_heading = marked_heading_title(heading);
@@ -481,7 +485,9 @@ fn inline_heading_prefix(line: &str, colon_index: usize) -> (&str, usize) {
     let prefix_start = before_colon
         .char_indices()
         .rev()
-        .find(|(_, character)| matches!(character, '.' | '?' | '!' | ';' | ':'))
+        .find(|(_, character)| {
+            is_source_sentence_terminal(*character) || matches!(character, ';' | ':')
+        })
         .map_or(0, |(index, character)| {
             index.saturating_add(character.len_utf8())
         });
@@ -1374,17 +1380,20 @@ fn source_framing_line_update(
     let mut framing = current;
     let mut transitions = Vec::new();
     apply_section_denial_update(&mut framing, &mut transitions, leading_whitespace, line);
-    for (delimiter_index, delimiter) in line.match_indices([':', '?']) {
-        if delimiter == "?" {
+    for (delimiter_index, delimiter) in line
+        .match_indices(|character: char| character == ':' || is_source_question_terminal(character))
+    {
+        let delimiter_len = delimiter.len();
+        if delimiter != ":" {
             let (heading_candidate, heading_offset) = inline_heading_prefix(line, delimiter_index);
             if possible_interrogative_framing_boundary(heading_candidate) {
                 framing = None;
                 transitions.push((leading_whitespace.saturating_add(heading_offset), framing));
             }
-            let answer = &line[delimiter_index + 1..];
+            let answer = &line[delimiter_index + delimiter_len..];
             let answer_offset = leading_whitespace
                 .saturating_add(delimiter_index)
-                .saturating_add(1);
+                .saturating_add(delimiter_len);
             apply_section_denial_update(&mut framing, &mut transitions, answer_offset, answer);
             continue;
         }
@@ -6817,6 +6826,28 @@ mod tests {
             source_framing_for_segment(interrogative_heading, "Late payment may occur.", None,),
             None
         );
+        for question_terminal in ['？', '؟'] {
+            let unicode_interrogative_heading =
+                format!("Key Risks\nCommon Problems{question_terminal}\nLate payment may occur.");
+            assert_eq!(
+                source_framing_for_segment(
+                    &unicode_interrogative_heading,
+                    "Late payment may occur.",
+                    None,
+                ),
+                None
+            );
+            let unicode_inline_interrogative =
+                format!("Key Risks: Common Problems{question_terminal} Late payment may occur.");
+            assert_eq!(
+                source_framing_for_segment(
+                    &unicode_inline_interrogative,
+                    "Late payment may occur.",
+                    None,
+                ),
+                None
+            );
+        }
         let compound_interrogative_heading = "Common Problems\nRisk Factors? Fraud may occur.";
         assert_eq!(
             source_framing_for_segment(compound_interrogative_heading, "Fraud may occur.", None,),
