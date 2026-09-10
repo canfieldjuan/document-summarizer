@@ -355,6 +355,12 @@ fn apply_heading_candidate(
 ) -> (Option<SourceFraming>, bool) {
     if let Some(next) = framing_from_heading(heading_candidate) {
         (Some(next), true)
+    } else if heading_candidate.trim().ends_with(':') {
+        if possible_inline_framing_boundary(heading_candidate) {
+            (None, true)
+        } else {
+            (current, false)
+        }
     } else if possible_framing_boundary(heading_candidate) {
         (None, true)
     } else {
@@ -4726,6 +4732,16 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(inline_note, "The guard may become hot.", None),
             Some(SourceFraming::Warning)
+        );
+        let standalone_note = "Safety Warnings\nImportant Note:\nThe guard may become hot.";
+        assert_eq!(
+            source_framing_for_segment(standalone_note, "The guard may become hot.", None),
+            Some(SourceFraming::Warning)
+        );
+        let standalone_solution = "Common Problems\nSolutions:\nPay workers promptly.";
+        assert_eq!(
+            source_framing_for_segment(standalone_solution, "Pay workers promptly.", None),
+            None
         );
         let single_newline = "Common Problems\nLate payments are frequent.";
         assert_eq!(

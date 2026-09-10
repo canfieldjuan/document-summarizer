@@ -3292,9 +3292,10 @@ release acceptance exposed issue #49
   a decimal, Roman or letter-marked heading or a sentence-case heading with an
   explicit heading signal, resets the label; numbering alone does not. A
   reliable heading followed by a colon and body on the same line changes state
-  at the body boundary. Generic inline resets require a marked heading or an
-  explicit section lead, so introductory labels such as `Example:`, `Note:` or
-  `Important Note:` remain prose. A recognized framing heading replaces the
+  at the body boundary. Generic colon-ended resets require a marked heading or
+  an explicit section lead in both inline and standalone layouts, so
+  introductory labels such as `Example:`, `Note:` or `Important Note:` remain
+  prose. A recognized framing heading replaces the
   prior label. Inline transitions
   retain byte positions: a source after one inherits its state, while a source
   crossing one remains unframed. The final transition controls following text.
@@ -3332,7 +3333,7 @@ release acceptance exposed issue #49
   visual-processing pages, retention across an introductory colon, single- and
   excess-newline framing and reset headings, decimal/Roman/letter framing
   headings, inline framing and reset headings, fail-closed transition-spanning
-  sources, retention across one- and multiword introductory labels,
+  sources, retention across inline and standalone introductory labels,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry
