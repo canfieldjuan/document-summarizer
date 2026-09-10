@@ -709,10 +709,33 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
     }
     if matches!(predicate, "remain" | "remained" | "remains") {
         cursor = skip_adverbs(cursor + 1);
+        if words
+            .get(cursor)
+            .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
+        {
+            cursor = skip_adverbs(cursor + 1);
+            return words
+                .get(cursor)
+                .is_some_and(|word| matches!(word.as_str(), "absent" | "eliminated" | "resolved"));
+        }
+        if words.get(cursor).is_some_and(|word| word == "no")
+            && words.get(cursor + 1).is_some_and(|word| word == "longer")
+        {
+            cursor = skip_adverbs(cursor + 2);
+            return words
+                .get(cursor)
+                .is_some_and(|word| matches!(word.as_str(), "absent" | "eliminated" | "resolved"));
+        }
         return !words.get(cursor).is_some_and(|word| {
             matches!(
                 word.as_str(),
-                "absent" | "eliminated" | "none" | "resolved" | "unidentified" | "unreported"
+                "absent"
+                    | "eliminated"
+                    | "impossible"
+                    | "none"
+                    | "resolved"
+                    | "unidentified"
+                    | "unreported"
             )
         });
     }
@@ -805,17 +828,22 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
     })
 }
 
-fn contrast_continuation_reintroduces_source_framing(
+fn residual_continuation_reintroduces_source_framing(
     continuation: &str,
     active_framing: SourceFraming,
+    skip_coordinator: bool,
 ) -> bool {
-    let contrast_body = continuation
-        .split_once(|character: char| !character.is_alphanumeric())
-        .map(|(_, body)| body)
-        .unwrap_or("")
-        .trim_start_matches(|character: char| {
-            character.is_whitespace() || matches!(character, ',' | ':' | ';')
-        });
+    let continuation_body = if skip_coordinator {
+        continuation
+            .split_once(|character: char| !character.is_alphanumeric())
+            .map(|(_, body)| body)
+            .unwrap_or("")
+    } else {
+        continuation
+    };
+    let contrast_body = continuation_body.trim_start_matches(|character: char| {
+        character.is_whitespace() || matches!(character, ',' | ':' | ';')
+    });
     if continuation_reintroduces_source_framing(contrast_body, active_framing) {
         return true;
     }
@@ -922,20 +950,62 @@ fn contrast_continuation_reintroduces_source_framing(
     })
 }
 
-fn contrast_continuation_lead(text: &str) -> bool {
+fn coordinated_continuation_lead(text: &str) -> bool {
     text.split(|character: char| !character.is_alphanumeric())
         .find(|word| !word.is_empty())
         .is_some_and(|word| {
             matches!(
                 word.to_ascii_lowercase().as_str(),
-                "but" | "however" | "nevertheless" | "nonetheless" | "still" | "yet"
+                "although"
+                    | "and"
+                    | "but"
+                    | "however"
+                    | "nevertheless"
+                    | "nonetheless"
+                    | "nor"
+                    | "or"
+                    | "still"
+                    | "though"
+                    | "whereas"
+                    | "while"
+                    | "yet"
             )
         })
 }
 
-fn comma_contrast_boundary(text: &str) -> Option<usize> {
-    text.match_indices(',')
-        .find_map(|(index, _)| contrast_continuation_lead(&text[index + 1..]).then_some(index))
+fn denial_qualification_lead(text: &str) -> bool {
+    text.split(|character: char| !character.is_alphanumeric())
+        .find(|word| !word.is_empty())
+        .is_some_and(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "as" | "because"
+                    | "if"
+                    | "pending"
+                    | "since"
+                    | "unless"
+                    | "until"
+                    | "when"
+                    | "where"
+                    | "whether"
+            )
+        })
+}
+
+fn coordinated_clause_boundary(
+    text: &str,
+    active_framing: SourceFraming,
+    limit: usize,
+) -> Option<usize> {
+    text.match_indices([',', ';'])
+        .find_map(|(index, delimiter)| {
+            let continuation = &text[index + 1..];
+            (index < limit
+                && (coordinated_continuation_lead(continuation)
+                    || delimiter == ";" && !denial_qualification_lead(continuation))
+                && bounded_section_denial_clause(&text[..index], active_framing))
+            .then_some(index)
+        })
 }
 
 fn is_bounded_not_applicable_abbreviation(text: &str) -> bool {
@@ -967,11 +1037,11 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
     let sentence_terminal = text
         .char_indices()
         .find(|(_, character)| matches!(character, '.' | '?' | '!'));
-    let comma_contrast = comma_contrast_boundary(text);
-    let (sentence_end, remainder_start) = match (sentence_terminal, comma_contrast) {
-        (Some((terminal, _)), Some(comma)) if comma < terminal => (comma, comma + 1),
-        (Some((terminal, _)), _) => (terminal, terminal),
-        (None, Some(comma)) => (comma, comma + 1),
+    let terminal_index = sentence_terminal.map_or(text.len(), |(index, _)| index);
+    let coordinated_boundary = coordinated_clause_boundary(text, active_framing, terminal_index);
+    let (sentence_end, remainder_start) = match (sentence_terminal, coordinated_boundary) {
+        (_, Some(boundary)) => (boundary, boundary + 1),
+        (Some((terminal, _)), None) => (terminal, terminal),
         (None, None) => (text.len(), text.len()),
     };
     let sentence_remainder = &text[remainder_start..];
@@ -989,17 +1059,36 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
         .saturating_add(remainder_start)
         .saturating_add(sentence_remainder.len().saturating_sub(continuation.len()));
     let sentence = &text[..sentence_end];
-    let words = sentence
+    if !bounded_section_denial_clause(sentence, active_framing) {
+        return None;
+    }
+    let contrast_continuation = coordinated_continuation_lead(continuation);
+    let reintroduced = continuation_reintroduces_source_framing(continuation, active_framing)
+        || residual_continuation_reintroduces_source_framing(
+            continuation,
+            active_framing,
+            contrast_continuation,
+        );
+    Some(SectionDenialUpdate {
+        denial_offset,
+        reintroduction_offset: reintroduced.then_some(continuation_offset),
+    })
+}
+
+fn bounded_section_denial_clause(text: &str, active_framing: SourceFraming) -> bool {
+    let words = text
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .take(17)
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
     if words.len() > 16 {
-        return None;
+        return false;
     }
-    let first = words.first().map(String::as_str)?;
-    let denied = if first == "not" {
+    let Some(first) = words.first().map(String::as_str) else {
+        return false;
+    };
+    if first == "not" {
         words.get(1).is_some_and(|word| word == "applicable") && section_denial_tail(&words[2..])
     } else if first == "none" {
         words.len() == 1 || bounded_section_denial_predicate(&words, 1, None)
@@ -1010,18 +1099,7 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
         existential_noun_start.is_some_and(|noun_start| {
             bounded_section_denial_predicate(&words, noun_start, Some(active_framing))
         })
-    };
-    if !denied {
-        return None;
     }
-    let contrast_continuation = contrast_continuation_lead(continuation);
-    let reintroduced = continuation_reintroduces_source_framing(continuation, active_framing)
-        || contrast_continuation
-            && contrast_continuation_reintroduces_source_framing(continuation, active_framing);
-    Some(SectionDenialUpdate {
-        denial_offset,
-        reintroduction_offset: reintroduced.then_some(continuation_offset),
-    })
 }
 
 fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
@@ -5880,9 +5958,39 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(begins_with_section_denial(
+            "No risks were identified, and monitoring will continue.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were identified; however, monitoring will continue.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were identified; monitoring will continue.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were identified, while monitoring will continue.",
+            SourceFraming::Risk,
+        ));
+        for qualified_semicolon in [
+            "No risks were identified; because the review is incomplete.",
+            "No risks were identified; if the preliminary record is accurate.",
+        ] {
+            assert!(!begins_with_section_denial(
+                qualified_semicolon,
+                SourceFraming::Risk,
+            ));
+        }
+        assert!(begins_with_section_denial(
             "No risks were identified, but risk reduction remains possible.",
             SourceFraming::Risk,
         ));
+        let noun_list = "No risks, warnings, and limitations were identified.";
+        assert_eq!(
+            coordinated_clause_boundary(noun_list, SourceFraming::Risk, noun_list.len()),
+            None
+        );
         for adverse_possibility in [
             "No risks were identified. However, financial loss remains possible.",
             "No risks were identified. However, worker injury is still possible.",
@@ -6818,26 +6926,58 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
-        let coordinated_neutral =
-            "Key Risks\nNo risks were identified, but monitoring will continue.\nOverview follows.";
-        for unframed in [
-            "No risks were identified, but monitoring will continue.",
-            "Overview follows.",
+        for coordinated_neutral in [
+            "Key Risks\nNo risks were identified, but monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified, and monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified; however, monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified; monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified, while monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified, nor were limitations found.\nOverview follows.",
+        ] {
+            let coordinated_line = coordinated_neutral.lines().nth(1).unwrap();
+            for unframed in [coordinated_line, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(coordinated_neutral, unframed, None),
+                    None
+                );
+            }
+        }
+        for coordinated_adverse in [
+            "Key Risks\nNo risks were identified, but fraud remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified, and fraud remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified; however, fraud remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified; fraud remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified, while fraud remains possible.\nOverview follows.",
         ] {
             assert_eq!(
-                source_framing_for_segment(coordinated_neutral, unframed, None),
+                source_framing_for_segment(
+                    coordinated_adverse,
+                    coordinated_adverse.lines().nth(1).unwrap(),
+                    None,
+                ),
                 None
             );
-        }
-        let coordinated_adverse =
-            "Key Risks\nNo risks were identified, but fraud remains possible.\nOverview follows.";
-        assert_eq!(
-            source_framing_for_segment(coordinated_adverse, "No risks were identified", None),
-            None
-        );
-        for framed in ["fraud remains possible.", "Overview follows."] {
             assert_eq!(
-                source_framing_for_segment(coordinated_adverse, framed, None),
+                source_framing_for_segment(
+                    coordinated_adverse,
+                    "No risks were identified",
+                    None,
+                ),
+                None
+            );
+            for framed in ["fraud remains possible.", "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(coordinated_adverse, framed, None),
+                    Some(SourceFraming::Risk)
+                );
+            }
+        }
+        for qualified_semicolon in [
+            "Key Risks\nNo risks were identified; because the review is incomplete.\nOverview follows.",
+            "Key Risks\nNo risks were identified; if the preliminary record is accurate.\nOverview follows.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(qualified_semicolon, "Overview follows.", None),
                 Some(SourceFraming::Risk)
             );
         }
@@ -6952,7 +7092,14 @@ mod tests {
             source_framing_for_segment(repeated_absence, "Later text.", None),
             None
         );
-        for resolved_state in ["Risks remain eliminated.", "Risks remain resolved."] {
+        for resolved_state in [
+            "Risks remain eliminated.",
+            "Risks remain resolved.",
+            "Risks remain not possible.",
+            "Risks remain never possible.",
+            "Risks remain no longer possible.",
+            "Risks remain impossible.",
+        ] {
             let resolved_continuation =
                 format!("Key Risks\nNo risks were identified. {resolved_state}\nLater text.");
             for unframed in [resolved_state, "Later text."] {
@@ -6967,6 +7114,24 @@ mod tests {
         for framed in ["Risks remain unresolved.", "Later text."] {
             assert_eq!(
                 source_framing_for_segment(unresolved_continuation, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        for negated_resolution in ["Risks remain not eliminated.", "Risks remain not resolved."] {
+            let block =
+                format!("Key Risks\nNo risks were identified. {negated_resolution}\nLater text.");
+            for framed in [negated_resolution, "Later text."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk)
+                );
+            }
+        }
+        let no_longer_eliminated =
+            "Key Risks\nNo risks were identified. Risks remain no longer eliminated.\nLater text.";
+        for framed in ["Risks remain no longer eliminated.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(no_longer_eliminated, framed, None),
                 Some(SourceFraming::Risk)
             );
         }
