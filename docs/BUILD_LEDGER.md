@@ -3523,6 +3523,6 @@ release acceptance exposed issue #49
 - A model response whose invalid mixed-framing unit is too large to include in
   the bounded repair context still fails the run closed with
   `SYNTHESIS_REPAIR_INPUT_TOO_LARGE`; this slice does not add an automatic
-  whole-run retry policy.
+  whole-run retry policy. Follow-up is tracked in issue #52.
 - This slice does not change Story or Contract behavior, routing, UI, persistence
   schemas, source selection, ingestion, OCR or model configuration.
