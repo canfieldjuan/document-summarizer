@@ -3325,9 +3325,10 @@ release acceptance exposed issue #49
   recognized framing heading remains unframed, while the heading's state still
   governs later source blocks.
   A bounded denial such as `None reported`, `None have been identified`, `No
-  limitations were identified`, `No risks exist`, `No risks to report`, `Not
-  applicable`, `N/A`, `N.A.` or `There are no known risks at this time` clears
-  an active label. An implicit `None` denial or bounded not-applicable form can
+  limitations were identified`, `No risks exist`, `No risks remain`, `No
+  exceptions apply`, `No risks to report`, `Not applicable`, `N/A`, `N.A.` or
+  `There are no known risks at this time` clears an active label. An implicit
+  `None` denial or bounded not-applicable form can
   clear any label; an
   explicit denial must name a noun in the active framing category.
   Explicit denial noun phrases may use the same conservative framing modifiers
@@ -3341,7 +3342,9 @@ release acceptance exposed issue #49
   framing category or states a bounded unresolved Problem/Risk condition, or
   explicitly reintroduces the category through a bounded affirmative noun-first
   predicate, optionally preceded by one article, conservative heading modifiers
-  or `new`.
+  or `new`. A noun-first `remain` predicate followed by a bounded absence
+  complement such as `eliminated` or `resolved` preserves the cleared state;
+  `unresolved` reintroduces the active category.
   Negation in a subordinate proposition and a negated
   elimination do not erase that reintroduction. A repeated absence or a
   different framing category still clears state. Repeated determiners after noun
@@ -3365,7 +3368,9 @@ release acceptance exposed issue #49
   that mixes framing in one unit receives one bounded repair instruction to
   split only invalid units; the repair must preserve every individually valid
   sibling's rendered text and ordered evidence IDs, and a repeated violation,
-  omission or rewrite fails closed. The initial
+  omission or rewrite fails closed. Those exact repair requirements are consumed
+  after that repaired response passes, allowing a later validator repair to
+  correct independently invalid wording. The initial
   General prompt and schema use the larger of the base unit budget and total
   compatibility-group count. Only a framing repair expands the prompt and
   schema ceiling to that initial limit times the greatest number of distinct
@@ -3391,19 +3396,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `38bb915efc464ed172d1a55d4d8580732c59f2a7`
+- The final product-code head `ce39d2c0d39dfc6d90b5ab799ef1a583edb59d3a`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 97.52 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 97.10 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `46df8bd581993cb4d1bcfc91bc6df6a0cfc9618674446bbaf42f8fe056eca99a` and
+  `5bac73bb862495c27735cd3e53a5abf453b041b96b06e2344bb07c89a0a4876f` and
   citation integrity hash
-  `e19b55268efaceb88b3f055830d47669126fb3ef81ff2825b2365cf2e9aafd44`.
+  `cde12061d664ad3575f1abfdf229cc6389c32a04972b1fae5dd66b5be26a0da3`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3456,9 +3461,12 @@ release acceptance exposed issue #49
   zero/exact/over-limit persisted-count boundaries and selected-window capacity
   after the transient selection labels are unavailable,
   neutral reset at uncertainty-qualified sentence-case framing headings,
-  bounded `detected` denial, exact neutral and affirmative transitions within
+  bounded `detected`, `remain` and `apply` denials, resolved/eliminated absence
+  continuations with unresolved-risk reintroduction, exact neutral and
+  affirmative transitions within
   one denial/reintroduction line and its colon-body form, and fail-closed
   rejection of a source candidate spanning those transitions,
+  framing-repair integrity release before a subsequent modal repair,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry
