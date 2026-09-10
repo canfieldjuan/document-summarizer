@@ -3300,7 +3300,9 @@ release acceptance exposed issue #49
   and its own body begins on the next line. Generic colon-ended resets require a
   marked heading or an explicit section lead in both inline and standalone layouts, so
   introductory labels such as `Example:`, `Note:` or `Important Note:` remain
-  prose. A recognized framing heading replaces the
+  prose. An explicit inline prefix ending in a framing noun resets prior state
+  when negation, uncertainty or unsupported modifiers prevent assigning a new
+  label. A recognized framing heading replaces the
   prior label. Inline transitions
   retain byte positions: a source after one inherits its state, while a source
   crossing one remains unframed. The final transition controls following text.
@@ -3308,7 +3310,8 @@ release acceptance exposed issue #49
   limitations were identified` or `There are no known risks at this time`
   clears an active label. Direct `No`/`Neither` and existential denials must
   consist of a framing-noun phrase plus a bounded absence or reporting
-  predicate. Negative rules and residual-risk propositions such as `No worker
+  predicate; only the leading complete sentence is inspected so later prose on
+  the extracted line does not hide the reset. Negative rules and residual-risk propositions such as `No worker
   may be paid below minimum wage`, `No control eliminates every fraud risk`
   and `None of ...` retain their governing context.
   A bounded source segment
@@ -3347,9 +3350,11 @@ release acceptance exposed issue #49
   visual-processing pages, retention across an introductory colon, single- and
   excess-newline framing and reset headings, decimal/Roman/letter framing
   headings, inline framing and reset headings, fail-closed transition-spanning
-  sources, retention across inline and standalone introductory labels,
+  sources, reset at uncertain and negated inline framing headings, retention
+  across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
-  denial clearing in following-line and inline bodies with negative-rule,
+  denial clearing in following-line and inline bodies with trailing prose,
+  negative-rule,
   residual-risk, qualified-denial and `None of ...` retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
   repair and repeated-response failure,

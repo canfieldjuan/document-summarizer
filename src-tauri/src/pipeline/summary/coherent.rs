@@ -404,10 +404,25 @@ fn inline_heading_prefix(line: &str, colon_index: usize) -> &str {
 }
 
 fn possible_inline_framing_boundary(text: &str) -> bool {
+    let heading = text.trim();
+    let inline_words = heading
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let bounded_framing_reference = !heading.is_empty()
+        && !heading.contains('\n')
+        && heading.chars().count() <= 80
+        && !inline_words.is_empty()
+        && inline_words.len() <= 8
+        && inline_words
+            .last()
+            .is_some_and(|word| is_source_framing_noun(&word.to_ascii_lowercase()));
+    if bounded_framing_reference {
+        return true;
+    }
     if !possible_framing_boundary(text) {
         return false;
     }
-    let heading = text.trim();
     let marked = marked_heading_title(heading);
     let title = marked.unwrap_or(heading);
     let words = title
@@ -460,6 +475,11 @@ fn apply_inline_heading_candidate(
 }
 
 fn begins_with_section_denial(text: &str) -> bool {
+    let sentence_end = text
+        .char_indices()
+        .find(|(_, character)| matches!(character, '.' | '?' | '!'))
+        .map_or(text.len(), |(index, _)| index);
+    let text = &text[..sentence_end];
     let words = text
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -536,27 +556,10 @@ fn consume_section_denial_nouns(words: &[String], mut cursor: usize) -> Option<u
         {
             cursor += 1;
         }
-        if !words.get(cursor).is_some_and(|word| {
-            matches!(
-                word.as_str(),
-                "caution"
-                    | "cautions"
-                    | "exception"
-                    | "exceptions"
-                    | "hazard"
-                    | "hazards"
-                    | "issue"
-                    | "issues"
-                    | "limitation"
-                    | "limitations"
-                    | "problem"
-                    | "problems"
-                    | "risk"
-                    | "risks"
-                    | "warning"
-                    | "warnings"
-            )
-        }) {
+        if !words
+            .get(cursor)
+            .is_some_and(|word| is_source_framing_noun(word))
+        {
             return None;
         }
         cursor += 1;
@@ -568,6 +571,28 @@ fn consume_section_denial_nouns(words: &[String], mut cursor: usize) -> Option<u
         }
         cursor += 1;
     }
+}
+
+fn is_source_framing_noun(word: &str) -> bool {
+    matches!(
+        word,
+        "caution"
+            | "cautions"
+            | "exception"
+            | "exceptions"
+            | "hazard"
+            | "hazards"
+            | "issue"
+            | "issues"
+            | "limitation"
+            | "limitations"
+            | "problem"
+            | "problems"
+            | "risk"
+            | "risks"
+            | "warning"
+            | "warnings"
+    )
 }
 
 fn section_denial_tail(words: &[String]) -> bool {
@@ -4853,11 +4878,17 @@ mod tests {
         assert!(possible_framing_boundary("How to avoid common problems"));
         assert!(possible_inline_framing_boundary("Solutions"));
         assert!(possible_inline_framing_boundary("Payment Terms"));
+        assert!(possible_inline_framing_boundary("Potential Risks"));
+        assert!(possible_inline_framing_boundary("No Known Issues"));
+        assert!(possible_inline_framing_boundary("potential risks"));
         assert!(!possible_inline_framing_boundary("Example"));
         assert!(!possible_inline_framing_boundary("Note"));
         assert!(!possible_inline_framing_boundary("Important Note"));
         assert!(!possible_inline_framing_boundary("Supporting Example"));
         assert!(begins_with_section_denial("None reported."));
+        assert!(begins_with_section_denial(
+            "None reported. See the appendix for terminology."
+        ));
         assert!(begins_with_section_denial("None have been identified."));
         assert!(begins_with_section_denial(
             "There are no known risks at this time."
@@ -4881,6 +4912,7 @@ mod tests {
             "There is no control that eliminates every risk.",
             "Neither control eliminates all risks.",
             "No risks were identified, but fraud remains possible.",
+            "No risks were identified, but fraud remains possible. See the appendix.",
         ] {
             assert!(!begins_with_section_denial(residual_risk));
         }
@@ -5053,6 +5085,32 @@ mod tests {
             None
         );
         assert_eq!(source_framing_after_block(denied_inline, None), None);
+        let denied_inline_followed_by_prose =
+            "Common Problems: None reported. See the appendix for terminology.\nLater text.";
+        for unframed in ["See the appendix for terminology.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(denied_inline_followed_by_prose, unframed, None),
+                None
+            );
+        }
+        let uncertain_inline =
+            "Common Problems: Late payments occur. Potential Risks: A different harm may occur.";
+        assert_eq!(
+            source_framing_for_segment(uncertain_inline, "Late payments occur.", None),
+            Some(SourceFraming::Problem)
+        );
+        assert_eq!(
+            source_framing_for_segment(uncertain_inline, "A different harm may occur.", None),
+            None
+        );
+        assert_eq!(source_framing_after_block(uncertain_inline, None), None);
+        let negated_inline =
+            "Common Problems: Late payments occur. No Known Issues: No defects were found.";
+        assert_eq!(
+            source_framing_for_segment(negated_inline, "No defects were found.", None),
+            None
+        );
+        assert_eq!(source_framing_after_block(negated_inline, None), None);
         let negative_problem = "Common Problems\nNo worker may be paid below minimum wage.";
         assert_eq!(
             source_framing_for_segment(
