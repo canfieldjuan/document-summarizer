@@ -3458,11 +3458,17 @@ release acceptance exposed issue #49
   not clear the category, including through a labeled `Answer: No`; an explicit
   bounded denial such as `No risks were identified` still clears it. The focused
   classifier test and full deterministic gate passed.
-- The final product-code head `1226db8bb714ab5fb0d828e5f7c9ae1791c8251e`
+- Product-code head `1226db8bb714ab5fb0d828e5f7c9ae1791c8251e`
   restores Problem or Risk framing when a later sentence says the condition has
   not been, was not, or cannot be ruled out. The predicate requires the bounded
   `ruled out` complement; affirmative `ruled out` and `ruled in` controls remain
   unframed. The focused classifier test and full deterministic gate passed.
+- The final product-code head `4bb76df9709d410837d9ae4dde43a0d9b1bab86f`
+  admits modal `no longer be ruled out`, splits UTF-8 en/em-dash continuations
+  only when a bounded coordinator follows, and rejects unmarked framing phrases
+  that end as declarative sentences. Wrong complements, qualified dash clauses,
+  and marked or colon-signaled heading controls preserve their prior behavior.
+  The focused classifier test and full deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3540,6 +3546,10 @@ release acceptance exposed issue #49
   bounded residual-risk forms using `has`, `have`, `had`, copular, `cannot`, or
   modal `not be ruled out` predicates with affirmative and wrong-complement
   controls,
+  modal `no longer be ruled out` predicates with wrong-complement controls,
+  coordinated en/em-dash denial continuations with neutral, adverse and
+  qualification controls, and unmarked punctuated framing-phrase rejection with
+  marked and colon-signaled controls,
   and disjunctive continuations admitted only when their second disjunct is an
   independent declarative bounded denial, with ASCII, full-width and Arabic
   interrogative second disjuncts rejected, and denial/continuation splitting
