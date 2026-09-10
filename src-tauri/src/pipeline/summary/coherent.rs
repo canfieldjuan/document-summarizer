@@ -343,10 +343,10 @@ fn possible_framing_boundary(text: &str) -> bool {
     starts_uppercase && (all_uppercase || title_case || sentence_case_lead)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceFramingLineUpdate {
     framing: Option<SourceFraming>,
-    inline_transitions: usize,
+    transitions: Vec<(usize, Option<SourceFraming>)>,
 }
 
 fn apply_heading_candidate(
@@ -374,30 +374,90 @@ fn inline_heading_prefix(line: &str, colon_index: usize) -> &str {
     before_colon[prefix_start..].trim()
 }
 
+fn possible_inline_framing_boundary(text: &str) -> bool {
+    if !possible_framing_boundary(text) {
+        return false;
+    }
+    let heading = text.trim();
+    let marked = marked_heading_title(heading);
+    let title = marked.unwrap_or(heading);
+    let words = title
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    marked.is_some()
+        || words.len() > 1
+        || words.first().is_some_and(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "appendix"
+                    | "background"
+                    | "conclusion"
+                    | "conclusions"
+                    | "definitions"
+                    | "introduction"
+                    | "overview"
+                    | "recommendation"
+                    | "recommendations"
+                    | "references"
+                    | "remedies"
+                    | "resources"
+                    | "scope"
+                    | "solution"
+                    | "solutions"
+                    | "summary"
+                    | "terms"
+            )
+        })
+}
+
+fn apply_inline_heading_candidate(
+    current: Option<SourceFraming>,
+    heading_candidate: &str,
+) -> (Option<SourceFraming>, bool) {
+    if let Some(next) = framing_from_heading(heading_candidate) {
+        (Some(next), true)
+    } else if possible_inline_framing_boundary(heading_candidate) {
+        (None, true)
+    } else {
+        (current, false)
+    }
+}
+
 fn source_framing_line_update(
     current: Option<SourceFraming>,
     line: &str,
 ) -> SourceFramingLineUpdate {
+    let leading_whitespace = line.len().saturating_sub(line.trim_start().len());
     let line = line.trim();
     let mut framing = current;
-    let mut inline_transitions = 0usize;
+    let mut transitions = Vec::new();
     for (colon_index, _) in line.match_indices(':') {
         if line[colon_index + 1..].trim().is_empty() {
             continue;
         }
         let (next, changed) =
-            apply_heading_candidate(framing, inline_heading_prefix(line, colon_index));
+            apply_inline_heading_candidate(framing, inline_heading_prefix(line, colon_index));
         if changed {
             framing = next;
-            inline_transitions = inline_transitions.saturating_add(1);
+            transitions.push((
+                leading_whitespace
+                    .saturating_add(colon_index)
+                    .saturating_add(1),
+                framing,
+            ));
         }
     }
-    if inline_transitions == 0 {
-        (framing, _) = apply_heading_candidate(framing, line);
+    if transitions.is_empty() {
+        let (next, changed) = apply_heading_candidate(framing, line);
+        framing = next;
+        if changed {
+            transitions.push((leading_whitespace, framing));
+        }
     }
     SourceFramingLineUpdate {
         framing,
-        inline_transitions,
+        transitions,
     }
 }
 
@@ -454,14 +514,24 @@ fn source_framing_for_segment(
         }
         let line_end = line_start.saturating_add(line.len());
         let update = source_framing_line_update(framing, line);
-        framing = update.framing;
-        if update.inline_transitions > 1 && line_start < segment_end && line_end > segment_start {
-            return None;
-        }
-        if line_start <= segment_start {
+        if line_end <= segment_start {
+            framing = update.framing;
             governing_framing = framing;
-        } else if framing != governing_framing {
-            return None;
+            line_start = line_end;
+            continue;
+        }
+        let mut framing_at_segment_start = framing;
+        for (transition_offset, next) in &update.transitions {
+            let transition = line_start.saturating_add(*transition_offset);
+            if transition <= segment_start {
+                framing_at_segment_start = *next;
+            } else if transition < segment_end {
+                return None;
+            }
+        }
+        framing = update.framing;
+        if line_start <= segment_start {
+            governing_framing = framing_at_segment_start;
         }
         line_start = line_end;
     }
@@ -4530,6 +4600,10 @@ mod tests {
             assert!(possible_framing_boundary(heading));
         }
         assert!(possible_framing_boundary("How to avoid common problems"));
+        assert!(possible_inline_framing_boundary("Solutions"));
+        assert!(possible_inline_framing_boundary("Payment Terms"));
+        assert!(!possible_inline_framing_boundary("Example"));
+        assert!(!possible_inline_framing_boundary("Note"));
         for body in [
             "2",
             "1. Workers may fall from ladders.",
@@ -4606,15 +4680,39 @@ mod tests {
         );
         let collapsed_inline_sections =
             "Common Problems: Late payments are frequent. Solutions: Pay workers promptly.";
-        for unframed in ["Late payments are frequent.", "Pay workers promptly."] {
-            assert_eq!(
-                source_framing_for_segment(collapsed_inline_sections, unframed, None),
-                None
-            );
-        }
+        assert_eq!(
+            source_framing_for_segment(
+                collapsed_inline_sections,
+                "Late payments are frequent.",
+                None,
+            ),
+            Some(SourceFraming::Problem)
+        );
+        assert_eq!(
+            source_framing_for_segment(collapsed_inline_sections, "Pay workers promptly.", None,),
+            None
+        );
+        assert_eq!(
+            source_framing_for_segment(collapsed_inline_sections, collapsed_inline_sections, None,),
+            None
+        );
         assert_eq!(
             source_framing_after_block(collapsed_inline_sections, None),
             None
+        );
+        let crossing_inline = "Background text. Common Problems: Late payment.";
+        assert_eq!(
+            source_framing_for_segment(crossing_inline, crossing_inline, None),
+            None
+        );
+        assert_eq!(
+            source_framing_for_segment(crossing_inline, "Late payment.", None),
+            Some(SourceFraming::Problem)
+        );
+        let inline_example = "Common Problems\nExample: Late payment.";
+        assert_eq!(
+            source_framing_for_segment(inline_example, "Late payment.", None),
+            Some(SourceFraming::Problem)
         );
         let single_newline = "Common Problems\nLate payments are frequent.";
         assert_eq!(
