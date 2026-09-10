@@ -3507,12 +3507,21 @@ release acceptance exposed issue #49
   admits `discovered` in the existing affirmative copular and perfect
   reintroduction predicates. Explicitly negated discovery remains neutral. The
   focused two-sided propagation probe and full deterministic gate passed.
-- The final product-code head `9c38c1c62c0d053cac9883c84c270de7819aecbc`
+- Product-code head `9c38c1c62c0d053cac9883c84c270de7819aecbc`
   requires a declarative first sentence terminal before a suspended framing
   category can be restored by either noun-based or residual predicates. ASCII,
   full-width and Arabic questions remain neutral; declarative controls restore
   framing. The focused two-sided propagation probe and full deterministic gate
   passed.
+- The final product-code head `87770baa08c0eb5a27f2eb67830bad52f2c91438`
+  scans bounded coordinated suffixes for a denial that follows an affirmative
+  clause and recognizes full-width inline colons using their UTF-8 byte length.
+  ASCII, full-width and Arabic comma coordinators, semicolon clauses and an
+  em-dash coordinator clear the active category at the denial; qualification,
+  comma-splice and negative-rule controls retain it. Full-width framing, reset
+  and labeled-answer colons transition at the body without labeling a source
+  that crosses the transition. The focused two-sided propagation probe and full
+  deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
