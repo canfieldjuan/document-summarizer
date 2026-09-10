@@ -336,6 +336,43 @@ fn marked_heading_title(heading: &str) -> Option<&str> {
     (!title.is_empty() && (decimal || alphabetic || roman)).then_some(title)
 }
 
+fn mitigation_control_section_heading(words: &[&str]) -> bool {
+    let normalized = words
+        .iter()
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches!(
+        normalized.as_str(),
+        "control"
+            | "control measure"
+            | "control measures"
+            | "control plan"
+            | "control plans"
+            | "control strategies"
+            | "control strategy"
+            | "controls"
+            | "mitigation"
+            | "mitigation and controls"
+            | "mitigation measure"
+            | "mitigation measures"
+            | "mitigation plan"
+            | "mitigation plans"
+            | "mitigation strategies"
+            | "mitigation strategy"
+            | "mitigations"
+            | "mitigations and controls"
+            | "risk mitigation"
+            | "risk mitigation measure"
+            | "risk mitigation measures"
+            | "risk mitigation plan"
+            | "risk mitigation plans"
+            | "risk mitigation strategies"
+            | "risk mitigation strategy"
+            | "risk mitigations"
+    )
+}
+
 fn possible_framing_boundary(text: &str) -> bool {
     let heading = text.trim();
     if heading.is_empty() || heading.contains('\n') || heading.chars().count() > 80 {
@@ -432,10 +469,17 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "solutions"
             | "summary"
     );
+    let mitigation_control_section_heading = mitigation_control_section_heading(&words);
     let sentence_case_has_heading_shape = !heading.ends_with(['.', '!', ';']);
-    (sentence_case_has_heading_shape || marked_title.is_some() && punctuated_marked_section_lead)
+    (sentence_case_has_heading_shape
+        || marked_title.is_some()
+            && (punctuated_marked_section_lead || mitigation_control_section_heading))
         && (starts_uppercase || marked_title.is_some())
-        && (all_uppercase || title_case || sentence_case_lead || nonaffirmative_framing_boundary)
+        && (all_uppercase
+            || title_case
+            || sentence_case_lead
+            || nonaffirmative_framing_boundary
+            || mitigation_control_section_heading)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -543,6 +587,7 @@ fn possible_inline_framing_boundary(text: &str) -> bool {
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>();
     marked.is_some()
+        || mitigation_control_section_heading(&words)
         || words.first().is_some_and(|word| {
             matches!(
                 word.to_ascii_lowercase().as_str(),
@@ -5952,10 +5997,19 @@ mod tests {
             "Scope and Services",
             "2. Remedies",
             "2. Solutions.",
+            "Mitigation strategies",
+            "Control measures",
+            "2. Mitigation strategies.",
             "KNOWN ISSUES",
             "How to avoid common problems?",
         ] {
             assert!(possible_framing_boundary(heading));
+        }
+        for ordinary_prose in [
+            "Mitigation strategies reduce risk.",
+            "Controls fail when passwords are reused",
+        ] {
+            assert!(!possible_framing_boundary(ordinary_prose));
         }
         assert!(possible_framing_boundary("How to avoid common problems"));
         assert!(possible_framing_boundary("Potential risks"));
@@ -6619,6 +6673,27 @@ mod tests {
             None
         );
         assert_eq!(source_framing_after_block(trailing_solution, None), None);
+        let standalone_mitigation =
+            "Key Risks\nCredential theft may occur.\nMitigation strategies\nEnable MFA.";
+        assert_eq!(
+            source_framing_for_segment(standalone_mitigation, "Enable MFA.", None),
+            None
+        );
+        let inline_mitigation = "Key Risks\nMitigation strategies: Enable MFA.";
+        assert_eq!(
+            source_framing_for_segment(inline_mitigation, "Enable MFA.", None),
+            None
+        );
+        for risk_body in [
+            "Mitigation strategies reduce risk.",
+            "Controls fail when passwords are reused",
+        ] {
+            let ordinary_mitigation_prose = format!("Key Risks\n{risk_body}");
+            assert_eq!(
+                source_framing_for_segment(&ordinary_mitigation_prose, risk_body, None),
+                Some(SourceFraming::Risk)
+            );
+        }
         let denied_problem = "Common Problems\nNone reported.\nLater unrelated text.";
         for unframed in ["None reported.", "Later unrelated text."] {
             assert_eq!(
