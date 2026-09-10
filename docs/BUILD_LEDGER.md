@@ -3293,8 +3293,9 @@ release acceptance exposed issue #49
   each extracted line so a subsequent bounded heading-shaped line, including
   a decimal, uppercase/lowercase Roman or uppercase/lowercase letter-marked
   heading, including a fully parenthesized outline marker, or a sentence-case
-  heading with an explicit heading signal, resets the label. An unmarked sentence ending in a
-  period, exclamation point or semicolon remains body text; numbering alone
+  heading with an explicit heading signal, resets the label. An unmarked
+  sentence ending in a period, exclamation point or semicolon remains body text;
+  numbering alone
   does not turn a punctuated sentence-case body line into a heading. A
   reliable heading followed by a colon and body on the same line changes state
   at the body boundary, including when the heading ends a preceding body line
@@ -3363,6 +3364,18 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
+- The final product-code head `20e1a819b4bff5c3e58f646132a046b6d1e81b55`
+  reran the full 111-page public DOL acceptance through
+  `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,224
+  MiB for the Ollama process. The test passed in 102.75 seconds after 186 model
+  requests and produced 81 claims backed by 97 evidence items. The delivered
+  page-21 paragraph reads `The document presents the following as a problem:
+  Common problems include employees paid a piece rate falling below the minimum
+  wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
+  The run recorded summary integrity hash
+  `be3e49c5ead82bea76cdbf2279a545414d214ffe2d01be97ab4e04b2fb2b403a` and
+  citation integrity hash
+  `e96262d36ef17920af8a2b0a81b8faee69e31ea03a74f1559fd0ed144543fd27`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
