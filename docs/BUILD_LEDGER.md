@@ -3463,12 +3463,19 @@ release acceptance exposed issue #49
   not been, was not, or cannot be ruled out. The predicate requires the bounded
   `ruled out` complement; affirmative `ruled out` and `ruled in` controls remain
   unframed. The focused classifier test and full deterministic gate passed.
-- The final product-code head `4bb76df9709d410837d9ae4dde43a0d9b1bab86f`
+- Product-code head `4bb76df9709d410837d9ae4dde43a0d9b1bab86f`
   admits modal `no longer be ruled out`, splits UTF-8 en/em-dash continuations
   only when a bounded coordinator follows, and rejects unmarked framing phrases
   that end as declarative sentences. Wrong complements, qualified dash clauses,
   and marked or colon-signaled heading controls preserve their prior behavior.
   The focused classifier test and full deterministic gate passed.
+- The final product-code head `e9ea756744309abfb2c5b4866a46344d2a7ae00a`
+  retains a denied category as non-governing parser state, allowing a bounded
+  adverse continuation on a later line or normalized block to restore it. The
+  suspended category does not label neutral text and clears at a recognized
+  section boundary or unavailable visual gap. Blank-line, cross-block,
+  explicit-boundary and synthesis/verification parity controls pass. The
+  focused classifier test and full deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3550,6 +3557,9 @@ release acceptance exposed issue #49
   coordinated en/em-dash denial continuations with neutral, adverse and
   qualification controls, and unmarked punctuated framing-phrase rejection with
   marked and colon-signaled controls,
+  non-governing denied-category suspension across blank lines and normalized
+  blocks, bounded next-line reintroduction, explicit section-boundary and visual
+  reset, and shared synthesis/verification state reconstruction,
   and disjunctive continuations admitted only when their second disjunct is an
   independent declarative bounded denial, with ASCII, full-width and Arabic
   interrogative second disjuncts rejected, and denial/continuation splitting
