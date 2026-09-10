@@ -3400,19 +3400,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `097957a1c979492bae2ffe61a2ecb4dca1913393`
+- The final product-code head `f5ede1f6d97c8828423c4c32f99c15a6b50218be`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 111.89 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 107.17 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `ca4c5b65bdd4e53686848972d09879c73028297b018d8f0a108075f08c7fbed7` and
+  `a5d809c635dd080bf3b7b411b8d5eedb47a12379dfc3c549cd5d07e750727230` and
   citation integrity hash
-  `46b925b0794370eff1c1f516e5e33845d54b953093870549d68dcdd10eace635`.
+  `f72dccb72457f8f4314be963eb5f8eb3f9868554e89772fcbb7cf221ad408ba7`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3476,7 +3476,9 @@ release acceptance exposed issue #49
   rejection, comma- and semicolon-coordinated denial continuations with
   additive, contrast, bare-independent-clause, noun-list and qualification
   controls, complement-aware `remain not possible` versus `remain not
-  eliminated` polarity, bounded `Answer` and `Response` denial bodies, exact
+  eliminated` polarity including double-negative `not impossible` inversion,
+  and disjunctive continuations admitted only when their second disjunct is an
+  independent bounded denial, bounded `Answer` and `Response` denial bodies, exact
   neutral and affirmative
   transitions within one denial/reintroduction line and its colon-body form,
   post-question denial answers with interrogative and qualified-tail rejection,
