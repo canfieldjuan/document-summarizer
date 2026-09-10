@@ -3397,19 +3397,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `7ebc94b856aad163a1e24d95543e8e0f1bea4991`
+- The final product-code head `14175d6515e7f12c302191c3e7c10503e40ec35e`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 96.81 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 96.76 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `e4f524265b97ceee27c82c53bf81ee5122c03005744abc31619b36bf75b37b2c` and
+  `b340e86a9824bc681f62c1cf7ac9bde7602ee5838978adb993596d50b59c4016` and
   citation integrity hash
-  `172c1d26ff55f5d6f5625f2d08358cd06fb7c1ff5fe5cff7ceb3eb77cb962024`.
+  `6fc07a74b772aecbbfce637bdf791296e1a0f7aa8a055751da3f91154793f4ea`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3463,7 +3463,8 @@ release acceptance exposed issue #49
   after the transient selection labels are unavailable,
   neutral reset at uncertainty-qualified sentence-case framing headings,
   bounded `detected`, `remain` and `apply` denials, one bounded `currently` or
-  `yet` inside an auxiliary denial predicate or before an existential `no`,
+  `yet` inside an auxiliary denial predicate or around an existential auxiliary
+  and `no`,
   with category-mismatch and substantive-tail rejection,
   resolved/eliminated absence continuations with unresolved-risk
   reintroduction, punctuation-scoped residual-predicate negation with
