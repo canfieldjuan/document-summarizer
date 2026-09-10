@@ -3400,19 +3400,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `03b445fc80f1272fa76a48f60ab11ec9094146ac`
+- The final product-code head `1a3c90425ab0c4eed2dea58eda09b6dfff938f38`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 151.35 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 120.48 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `9bf6ea09aef37a64472fb5acc341746f88bc287471dc78b8306a495cb32e9a59` and
+  `c8b988ef0694f299139162439718316472520a7e55102d33d9b54b8d927efca3` and
   citation integrity hash
-  `11bf3872dafaf8e028de604e7a8725cbfe9795094f68e5580ab1692a024d2d01`.
+  `e6500ab1141ca63c570f0eaafc206e92b97a08827721121e062fa1dc555c19df`.
   An immediately preceding exact-head run failed closed with
   `SYNTHESIS_REPAIR_INPUT_TOO_LARGE` after the model combined neutral and
   Problem sources in one unusually long unit. The unchanged retry passed; this
@@ -3431,6 +3431,8 @@ release acceptance exposed issue #49
   uppercase/lowercase-letter and fully parenthesized outline framing
   headings, a lowercase recognized section lead after a valid marker with
   marked lowercase and title-case prose retention, inline framing and reset headings,
+  bounded mitigation/control neutral headings in standalone, marked and inline
+  forms with ordinary mitigation sentences retained as body text,
   rejection of standalone and
   bounded compound `Risk Factors`, `Warning Signs` and `Problem Areas`
   headings with the existing conservative modifiers, rejection of unrelated
