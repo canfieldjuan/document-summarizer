@@ -3431,7 +3431,7 @@ release acceptance exposed issue #49
   was persisted. The preceding exact product head therefore supplies this
   slice's representative live output; these final-head runs prove rejection,
   not successful live completion. Follow-up is tracked in issue #53.
-- The final product-code head `4cfaa383db21314f626f32371f60ac5b497af947`
+- Product-code head `4cfaa383db21314f626f32371f60ac5b497af947`
   admits bounded `No risks were discovered` as an empty-section predicate and
   restores Risk for `Risks are unresolved` after a prior denial. Qualified
   discovery statements, `Risks are resolved`, and `Risks are not unresolved`
@@ -3439,6 +3439,12 @@ release acceptance exposed issue #49
   and full deterministic gate passed. No further DOL model run was made because
   issue #53 already reproduces the independent cross-window failure twice and
   neither added predicate occurs in the affected DOL source text.
+- The final product-code head `c815b2bfd94e0b39dc78836f07bc699255547ae8`
+  recognizes a leading bounded `N/A` or `N.A` before splitting its same-line
+  continuation. `N/A. Overview follows.` therefore clears prior framing before
+  the overview, while an interrogative, qualified, or attached path-like form
+  retains it and an explicit adverse continuation can restore framing. The
+  focused classifier test and full deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3494,6 +3500,8 @@ release acceptance exposed issue #49
   split capacity with Story isolation, and
   zero/exact/over-limit persisted-count boundaries and selected-window capacity
   after the transient selection labels are unavailable,
+  same-line `N/A.` and marked `N.A.` clearing with interrogative, qualified,
+  attached-text and explicit-reintroduction controls,
   neutral reset at uncertainty-qualified sentence-case framing headings,
   bounded `detected`, `discovered`, `remain` and `apply` denials, one bounded `currently` or
   `yet` inside an auxiliary denial predicate or around an existential auxiliary
