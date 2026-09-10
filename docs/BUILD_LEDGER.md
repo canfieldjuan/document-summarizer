@@ -3295,13 +3295,16 @@ release acceptance exposed issue #49
   explicit heading signal, resets the label; numbering alone does not. A
   reliable heading followed by a colon and body on the same line changes state
   at the body boundary, including when the heading ends a preceding body line
-  and its own body begins on the next line. Generic colon-ended resets require a marked heading or
-  an explicit section lead in both inline and standalone layouts, so
+  and its own body begins on the next line. Generic colon-ended resets require a
+  marked heading or an explicit section lead in both inline and standalone layouts, so
   introductory labels such as `Example:`, `Note:` or `Important Note:` remain
   prose. A recognized framing heading replaces the
   prior label. Inline transitions
   retain byte positions: a source after one inherits its state, while a source
   crossing one remains unframed. The final transition controls following text.
+  A bounded denial such as `None reported` or `No limitations were identified`
+  clears an active label, while a negative rule such as `No worker may be paid
+  below minimum wage` retains its governing problem context.
   A bounded source segment
   that crosses either transition remains unframed because one relationship does
   not govern all of its text. General
@@ -3338,6 +3341,7 @@ release acceptance exposed issue #49
   headings, inline framing and reset headings, fail-closed transition-spanning
   sources, retention across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
+  denial clearing in following-line and inline bodies with negative-rule retention,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry

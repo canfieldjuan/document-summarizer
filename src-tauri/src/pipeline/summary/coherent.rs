@@ -455,6 +455,57 @@ fn apply_inline_heading_candidate(
     }
 }
 
+fn begins_with_section_denial(text: &str) -> bool {
+    let words = text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(12)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let Some(first) = words.first().map(String::as_str) else {
+        return false;
+    };
+    if first == "none" {
+        return true;
+    }
+    let direct_denial = matches!(first, "neither" | "no");
+    let existential_denial = first == "there"
+        && matches!(
+            words.get(1).map(String::as_str),
+            Some("are" | "is" | "were")
+        )
+        && words.get(2).is_some_and(|word| word == "no");
+    (direct_denial || existential_denial)
+        && words.iter().any(|word| {
+            matches!(
+                word.as_str(),
+                "applicable"
+                    | "caution"
+                    | "cautions"
+                    | "exception"
+                    | "exceptions"
+                    | "found"
+                    | "hazard"
+                    | "hazards"
+                    | "identified"
+                    | "issue"
+                    | "issues"
+                    | "known"
+                    | "limitation"
+                    | "limitations"
+                    | "noted"
+                    | "observed"
+                    | "problem"
+                    | "problems"
+                    | "reported"
+                    | "risk"
+                    | "risks"
+                    | "warning"
+                    | "warnings"
+            )
+        })
+}
+
 fn source_framing_line_update(
     current: Option<SourceFraming>,
     line: &str,
@@ -463,17 +514,25 @@ fn source_framing_line_update(
     let line = line.trim();
     let mut framing = current;
     let mut transitions = Vec::new();
+    if framing.is_some() && begins_with_section_denial(line) {
+        framing = None;
+        transitions.push((leading_whitespace, framing));
+    }
     for (colon_index, _) in line.match_indices(':') {
         let (next, changed) =
             apply_inline_heading_candidate(framing, inline_heading_prefix(line, colon_index));
         if changed {
             framing = next;
-            transitions.push((
-                leading_whitespace
-                    .saturating_add(colon_index)
-                    .saturating_add(1),
-                framing,
-            ));
+            let body_offset = leading_whitespace
+                .saturating_add(colon_index)
+                .saturating_add(1);
+            transitions.push((body_offset, framing));
+            let body = &line[colon_index + 1..];
+            if framing.is_some() && begins_with_section_denial(body) {
+                framing = None;
+                let body_leading_whitespace = body.len().saturating_sub(body.trim_start().len());
+                transitions.push((body_offset.saturating_add(body_leading_whitespace), framing));
+            }
         }
     }
     if transitions.is_empty() {
@@ -4635,6 +4694,13 @@ mod tests {
         assert!(!possible_inline_framing_boundary("Note"));
         assert!(!possible_inline_framing_boundary("Important Note"));
         assert!(!possible_inline_framing_boundary("Supporting Example"));
+        assert!(begins_with_section_denial("None reported."));
+        assert!(begins_with_section_denial(
+            "There are no known risks at this time."
+        ));
+        assert!(!begins_with_section_denial(
+            "No worker may be paid below minimum wage."
+        ));
         for body in [
             "2",
             "1. Workers may fall from ladders.",
@@ -4775,6 +4841,34 @@ mod tests {
             None
         );
         assert_eq!(source_framing_after_block(trailing_solution, None), None);
+        let denied_problem = "Common Problems\nNone reported.\nLater unrelated text.";
+        for unframed in ["None reported.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(denied_problem, unframed, None),
+                None
+            );
+        }
+        let denied_limitation =
+            "Known Limitations\nNo limitations were identified.\nLater unrelated text.";
+        assert_eq!(
+            source_framing_for_segment(denied_limitation, "Later unrelated text.", None),
+            None
+        );
+        let denied_inline = "Common Problems: None reported.";
+        assert_eq!(
+            source_framing_for_segment(denied_inline, "None reported.", None),
+            None
+        );
+        assert_eq!(source_framing_after_block(denied_inline, None), None);
+        let negative_problem = "Common Problems\nNo worker may be paid below minimum wage.";
+        assert_eq!(
+            source_framing_for_segment(
+                negative_problem,
+                "No worker may be paid below minimum wage.",
+                None,
+            ),
+            Some(SourceFraming::Problem)
+        );
         let single_newline = "Common Problems\nLate payments are frequent.";
         assert_eq!(
             source_framing_for_segment(single_newline, "Late payments are frequent.", None),
