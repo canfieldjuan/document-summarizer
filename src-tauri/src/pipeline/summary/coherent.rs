@@ -604,10 +604,16 @@ fn continuation_reintroduces_source_framing(
         .take(17)
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
-    let term_start = words
-        .iter()
-        .take_while(|word| is_source_framing_modifier(word.as_str()) || word.as_str() == "new")
-        .count();
+    let framing_phrase_start = usize::from(
+        words
+            .first()
+            .is_some_and(|word| matches!(word.as_str(), "a" | "an" | "the")),
+    );
+    let term_start = framing_phrase_start
+        + words[framing_phrase_start..]
+            .iter()
+            .take_while(|word| is_source_framing_modifier(word.as_str()) || word.as_str() == "new")
+            .count();
     let Some((framing, noun_end)) = source_framing_term_at(&words, term_start) else {
         return false;
     };
@@ -978,6 +984,7 @@ fn bounded_section_denial_predicate(
                 | "known"
                 | "noted"
                 | "observed"
+                | "present"
                 | "reported"
         )
     }) {
@@ -1345,8 +1352,8 @@ fn maximum_summary_units_for_catalog(profile: SummaryProfile, catalog: &SourceCa
         .min(MAX_SUMMARY_CLAIMS)
 }
 
-fn persisted_summary_claim_count_valid(catalog: &SourceCatalog, claim_count: usize) -> bool {
-    (1..=maximum_summary_units_for_catalog(SummaryProfile::General, catalog)).contains(&claim_count)
+fn persisted_summary_claim_count_valid(claim_count: usize) -> bool {
+    (1..=MAX_SUMMARY_CLAIMS).contains(&claim_count)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4605,7 +4612,7 @@ pub(super) fn validate_content(
     )?;
     match synthesized.presentation_mode {
         SummaryPresentationMode::Coherent => {
-            if !persisted_summary_claim_count_valid(&catalog, synthesized.summary_claims.len())
+            if !persisted_summary_claim_count_valid(synthesized.summary_claims.len())
                 || synthesized.synthesis_evidence.is_empty()
                 || synthesized
                     .warnings
@@ -5550,6 +5557,10 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(!begins_with_section_denial(
+            "No risks were identified. A new risk emerged during testing.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
             "No risks were identified. However, new risks emerged during testing.",
             SourceFraming::Risk,
         ));
@@ -5645,6 +5656,10 @@ mod tests {
         ));
         assert!(begins_with_section_denial(
             "No risks exist.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks are present.",
             SourceFraming::Risk,
         ));
         assert!(begins_with_section_denial(
@@ -6000,6 +6015,11 @@ mod tests {
                 None
             );
         }
+        let copular_presence_denial = "Key Risks\nNo risks are present.\nLater unrelated text.";
+        assert_eq!(
+            source_framing_for_segment(copular_presence_denial, "Later unrelated text.", None,),
+            None
+        );
         let perfect_existential_denial =
             "Key Risks\nThere have been no risks identified.\nLater unrelated text.";
         for unframed in [
@@ -6299,6 +6319,12 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
+        let determiner_reintroduction =
+            "Key Risks\nNo risks were identified. A new risk emerged during testing.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(determiner_reintroduction, "Later text.", None),
+            Some(SourceFraming::Risk)
+        );
         let uncertain_reintroduction = "Key Risks\nNo risks were identified. Potential risks emerged during testing.\nLater text.";
         assert_eq!(
             source_framing_for_segment(uncertain_reintroduction, "Later text.", None),
@@ -7213,9 +7239,9 @@ mod tests {
             maximum_summary_units_for_catalog(SummaryProfile::Story, &grouped),
             1
         );
-        assert!(!persisted_summary_claim_count_valid(&grouped, 0));
-        assert!(persisted_summary_claim_count_valid(&grouped, 8));
-        assert!(!persisted_summary_claim_count_valid(&grouped, 9));
+        assert!(!persisted_summary_claim_count_valid(0));
+        assert!(persisted_summary_claim_count_valid(8));
+        assert!(!persisted_summary_claim_count_valid(9));
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &grouped).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&prompt).unwrap()["maximum_units"],
@@ -7249,8 +7275,20 @@ mod tests {
             maximum_summary_units_for_catalog(SummaryProfile::General, &grouped),
             1
         );
-        assert!(persisted_summary_claim_count_valid(&grouped, 1));
-        assert!(!persisted_summary_claim_count_valid(&grouped, 2));
+        assert!(persisted_summary_claim_count_valid(1));
+        assert!(persisted_summary_claim_count_valid(2));
+
+        let unwindowed_neutral = SourceCatalog {
+            candidates: (1..=8)
+                .map(|page| candidate(&format!("s{page}"), &format!("evidence-{page}"), page))
+                .collect(),
+            omitted_source_units: 0,
+        };
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::General, &unwindowed_neutral),
+            3
+        );
+        assert!(persisted_summary_claim_count_valid(4));
     }
 
     #[test]
