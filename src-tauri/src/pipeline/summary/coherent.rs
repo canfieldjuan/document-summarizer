@@ -506,20 +506,116 @@ fn continuation_reintroduces_source_framing(
         .first()
         .and_then(|word| source_framing_from_noun(word))
         == Some(active_framing)
-        && !words.iter().skip(1).take(8).any(|word| {
+        && !framing_noun_is_denied(&words)
+}
+
+fn framing_noun_is_denied(words: &[String]) -> bool {
+    let skip_adverbs = |mut cursor: usize| {
+        while words.get(cursor).is_some_and(|word| {
             matches!(
                 word.as_str(),
-                "absent"
-                    | "eliminated"
-                    | "never"
-                    | "no"
-                    | "none"
-                    | "not"
-                    | "unidentified"
-                    | "unreported"
-                    | "without"
+                "currently" | "later" | "now" | "previously" | "still" | "subsequently" | "yet"
             )
-        })
+        }) {
+            cursor += 1;
+        }
+        cursor
+    };
+    let mut cursor = skip_adverbs(1);
+    let Some(predicate) = words.get(cursor).map(String::as_str) else {
+        return false;
+    };
+    if matches!(
+        predicate,
+        "absent" | "no" | "none" | "unidentified" | "unreported" | "without"
+    ) {
+        return true;
+    }
+    if matches!(predicate, "remain" | "remained" | "remains") {
+        cursor = skip_adverbs(cursor + 1);
+        return words.get(cursor).is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "absent" | "none" | "unidentified" | "unreported"
+            )
+        });
+    }
+    if matches!(predicate, "do" | "does" | "did") {
+        cursor = skip_adverbs(cursor + 1);
+        if !words
+            .get(cursor)
+            .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
+        {
+            return false;
+        }
+        cursor = skip_adverbs(cursor + 1);
+        return words.get(cursor).is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "appear" | "emerge" | "exist" | "occur" | "remain"
+            )
+        });
+    }
+    if matches!(predicate, "have" | "had" | "has") {
+        cursor = skip_adverbs(cursor + 1);
+        let negated = words
+            .get(cursor)
+            .is_some_and(|word| matches!(word.as_str(), "never" | "not"));
+        if negated {
+            cursor = skip_adverbs(cursor + 1);
+        }
+        if words.get(cursor).is_some_and(|word| word == "been") {
+            cursor = skip_adverbs(cursor + 1);
+        }
+        return words.get(cursor).is_some_and(|word| {
+            if negated {
+                matches!(
+                    word.as_str(),
+                    "detected"
+                        | "emerged"
+                        | "found"
+                        | "identified"
+                        | "observed"
+                        | "occurred"
+                        | "reported"
+                )
+            } else {
+                matches!(word.as_str(), "absent" | "eliminated" | "resolved")
+            }
+        });
+    }
+    if !matches!(predicate, "are" | "is" | "was" | "were") {
+        return false;
+    }
+    cursor = skip_adverbs(cursor + 1);
+    let negated = words
+        .get(cursor)
+        .is_some_and(|word| matches!(word.as_str(), "never" | "not"));
+    if negated {
+        cursor = skip_adverbs(cursor + 1);
+        if words.get(cursor).is_some_and(|word| word == "been") {
+            cursor = skip_adverbs(cursor + 1);
+        }
+        return words.get(cursor).is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "detected"
+                    | "emerging"
+                    | "found"
+                    | "identified"
+                    | "observed"
+                    | "occurring"
+                    | "present"
+                    | "reported"
+            )
+        });
+    }
+    words.get(cursor).is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "absent" | "eliminated" | "none" | "resolved" | "unidentified" | "unreported"
+        )
+    })
 }
 
 fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool {
@@ -5136,10 +5232,25 @@ mod tests {
             "No risks were identified. Risks subsequently emerged during testing.",
             SourceFraming::Risk,
         ));
-        assert!(begins_with_section_denial(
-            "No risks were identified. Risks were not identified later.",
+        assert!(!begins_with_section_denial(
+            "No risks were identified. Risks emerged because controls were not applied.",
             SourceFraming::Risk,
         ));
+        assert!(!begins_with_section_denial(
+            "No risks were identified. Risks were not eliminated.",
+            SourceFraming::Risk,
+        ));
+        for repeated_absence in [
+            "No risks were identified. Risks were not identified later.",
+            "No risks were identified. Risks did not emerge.",
+            "No risks were identified. Risks have not been identified.",
+            "No risks were identified. Risks were eliminated.",
+        ] {
+            assert!(begins_with_section_denial(
+                repeated_absence,
+                SourceFraming::Risk,
+            ));
+        }
         assert!(begins_with_section_denial(
             "No risks were identified. Problems subsequently emerged.",
             SourceFraming::Risk,
@@ -5625,6 +5736,16 @@ mod tests {
         for framed in ["Risks subsequently emerged during testing.", "Later text."] {
             assert_eq!(
                 source_framing_for_segment(explicit_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let causal_reintroduction = "Key Risks\nNo risks were identified. Risks emerged because controls were not applied.\nLater text.";
+        for framed in [
+            "Risks emerged because controls were not applied.",
+            "Later text.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(causal_reintroduction, framed, None),
                 Some(SourceFraming::Risk)
             );
         }

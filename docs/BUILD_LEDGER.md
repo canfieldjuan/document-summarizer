@@ -3328,8 +3328,10 @@ release acceptance exposed issue #49
   predicate; only the leading complete sentence is inspected so later prose on
   the extracted line does not hide the reset, unless the next sentence begins
   with a bounded contrast marker or explicitly reintroduces the active framing
-  category without absence or negation terms. A repeated absence or a different
-  framing category still clears state. Repeated determiners after noun
+  category through a noun-first predicate that does not deny its presence or
+  identification. Negation in a subordinate proposition and a negated
+  elimination do not erase that reintroduction. A repeated absence or a
+  different framing category still clears state. Repeated determiners after noun
   conjunctions remain within that grammar, while
   interrogative clauses cannot reset it. A recognized outline marker may
   precede the bounded denial; invalid markers and marked negative rules cannot
@@ -3413,7 +3415,8 @@ release acceptance exposed issue #49
   bounded `to report` and bounded `Not applicable`, active-category noun
   matching, rejection of uncertainty modifiers, retention through
   interrogative denials, post-denial contrast sentences, explicit same-line
-  framing reintroduction with repeated-absence and category-mismatch rejection,
+  framing reintroduction with predicate-bound negation, repeated-absence and
+  category-mismatch rejection,
   explanatory `Not applicable because ...` and `No risks to report because ...`
   text and negative-rule, residual-risk, qualified-denial and `None of ...`
   retention,
