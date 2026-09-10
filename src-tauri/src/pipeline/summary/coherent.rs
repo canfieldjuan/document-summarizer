@@ -832,19 +832,21 @@ fn source_framing_line_update(
         framing = None;
         transitions.push((leading_whitespace, framing));
     }
-    for (question_index, _) in line.match_indices('?') {
-        if line[question_index + 1..].trim().is_empty() {
+    for (delimiter_index, delimiter) in line.match_indices([':', '?']) {
+        if delimiter == "?" {
+            if line[delimiter_index + 1..].trim().is_empty() {
+                continue;
+            }
+            let (heading_candidate, heading_offset) = inline_heading_prefix(line, delimiter_index);
+            if possible_framing_boundary(heading_candidate)
+                && possible_inline_framing_boundary(heading_candidate)
+            {
+                framing = None;
+                transitions.push((leading_whitespace.saturating_add(heading_offset), framing));
+            }
             continue;
         }
-        let (heading_candidate, heading_offset) = inline_heading_prefix(line, question_index);
-        if possible_framing_boundary(heading_candidate)
-            && possible_inline_framing_boundary(heading_candidate)
-        {
-            framing = None;
-            transitions.push((leading_whitespace.saturating_add(heading_offset), framing));
-        }
-    }
-    for (colon_index, _) in line.match_indices(':') {
+        let colon_index = delimiter_index;
         let (heading_candidate, heading_offset) = inline_heading_prefix(line, colon_index);
         let (next, changed) = apply_inline_heading_candidate(framing, heading_candidate);
         if changed {
@@ -5689,6 +5691,16 @@ mod tests {
                 None,
             ),
             None
+        );
+        let colon_before_interrogative = "Key Risks: Common Problems? Late payment may occur.";
+        assert_eq!(
+            source_framing_for_segment(colon_before_interrogative, "Late payment may occur.", None,),
+            None
+        );
+        let colon_after_interrogative = "Common Problems? Answer: Key Risks: Injury may occur.";
+        assert_eq!(
+            source_framing_for_segment(colon_after_interrogative, "Injury may occur.", None,),
+            Some(SourceFraming::Risk)
         );
         let substantive_question = "Key Risks\nAre there risks? No control eliminates every risk.";
         assert_eq!(

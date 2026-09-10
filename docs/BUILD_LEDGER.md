@@ -3309,9 +3309,10 @@ release acceptance exposed issue #49
   on the same line. Ordinary substantive questions do not create that reset. A
   recognized framing heading replaces the
   prior label. Inline transitions
-  retain byte positions: a source after one inherits its state, while a source
-  crossing one remains unframed. A standalone colon heading transitions at the
-  heading start so a quote containing that heading and its next-line body keeps
+  are applied in byte order and retain byte positions, so the last textual
+  delimiter controls following content; a source after one inherits its state,
+  while a source crossing one remains unframed. A standalone colon heading
+  transitions at the heading start so a quote containing that heading and its next-line body keeps
   the relationship; a genuinely inline heading transitions at its body. The
   final transition controls following text. A candidate containing only a
   recognized framing heading remains unframed, while the heading's state still
@@ -3400,7 +3401,8 @@ release acceptance exposed issue #49
   uppercase/lowercase-letter and fully parenthesized outline framing
   headings, inline framing and reset headings, rejection of standalone and
   inline interrogative framing headings, same-line interrogative reset before
-  answer text with substantive-question retention, fail-closed
+  answer text with substantive-question retention, byte-ordered colon/question
+  precedence in both directions, fail-closed
   transition-spanning sources, whole standalone-colon heading/body candidates,
   inline transition
   isolation, heading-only candidate neutrality with state propagation, marked
