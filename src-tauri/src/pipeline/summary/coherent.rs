@@ -757,6 +757,14 @@ fn continuation_reintroduces_source_framing(
 }
 
 fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> bool {
+    let negated_resolution_remains_open = |cursor: usize| {
+        words.get(cursor).is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "absent" | "eliminated" | "impossible" | "resolved"
+            ) || (word == "ruled" && words.get(cursor + 1).is_some_and(|next| next == "out"))
+        })
+    };
     let skip_adverbs = |mut cursor: usize| {
         while words.get(cursor).is_some_and(|word| {
             matches!(
@@ -810,6 +818,16 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
     ) {
         return true;
     }
+    if predicate == "cannot" {
+        cursor = skip_adverbs(cursor + 1);
+        if words
+            .get(cursor)
+            .is_some_and(|word| matches!(word.as_str(), "be" | "been"))
+        {
+            cursor = skip_adverbs(cursor + 1);
+        }
+        return negated_resolution_remains_open(cursor);
+    }
     if matches!(
         predicate,
         "can" | "could" | "may" | "might" | "must" | "shall" | "should" | "will" | "would"
@@ -819,7 +837,14 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
             .get(cursor)
             .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
         {
-            return false;
+            cursor = skip_adverbs(cursor + 1);
+            if words
+                .get(cursor)
+                .is_some_and(|word| matches!(word.as_str(), "be" | "been"))
+            {
+                cursor = skip_adverbs(cursor + 1);
+            }
+            return negated_resolution_remains_open(cursor);
         }
         return words.get(cursor).is_some_and(|word| {
             matches!(
@@ -842,23 +867,13 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
             .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
         {
             cursor = skip_adverbs(cursor + 1);
-            return words.get(cursor).is_some_and(|word| {
-                matches!(
-                    word.as_str(),
-                    "absent" | "eliminated" | "impossible" | "resolved"
-                )
-            });
+            return negated_resolution_remains_open(cursor);
         }
         if words.get(cursor).is_some_and(|word| word == "no")
             && words.get(cursor + 1).is_some_and(|word| word == "longer")
         {
             cursor = skip_adverbs(cursor + 2);
-            return words.get(cursor).is_some_and(|word| {
-                matches!(
-                    word.as_str(),
-                    "absent" | "eliminated" | "impossible" | "resolved"
-                )
-            });
+            return negated_resolution_remains_open(cursor);
         }
         return !words.get(cursor).is_some_and(|word| {
             matches!(
@@ -902,10 +917,8 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
         }
         return words.get(cursor).is_some_and(|word| {
             if negated {
-                matches!(
-                    word.as_str(),
-                    "absent" | "eliminated" | "resolved" | "unidentified" | "unreported"
-                )
+                negated_resolution_remains_open(cursor)
+                    || matches!(word.as_str(), "unidentified" | "unreported")
             } else {
                 matches!(
                     word.as_str(),
@@ -943,16 +956,8 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
             cursor = skip_adverbs(cursor + 1);
         }
         return words.get(cursor).is_some_and(|word| {
-            matches!(
-                word.as_str(),
-                "absent"
-                    | "eliminated"
-                    | "impossible"
-                    | "none"
-                    | "resolved"
-                    | "unidentified"
-                    | "unreported"
-            )
+            negated_resolution_remains_open(cursor)
+                || matches!(word.as_str(), "none" | "unidentified" | "unreported")
         });
     }
     words.get(cursor).is_some_and(|word| {
@@ -7814,6 +7819,36 @@ mod tests {
                     source_framing_for_segment(&block, framed, None),
                     Some(SourceFraming::Risk)
                 );
+            }
+        }
+        for residual_risk in [
+            "Risks have not been ruled out.",
+            "Risk has not been ruled out.",
+            "Risks had not been ruled out.",
+            "Risks were not ruled out.",
+            "Risks are not ruled out.",
+            "Risks cannot be ruled out.",
+            "Risks could not be ruled out.",
+        ] {
+            let block =
+                format!("Key Risks\nNo risks were identified. {residual_risk}\nLater text.");
+            for framed in [residual_risk, "Later text."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk)
+                );
+            }
+        }
+        for ruled_out_risk in [
+            "Risks have been ruled out.",
+            "Risks were ruled out.",
+            "Risks have not been ruled in.",
+            "Risks could not be ruled in.",
+        ] {
+            let block =
+                format!("Key Risks\nNo risks were identified. {ruled_out_risk}\nLater text.");
+            for unframed in [ruled_out_risk, "Later text."] {
+                assert_eq!(source_framing_for_segment(&block, unframed, None), None);
             }
         }
         let no_longer_eliminated =
