@@ -343,26 +343,66 @@ fn possible_framing_boundary(text: &str) -> bool {
     starts_uppercase && (all_uppercase || title_case || sentence_case_lead)
 }
 
-fn source_framing_after_line(current: Option<SourceFraming>, line: &str) -> Option<SourceFraming> {
-    let heading_candidate = line.trim();
-    if let Some((prefix, body)) = heading_candidate.split_once(':') {
-        let prefix = prefix.trim();
-        if !body.trim().is_empty() {
-            if let Some(next) = framing_from_heading(prefix) {
-                return Some(next);
-            }
-            if possible_framing_boundary(prefix) {
-                return None;
-            }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceFramingLineUpdate {
+    framing: Option<SourceFraming>,
+    inline_transitions: usize,
+}
+
+fn apply_heading_candidate(
+    current: Option<SourceFraming>,
+    heading_candidate: &str,
+) -> (Option<SourceFraming>, bool) {
+    if let Some(next) = framing_from_heading(heading_candidate) {
+        (Some(next), true)
+    } else if possible_framing_boundary(heading_candidate) {
+        (None, true)
+    } else {
+        (current, false)
+    }
+}
+
+fn inline_heading_prefix(line: &str, colon_index: usize) -> &str {
+    let before_colon = &line[..colon_index];
+    let prefix_start = before_colon
+        .char_indices()
+        .rev()
+        .find(|(_, character)| matches!(character, '.' | '?' | '!' | ';' | ':'))
+        .map_or(0, |(index, character)| {
+            index.saturating_add(character.len_utf8())
+        });
+    before_colon[prefix_start..].trim()
+}
+
+fn source_framing_line_update(
+    current: Option<SourceFraming>,
+    line: &str,
+) -> SourceFramingLineUpdate {
+    let line = line.trim();
+    let mut framing = current;
+    let mut inline_transitions = 0usize;
+    for (colon_index, _) in line.match_indices(':') {
+        if line[colon_index + 1..].trim().is_empty() {
+            continue;
+        }
+        let (next, changed) =
+            apply_heading_candidate(framing, inline_heading_prefix(line, colon_index));
+        if changed {
+            framing = next;
+            inline_transitions = inline_transitions.saturating_add(1);
         }
     }
-    if let Some(next) = framing_from_heading(heading_candidate) {
-        Some(next)
-    } else if possible_framing_boundary(heading_candidate) {
-        None
-    } else {
-        current
+    if inline_transitions == 0 {
+        (framing, _) = apply_heading_candidate(framing, line);
     }
+    SourceFramingLineUpdate {
+        framing,
+        inline_transitions,
+    }
+}
+
+fn source_framing_after_line(current: Option<SourceFraming>, line: &str) -> Option<SourceFraming> {
+    source_framing_line_update(current, line).framing
 }
 
 fn source_framing_after_block(
@@ -412,13 +452,18 @@ fn source_framing_for_segment(
         if line_start >= segment_end {
             break;
         }
-        framing = source_framing_after_line(framing, line);
+        let line_end = line_start.saturating_add(line.len());
+        let update = source_framing_line_update(framing, line);
+        framing = update.framing;
+        if update.inline_transitions > 1 && line_start < segment_end && line_end > segment_start {
+            return None;
+        }
         if line_start <= segment_start {
             governing_framing = framing;
         } else if framing != governing_framing {
             return None;
         }
-        line_start = line_start.saturating_add(line.len());
+        line_start = line_end;
     }
     governing_framing
 }
@@ -4557,6 +4602,18 @@ mod tests {
         );
         assert_eq!(
             source_framing_for_segment(inline_sections, "Pay workers promptly.", None),
+            None
+        );
+        let collapsed_inline_sections =
+            "Common Problems: Late payments are frequent. Solutions: Pay workers promptly.";
+        for unframed in ["Late payments are frequent.", "Pay workers promptly."] {
+            assert_eq!(
+                source_framing_for_segment(collapsed_inline_sections, unframed, None),
+                None
+            );
+        }
+        assert_eq!(
+            source_framing_after_block(collapsed_inline_sections, None),
             None
         );
         let single_newline = "Common Problems\nLate payments are frequent.";
