@@ -3452,12 +3452,17 @@ release acceptance exposed issue #49
   failure-qualified questions and substantive questions about remaining risks
   retain their active framing. The focused classifier test and full
   deterministic gate passed.
-- The final product-code head `d93c604537cef762b3193050c2fd03288aba0e4e`
+- Product-code head `d93c604537cef762b3193050c2fd03288aba0e4e`
   admits bare `No` only after a bounded question about the presence or existence
   of the active framing category. Substantive questions about control failure do
   not clear the category, including through a labeled `Answer: No`; an explicit
   bounded denial such as `No risks were identified` still clears it. The focused
   classifier test and full deterministic gate passed.
+- The final product-code head `1226db8bb714ab5fb0d828e5f7c9ae1791c8251e`
+  restores Problem or Risk framing when a later sentence says the condition has
+  not been, was not, or cannot be ruled out. The predicate requires the bounded
+  `ruled out` complement; affirmative `ruled out` and `ruled in` controls remain
+  unframed. The focused classifier test and full deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3532,6 +3537,9 @@ release acceptance exposed issue #49
   eliminated` polarity including double-negative `not impossible` inversion,
   matching copular polarity for `are impossible`, `are not possible`, and
   `are not`, `were never`, or `are no longer impossible`,
+  bounded residual-risk forms using `has`, `have`, `had`, copular, `cannot`, or
+  modal `not be ruled out` predicates with affirmative and wrong-complement
+  controls,
   and disjunctive continuations admitted only when their second disjunct is an
   independent declarative bounded denial, with ASCII, full-width and Arabic
   interrogative second disjuncts rejected, and denial/continuation splitting
