@@ -3295,7 +3295,7 @@ release acceptance exposed issue #49
   fully parenthesized outline marker, or a sentence-case heading with an explicit
   heading signal, resets the label. An unmarked sentence ending in a
   period, exclamation point or semicolon remains body text; numbering alone
-  does not create a heading. A
+  does not turn a punctuated sentence-case body line into a heading. A
   reliable heading followed by a colon and body on the same line changes state
   at the body boundary, including when the heading ends a preceding body line
   and its own body begins on the next line. Generic colon-ended resets require a
@@ -3362,8 +3362,9 @@ release acceptance exposed issue #49
   solution-oriented and unrelated headings. Tests
   also prove application-owned framing of neutral General units, propagation to
   later segments and page blocks of a split section, reset at a later
-  sentence-case or punctuated marked solution section, retention across short
-  capitalized and numbered-list body paragraphs, reset across empty and
+  sentence-case or punctuated marked title-case solution section, retention
+  across short capitalized, numbered-list and numbered sentence-case body
+  paragraphs, reset across empty and
   visual-processing pages, retention across an introductory colon, single- and
   excess-newline framing and reset headings, decimal/Roman/uppercase,
   lowercase-letter and fully parenthesized outline framing

@@ -356,8 +356,7 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "who"
             | "why"
     );
-    let sentence_case_has_heading_shape =
-        marked_title.is_some() || !heading.ends_with(['.', '!', ';']);
+    let sentence_case_has_heading_shape = !heading.ends_with(['.', '!', ';']);
     starts_uppercase
         && (all_uppercase || title_case || sentence_case_lead && sentence_case_has_heading_shape)
 }
@@ -5030,6 +5029,7 @@ mod tests {
             "2",
             "1. Workers may fall from ladders.",
             "A. Workers may fall from ladders.",
+            "1. When guards fail, workers may be injured.",
             "Examples include:",
             "Employees paid by piece rate",
             "employees below minimum wage",
@@ -5091,6 +5091,17 @@ mod tests {
             ),
             Some(SourceFraming::Risk)
         );
+        let numbered_sentence_case_body =
+            "Key Risks\n1. When guards fail, workers may be injured.\nFalls can be fatal.";
+        for framed in [
+            "1. When guards fail, workers may be injured.",
+            "Falls can be fatal.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(numbered_sentence_case_body, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
         let introductory_colon = "Common Problems\n\nExamples include:\n\nLate payment.";
         assert_eq!(
             source_framing_for_segment(introductory_colon, "Late payment.", None),
