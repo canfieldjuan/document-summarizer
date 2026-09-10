@@ -809,12 +809,7 @@ fn continuation_reintroduces_source_framing(
     continuation: &str,
     active_framing: SourceFraming,
 ) -> bool {
-    let words = continuation
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .take(17)
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
+    let (words, _) = section_denial_words(continuation);
     let framing_phrase_start = usize::from(
         words
             .first()
@@ -852,9 +847,10 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
         cursor
     };
     let mut cursor = skip_adverbs(noun_end);
-    let Some(predicate) = words.get(cursor).map(String::as_str) else {
+    let Some(raw_predicate) = words.get(cursor).map(String::as_str) else {
         return true;
     };
+    let (predicate, contracted_negative) = normalize_contracted_auxiliary(raw_predicate);
     if matches!(
         predicate,
         "absent" | "no" | "none" | "unidentified" | "unreported" | "without"
@@ -908,6 +904,15 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
         "can" | "could" | "may" | "might" | "must" | "shall" | "should" | "will" | "would"
     ) {
         cursor = skip_adverbs(cursor + 1);
+        if contracted_negative {
+            if words
+                .get(cursor)
+                .is_some_and(|word| matches!(word.as_str(), "be" | "been"))
+            {
+                cursor = skip_adverbs(cursor + 1);
+            }
+            return negated_resolution_remains_open(cursor);
+        }
         if words.get(cursor).is_some_and(|word| word == "no")
             && words.get(cursor + 1).is_some_and(|word| word == "longer")
         {
@@ -977,12 +982,16 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
     }
     if matches!(predicate, "do" | "does" | "did") {
         cursor = skip_adverbs(cursor + 1);
-        let negated = words
+        let explicit_negative = words
             .get(cursor)
             .is_some_and(|word| matches!(word.as_str(), "never" | "not"));
-        if negated {
+        if contracted_negative && explicit_negative {
+            return false;
+        }
+        if explicit_negative {
             cursor = skip_adverbs(cursor + 1);
         }
+        let negated = contracted_negative || explicit_negative;
         return !negated
             && words.get(cursor).is_some_and(|word| {
                 matches!(
@@ -993,12 +1002,16 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
     }
     if matches!(predicate, "have" | "had" | "has") {
         cursor = skip_adverbs(cursor + 1);
-        let negated = words
+        let explicit_negative = words
             .get(cursor)
             .is_some_and(|word| matches!(word.as_str(), "never" | "not"));
-        if negated {
+        if contracted_negative && explicit_negative {
+            return false;
+        }
+        if explicit_negative {
             cursor = skip_adverbs(cursor + 1);
         }
+        let negated = contracted_negative || explicit_negative;
         if words.get(cursor).is_some_and(|word| word == "been") {
             cursor = skip_adverbs(cursor + 1);
         }
@@ -1028,17 +1041,20 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
         return false;
     }
     cursor = skip_adverbs(cursor + 1);
-    let explicitly_negated = words
+    let explicit_negative = words
         .get(cursor)
         .is_some_and(|word| matches!(word.as_str(), "never" | "not"));
     let no_longer = words.get(cursor).is_some_and(|word| word == "no")
         && words.get(cursor + 1).is_some_and(|word| word == "longer");
-    if explicitly_negated {
+    if contracted_negative && (explicit_negative || no_longer) {
+        return false;
+    }
+    if explicit_negative {
         cursor = skip_adverbs(cursor + 1);
     } else if no_longer {
         cursor = skip_adverbs(cursor + 2);
     }
-    if explicitly_negated || no_longer {
+    if contracted_negative || explicit_negative || no_longer {
         if words.get(cursor).is_some_and(|word| word == "been") {
             cursor = skip_adverbs(cursor + 1);
         }
@@ -1065,6 +1081,30 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
                 | "unresolved"
         )
     })
+}
+
+fn normalize_contracted_auxiliary(word: &str) -> (&str, bool) {
+    match word {
+        "aren't" | "aren’t" => ("are", true),
+        "can't" | "can’t" => ("can", true),
+        "couldn't" | "couldn’t" => ("could", true),
+        "didn't" | "didn’t" => ("did", true),
+        "doesn't" | "doesn’t" => ("does", true),
+        "don't" | "don’t" => ("do", true),
+        "hadn't" | "hadn’t" => ("had", true),
+        "hasn't" | "hasn’t" => ("has", true),
+        "haven't" | "haven’t" => ("have", true),
+        "isn't" | "isn’t" => ("is", true),
+        "mightn't" | "mightn’t" => ("might", true),
+        "mustn't" | "mustn’t" => ("must", true),
+        "shan't" | "shan’t" => ("shall", true),
+        "shouldn't" | "shouldn’t" => ("should", true),
+        "wasn't" | "wasn’t" => ("was", true),
+        "weren't" | "weren’t" => ("were", true),
+        "won't" | "won’t" => ("will", true),
+        "wouldn't" | "wouldn’t" => ("would", true),
+        _ => (word, false),
+    }
 }
 
 fn residual_continuation_reintroduces_source_framing(
@@ -1279,7 +1319,7 @@ fn coordinated_clause_boundary(
     {
         return None;
     }
-    text.match_indices([',', ';', '–', '—'])
+    text.match_indices([',', '،', '，', ';', '–', '—'])
         .find_map(|(index, delimiter)| {
             let continuation_start = index.saturating_add(delimiter.len());
             let continuation = &text[continuation_start..];
@@ -6694,6 +6734,18 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(begins_with_section_denial(
+            "No risks were identified， however, monitoring will continue.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were identified، however, monitoring will continue.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
+            "No risks were identified， because the review is incomplete.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
             "No risks were identified; however, monitoring will continue.",
             SourceFraming::Risk,
         ));
@@ -7978,6 +8030,8 @@ mod tests {
         for coordinated_neutral in [
             "Key Risks\nNo risks were identified, but monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified, and monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified， however, monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified، however, monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified; however, monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified; monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified, while monitoring will continue.\nOverview follows.",
@@ -7996,6 +8050,8 @@ mod tests {
         for coordinated_adverse in [
             "Key Risks\nNo risks were identified, but fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified, and fraud remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified， however, fraud remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified، however, fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified; however, fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified; fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified, while fraud remains possible.\nOverview follows.",
@@ -8027,6 +8083,8 @@ mod tests {
         for qualified_semicolon in [
             "Key Risks\nNo risks were identified; because the review is incomplete.\nOverview follows.",
             "Key Risks\nNo risks were identified; if the preliminary record is accurate.\nOverview follows.",
+            "Key Risks\nNo risks were identified， because the review is incomplete.\nOverview follows.",
+            "Key Risks\nNo risks were identified، because the review is incomplete.\nOverview follows.",
             "Key Risks\nNo risks were identified — because the review is incomplete.\nOverview follows.",
         ] {
             assert_eq!(
@@ -8255,12 +8313,19 @@ mod tests {
         }
         for residual_risk in [
             "Risks have not been ruled out.",
+            "Risks haven't been ruled out.",
+            "Risks haven’t been ruled out.",
             "Risk has not been ruled out.",
+            "Risks aren't ruled out.",
+            "Risks aren’t ruled out.",
             "Risks had not been ruled out.",
             "Risks were not ruled out.",
             "Risks are not ruled out.",
             "Risks cannot be ruled out.",
+            "Risks can't be ruled out.",
+            "Risks can’t be ruled out.",
             "Risks could not be ruled out.",
+            "Risks couldn't be ruled out.",
             "Risks can no longer be ruled out.",
             "Risks may no longer be ruled out.",
         ] {
@@ -8275,9 +8340,14 @@ mod tests {
         }
         for ruled_out_risk in [
             "Risks have been ruled out.",
+            "Risks haven't been ruled in.",
             "Risks were ruled out.",
             "Risks have not been ruled in.",
             "Risks could not be ruled in.",
+            "Risks couldn't be ruled in.",
+            "Risks can't be identified.",
+            "Risks haven't not been ruled out.",
+            "Risks aren't not ruled out.",
             "Risks can no longer be ruled in.",
             "Risks can no longer be identified.",
         ] {
