@@ -893,6 +893,7 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
                 | "possible"
                 | "present"
                 | "reported"
+                | "unresolved"
         )
     })
 }
@@ -1346,6 +1347,7 @@ fn bounded_section_denial_predicate(
                 | "applicable"
                 | "applies"
                 | "detected"
+                | "discovered"
                 | "exist"
                 | "exists"
                 | "found"
@@ -6793,6 +6795,19 @@ mod tests {
                 None
             );
         }
+        let discovered_denial = "Key Risks\nNo risks were discovered.\nLater unrelated text.";
+        for unframed in ["No risks were discovered.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(discovered_denial, unframed, None),
+                None
+            );
+        }
+        let qualified_discovered_statement =
+            "Key Risks\nNo risks were discovered because the review is incomplete.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(qualified_discovered_statement, "Later text.", None),
+            Some(SourceFraming::Risk)
+        );
         for temporal_denial in [
             "Key Risks\nNo risks have yet been identified.\nLater unrelated text.",
             "Key Risks\nNo risks are currently present.\nLater unrelated text.",
@@ -7478,6 +7493,8 @@ mod tests {
             "Risks are not possible.",
             "Risks are impossible.",
             "Risks are no longer possible.",
+            "Risks are resolved.",
+            "Risks are not unresolved.",
         ] {
             let resolved_continuation =
                 format!("Key Risks\nNo risks were identified. {resolved_state}\nLater text.");
@@ -7488,13 +7505,15 @@ mod tests {
                 );
             }
         }
-        let unresolved_continuation =
-            "Key Risks\nNo risks were identified. Risks remain unresolved.\nLater text.";
-        for framed in ["Risks remain unresolved.", "Later text."] {
-            assert_eq!(
-                source_framing_for_segment(unresolved_continuation, framed, None),
-                Some(SourceFraming::Risk)
-            );
+        for unresolved_state in ["Risks remain unresolved.", "Risks are unresolved."] {
+            let unresolved_continuation =
+                format!("Key Risks\nNo risks were identified. {unresolved_state}\nLater text.");
+            for framed in [unresolved_state, "Later text."] {
+                assert_eq!(
+                    source_framing_for_segment(&unresolved_continuation, framed, None),
+                    Some(SourceFraming::Risk)
+                );
+            }
         }
         for negated_resolution in [
             "Risks remain not eliminated.",
