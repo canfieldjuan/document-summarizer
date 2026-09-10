@@ -539,6 +539,12 @@ fn bounded_section_denial_predicate(
         if section_denial_tail(&words[cursor..]) {
             return true;
         }
+        if words.get(cursor).is_some_and(|word| word == "to")
+            && words.get(cursor + 1).is_some_and(|word| word == "report")
+            && section_denial_tail(&words[cursor + 2..])
+        {
+            return true;
+        }
     }
 
     while words.get(cursor).is_some_and(|word| {
@@ -4969,6 +4975,14 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(begins_with_section_denial(
+            "No risks to report.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
+            "No risks to report because the review is incomplete.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
             "Not applicable.",
             SourceFraming::Risk,
         ));
@@ -5268,6 +5282,13 @@ mod tests {
         for unframed in ["Not applicable.", "Later unrelated text."] {
             assert_eq!(
                 source_framing_for_segment(not_applicable, unframed, None),
+                None
+            );
+        }
+        let no_risks_to_report = "Key Risks\nNo risks to report.\nLater unrelated text.";
+        for unframed in ["No risks to report.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(no_risks_to_report, unframed, None),
                 None
             );
         }

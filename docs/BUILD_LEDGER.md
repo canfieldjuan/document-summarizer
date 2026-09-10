@@ -3311,10 +3311,10 @@ release acceptance exposed issue #49
   the relationship; a genuinely inline heading transitions at its body. The
   final transition controls following text.
   A bounded denial such as `None reported`, `None have been identified`, `No
-  limitations were identified`, `No risks exist`, `Not applicable` or `There are
-  no known risks at this time` clears an active label. An implicit `None` denial
-  or bounded `Not applicable` can clear any
-  label; an explicit denial must name a noun in the active framing category.
+  limitations were identified`, `No risks exist`, `No risks to report`, `Not
+  applicable` or `There are no known risks at this time` clears an active label.
+  An implicit `None` denial or bounded `Not applicable` can clear any label; an
+  explicit denial must name a noun in the active framing category.
   Direct `No`/`Neither` and existential denials must
   consist of a framing-noun phrase plus a bounded absence or reporting
   predicate; only the leading complete sentence is inspected so later prose on
@@ -3372,9 +3372,10 @@ release acceptance exposed issue #49
   across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
   denial clearing in following-line and inline bodies with trailing prose and
-  repeated determiners, exact existential predicates and bounded `Not
-  applicable`, active-category noun matching, retention through interrogative
-  denials, explanatory `Not applicable because ...` text and negative-rule,
+  repeated determiners, exact existential predicates, bounded `to report` and
+  bounded `Not applicable`, active-category noun matching, retention through
+  interrogative denials, explanatory `Not applicable because ...` and `No risks
+  to report because ...` text and negative-rule,
   residual-risk, qualified-denial and `None of ...` retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
   repair and repeated-response failure, compatibility-group unit capacity with
