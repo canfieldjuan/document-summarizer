@@ -3296,7 +3296,8 @@ release acceptance exposed issue #49
   heading with an explicit heading signal, resets the label. A recognized
   marker supplies the casing signal for a lowercase recognized section lead,
   while marked lowercase prose still does not qualify. An unmarked
-  sentence ending in a period, exclamation point or semicolon remains body text;
+  title-case, all-caps or sentence-case line ending in a period, exclamation
+  point or semicolon remains body text unless it has a valid outline marker;
   numbering alone
   does not turn a punctuated sentence-case body line into a heading. A
   reliable heading followed by a colon and body on the same line changes state
@@ -3434,7 +3435,8 @@ release acceptance exposed issue #49
   explanatory `Not applicable because ...` and `No risks to report because ...`
   text and negative-rule, residual-risk, qualified-denial and `None of ...`
   retention,
-  retention across punctuated sentence-case body text, bounded mixed-framing
+  retention across punctuated title-case, all-caps and sentence-case body text,
+  bounded mixed-framing
   repair with an unchanged valid sibling, repeated-response failure, distinct
   initial and expanded repair contracts, worst-permitted compatibility-group
   split capacity with Story isolation, and

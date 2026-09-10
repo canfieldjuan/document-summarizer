@@ -397,7 +397,8 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "why"
     );
     let sentence_case_has_heading_shape = !heading.ends_with(['.', '!', ';']);
-    (starts_uppercase || marked_title.is_some())
+    (marked_title.is_some() || sentence_case_has_heading_shape)
+        && (starts_uppercase || marked_title.is_some())
         && (all_uppercase || title_case || sentence_case_lead && sentence_case_has_heading_shape)
 }
 
@@ -5459,6 +5460,8 @@ mod tests {
             "Employees paid by piece rate",
             "employees below minimum wage",
             "This is a complete sentence.",
+            "Workers May Fall.",
+            "WORKERS MAY FALL.",
             "When guards fail, workers may be injured.",
             "A heading with far too many separate words to fit the supported boundary",
         ] {
@@ -5526,6 +5529,18 @@ mod tests {
                 None,
             ),
             Some(SourceFraming::Risk)
+        );
+        let title_case_body = "Key Risks\nWorkers May Fall.\nInjuries can be fatal.";
+        for framed in ["Workers May Fall.", "Injuries can be fatal."] {
+            assert_eq!(
+                source_framing_for_segment(title_case_body, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let unpunctuated_title_case = "Key Risks\nWorkers May Fall\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(unpunctuated_title_case, "Later text.", None),
+            None
         );
         let numbered_sentence_case_body =
             "Key Risks\n1. When guards fail, workers may be injured.\nFalls can be fatal.";
