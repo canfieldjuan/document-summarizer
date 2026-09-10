@@ -3311,7 +3311,9 @@ release acceptance exposed issue #49
   crossing one remains unframed. A standalone colon heading transitions at the
   heading start so a quote containing that heading and its next-line body keeps
   the relationship; a genuinely inline heading transitions at its body. The
-  final transition controls following text.
+  final transition controls following text. A candidate containing only a
+  recognized framing heading remains unframed, while the heading's state still
+  governs later source blocks.
   A bounded denial such as `None reported`, `None have been identified`, `No
   limitations were identified`, `No risks exist`, `No risks to report`, `Not
   applicable` or `There are no known risks at this time` clears an active label.
@@ -3325,9 +3327,11 @@ release acceptance exposed issue #49
   the extracted line does not hide the reset, unless the next sentence begins
   with a bounded contrast marker that may reintroduce framed content. Repeated
   determiners after noun conjunctions remain within that grammar, while
-  interrogative clauses cannot reset it. Negative rules and residual-risk propositions such as `No worker
-  may be paid below minimum wage`, `No control eliminates every fraud risk`
-  and `None of ...` retain their governing context.
+  interrogative clauses cannot reset it. A recognized outline marker may
+  precede the bounded denial; invalid markers and marked negative rules cannot
+  clear state. Negative rules and residual-risk propositions such as `No worker
+  may be paid below minimum wage`, `No control eliminates every fraud risk` and
+  `None of ...` retain their governing context.
   A bounded source segment
   that crosses either transition remains unframed because one relationship does
   not govern all of its text. General
@@ -3340,12 +3344,13 @@ release acceptance exposed issue #49
   labels cannot govern one generated unit. Exact source evidence, source order,
   citation rendering and persisted schemas remain unchanged. A model response
   that mixes framing in one unit receives one bounded repair instruction to
-  split only invalid units; a repeated violation fails closed. The General unit
-  ceiling reserves the base unit budget times the greatest number of distinct
+  split only invalid units; a repeated violation fails closed. The initial
+  General prompt and schema use the larger of the base unit budget and total
+  compatibility-group count. Only a framing repair expands the prompt and
+  schema ceiling to that initial limit times the greatest number of distinct
   framing groups in any one selection window, capped by the existing global
-  maximum, so every initially permitted mixed unit can split while valid
-  siblings remain; the total compatibility-group count remains a floor. Story
-  and Contract retain their prior generation ceiling.
+  maximum. The initial response therefore cannot consume the reserved split
+  capacity. Story and Contract retain their prior generation ceiling.
   Profile-neutral persisted-content validation admits that widest valid
   current profile boundary so a correctly split General result reaches
   verification.
@@ -3390,20 +3395,24 @@ release acceptance exposed issue #49
   headings, inline framing and reset headings, rejection of standalone and
   inline interrogative framing headings, fail-closed transition-spanning
   sources, whole standalone-colon heading/body candidates, inline transition
-  isolation, reset at uncertain and negated inline framing headings, retention
+  isolation, heading-only candidate neutrality with state propagation, marked
+  standalone-colon transition at the full marker, reset at uncertain and
+  negated inline framing headings, retention
   across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
   denial clearing in following-line and inline bodies with trailing prose and
-  repeated determiners, conservative modifiers, bounded copular and perfect
-  existential predicates,
+  repeated determiners, conservative modifiers, recognized outline markers on
+  bounded denials, rejection of invalid markers and marked negative rules,
+  bounded copular and perfect existential predicates,
   bounded `to report` and bounded `Not applicable`, active-category noun
   matching, rejection of uncertainty modifiers, retention through
   interrogative denials, post-denial contrast sentences, explanatory `Not
   applicable because ...` and `No risks to report because ...` text and
   negative-rule, residual-risk, qualified-denial and `None of ...` retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
-  repair with an unchanged valid sibling, repeated-response failure,
-  worst-permitted compatibility-group split capacity with Story isolation, and
+  repair with an unchanged valid sibling, repeated-response failure, distinct
+  initial and expanded repair contracts, worst-permitted compatibility-group
+  split capacity with Story isolation, and
   zero/exact/over-limit persisted-count boundaries,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,

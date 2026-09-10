@@ -397,10 +397,28 @@ fn inline_heading_prefix(line: &str, colon_index: usize) -> (&str, usize) {
         });
     let prefix = &before_colon[prefix_start..];
     let prefix_leading_whitespace = prefix.len().saturating_sub(prefix.trim_start().len());
-    (
-        prefix.trim(),
-        prefix_start.saturating_add(prefix_leading_whitespace),
-    )
+    let heading_offset = prefix_start.saturating_add(prefix_leading_whitespace);
+    let preceding = before_colon[..heading_offset].trim_end();
+    if !preceding.is_empty() {
+        let marker_start = preceding
+            .char_indices()
+            .rev()
+            .find(|(_, character)| character.is_whitespace())
+            .map_or(0, |(index, character)| {
+                index.saturating_add(character.len_utf8())
+            });
+        let marked_prefix = &before_colon[marker_start..];
+        let marked_leading_whitespace = marked_prefix
+            .len()
+            .saturating_sub(marked_prefix.trim_start().len());
+        if marked_heading_title(marked_prefix.trim()).is_some() {
+            return (
+                marked_prefix.trim(),
+                marker_start.saturating_add(marked_leading_whitespace),
+            );
+        }
+    }
+    (prefix.trim(), heading_offset)
 }
 
 fn possible_inline_framing_boundary(text: &str) -> bool {
@@ -475,6 +493,8 @@ fn apply_inline_heading_candidate(
 }
 
 fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool {
+    let text = text.trim_start();
+    let text = marked_heading_title(text).unwrap_or(text);
     let sentence_terminal = text
         .char_indices()
         .find(|(_, character)| matches!(character, '.' | '?' | '!'));
@@ -763,6 +783,9 @@ fn source_framing_for_segment(
     if matches.next().is_some() {
         return None;
     }
+    if framing_from_heading(exact_quote.trim()).is_some() {
+        return None;
+    }
     let segment_end = segment_start.checked_add(exact_quote.len())?;
     let mut framing = inherited;
     let mut governing_framing = inherited;
@@ -914,7 +937,10 @@ struct SourceCatalog {
     omitted_source_units: usize,
 }
 
-fn maximum_summary_units_for_catalog(profile: SummaryProfile, catalog: &SourceCatalog) -> usize {
+fn maximum_initial_summary_units_for_catalog(
+    profile: SummaryProfile,
+    catalog: &SourceCatalog,
+) -> usize {
     let compatibility_groups = catalog
         .candidates
         .iter()
@@ -929,27 +955,29 @@ fn maximum_summary_units_for_catalog(profile: SummaryProfile, catalog: &SourceCa
         .collect::<HashSet<_>>()
         .len();
     let base_units = maximum_summary_units(catalog.candidates.len());
-    let repair_capacity = if profile == SummaryProfile::General {
-        let mut framing_groups_by_window =
-            HashMap::<Option<usize>, HashSet<Option<SourceFraming>>>::new();
-        for candidate in &catalog.candidates {
-            framing_groups_by_window
-                .entry(candidate.selection_window)
-                .or_default()
-                .insert(candidate.source_framing);
-        }
-        let maximum_framing_groups_in_one_window = framing_groups_by_window
-            .values()
-            .map(HashSet::len)
-            .max()
-            .unwrap_or(1);
-        base_units.saturating_mul(maximum_framing_groups_in_one_window)
-    } else {
-        base_units
-    };
-    base_units
-        .max(compatibility_groups)
-        .max(repair_capacity)
+    base_units.max(compatibility_groups).min(MAX_SUMMARY_CLAIMS)
+}
+
+fn maximum_summary_units_for_catalog(profile: SummaryProfile, catalog: &SourceCatalog) -> usize {
+    let initial_units = maximum_initial_summary_units_for_catalog(profile, catalog);
+    if profile != SummaryProfile::General {
+        return initial_units;
+    }
+    let mut framing_groups_by_window =
+        HashMap::<Option<usize>, HashSet<Option<SourceFraming>>>::new();
+    for candidate in &catalog.candidates {
+        framing_groups_by_window
+            .entry(candidate.selection_window)
+            .or_default()
+            .insert(candidate.source_framing);
+    }
+    let maximum_framing_groups_in_one_window = framing_groups_by_window
+        .values()
+        .map(HashSet::len)
+        .max()
+        .unwrap_or(1);
+    initial_units
+        .saturating_mul(maximum_framing_groups_in_one_window)
         .min(MAX_SUMMARY_CLAIMS)
 }
 
@@ -1891,7 +1919,7 @@ fn generate_summary_with_validation_repair(
     document_id: &str,
     catalog: &SourceCatalog,
     user_prompt: String,
-    output_schema: Value,
+    mut output_schema: Value,
     input_limit: usize,
     starting_request_ordinal: u32,
     generation_seed: u64,
@@ -1952,7 +1980,18 @@ fn generate_summary_with_validation_repair(
         })?;
         validate_runtime_response(runtime, &response, PipelineStage::Synthesize)?;
 
-        let parsed_response = parse_response(profile, &response.text, document_id, catalog);
+        let response_maximum_units = if framing_repairs > 0 {
+            maximum_summary_units_for_catalog(profile, catalog)
+        } else {
+            maximum_initial_summary_units_for_catalog(profile, catalog)
+        };
+        let parsed_response = parse_response_with_maximum_units(
+            profile,
+            &response.text,
+            document_id,
+            catalog,
+            response_maximum_units,
+        );
         if clipped_repairs == 0
             && parsed_response.as_ref().is_err_and(|failure| {
                 failure.code == UNIT_CLIPPED_RESPONSE_CODE
@@ -2016,6 +2055,12 @@ fn generate_summary_with_validation_repair(
                         .to_string(),
                 ];
                 request_prompt = prompt_with_validation_feedback(&request_prompt, &feedback)?;
+                let repair_maximum_units = maximum_summary_units_for_catalog(profile, catalog);
+                request_prompt = prompt_with_maximum_units(&request_prompt, repair_maximum_units)?;
+                let maximum_items = output_schema
+                    .pointer_mut("/properties/units/maxItems")
+                    .ok_or_else(invalid_response)?;
+                *maximum_items = json!(repair_maximum_units);
                 if synthesis_request_characters(profile, &request_prompt, &output_schema)?
                     > input_limit
                 {
@@ -2552,6 +2597,16 @@ fn prompt_with_validation_feedback(
     let mut prompt = serde_json::from_str::<Value>(user_prompt).map_err(|_| invalid_response())?;
     let object = prompt.as_object_mut().ok_or_else(invalid_response)?;
     object.insert("validation_feedback".to_string(), json!(feedback));
+    serde_json::to_string(&prompt).map_err(|_| invalid_response())
+}
+
+fn prompt_with_maximum_units(
+    user_prompt: &str,
+    maximum_units: usize,
+) -> Result<String, PipelineFailure> {
+    let mut prompt = serde_json::from_str::<Value>(user_prompt).map_err(|_| invalid_response())?;
+    let object = prompt.as_object_mut().ok_or_else(invalid_response)?;
+    object.insert("maximum_units".to_string(), json!(maximum_units));
     serde_json::to_string(&prompt).map_err(|_| invalid_response())
 }
 
@@ -3281,7 +3336,7 @@ fn prompt_and_schema(
             false,
         ));
     }
-    let maximum_units = maximum_summary_units_for_catalog(profile, catalog);
+    let maximum_units = maximum_initial_summary_units_for_catalog(profile, catalog);
     let prompt = Prompt {
         maximum_units,
         source_segments: catalog
@@ -3363,9 +3418,24 @@ fn parse_response(
     document_id: &str,
     catalog: &SourceCatalog,
 ) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
+    parse_response_with_maximum_units(
+        profile,
+        response,
+        document_id,
+        catalog,
+        maximum_summary_units_for_catalog(profile, catalog),
+    )
+}
+
+fn parse_response_with_maximum_units(
+    profile: SummaryProfile,
+    response: &str,
+    document_id: &str,
+    catalog: &SourceCatalog,
+    maximum_units: usize,
+) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
     let raw: RawResponse = serde_json::from_str(response).map_err(|_| invalid_response())?;
-    if raw.units.is_empty() || raw.units.len() > maximum_summary_units_for_catalog(profile, catalog)
-    {
+    if raw.units.is_empty() || raw.units.len() > maximum_units {
         return Err(invalid_response());
     }
     let candidates = catalog
@@ -4975,6 +5045,16 @@ mod tests {
         }
         let overlong_heading = format!("{} Problems\n\nBody text.", "x".repeat(80));
         assert_eq!(required_source_framing(&overlong_heading), None);
+        for heading_only in ["Common Problems", "2. Common Problems:"] {
+            assert_eq!(
+                source_framing_for_segment(heading_only, heading_only, None),
+                None
+            );
+            assert_eq!(
+                source_framing_after_block(heading_only, None),
+                Some(SourceFraming::Problem)
+            );
+        }
 
         for heading in [
             "Solutions",
@@ -5055,6 +5135,23 @@ mod tests {
             "No significant risks were identified.",
             SourceFraming::Risk,
         ));
+        for marked_denial in ["1. None reported.", "(iv) No risks were identified."] {
+            assert!(begins_with_section_denial(
+                marked_denial,
+                SourceFraming::Risk,
+            ));
+        }
+        for unrecognized_or_substantive in [
+            "0. None reported.",
+            "1.. None reported.",
+            "2026. None reported.",
+            "1. No worker may be paid below minimum wage.",
+        ] {
+            assert!(!begins_with_section_denial(
+                unrecognized_or_substantive,
+                SourceFraming::Problem,
+            ));
+        }
         assert!(!begins_with_section_denial(
             "No potential risks were identified.",
             SourceFraming::Risk,
@@ -5310,6 +5407,13 @@ mod tests {
                 None
             );
         }
+        let marked_denial = "Key Risks\n1. None reported.\nLater unrelated text.";
+        for unframed in ["1. None reported.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(marked_denial, unframed, None),
+                None
+            );
+        }
         let mismatched_denial =
             "Key Risks\nNo limitations were identified.\nFraud remains possible.";
         assert_eq!(
@@ -5357,6 +5461,19 @@ mod tests {
         let standalone_colon = "Common Problems:\nLate payments are frequent.";
         assert_eq!(
             source_framing_for_segment(standalone_colon, standalone_colon, None),
+            Some(SourceFraming::Problem)
+        );
+        let marked_standalone_colon = "2. Common Problems:\nLate payments are frequent.";
+        assert_eq!(
+            source_framing_for_segment(marked_standalone_colon, marked_standalone_colon, None,),
+            Some(SourceFraming::Problem)
+        );
+        assert_eq!(
+            source_framing_for_segment(
+                marked_standalone_colon,
+                "Late payments are frequent.",
+                None,
+            ),
             Some(SourceFraming::Problem)
         );
         let inline_colon = "Common Problems: Late payments are frequent.";
@@ -6293,16 +6410,24 @@ mod tests {
         grouped.candidates[0].source_framing = Some(SourceFraming::Problem);
         grouped.candidates[2].source_framing = Some(SourceFraming::Risk);
         assert_eq!(
-            maximum_summary_units_for_catalog(SummaryProfile::General, &grouped),
+            maximum_initial_summary_units_for_catalog(SummaryProfile::General, &grouped),
             3
+        );
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::General, &grouped),
+            8
+        );
+        assert_eq!(
+            maximum_initial_summary_units_for_catalog(SummaryProfile::Story, &grouped),
+            1
         );
         assert_eq!(
             maximum_summary_units_for_catalog(SummaryProfile::Story, &grouped),
             1
         );
         assert!(!persisted_summary_claim_count_valid(&grouped, 0));
-        assert!(persisted_summary_claim_count_valid(&grouped, 3));
-        assert!(!persisted_summary_claim_count_valid(&grouped, 4));
+        assert!(persisted_summary_claim_count_valid(&grouped, 8));
+        assert!(!persisted_summary_claim_count_valid(&grouped, 9));
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &grouped).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&prompt).unwrap()["maximum_units"],
@@ -6328,6 +6453,10 @@ mod tests {
         for candidate in &mut grouped.candidates {
             candidate.source_framing = Some(SourceFraming::Problem);
         }
+        assert_eq!(
+            maximum_initial_summary_units_for_catalog(SummaryProfile::General, &grouped),
+            1
+        );
         assert_eq!(
             maximum_summary_units_for_catalog(SummaryProfile::General, &grouped),
             1
@@ -8742,9 +8871,6 @@ mod tests {
             candidate("s1", "evidence-1", 1),
             candidate("s2", "evidence-2", 2),
             candidate("s3", "evidence-3", 3),
-            candidate("s4", "evidence-4", 4),
-            candidate("s5", "evidence-5", 5),
-            candidate("s6", "evidence-6", 6),
         ];
         candidates[0].evidence.claim_text = "Problem statement.".into();
         candidates[0].evidence.exact_quote = "Problem statement.".into();
@@ -8756,14 +8882,47 @@ mod tests {
             omitted_source_units: 0,
         };
         assert_eq!(
+            maximum_initial_summary_units_for_catalog(SummaryProfile::General, &catalog),
+            2
+        );
+        assert_eq!(
             maximum_summary_units_for_catalog(SummaryProfile::General, &catalog),
             4
         );
         assert_eq!(
             maximum_summary_units_for_catalog(SummaryProfile::Story, &catalog),
-            2
+            1
         );
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&prompt).unwrap()["maximum_units"],
+            2
+        );
+        assert_eq!(schema["properties"]["units"]["maxItems"], 2);
+        let repair_sized_response = json!({
+            "units": [
+                {"text":"Problem statement.","source_ids":["s1"]},
+                {"text":"The unchanged statement remains.","source_ids":["s2"]},
+                {"text":"Ordinary statement.","source_ids":["s3"]}
+            ]
+        })
+        .to_string();
+        assert!(parse_response(
+            SummaryProfile::General,
+            &repair_sized_response,
+            "document-1",
+            &catalog,
+        )
+        .is_ok());
+        let failure = parse_response_with_maximum_units(
+            SummaryProfile::General,
+            &repair_sized_response,
+            "document-1",
+            &catalog,
+            2,
+        )
+        .expect_err("the initial response must not consume framing-repair capacity");
+        assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
         let runtime = FramingRepairRuntime::new(true);
         let generated = generate_summary_with_validation_repair(
             SummaryProfile::General,
@@ -8789,11 +8948,28 @@ mod tests {
         let requests = runtime.requests();
         assert_eq!(requests.len(), 2);
         let repair_prompt = serde_json::from_str::<Value>(&requests[1].user_prompt).unwrap();
+        assert_eq!(repair_prompt["maximum_units"], 4);
         assert!(repair_prompt["validation_feedback"]
             .as_array()
             .is_some_and(|feedback| feedback.iter().any(|item| item
                 .as_str()
                 .is_some_and(|message| message.contains("source_framing")))));
+        let ModelOutputFormat::JsonSchema {
+            schema: initial_schema,
+            ..
+        } = &requests[0].output_format
+        else {
+            panic!("initial synthesis must use a JSON schema");
+        };
+        assert_eq!(initial_schema["properties"]["units"]["maxItems"], 2);
+        let ModelOutputFormat::JsonSchema {
+            schema: repair_schema,
+            ..
+        } = &requests[1].output_format
+        else {
+            panic!("framing repair must use a JSON schema");
+        };
+        assert_eq!(repair_schema["properties"]["units"]["maxItems"], 4);
 
         let repeating = FramingRepairRuntime::new(false);
         let failure = generate_summary_with_validation_repair(
