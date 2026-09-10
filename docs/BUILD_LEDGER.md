@@ -3445,13 +3445,19 @@ release acceptance exposed issue #49
   the overview, while an interrogative, qualified, or attached path-like form
   retains it and an explicit adverse continuation can restore framing. The
   focused classifier test and full deterministic gate passed.
-- The final product-code head `d9dc80d48c4cd720b364e5be7c7a7a9728c2e030`
+- Product-code head `d9dc80d48c4cd720b364e5be7c7a7a9728c2e030`
   resets prior framing at bounded mitigation questions such as `How can risks be
   reduced?` and `What are the solutions?` before their answers. Equivalent
   mitigation verbs and solution/control nouns share that bounded grammar, while
   failure-qualified questions and substantive questions about remaining risks
   retain their active framing. The focused classifier test and full
   deterministic gate passed.
+- The final product-code head `d93c604537cef762b3193050c2fd03288aba0e4e`
+  admits bare `No` only after a bounded question about the presence or existence
+  of the active framing category. Substantive questions about control failure do
+  not clear the category, including through a labeled `Answer: No`; an explicit
+  bounded denial such as `No risks were identified` still clears it. The focused
+  classifier test and full deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3534,7 +3540,8 @@ release acceptance exposed issue #49
   neutral and affirmative
   transitions within one denial/reintroduction line and its colon-body form,
   post-question denial answers including bounded bare `No` with interrogative,
-  qualified-tail and substantive-`No` rejection, declarative sentence-suffix
+  qualified-tail, active-category section-question, substantive-question and
+  labeled-answer controls, declarative sentence-suffix
   denials after ASCII and CJK terminals with non-denial and explicit
   reintroduction controls,
   and fail-closed
