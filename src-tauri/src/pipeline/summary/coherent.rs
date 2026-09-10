@@ -463,9 +463,12 @@ fn begins_with_section_denial(text: &str) -> bool {
     let words = text
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
-        .take(12)
+        .take(17)
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
+    if words.len() > 16 {
+        return false;
+    }
     let Some(first) = words.first().map(String::as_str) else {
         return false;
     };
@@ -473,52 +476,113 @@ fn begins_with_section_denial(text: &str) -> bool {
         if words.len() == 1 {
             return true;
         }
-        if words.get(1).is_some_and(|word| word == "of") {
-            return false;
-        }
-        return words.iter().skip(1).any(|word| {
-            matches!(
-                word.as_str(),
-                "applicable" | "found" | "identified" | "known" | "noted" | "observed" | "reported"
-            )
-        });
+        return bounded_section_denial_predicate(&words, 1, false);
     }
-    let direct_denial = matches!(first, "neither" | "no");
-    let existential_denial = first == "there"
+    if first == "no" {
+        return bounded_section_denial_predicate(&words, 1, true);
+    }
+    if first == "neither" {
+        return bounded_section_denial_predicate(&words, 1, true);
+    }
+    first == "there"
         && matches!(
             words.get(1).map(String::as_str),
-            Some("are" | "is" | "were")
+            Some("are" | "is" | "was" | "were")
         )
-        && words.get(2).is_some_and(|word| word == "no");
-    (direct_denial || existential_denial)
-        && words.iter().any(|word| {
+        && words.get(2).is_some_and(|word| word == "no")
+        && bounded_section_denial_predicate(&words, 3, true)
+}
+
+fn bounded_section_denial_predicate(
+    words: &[String],
+    mut cursor: usize,
+    requires_framing_noun: bool,
+) -> bool {
+    if requires_framing_noun {
+        let Some(after_nouns) = consume_section_denial_nouns(words, cursor) else {
+            return false;
+        };
+        cursor = after_nouns;
+        if section_denial_tail(&words[cursor..]) {
+            return true;
+        }
+    }
+
+    while words.get(cursor).is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "are" | "been" | "had" | "has" | "have" | "is" | "was" | "were"
+        )
+    }) {
+        cursor += 1;
+    }
+    if !words.get(cursor).is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "applicable" | "found" | "identified" | "known" | "noted" | "observed" | "reported"
+        )
+    }) {
+        return false;
+    }
+    cursor += 1;
+    section_denial_tail(&words[cursor..])
+}
+
+fn consume_section_denial_nouns(words: &[String], mut cursor: usize) -> Option<usize> {
+    loop {
+        if words
+            .get(cursor)
+            .is_some_and(|word| matches!(word.as_str(), "applicable" | "known"))
+        {
+            cursor += 1;
+        }
+        if !words.get(cursor).is_some_and(|word| {
             matches!(
                 word.as_str(),
-                "applicable"
-                    | "caution"
+                "caution"
                     | "cautions"
                     | "exception"
                     | "exceptions"
-                    | "found"
                     | "hazard"
                     | "hazards"
-                    | "identified"
                     | "issue"
                     | "issues"
-                    | "known"
                     | "limitation"
                     | "limitations"
-                    | "noted"
-                    | "observed"
                     | "problem"
                     | "problems"
-                    | "reported"
                     | "risk"
                     | "risks"
                     | "warning"
                     | "warnings"
             )
-        })
+        }) {
+            return None;
+        }
+        cursor += 1;
+        if !words
+            .get(cursor)
+            .is_some_and(|word| matches!(word.as_str(), "and" | "nor" | "or"))
+        {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+}
+
+fn section_denial_tail(words: &[String]) -> bool {
+    words.is_empty()
+        || (words.len() == 1 && matches!(words[0].as_str(), "currently" | "yet"))
+        || (words.len() == 2
+            && matches!(
+                (words[0].as_str(), words[1].as_str()),
+                ("at", "present") | ("for", "now") | ("so", "far") | ("to", "date")
+            ))
+        || (words.len() == 3
+            && matches!(
+                (words[0].as_str(), words[1].as_str(), words[2].as_str()),
+                ("at", "this", "time")
+            ))
 }
 
 fn source_framing_line_update(
@@ -4798,12 +4862,28 @@ mod tests {
         assert!(begins_with_section_denial(
             "There are no known risks at this time."
         ));
+        assert!(begins_with_section_denial(
+            "No risks or limitations were identified."
+        ));
+        assert!(begins_with_section_denial(
+            "Neither issues nor risks were reported."
+        ));
         assert!(!begins_with_section_denial(
             "None of the controls fully eliminates fraud."
         ));
         assert!(!begins_with_section_denial(
             "No worker may be paid below minimum wage."
         ));
+        for residual_risk in [
+            "No control eliminates every fraud risk.",
+            "No known control eliminates every fraud risk.",
+            "No risk can be completely eliminated.",
+            "There is no control that eliminates every risk.",
+            "Neither control eliminates all risks.",
+            "No risks were identified, but fraud remains possible.",
+        ] {
+            assert!(!begins_with_section_denial(residual_risk));
+        }
         for body in [
             "2",
             "1. Workers may fall from ladders.",
@@ -4982,15 +5062,21 @@ mod tests {
             ),
             Some(SourceFraming::Problem)
         );
-        let negative_risk = "Key Risks\nNone of the controls fully eliminates fraud.";
-        assert_eq!(
-            source_framing_for_segment(
-                negative_risk,
-                "None of the controls fully eliminates fraud.",
-                None,
-            ),
-            Some(SourceFraming::Risk)
-        );
+        for residual_risk in [
+            "None of the controls fully eliminates fraud.",
+            "No control eliminates every fraud risk.",
+            "No known control eliminates every fraud risk.",
+            "No risk can be completely eliminated.",
+            "There is no control that eliminates every risk.",
+            "Neither control eliminates all risks.",
+            "No risks were identified, but fraud remains possible.",
+        ] {
+            let negative_risk = format!("Key Risks\n{residual_risk}");
+            assert_eq!(
+                source_framing_for_segment(&negative_risk, residual_risk, None),
+                Some(SourceFraming::Risk)
+            );
+        }
         let single_newline = "Common Problems\nLate payments are frequent.";
         assert_eq!(
             source_framing_for_segment(single_newline, "Late payments are frequent.", None),

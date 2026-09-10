@@ -3304,10 +3304,13 @@ release acceptance exposed issue #49
   prior label. Inline transitions
   retain byte positions: a source after one inherits its state, while a source
   crossing one remains unframed. The final transition controls following text.
-  A bounded denial such as `None reported`, `None have been identified` or `No
-  limitations were identified` clears an active label. A negative rule such as
-  `No worker may be paid below minimum wage` and a `None of ...` proposition
-  retain their governing context.
+  A bounded denial such as `None reported`, `None have been identified`, `No
+  limitations were identified` or `There are no known risks at this time`
+  clears an active label. Direct `No`/`Neither` and existential denials must
+  consist of a framing-noun phrase plus a bounded absence or reporting
+  predicate. Negative rules and residual-risk propositions such as `No worker
+  may be paid below minimum wage`, `No control eliminates every fraud risk`
+  and `None of ...` retain their governing context.
   A bounded source segment
   that crosses either transition remains unframed because one relationship does
   not govern all of its text. General
@@ -3346,8 +3349,8 @@ release acceptance exposed issue #49
   headings, inline framing and reset headings, fail-closed transition-spanning
   sources, retention across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
-  denial clearing in following-line and inline bodies with negative-rule and
-  `None of ...` retention,
+  denial clearing in following-line and inline bodies with negative-rule,
+  residual-risk, qualified-denial and `None of ...` retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
   repair and repeated-response failure,
   mixed verification context, Story isolation, and rejection of a short source
