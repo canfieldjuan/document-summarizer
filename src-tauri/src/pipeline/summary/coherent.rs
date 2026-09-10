@@ -712,7 +712,7 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
         return !words.get(cursor).is_some_and(|word| {
             matches!(
                 word.as_str(),
-                "absent" | "none" | "unidentified" | "unreported"
+                "absent" | "eliminated" | "none" | "resolved" | "unidentified" | "unreported"
             )
         });
     }
@@ -998,7 +998,9 @@ fn bounded_section_denial_predicate(
     if !words.get(cursor).is_some_and(|word| {
         matches!(
             word.as_str(),
-            "applicable"
+            "apply"
+                | "applicable"
+                | "applies"
                 | "detected"
                 | "exist"
                 | "exists"
@@ -1008,6 +1010,8 @@ fn bounded_section_denial_predicate(
                 | "noted"
                 | "observed"
                 | "present"
+                | "remain"
+                | "remains"
                 | "reported"
         )
     }) {
@@ -2561,11 +2565,10 @@ fn generate_summary_with_validation_repair(
                 return Err(failure);
             }
         };
-        if framing_repair_requirements
-            .as_ref()
-            .is_some_and(|requirements| !satisfies_source_framing_repair(&parsed.0, requirements))
-        {
-            return Err(source_framing_repair_integrity_response());
+        if let Some(requirements) = framing_repair_requirements.take() {
+            if !satisfies_source_framing_repair(&parsed.0, &requirements) {
+                return Err(source_framing_repair_integrity_response());
+            }
         }
         let repaired_clipped_response_is_incomplete = clipped_repairs > 0
             && clipped_fallback
@@ -4799,6 +4802,7 @@ mod tests {
         RewriteSibling,
         OmitMixedSource,
         AddUnit,
+        ThenCorrectModal,
     }
 
     #[derive(Clone, Copy)]
@@ -5013,7 +5017,34 @@ mod tests {
             self.requests.lock().unwrap().push(request.clone());
             let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
             let is_repair = prompt.get("validation_feedback").is_some();
+            let feedback = prompt
+                .get("validation_feedback")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
             let units = match (is_repair, self.behavior) {
+                (false, FramingRepairBehavior::ThenCorrectModal) => json!([
+                    {"text":"The operator must inspect the record.","source_ids":["s2"]},
+                    {"text":"Combined statement.","source_ids":["s1","s3"]}
+                ]),
+                (true, FramingRepairBehavior::ThenCorrectModal)
+                    if feedback
+                        .iter()
+                        .any(|message| message.contains("source_framing")) =>
+                {
+                    json!([
+                        {"text":"The operator must inspect the record.","source_ids":["s2"]},
+                        {"text":"Problem statement.","source_ids":["s1"]},
+                        {"text":"Ordinary statement.","source_ids":["s3"]}
+                    ])
+                }
+                (true, FramingRepairBehavior::ThenCorrectModal) => json!([
+                    {"text":"The operator should inspect the record.","source_ids":["s2"]},
+                    {"text":"Problem statement.","source_ids":["s1"]},
+                    {"text":"Ordinary statement.","source_ids":["s3"]}
+                ]),
                 (false, _) | (true, FramingRepairBehavior::RepeatMixed) => json!([
                     {"text":"The unchanged statement remains.","source_ids":["s2"]},
                     {"text":"Combined statement.","source_ids":["s1","s3"]}
@@ -5761,6 +5792,14 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(begins_with_section_denial(
+            "No risks remain.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No exceptions apply.",
+            SourceFraming::Exception,
+        ));
+        assert!(begins_with_section_denial(
             "No risks to report.",
             SourceFraming::Risk,
         ));
@@ -5865,6 +5904,8 @@ mod tests {
             "No risks!? Think again.",
             "None reported? Verify the records.",
             "No risks and no control eliminates every fraud risk.",
+            "No risks remain possible.",
+            "No exceptions apply to every worker.",
         ] {
             assert!(!begins_with_section_denial(
                 residual_risk,
@@ -6133,6 +6174,28 @@ mod tests {
             assert_eq!(
                 source_framing_for_segment(detected_denial, unframed, None),
                 None
+            );
+        }
+        let remaining_denial = "Key Risks\nNo risks remain.\nLater unrelated text.";
+        for unframed in ["No risks remain.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(remaining_denial, unframed, None),
+                None
+            );
+        }
+        let applying_denial = "Exceptions\nNo exceptions apply.\nLater unrelated text.";
+        for unframed in ["No exceptions apply.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(applying_denial, unframed, None),
+                None
+            );
+        }
+        let qualified_applying_rule =
+            "Exceptions\nNo exceptions apply to every worker.\nLater text.";
+        for framed in ["No exceptions apply to every worker.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(qualified_applying_rule, framed, None),
+                Some(SourceFraming::Exception)
             );
         }
         let perfect_existential_denial =
@@ -6500,6 +6563,24 @@ mod tests {
             source_framing_for_segment(repeated_absence, "Later text.", None),
             None
         );
+        for resolved_state in ["Risks remain eliminated.", "Risks remain resolved."] {
+            let resolved_continuation =
+                format!("Key Risks\nNo risks were identified. {resolved_state}\nLater text.");
+            for unframed in [resolved_state, "Later text."] {
+                assert_eq!(
+                    source_framing_for_segment(&resolved_continuation, unframed, None),
+                    None
+                );
+            }
+        }
+        let unresolved_continuation =
+            "Key Risks\nNo risks were identified. Risks remain unresolved.\nLater text.";
+        for framed in ["Risks remain unresolved.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(unresolved_continuation, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
         let compound_denial = "Risk Factors\nNo risk factors were identified.\nOverview text.";
         assert_eq!(
             source_framing_for_segment(compound_denial, "Overview text.", None),
@@ -9992,6 +10073,50 @@ mod tests {
             assert_eq!(failure.code, SOURCE_FRAMING_MIXED_RESPONSE_CODE);
             assert_eq!(runtime.requests().len(), 2);
         }
+
+        let mut modal_catalog = catalog.clone();
+        modal_catalog.candidates[1].evidence.claim_text =
+            "The operator should inspect the record.".into();
+        modal_catalog.candidates[1].evidence.exact_quote =
+            "The operator should inspect the record.".into();
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &modal_catalog).unwrap();
+        let runtime = FramingRepairRuntime::new(FramingRepairBehavior::ThenCorrectModal);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &runtime,
+            "document-1",
+            &modal_catalog,
+            prompt,
+            schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("framing repair constraints must release before a valid modal repair");
+        assert_eq!(generated.claims.len(), 3);
+        assert_eq!(
+            generated.claims[0].text,
+            "The operator should inspect the record."
+        );
+        let requests = runtime.requests();
+        assert_eq!(requests.len(), 3);
+        let framing_feedback = serde_json::from_str::<Value>(&requests[1].user_prompt).unwrap()
+            ["validation_feedback"]
+            .clone();
+        assert!(framing_feedback.as_array().is_some_and(|feedback| feedback
+            .iter()
+            .any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("source_framing")))));
+        let modal_feedback = serde_json::from_str::<Value>(&requests[2].user_prompt).unwrap()
+            ["validation_feedback"]
+            .clone();
+        assert!(modal_feedback
+            .as_array()
+            .is_some_and(|feedback| feedback.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("strengthens")))));
     }
 
     #[test]
