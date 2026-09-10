@@ -3325,8 +3325,9 @@ release acceptance exposed issue #49
   governs later source blocks.
   A bounded denial such as `None reported`, `None have been identified`, `No
   limitations were identified`, `No risks exist`, `No risks to report`, `Not
-  applicable` or `There are no known risks at this time` clears an active label.
-  An implicit `None` denial or bounded `Not applicable` can clear any label; an
+  applicable`, `N/A`, `N.A.` or `There are no known risks at this time` clears
+  an active label. An implicit `None` denial or bounded not-applicable form can
+  clear any label; an
   explicit denial must name a noun in the active framing category.
   Explicit denial noun phrases may use the same conservative framing modifiers
   as headings and the same three bounded compound families; uncertainty

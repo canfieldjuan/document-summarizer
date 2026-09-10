@@ -752,9 +752,21 @@ fn contrast_continuation_reintroduces_source_framing(
     })
 }
 
+fn is_bounded_not_applicable_abbreviation(text: &str) -> bool {
+    let text = text.trim();
+    let abbreviation = text
+        .strip_suffix('.')
+        .or_else(|| text.strip_suffix('!'))
+        .unwrap_or(text);
+    abbreviation.eq_ignore_ascii_case("N/A") || abbreviation.eq_ignore_ascii_case("N.A")
+}
+
 fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool {
     let text = text.trim_start();
     let text = marked_heading_title(text).unwrap_or(text);
+    if is_bounded_not_applicable_abbreviation(text) {
+        return true;
+    }
     let sentence_terminal = text
         .char_indices()
         .find(|(_, character)| matches!(character, '.' | '?' | '!'));
@@ -5521,6 +5533,22 @@ mod tests {
             "Not applicable.",
             SourceFraming::Risk,
         ));
+        for abbreviation in ["N/A", "N/A.", "n/a!", "N.A", "N.A.", "n.a!"] {
+            assert!(begins_with_section_denial(
+                abbreviation,
+                SourceFraming::Risk,
+            ));
+        }
+        for unbounded_abbreviation in [
+            "N/A? Verify the record.",
+            "N/A because conditions apply.",
+            "N.A. Fraud remains possible.",
+        ] {
+            assert!(!begins_with_section_denial(
+                unbounded_abbreviation,
+                SourceFraming::Risk,
+            ));
+        }
         assert!(!begins_with_section_denial(
             "Not applicable because the control already applies.",
             SourceFraming::Risk,
@@ -5988,6 +6016,15 @@ mod tests {
         for unframed in ["Not applicable.", "Later unrelated text."] {
             assert_eq!(
                 source_framing_for_segment(not_applicable, unframed, None),
+                None
+            );
+        }
+        for not_applicable_abbreviation in [
+            "Key Risks\nN/A.\nOverview follows.",
+            "Key Risks\n1. N.A.\nOverview follows.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(not_applicable_abbreviation, "Overview follows.", None,),
                 None
             );
         }
