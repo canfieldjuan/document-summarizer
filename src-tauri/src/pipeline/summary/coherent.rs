@@ -209,12 +209,23 @@ fn heading_has_only_framing_modifiers(words: &[String]) -> bool {
     })
 }
 
-fn framing_from_heading(heading: &str) -> Option<SourceFraming> {
+fn framing_from_heading_candidate(
+    heading: &str,
+    has_explicit_inline_signal: bool,
+) -> Option<SourceFraming> {
     let heading = heading.trim();
     if heading.is_empty() || heading.contains('\n') || heading.chars().count() > 80 {
         return None;
     }
-    let heading = marked_heading_title(heading).unwrap_or(heading);
+    let marked_heading = marked_heading_title(heading);
+    let heading = marked_heading.unwrap_or(heading);
+    let starts_uppercase = heading
+        .chars()
+        .find(|character| character.is_alphabetic())
+        .is_some_and(|character| character.is_uppercase());
+    if !has_explicit_inline_signal && marked_heading.is_none() && !starts_uppercase {
+        return None;
+    }
     let words = heading
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -235,6 +246,14 @@ fn framing_from_heading(heading: &str) -> Option<SourceFraming> {
         "limitation" | "limitations" => Some(SourceFraming::Limitation),
         _ => None,
     }
+}
+
+fn framing_from_heading(heading: &str) -> Option<SourceFraming> {
+    framing_from_heading_candidate(heading, false)
+}
+
+fn framing_from_inline_heading(heading: &str) -> Option<SourceFraming> {
+    framing_from_heading_candidate(heading, true)
 }
 
 #[cfg(test)]
@@ -427,7 +446,7 @@ fn apply_inline_heading_candidate(
     current: Option<SourceFraming>,
     heading_candidate: &str,
 ) -> (Option<SourceFraming>, bool) {
-    if let Some(next) = framing_from_heading(heading_candidate) {
+    if let Some(next) = framing_from_inline_heading(heading_candidate) {
         (Some(next), true)
     } else if possible_inline_framing_boundary(heading_candidate) {
         (None, true)
@@ -445,9 +464,6 @@ fn source_framing_line_update(
     let mut framing = current;
     let mut transitions = Vec::new();
     for (colon_index, _) in line.match_indices(':') {
-        if line[colon_index + 1..].trim().is_empty() {
-            continue;
-        }
         let (next, changed) =
             apply_inline_heading_candidate(framing, inline_heading_prefix(line, colon_index));
         if changed {
@@ -4587,6 +4603,7 @@ mod tests {
             "0. Common Problems\n\nBody text.",
             "1.. Common Problems\n\nBody text.",
             "2026 Common Problems\n\nBody text.",
+            "problems.\n\nOrdinary wrapped prose.",
             "No Known Issues\n\nNo defects were found.",
             "Possible Exceptions\n\nAn exception might apply.",
             "Potential Risks\n\nA risk might arise.",
@@ -4683,6 +4700,10 @@ mod tests {
             source_framing_for_segment(inline_introductory_colon, "Late payment.", None),
             Some(SourceFraming::Problem)
         );
+        assert_eq!(
+            source_framing_for_segment("problems: Late payment.", "Late payment.", None),
+            Some(SourceFraming::Problem)
+        );
         let inline_sections = "Safety Warning\nUse care.\nCommon Problems: Late payments are frequent.\nSolutions: Pay workers promptly.";
         assert_eq!(
             source_framing_for_segment(inline_sections, "Late payments are frequent.", None,),
@@ -4743,6 +4764,17 @@ mod tests {
             source_framing_for_segment(standalone_solution, "Pay workers promptly.", None),
             None
         );
+        let trailing_solution =
+            "Common Problems\nLate payments occur. Solutions:\nPay workers promptly.";
+        assert_eq!(
+            source_framing_for_segment(trailing_solution, "Late payments occur.", None),
+            Some(SourceFraming::Problem)
+        );
+        assert_eq!(
+            source_framing_for_segment(trailing_solution, "Pay workers promptly.", None),
+            None
+        );
+        assert_eq!(source_framing_after_block(trailing_solution, None), None);
         let single_newline = "Common Problems\nLate payments are frequent.";
         assert_eq!(
             source_framing_for_segment(single_newline, "Late payments are frequent.", None),
@@ -4812,6 +4844,13 @@ mod tests {
                     false,
                 ),
                 text_page(8, "after-excess-newlines", "Later detail.", false),
+                text_page(
+                    9,
+                    "wrapped-prose",
+                    "The team resolved several\nproblems.",
+                    false,
+                ),
+                text_page(10, "after-wrapped-prose", "Unrelated detail.", false),
             ],
             warnings: Vec::new(),
         };
@@ -4821,6 +4860,7 @@ mod tests {
         assert_eq!(starts["visual"], None);
         assert_eq!(starts["after-visual"], None);
         assert_eq!(starts["after-excess-newlines"], None);
+        assert_eq!(starts["after-wrapped-prose"], None);
     }
 
     #[test]

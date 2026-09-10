@@ -3283,7 +3283,9 @@ release acceptance exposed issue #49
   prose presented the statements neutrally even though its source did not.
 - General synthesis now derives a small, application-owned `source_framing`
   label only from a bounded heading ending in problem, risk, warning, exception
-  or limitation. Bounded source segments inherit the
+  or limitation and carrying an observable heading signal: casing, a valid
+  marker or an explicit colon label. Lowercase wrapped prose does not create a
+  framing label. Bounded source segments inherit the
   nearest reliable section heading in canonical document order, including later
   segments and fully available continuation pages that no longer contain it.
   Empty or visual-processing pages reset inherited state before and after the
@@ -3292,7 +3294,8 @@ release acceptance exposed issue #49
   a decimal, Roman or letter-marked heading or a sentence-case heading with an
   explicit heading signal, resets the label; numbering alone does not. A
   reliable heading followed by a colon and body on the same line changes state
-  at the body boundary. Generic colon-ended resets require a marked heading or
+  at the body boundary, including when the heading ends a preceding body line
+  and its own body begins on the next line. Generic colon-ended resets require a marked heading or
   an explicit section lead in both inline and standalone layouts, so
   introductory labels such as `Example:`, `Note:` or `Important Note:` remain
   prose. A recognized framing heading replaces the
@@ -3334,6 +3337,7 @@ release acceptance exposed issue #49
   excess-newline framing and reset headings, decimal/Roman/letter framing
   headings, inline framing and reset headings, fail-closed transition-spanning
   sources, retention across inline and standalone introductory labels,
+  trailing inline headings, rejection of lowercase wrapped framing nouns,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry
