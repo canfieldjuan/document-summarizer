@@ -1139,6 +1139,14 @@ struct SectionDenialUpdate {
 }
 
 fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<SectionDenialUpdate> {
+    section_denial_update_with_answer_context(text, active_framing, false)
+}
+
+fn section_denial_update_with_answer_context(
+    text: &str,
+    active_framing: SourceFraming,
+    allow_bare_no_answer: bool,
+) -> Option<SectionDenialUpdate> {
     let denial_offset = text.len().saturating_sub(text.trim_start().len());
     let trimmed = text.trim_start();
     let text = marked_heading_title(trimmed).unwrap_or(trimmed);
@@ -1174,7 +1182,9 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
         .saturating_add(remainder_start)
         .saturating_add(sentence_remainder.len().saturating_sub(continuation.len()));
     let sentence = &text[..sentence_end];
-    if !bounded_section_denial_clause(sentence, active_framing) {
+    if !bounded_section_denial_clause(sentence, active_framing)
+        && !(allow_bare_no_answer && is_bounded_bare_no_answer(sentence))
+    {
         return None;
     }
     let contrast_continuation = coordinated_continuation_lead(continuation);
@@ -1188,6 +1198,14 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
         denial_offset,
         reintroduction_offset: reintroduced.then_some(continuation_offset),
     })
+}
+
+fn is_bounded_bare_no_answer(text: &str) -> bool {
+    let words = text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    words.len() == 1 && words[0].eq_ignore_ascii_case("no")
 }
 
 fn bounded_section_denial_clause(text: &str, active_framing: SourceFraming) -> bool {
@@ -1414,10 +1432,34 @@ fn apply_section_denial_update(
     base_offset: usize,
     text: &str,
 ) {
+    apply_section_denial_update_with_answer_context(framing, transitions, base_offset, text, false);
+}
+
+fn apply_section_answer_denial_update(
+    framing: &mut Option<SourceFraming>,
+    transitions: &mut Vec<(usize, Option<SourceFraming>)>,
+    base_offset: usize,
+    text: &str,
+) {
+    apply_section_denial_update_with_answer_context(framing, transitions, base_offset, text, true);
+}
+
+fn apply_section_denial_update_with_answer_context(
+    framing: &mut Option<SourceFraming>,
+    transitions: &mut Vec<(usize, Option<SourceFraming>)>,
+    base_offset: usize,
+    text: &str,
+    allow_bare_no_answer: bool,
+) {
     let Some(active_framing) = *framing else {
         return;
     };
-    let Some(update) = section_denial_update(text, active_framing) else {
+    let update = if allow_bare_no_answer {
+        section_denial_update_with_answer_context(text, active_framing, true)
+    } else {
+        section_denial_update(text, active_framing)
+    };
+    let Some(update) = update else {
         return;
     };
     *framing = None;
@@ -1438,10 +1480,11 @@ fn source_framing_line_update(
     let mut transitions = Vec::new();
     apply_section_denial_update(&mut framing, &mut transitions, leading_whitespace, line);
     for (delimiter_index, delimiter) in line
-        .match_indices(|character: char| character == ':' || is_source_question_terminal(character))
+        .match_indices(|character: char| character == ':' || is_source_sentence_terminal(character))
     {
         let delimiter_len = delimiter.len();
-        if delimiter != ":" {
+        let delimiter_character = delimiter.chars().next();
+        if delimiter_character.is_some_and(is_source_question_terminal) {
             let (heading_candidate, heading_offset) = inline_heading_prefix(line, delimiter_index);
             if possible_interrogative_framing_boundary(heading_candidate) {
                 framing = None;
@@ -1451,7 +1494,20 @@ fn source_framing_line_update(
             let answer_offset = leading_whitespace
                 .saturating_add(delimiter_index)
                 .saturating_add(delimiter_len);
-            apply_section_denial_update(&mut framing, &mut transitions, answer_offset, answer);
+            apply_section_answer_denial_update(
+                &mut framing,
+                &mut transitions,
+                answer_offset,
+                answer,
+            );
+            continue;
+        }
+        if delimiter != ":" {
+            let suffix = &line[delimiter_index + delimiter_len..];
+            let suffix_offset = leading_whitespace
+                .saturating_add(delimiter_index)
+                .saturating_add(delimiter_len);
+            apply_section_denial_update(&mut framing, &mut transitions, suffix_offset, suffix);
             continue;
         }
         let colon_index = delimiter_index;
@@ -1479,7 +1535,7 @@ fn source_framing_line_update(
             let body_offset = leading_whitespace
                 .saturating_add(colon_index)
                 .saturating_add(1);
-            apply_section_denial_update(&mut framing, &mut transitions, body_offset, body);
+            apply_section_answer_denial_update(&mut framing, &mut transitions, body_offset, body);
         }
     }
     if transitions.is_empty() {
@@ -7008,6 +7064,33 @@ mod tests {
             ),
             None
         );
+        for bare_answer in [
+            "Any known risks? No.",
+            "Any known risks? Answer: No.",
+            "Any known risks? Response: No!",
+        ] {
+            let block = format!("Key Risks\n{bare_answer}\nOverview follows.");
+            for unframed in ["No.", "No!", "Overview follows."] {
+                if block.contains(unframed) {
+                    assert_eq!(
+                        source_framing_for_segment(&block, unframed, None),
+                        None,
+                        "{bare_answer} should clear framing",
+                    );
+                }
+            }
+        }
+        for retained_bare_answer in [
+            "Any known risks? No? Verify the record.",
+            "Any known risks? No because the review is incomplete.",
+        ] {
+            let block = format!("Key Risks\n{retained_bare_answer}\nOverview follows.");
+            assert_eq!(
+                source_framing_for_segment(&block, "Overview follows.", None),
+                Some(SourceFraming::Risk),
+                "{retained_bare_answer} should retain framing",
+            );
+        }
         for (labeled_answer, denied_text) in [
             ("Any known risks? Answer: None reported.", "None reported."),
             (
@@ -7271,6 +7354,43 @@ mod tests {
         for framed in ["Risks subsequently emerged during testing.", "Later text."] {
             assert_eq!(
                 source_framing_for_segment(explicit_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        for declarative_prefix_denial in [
+            "The assessment is complete. No risks were identified.",
+            "The assessment is complete。 No risks were identified.",
+        ] {
+            let block = format!("Key Risks\n{declarative_prefix_denial}\nOverview follows.");
+            assert_eq!(
+                source_framing_for_segment(&block, "No risks were identified.", None),
+                None,
+                "{declarative_prefix_denial} should clear framing at the denial",
+            );
+            assert_eq!(
+                source_framing_for_segment(&block, "Overview follows.", None),
+                None,
+                "{declarative_prefix_denial} should leave later text unframed",
+            );
+        }
+        let declarative_prefix_non_denial =
+            "Key Risks\nThe assessment is complete. No control eliminates every risk.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(declarative_prefix_non_denial, "Overview follows.", None,),
+            Some(SourceFraming::Risk)
+        );
+        let declarative_prefix_reintroduction = "Key Risks\nThe assessment is complete. No risks were identified. Fraud remains possible.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(
+                declarative_prefix_reintroduction,
+                "No risks were identified.",
+                None,
+            ),
+            None
+        );
+        for framed in ["Fraud remains possible.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(declarative_prefix_reintroduction, framed, None),
                 Some(SourceFraming::Risk)
             );
         }
