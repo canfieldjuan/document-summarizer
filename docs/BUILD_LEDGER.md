@@ -3397,19 +3397,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `bdc4950a634540d7d4183c4d5b20d2888c3f0755`
+- The final product-code head `e3c3f0ace1ef731e5b0e3ee5a4f7da06c2db8ae8`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 96.99 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 98.95 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `4fcf97c62cfa26537f56a506a5d8f049bf05a11cd5b735fda72996638e1d3fa4` and
+  `dcd7bbefef461a4e432bf9aa1b863f1b1b4e59bcb4cf1b4822fb4abd1539b005` and
   citation integrity hash
-  `50b82e7244e1069bb0dbf2536810ede787bc11aa68d2d431647bfb1b7265dc09`.
+  `b97ef3db6e3bf2aeeaec8fe0e0610449105d6e36f1408cc5d0f62e090a17cda0`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3465,7 +3465,9 @@ release acceptance exposed issue #49
   bounded `detected`, `remain` and `apply` denials, one bounded `currently` or
   `yet` inside an auxiliary denial predicate with substantive-tail rejection,
   resolved/eliminated absence continuations with unresolved-risk
-  reintroduction, exact neutral and affirmative transitions within
+  reintroduction, punctuation-scoped residual-predicate negation with
+  conditional-clause and same-clause controls, exact neutral and affirmative
+  transitions within
   one denial/reintroduction line and its colon-body form, and fail-closed
   rejection of a source candidate spanning those transitions,
   framing-repair integrity release before a subsequent modal repair,
