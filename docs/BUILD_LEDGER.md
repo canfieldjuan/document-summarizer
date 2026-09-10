@@ -3339,8 +3339,9 @@ release acceptance exposed issue #49
   the extracted line does not hide the reset, unless the next sentence begins
   with a bounded contrast marker and either explicitly reintroduces the active
   framing category or states a bounded unresolved Problem/Risk condition, or
-  explicitly reintroduces the category through a noun-first predicate, optionally preceded by conservative
-  heading modifiers or `new`, that does not deny its presence or identification.
+  explicitly reintroduces the category through a bounded affirmative noun-first
+  predicate, optionally preceded by one article, conservative heading modifiers
+  or `new`.
   Negation in a subordinate proposition and a negated
   elimination do not erase that reintroduction. A repeated absence or a
   different framing category still clears state. Repeated determiners after noun
@@ -3362,16 +3363,19 @@ release acceptance exposed issue #49
   labels cannot govern one generated unit. Exact source evidence, source order,
   citation rendering and persisted schemas remain unchanged. A model response
   that mixes framing in one unit receives one bounded repair instruction to
-  split only invalid units; a repeated violation fails closed. The initial
+  split only invalid units; the repair must preserve every individually valid
+  sibling's rendered text and ordered evidence IDs, and a repeated violation,
+  omission or rewrite fails closed. The initial
   General prompt and schema use the larger of the base unit budget and total
   compatibility-group count. Only a framing repair expands the prompt and
   schema ceiling to that initial limit times the greatest number of distinct
   framing groups in any one selection window, capped by the existing global
   maximum. The initial response therefore cannot consume the reserved split
   capacity. Story and Contract retain their prior generation ceiling.
-  Profile-neutral persisted-content validation admits that widest valid
-  current profile boundary so a correctly split General result reaches
-  verification.
+  Profile-neutral persisted-content validation enforces the same global
+  eight-unit cap as generation. It does not recompute a smaller ceiling from
+  the full catalog after transient long-document selection windows have been
+  discarded, so a valid selected-window result reaches verification.
 - Synthesis, verification and final-summary versions advance for the changed
   output contract. Completed version-7 summaries remain readable; in-progress
   coherent version-7 checkpoints retry, while version-7 claim-ledger fallbacks
@@ -3387,18 +3391,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `56d57e3c994c19b6273cf002de9dd38adf00c914`
+- The final product-code head `25cf5fdb04e4c1d89b55468ee330e61a34e2e87d`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,224
-  MiB for the Ollama process. The test passed in 109.35 seconds after 187 model
-  requests and produced 81 claims with 91 persisted evidence items. The delivered
+  MiB for the Ollama process. The evidence-traced test passed in 97.00 seconds
+  after 186 model requests and produced 81 claims with 97 persisted evidence
+  items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `50b03489656527b702f1cf1b642f0e1d2f7a9942a43eaae065cb496614ebda3e` and
+  `b61ef4050e3f9151d335d18cc7e98ae3b7104774b21b43c2b615c1c8fa58bb36` and
   citation integrity hash
-  `37c35ba58c6681c39a47c02703d2ff63bfd9284aacc18496b5da0b92647f988a`.
+  `2d771ae7c2872d089d9db97639a476e370cd661105395f6a81da99ef6135434b`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3416,9 +3421,9 @@ release acceptance exposed issue #49
   bounded compound `Risk Factors`, `Warning Signs` and `Problem Areas`
   headings with the existing conservative modifiers, rejection of unrelated
   or uncertainty-qualified compound headings,
-  inline interrogative framing headings, same-line interrogative reset before
-  answer text with substantive-question retention, byte-ordered colon/question
-  precedence in both directions, fail-closed
+  inline interrogative framing headings, same-line and trailing interrogative
+  reset before answer text with substantive-question retention, byte-ordered
+  colon/question precedence in both directions, fail-closed
   transition-spanning sources, whole standalone-colon heading/body candidates,
   inline transition
   isolation, heading-only candidate neutrality with state propagation, marked
@@ -3430,23 +3435,26 @@ release acceptance exposed issue #49
   repeated determiners, conservative modifiers, compound framing nouns,
   recognized outline markers on
   bounded denials, rejection of invalid markers and marked negative rules,
-  bounded copular and perfect existential predicates,
+  bounded copular presence and perfect existential predicates,
   bounded `to report` and bounded `Not applicable`, active-category noun
   matching, rejection of uncertainty modifiers, retention through
   interrogative denials, affirmative and unrelated post-denial contrast
   sentences, explicit same-line
-  framing reintroduction with predicate-bound negation, repeated-absence and
-  category-mismatch rejection, modified reintroduction with uncertainty
-  modifiers still excluded,
+  framing reintroduction with predicate-bound negation, bounded leading
+  determiners and modal predicates, rejection of adjectival framing compounds,
+  repeated-absence and category-mismatch rejection, modified reintroduction
+  with uncertainty modifiers still excluded,
   explanatory `Not applicable because ...` and `No risks to report because ...`
   text and negative-rule, residual-risk, qualified-denial and `None of ...`
   retention,
   retention across punctuated title-case, all-caps and sentence-case body text,
   bounded mixed-framing
-  repair with an unchanged valid sibling, repeated-response failure, distinct
+  repair with exact valid-sibling preservation, omission/rewrite and
+  repeated-response failure, distinct
   initial and expanded repair contracts, worst-permitted compatibility-group
   split capacity with Story isolation, and
-  zero/exact/over-limit persisted-count boundaries,
+  zero/exact/over-limit persisted-count boundaries and selected-window capacity
+  after the transient selection labels are unavailable,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry
