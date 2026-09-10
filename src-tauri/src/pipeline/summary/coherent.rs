@@ -385,6 +385,8 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "recommendation"
             | "recommendations"
             | "references"
+            | "remedies"
+            | "remedy"
             | "resources"
             | "scope"
             | "solution"
@@ -396,10 +398,32 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "who"
             | "why"
     );
+    let punctuated_marked_section_lead = matches!(
+        words[0].to_ascii_lowercase().as_str(),
+        "about"
+            | "appendix"
+            | "background"
+            | "conclusion"
+            | "conclusions"
+            | "definitions"
+            | "introduction"
+            | "next"
+            | "overview"
+            | "recommendation"
+            | "recommendations"
+            | "references"
+            | "remedies"
+            | "remedy"
+            | "resources"
+            | "scope"
+            | "solution"
+            | "solutions"
+            | "summary"
+    );
     let sentence_case_has_heading_shape = !heading.ends_with(['.', '!', ';']);
-    (marked_title.is_some() || sentence_case_has_heading_shape)
+    (sentence_case_has_heading_shape || marked_title.is_some() && punctuated_marked_section_lead)
         && (starts_uppercase || marked_title.is_some())
-        && (all_uppercase || title_case || sentence_case_lead && sentence_case_has_heading_shape)
+        && (all_uppercase || title_case || sentence_case_lead)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -661,6 +685,42 @@ fn framing_noun_is_denied(words: &[String], noun_end: usize) -> bool {
     })
 }
 
+fn contrast_continuation_reintroduces_source_framing(
+    continuation: &str,
+    active_framing: SourceFraming,
+) -> bool {
+    let contrast_body = continuation
+        .split_once(|character: char| !character.is_alphanumeric())
+        .map(|(_, body)| body)
+        .unwrap_or("")
+        .trim_start_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ',' | ':' | ';')
+        });
+    if continuation_reintroduces_source_framing(contrast_body, active_framing) {
+        return true;
+    }
+    if !matches!(active_framing, SourceFraming::Problem | SourceFraming::Risk) {
+        return false;
+    }
+    let words = contrast_body
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(17)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    words.windows(2).any(|window| {
+        matches!(
+            (window[0].as_str(), window[1].as_str()),
+            ("remain" | "remained" | "remains", "possible")
+        )
+    }) || words.windows(3).any(|window| {
+        matches!(
+            (window[0].as_str(), window[1].as_str(), window[2].as_str()),
+            ("are" | "is" | "was" | "were", "still", "possible")
+        )
+    })
+}
+
 fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool {
     let text = text.trim_start();
     let text = marked_heading_title(text).unwrap_or(text);
@@ -683,12 +743,15 @@ fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool
         .split(|character: char| !character.is_alphanumeric())
         .find(|word| !word.is_empty())
         .map(str::to_ascii_lowercase);
-    if continuation_lead.is_some_and(|lead| {
+    let contrast_continuation = continuation_lead.is_some_and(|lead| {
         matches!(
             lead.as_str(),
             "but" | "however" | "nevertheless" | "nonetheless" | "still" | "yet"
         )
-    }) || continuation_reintroduces_source_framing(continuation, active_framing)
+    });
+    if continuation_reintroduces_source_framing(continuation, active_framing)
+        || contrast_continuation
+            && contrast_continuation_reintroduces_source_framing(continuation, active_framing)
     {
         return false;
     }
@@ -5294,11 +5357,19 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(!begins_with_section_denial(
+            "No risks were identified. However, new risks emerged during testing.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
             "No risks were identified. Important new risk factors emerged during testing.",
             SourceFraming::Risk,
         ));
         assert!(!begins_with_section_denial(
             "No risks were identified. Risks were not eliminated.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were identified. However, monitoring will continue.",
             SourceFraming::Risk,
         ));
         for repeated_absence in [
@@ -5454,6 +5525,7 @@ mod tests {
             "2",
             "1. Workers may fall from ladders.",
             "1. workers may fall from ladders.",
+            "1. Workers May Fall.",
             "A. Workers may fall from ladders.",
             "1. When guards fail, workers may be injured.",
             "Examples include:",
@@ -5465,7 +5537,7 @@ mod tests {
             "When guards fail, workers may be injured.",
             "A heading with far too many separate words to fit the supported boundary",
         ] {
-            assert!(!possible_framing_boundary(body));
+            assert!(!possible_framing_boundary(body), "{body}");
         }
 
         let sectioned = "Common Problems\n\nFirst problem. Later problem.\n\nEmployees paid by piece rate\n\nmay fall below minimum wage.\n\n2. Solutions.\n\nEnsure workers receive minimum wage\n\nNo Known Issues\n\nNo defects were found.\n\nKey Risks\n\nRisk detail.";
@@ -5550,6 +5622,13 @@ mod tests {
         ] {
             assert_eq!(
                 source_framing_for_segment(numbered_sentence_case_body, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let numbered_title_case_body = "Key Risks\n1. Workers May Fall.\nInjuries can be fatal.";
+        for framed in ["1. Workers May Fall.", "Injuries can be fatal."] {
+            assert_eq!(
+                source_framing_for_segment(numbered_title_case_body, framed, None),
                 Some(SourceFraming::Risk)
             );
         }
@@ -5781,7 +5860,7 @@ mod tests {
             source_framing_for_segment(lowercase_marker, "The deadline does not apply.", None,),
             Some(SourceFraming::Exception)
         );
-        let lowercase_marked_reset = "Key Risks\na. solutions\nPay workers promptly.";
+        let lowercase_marked_reset = "Key Risks\na. solutions.\nPay workers promptly.";
         assert_eq!(
             source_framing_for_segment(lowercase_marked_reset, "Pay workers promptly.", None,),
             None
@@ -5870,6 +5949,13 @@ mod tests {
             assert_eq!(
                 source_framing_for_segment(post_denial_contrast, framed, None),
                 Some(SourceFraming::Risk)
+            );
+        }
+        let unrelated_post_denial_contrast = "Key Risks\nNo risks were identified. However, monitoring will continue.\nOverview follows.";
+        for unframed in ["However, monitoring will continue.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(unrelated_post_denial_contrast, unframed, None),
+                None
             );
         }
         let explicit_reintroduction = "Key Risks\nNo risks were identified. Risks subsequently emerged during testing.\nLater text.";

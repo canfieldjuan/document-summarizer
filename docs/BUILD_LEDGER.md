@@ -3333,8 +3333,9 @@ release acceptance exposed issue #49
   must consist of a framing-noun phrase plus a bounded absence or reporting
   predicate; only the leading complete sentence is inspected so later prose on
   the extracted line does not hide the reset, unless the next sentence begins
-  with a bounded contrast marker or explicitly reintroduces the active framing
-  category through a noun-first predicate, optionally preceded by conservative
+  with a bounded contrast marker and either explicitly reintroduces the active
+  framing category or states a bounded unresolved Problem/Risk condition, or
+  explicitly reintroduces the category through a noun-first predicate, optionally preceded by conservative
   heading modifiers or `new`, that does not deny its presence or identification.
   Negation in a subordinate proposition and a negated
   elimination do not erase that reintroduction. A repeated absence or a
@@ -3406,7 +3407,7 @@ release acceptance exposed issue #49
   excess-newline framing and reset headings, decimal/uppercase/lowercase Roman,
   uppercase/lowercase-letter and fully parenthesized outline framing
   headings, a lowercase recognized section lead after a valid marker with
-  marked lowercase prose retention, inline framing and reset headings,
+  marked lowercase and title-case prose retention, inline framing and reset headings,
   rejection of standalone and
   bounded compound `Risk Factors`, `Warning Signs` and `Problem Areas`
   headings with the existing conservative modifiers, rejection of unrelated
@@ -3428,7 +3429,8 @@ release acceptance exposed issue #49
   bounded copular and perfect existential predicates,
   bounded `to report` and bounded `Not applicable`, active-category noun
   matching, rejection of uncertainty modifiers, retention through
-  interrogative denials, post-denial contrast sentences, explicit same-line
+  interrogative denials, affirmative and unrelated post-denial contrast
+  sentences, explicit same-line
   framing reintroduction with predicate-bound negation, repeated-absence and
   category-mismatch rejection, modified reintroduction with uncertainty
   modifiers still excluded,
