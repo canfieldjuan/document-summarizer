@@ -3323,7 +3323,8 @@ release acceptance exposed issue #49
   An implicit `None` denial or bounded `Not applicable` can clear any label; an
   explicit denial must name a noun in the active framing category.
   Explicit denial noun phrases may use the same conservative framing modifiers
-  as headings; uncertainty modifiers remain outside the grammar.
+  as headings and the same three bounded compound families; uncertainty
+  modifiers remain outside the grammar.
   Direct `No`/`Neither`, copular existential, and perfect existential denials
   must consist of a framing-noun phrase plus a bounded absence or reporting
   predicate; only the leading complete sentence is inspected so later prose on
@@ -3414,7 +3415,8 @@ release acceptance exposed issue #49
   across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
   denial clearing in following-line and inline bodies with trailing prose and
-  repeated determiners, conservative modifiers, recognized outline markers on
+  repeated determiners, conservative modifiers, compound framing nouns,
+  recognized outline markers on
   bounded denials, rejection of invalid markers and marked negative rules,
   bounded copular and perfect existential predicates,
   bounded `to report` and bounded `Not applicable`, active-category noun

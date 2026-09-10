@@ -208,19 +208,31 @@ fn is_source_framing_modifier(word: &str) -> bool {
 }
 
 fn source_framing_from_compound_heading(words: &[String]) -> Option<SourceFraming> {
-    let (modifiers, compound) = words.split_at(words.len().checked_sub(2)?);
+    let noun_start = words.len().checked_sub(2)?;
+    let modifiers = &words[..noun_start];
     if !modifiers
         .iter()
         .all(|word| is_source_framing_modifier(word))
     {
         return None;
     }
-    match (compound[0].as_str(), compound[1].as_str()) {
-        ("risk", "factor" | "factors") => Some(SourceFraming::Risk),
-        ("warning", "sign" | "signs") => Some(SourceFraming::Warning),
-        ("problem", "area" | "areas") => Some(SourceFraming::Problem),
+    let (framing, after_noun) = source_framing_term_at(words, noun_start)?;
+    (after_noun == words.len()).then_some(framing)
+}
+
+fn source_framing_term_at(words: &[String], cursor: usize) -> Option<(SourceFraming, usize)> {
+    let word = words.get(cursor)?.as_str();
+    let next = words.get(cursor + 1).map(String::as_str);
+    let compound = match (word, next) {
+        ("risk", Some("factor" | "factors")) => Some(SourceFraming::Risk),
+        ("warning", Some("sign" | "signs")) => Some(SourceFraming::Warning),
+        ("problem", Some("area" | "areas")) => Some(SourceFraming::Problem),
         _ => None,
+    };
+    if let Some(framing) = compound {
+        return Some((framing, cursor + 2));
     }
+    source_framing_from_noun(word).map(|framing| (framing, cursor + 1))
 }
 
 fn framing_from_heading_candidate(
@@ -520,14 +532,13 @@ fn continuation_reintroduces_source_framing(
         .take(17)
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
-    words
-        .first()
-        .and_then(|word| source_framing_from_noun(word))
-        == Some(active_framing)
-        && !framing_noun_is_denied(&words)
+    let Some((framing, noun_end)) = source_framing_term_at(&words, 0) else {
+        return false;
+    };
+    framing == active_framing && !framing_noun_is_denied(&words, noun_end)
 }
 
-fn framing_noun_is_denied(words: &[String]) -> bool {
+fn framing_noun_is_denied(words: &[String], noun_end: usize) -> bool {
     let skip_adverbs = |mut cursor: usize| {
         while words.get(cursor).is_some_and(|word| {
             matches!(
@@ -539,7 +550,7 @@ fn framing_noun_is_denied(words: &[String]) -> bool {
         }
         cursor
     };
-    let mut cursor = skip_adverbs(1);
+    let mut cursor = skip_adverbs(noun_end);
     let Some(predicate) = words.get(cursor).map(String::as_str) else {
         return false;
     };
@@ -792,11 +803,9 @@ fn consume_section_denial_nouns(
         {
             cursor += 1;
         }
-        let noun_framing = words
-            .get(cursor)
-            .and_then(|word| source_framing_from_noun(word))?;
+        let (noun_framing, after_noun) = source_framing_term_at(words, cursor)?;
         contains_required_framing |= noun_framing == required_framing;
-        cursor += 1;
+        cursor = after_noun;
         if !words
             .get(cursor)
             .is_some_and(|word| matches!(word.as_str(), "and" | "nor" | "or"))
@@ -5351,6 +5360,25 @@ mod tests {
             "No potential risks were identified.",
             SourceFraming::Risk,
         ));
+        for (compound_denial, framing) in [
+            ("No risk factors were identified.", SourceFraming::Risk),
+            ("No warning signs were observed.", SourceFraming::Warning),
+            ("No problem areas were found.", SourceFraming::Problem),
+        ] {
+            assert!(begins_with_section_denial(compound_denial, framing));
+        }
+        assert!(begins_with_section_denial(
+            "No risk factors or problem areas were identified.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risk factors or problem areas were identified.",
+            SourceFraming::Problem,
+        ));
+        assert!(!begins_with_section_denial(
+            "No risk factor controls were identified.",
+            SourceFraming::Risk,
+        ));
         assert!(!begins_with_section_denial(
             "No risks to report because the review is incomplete.",
             SourceFraming::Risk,
@@ -5804,6 +5832,21 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(repeated_absence, "Later text.", None),
             None
+        );
+        let compound_denial = "Risk Factors\nNo risk factors were identified.\nOverview text.";
+        assert_eq!(
+            source_framing_for_segment(compound_denial, "Overview text.", None),
+            None
+        );
+        let compound_repeated_absence = "Risk Factors\nNo risks were identified. Risk factors were not identified later.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(compound_repeated_absence, "Later text.", None),
+            None
+        );
+        let compound_reintroduction = "Risk Factors\nNo risks were identified. Risk factors subsequently emerged during testing.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(compound_reintroduction, "Later text.", None),
+            Some(SourceFraming::Risk)
         );
         let negative_problem = "Common Problems\nNo worker may be paid below minimum wage.";
         assert_eq!(
