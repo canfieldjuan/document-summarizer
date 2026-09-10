@@ -3503,10 +3503,16 @@ release acceptance exposed issue #49
   delimiters. Wrong complements, repeated negation and qualified continuations
   remain unframed. The focused two-sided propagation probe and full
   deterministic gate passed.
-- The final product-code head `8c9aeacf33d7e45976d4ae6761c54df000a43606`
+- Product-code head `8c9aeacf33d7e45976d4ae6761c54df000a43606`
   admits `discovered` in the existing affirmative copular and perfect
   reintroduction predicates. Explicitly negated discovery remains neutral. The
   focused two-sided propagation probe and full deterministic gate passed.
+- The final product-code head `9c38c1c62c0d053cac9883c84c270de7819aecbc`
+  requires a declarative first sentence terminal before a suspended framing
+  category can be restored by either noun-based or residual predicates. ASCII,
+  full-width and Arabic questions remain neutral; declarative controls restore
+  framing. The focused two-sided propagation probe and full deterministic gate
+  passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
