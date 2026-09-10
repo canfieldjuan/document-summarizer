@@ -1137,6 +1137,9 @@ fn residual_continuation_reintroduces_source_framing(
     if !matches!(active_framing, SourceFraming::Problem | SourceFraming::Risk) {
         return false;
     }
+    if skip_coordinator && bounded_anaphoric_framing_reintroduction(contrast_body) {
+        return true;
+    }
     let mut words = Vec::new();
     let mut clause_starts = Vec::new();
     let mut clause_start = 0usize;
@@ -1235,6 +1238,15 @@ fn residual_continuation_reintroduces_source_framing(
                 ("are" | "is" | "was" | "were", "still", "possible")
             )
     })
+}
+
+fn bounded_anaphoric_framing_reintroduction(text: &str) -> bool {
+    let (words, _) = section_denial_words(text);
+    (2..=16).contains(&words.len())
+        && words
+            .first()
+            .is_some_and(|word| matches!(word.as_str(), "it" | "they"))
+        && framing_noun_predicate_reintroduces(&words, 1)
 }
 
 fn coordinated_continuation_lead(text: &str) -> bool {
@@ -1845,6 +1857,8 @@ fn section_question_presence_predicate(word: &str) -> bool {
             | "applies"
             | "detected"
             | "discovered"
+            | "emerge"
+            | "emerged"
             | "exist"
             | "exists"
             | "found"
@@ -1852,7 +1866,9 @@ fn section_question_presence_predicate(word: &str) -> bool {
             | "known"
             | "noted"
             | "observed"
+            | "occur"
             | "occurred"
+            | "occurring"
             | "possible"
             | "present"
             | "remain"
@@ -1965,7 +1981,8 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
             bare_no_answer_allowed = framing.is_some_and(|active_framing| {
                 section_question_accepts_bare_no(heading_candidate, active_framing)
             });
-            if possible_interrogative_framing_boundary(heading_candidate) {
+            if possible_interrogative_framing_boundary(heading_candidate) && !bare_no_answer_allowed
+            {
                 framing = None;
                 suspended = None;
                 transitions.push((leading_whitespace.saturating_add(heading_offset), framing));
@@ -7801,6 +7818,21 @@ mod tests {
             ),
             Some(SourceFraming::Risk)
         );
+        for affirmative_presence_answer in [
+            "Are There Risks? Yes.",
+            "Did Risks Emerge? Yes.",
+            "Have Risks Emerged? Yes.",
+            "Do Risks Occur? Yes.",
+        ] {
+            let block = format!("Key Risks\n{affirmative_presence_answer}\nFraud may occur.");
+            for framed in [affirmative_presence_answer, "Fraud may occur."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{affirmative_presence_answer} should retain active Risk framing",
+                );
+            }
+        }
         let question_answer_denial =
             "Key Risks\nAny known risks? None reported.\nOverview follows.";
         assert_eq!(
@@ -7829,6 +7861,10 @@ mod tests {
             "Were risks identified? No.",
             "Have any risks been identified? No.",
             "Do any risks exist? No.",
+            "Are There Risks? No.",
+            "Did Risks Emerge? No.",
+            "Have Risks Emerged? No.",
+            "Do Risks Occur? No.",
         ] {
             let block = format!("Key Risks\n{bare_answer}\nOverview follows.");
             for unframed in ["No.", "No!", "Overview follows."] {
@@ -8448,6 +8484,44 @@ mod tests {
                     Some(SourceFraming::Risk)
                 );
             }
+        }
+        for anaphoric_residual_risk in [
+            "No risks were identified, but they cannot be ruled out.",
+            "No risks were identified, but they can't be ruled out.",
+            "No risks were identified, but they could not be ruled out.",
+            "No risks were identified, but they have not been ruled out.",
+            "No risk was identified, but it may not be ruled out.",
+        ] {
+            let block = format!("Key Risks\n{anaphoric_residual_risk}\nLater text.");
+            assert_eq!(
+                source_framing_for_segment(&block, anaphoric_residual_risk, None),
+                None,
+                "a source crossing the denial and reintroduction must stay unframed",
+            );
+            let pronoun_clause = anaphoric_residual_risk
+                .split_once("but ")
+                .map(|(_, clause)| clause)
+                .unwrap();
+            for framed in [pronoun_clause, "Later text."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{pronoun_clause} should restore Risk framing",
+                );
+            }
+        }
+        for anaphoric_resolution in [
+            "No risks were identified, but they can be ruled out.",
+            "No risks were identified, but they cannot be ruled in.",
+            "No risks were identified, but they were ruled out.",
+            "No risks were identified, but they haven't not been ruled out.",
+        ] {
+            let block = format!("Key Risks\n{anaphoric_resolution}\nLater text.");
+            assert_eq!(
+                source_framing_for_segment(&block, "Later text.", None),
+                None,
+                "{anaphoric_resolution} must not restore Risk framing",
+            );
         }
         for ruled_out_risk in [
             "Risks have been ruled out.",
