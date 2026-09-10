@@ -3291,7 +3291,9 @@ release acceptance exposed issue #49
   each extracted line so a subsequent bounded heading-shaped line, including
   a decimal, Roman or letter-marked heading or a sentence-case heading with an
   explicit heading signal, resets the label; numbering alone does not. A
-  recognized framing heading replaces it. A bounded source segment
+  reliable heading followed by a colon and body on the same line changes state
+  at that prefix, while an introductory colon does not. A recognized framing
+  heading replaces the prior label. A bounded source segment
   that crosses either transition remains unframed because one relationship does
   not govern all of its text. General
   synthesis and verification use the same section-scope resolver. Story,
@@ -3324,7 +3326,7 @@ release acceptance exposed issue #49
   capitalized and numbered-list body paragraphs, reset across empty and
   visual-processing pages, retention across an introductory colon, single- and
   excess-newline framing and reset headings, decimal/Roman/letter framing
-  headings, fail-closed
+  headings, inline framing and reset headings, fail-closed
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry

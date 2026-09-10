@@ -345,6 +345,17 @@ fn possible_framing_boundary(text: &str) -> bool {
 
 fn source_framing_after_line(current: Option<SourceFraming>, line: &str) -> Option<SourceFraming> {
     let heading_candidate = line.trim();
+    if let Some((prefix, body)) = heading_candidate.split_once(':') {
+        let prefix = prefix.trim();
+        if !body.trim().is_empty() {
+            if let Some(next) = framing_from_heading(prefix) {
+                return Some(next);
+            }
+            if possible_framing_boundary(prefix) {
+                return None;
+            }
+        }
+    }
     if let Some(next) = framing_from_heading(heading_candidate) {
         Some(next)
     } else if possible_framing_boundary(heading_candidate) {
@@ -4533,6 +4544,20 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(introductory_colon, "Late payment.", None),
             Some(SourceFraming::Problem)
+        );
+        let inline_introductory_colon = "Common Problems\nExamples include: Late payment.";
+        assert_eq!(
+            source_framing_for_segment(inline_introductory_colon, "Late payment.", None),
+            Some(SourceFraming::Problem)
+        );
+        let inline_sections = "Safety Warning\nUse care.\nCommon Problems: Late payments are frequent.\nSolutions: Pay workers promptly.";
+        assert_eq!(
+            source_framing_for_segment(inline_sections, "Late payments are frequent.", None,),
+            Some(SourceFraming::Problem)
+        );
+        assert_eq!(
+            source_framing_for_segment(inline_sections, "Pay workers promptly.", None),
+            None
         );
         let single_newline = "Common Problems\nLate payments are frequent.";
         assert_eq!(
