@@ -3335,7 +3335,10 @@ release acceptance exposed issue #49
   that mixes framing in one unit receives one bounded repair instruction to
   split only invalid units; a repeated violation fails closed. The General
   unit ceiling is at least the number of distinct selection-window and framing
-  compatibility groups, while Story and Contract retain their prior ceiling.
+  compatibility groups, while Story and Contract retain their prior generation
+  ceiling. Profile-neutral persisted-content validation admits that widest valid
+  current profile boundary so a correctly split General result reaches
+  verification.
 - Synthesis, verification and final-summary versions advance for the changed
   output contract. Completed version-7 summaries remain readable; in-progress
   coherent version-7 checkpoints retry, while version-7 claim-ledger fallbacks
@@ -3372,7 +3375,7 @@ release acceptance exposed issue #49
   residual-risk, qualified-denial and `None of ...` retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
   repair and repeated-response failure, compatibility-group unit capacity with
-  Story isolation,
+  Story isolation, and zero/exact/over-limit persisted-count boundaries,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry

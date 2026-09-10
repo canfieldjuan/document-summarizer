@@ -889,6 +889,10 @@ fn maximum_summary_units_for_catalog(profile: SummaryProfile, catalog: &SourceCa
         .min(MAX_SUMMARY_CLAIMS)
 }
 
+fn persisted_summary_claim_count_valid(catalog: &SourceCatalog, claim_count: usize) -> bool {
+    (1..=maximum_summary_units_for_catalog(SummaryProfile::General, catalog)).contains(&claim_count)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FallbackReason {
     IncompleteCatalog,
@@ -4049,9 +4053,7 @@ pub(super) fn validate_content(
     )?;
     match synthesized.presentation_mode {
         SummaryPresentationMode::Coherent => {
-            if synthesized.summary_claims.is_empty()
-                || synthesized.summary_claims.len()
-                    > maximum_summary_units(catalog.candidates.len())
+            if !persisted_summary_claim_count_valid(&catalog, synthesized.summary_claims.len())
                 || synthesized.synthesis_evidence.is_empty()
                 || synthesized
                     .warnings
@@ -6103,6 +6105,9 @@ mod tests {
             maximum_summary_units_for_catalog(SummaryProfile::Story, &grouped),
             1
         );
+        assert!(!persisted_summary_claim_count_valid(&grouped, 0));
+        assert!(persisted_summary_claim_count_valid(&grouped, 3));
+        assert!(!persisted_summary_claim_count_valid(&grouped, 4));
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &grouped).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&prompt).unwrap()["maximum_units"],
@@ -6132,6 +6137,8 @@ mod tests {
             maximum_summary_units_for_catalog(SummaryProfile::General, &grouped),
             1
         );
+        assert!(persisted_summary_claim_count_valid(&grouped, 1));
+        assert!(!persisted_summary_claim_count_valid(&grouped, 2));
     }
 
     #[test]
