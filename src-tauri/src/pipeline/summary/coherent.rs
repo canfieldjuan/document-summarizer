@@ -386,7 +386,6 @@ fn possible_inline_framing_boundary(text: &str) -> bool {
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>();
     marked.is_some()
-        || words.len() > 1
         || words.first().is_some_and(|word| {
             matches!(
                 word.to_ascii_lowercase().as_str(),
@@ -396,7 +395,9 @@ fn possible_inline_framing_boundary(text: &str) -> bool {
                     | "conclusions"
                     | "definitions"
                     | "introduction"
+                    | "next"
                     | "overview"
+                    | "payment"
                     | "recommendation"
                     | "recommendations"
                     | "references"
@@ -407,6 +408,11 @@ fn possible_inline_framing_boundary(text: &str) -> bool {
                     | "solutions"
                     | "summary"
                     | "terms"
+                    | "what"
+                    | "when"
+                    | "where"
+                    | "who"
+                    | "why"
             )
         })
 }
@@ -4604,6 +4610,8 @@ mod tests {
         assert!(possible_inline_framing_boundary("Payment Terms"));
         assert!(!possible_inline_framing_boundary("Example"));
         assert!(!possible_inline_framing_boundary("Note"));
+        assert!(!possible_inline_framing_boundary("Important Note"));
+        assert!(!possible_inline_framing_boundary("Supporting Example"));
         for body in [
             "2",
             "1. Workers may fall from ladders.",
@@ -4713,6 +4721,11 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(inline_example, "Late payment.", None),
             Some(SourceFraming::Problem)
+        );
+        let inline_note = "Safety Warnings\nImportant Note: The guard may become hot.";
+        assert_eq!(
+            source_framing_for_segment(inline_note, "The guard may become hot.", None),
+            Some(SourceFraming::Warning)
         );
         let single_newline = "Common Problems\nLate payments are frequent.";
         assert_eq!(
