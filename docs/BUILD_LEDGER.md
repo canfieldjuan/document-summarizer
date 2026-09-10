@@ -3484,12 +3484,18 @@ release acceptance exposed issue #49
   compound-noun splits and question terminals fail closed. Supported Unicode
   declarative terminals preserve active framing. The focused boundary probe and
   full deterministic gate passed.
-- The final product-code head `3880c825ed8b51bbe6cb281f70a5a53c63f0e31f`
+- Product-code head `3880c825ed8b51bbe6cb281f70a5a53c63f0e31f`
   resets framing for bounded auxiliary-led solution and control questions, and
   parses bounded expanded or apostrophe-contracted negated existential denials.
   Risk questions, control-failure questions, extra qualifiers, missing
   determiners, mismatched categories and interrogative denials retain framing.
   The focused two-sided classifier probe and full deterministic gate passed.
+- The final product-code head `a289dc20c02d4752f88441d9d99a24f8ea9cec93`
+  admits bounded modal-led mitigation-action questions and supported temporal
+  adverb positions around expanded negation. Modal failure and residual-state
+  questions, noun uses of `control`, repeated negation, mismatched categories
+  and qualified denials retain framing. The focused two-sided propagation probe
+  and full deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
