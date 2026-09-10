@@ -708,16 +708,26 @@ fn contrast_continuation_reintroduces_source_framing(
         .take(17)
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
-    words.windows(2).any(|window| {
-        matches!(
-            (window[0].as_str(), window[1].as_str()),
-            ("remain" | "remained" | "remains", "possible")
-        )
-    }) || words.windows(3).any(|window| {
-        matches!(
-            (window[0].as_str(), window[1].as_str(), window[2].as_str()),
-            ("are" | "is" | "was" | "were", "still", "possible")
-        )
+    let predicate_is_affirmative = |predicate_start: usize| {
+        !words[..predicate_start].iter().any(|word| {
+            matches!(
+                word.as_str(),
+                "cannot" | "neither" | "never" | "no" | "none" | "not"
+            )
+        })
+    };
+    words.windows(2).enumerate().any(|(index, window)| {
+        predicate_is_affirmative(index)
+            && matches!(
+                (window[0].as_str(), window[1].as_str()),
+                ("remain" | "remained" | "remains", "possible")
+            )
+    }) || words.windows(3).enumerate().any(|(index, window)| {
+        predicate_is_affirmative(index)
+            && matches!(
+                (window[0].as_str(), window[1].as_str(), window[2].as_str()),
+                ("are" | "is" | "was" | "were", "still", "possible")
+            )
     })
 }
 
@@ -5372,6 +5382,16 @@ mod tests {
             "No risks were identified. However, monitoring will continue.",
             SourceFraming::Risk,
         ));
+        for negated_contrast in [
+            "No risks were identified. However, no fraud remains possible.",
+            "No risks were identified. However, fraud does not remain possible.",
+            "No risks were identified. However, fraud is not still possible.",
+        ] {
+            assert!(begins_with_section_denial(
+                negated_contrast,
+                SourceFraming::Risk,
+            ));
+        }
         for repeated_absence in [
             "No risks were identified. Risks were not identified later.",
             "No risks were identified. Risks did not emerge.",
@@ -5958,6 +5978,19 @@ mod tests {
                 None
             );
         }
+        let negated_post_denial_contrast = "Key Risks\nNo risks were identified. However, no fraud remains possible.\nOverview follows.";
+        for unframed in ["However, no fraud remains possible.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(negated_post_denial_contrast, unframed, None),
+                None
+            );
+        }
+        let mixed_category_heading =
+            "Key Risks\nFraud remains possible.\nRisks and Limitations\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(mixed_category_heading, "Overview follows.", None),
+            None
+        );
         let explicit_reintroduction = "Key Risks\nNo risks were identified. Risks subsequently emerged during testing.\nLater text.";
         for framed in ["Risks subsequently emerged during testing.", "Later text."] {
             assert_eq!(

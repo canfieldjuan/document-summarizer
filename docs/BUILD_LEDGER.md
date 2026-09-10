@@ -3459,5 +3459,10 @@ release acceptance exposed issue #49
 - This is a conservative repair for explicit leading headings in source quotes,
   not a general discourse parser. Semantic review remains necessary for framing
   expressed indirectly or across separate blocks.
+- A coordinated heading that names distinct framing categories, such as `Risks
+  and Limitations`, remains unframed. The source-framing contract stores one
+  application-owned relationship, so selecting either category for every later
+  segment would overstate the source; combined relationships require a separate
+  contract and compatibility design.
 - This slice does not change Story or Contract behavior, routing, UI, persistence
   schemas, source selection, ingestion, OCR or model configuration.
