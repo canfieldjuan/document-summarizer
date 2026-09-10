@@ -999,9 +999,13 @@ fn continuation_after_coordinator(text: &str) -> &str {
 
 fn begins_with_declarative_section_denial(text: &str, active_framing: SourceFraming) -> bool {
     !matches!(
-        text.chars()
-            .find(|character| matches!(character, '.' | '?' | '!')),
-        Some('?')
+        text.chars().find(|character| {
+            matches!(
+                character,
+                '.' | '!' | '?' | '。' | '！' | '？' | '؟' | '۔' | '։' | '।'
+            )
+        }),
+        Some('?' | '？' | '؟')
     ) && bounded_section_denial_clause(text, active_framing)
 }
 
@@ -6044,6 +6048,12 @@ mod tests {
             "No risks were identified, or no risks were reported?",
             SourceFraming::Risk,
         ));
+        for question_terminal in ['？', '؟'] {
+            assert!(!begins_with_section_denial(
+                &format!("No risks were identified, or no risks were reported{question_terminal}"),
+                SourceFraming::Risk,
+            ));
+        }
         for qualified_semicolon in [
             "No risks were identified; because the review is incomplete.",
             "No risks were identified; if the preliminary record is accurate.",
@@ -6426,6 +6436,19 @@ mod tests {
             source_framing_for_segment(interrogative_disjunction, "Overview follows.", None,),
             Some(SourceFraming::Risk)
         );
+        for question_terminal in ['？', '؟'] {
+            let unicode_interrogative_disjunction = format!(
+                "Key Risks\nNo risks were identified, or no risks were reported{question_terminal}\nOverview follows."
+            );
+            assert_eq!(
+                source_framing_for_segment(
+                    &unicode_interrogative_disjunction,
+                    "Overview follows.",
+                    None,
+                ),
+                Some(SourceFraming::Risk)
+            );
+        }
         let unpunctuated_title_case = "Key Risks\nWorkers May Fall\nLater text.";
         assert_eq!(
             source_framing_for_segment(unpunctuated_title_case, "Later text.", None),
