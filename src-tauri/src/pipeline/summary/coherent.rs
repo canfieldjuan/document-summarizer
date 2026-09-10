@@ -554,7 +554,7 @@ fn inline_heading_prefix(line: &str, colon_index: usize) -> (&str, usize) {
         .char_indices()
         .rev()
         .find(|(_, character)| {
-            is_source_sentence_terminal(*character) || matches!(character, ';' | ':')
+            is_source_sentence_terminal(*character) || matches!(character, ';' | ':' | '\u{ff1a}')
         })
         .map_or(0, |(index, character)| {
             index.saturating_add(character.len_utf8())
@@ -1289,6 +1289,14 @@ fn is_source_question_terminal(character: char) -> bool {
     matches!(character, '?' | '？' | '؟')
 }
 
+fn is_source_inline_colon(character: char) -> bool {
+    matches!(character, ':' | '：')
+}
+
+fn is_source_coordination_delimiter(character: char) -> bool {
+    matches!(character, ',' | '،' | '，' | ';' | '–' | '—')
+}
+
 fn begins_with_declarative_section_denial(text: &str, active_framing: SourceFraming) -> bool {
     begins_with_declarative_source_clause(text)
         && bounded_section_denial_clause(text, active_framing)
@@ -1945,9 +1953,11 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
         leading_whitespace,
         line,
     );
-    for (delimiter_index, delimiter) in line
-        .match_indices(|character: char| character == ':' || is_source_sentence_terminal(character))
-    {
+    for (delimiter_index, delimiter) in line.match_indices(|character: char| {
+        is_source_inline_colon(character)
+            || is_source_sentence_terminal(character)
+            || is_source_coordination_delimiter(character)
+    }) {
         let delimiter_len = delimiter.len();
         let delimiter_character = delimiter.chars().next();
         if delimiter_character.is_some_and(is_source_question_terminal) {
@@ -1974,7 +1984,7 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
             );
             continue;
         }
-        if delimiter != ":" {
+        if delimiter_character.is_some_and(is_source_sentence_terminal) {
             let suffix = &line[delimiter_index + delimiter_len..];
             let suffix_offset = leading_whitespace
                 .saturating_add(delimiter_index)
@@ -1989,6 +1999,30 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
             bare_no_answer_allowed = false;
             continue;
         }
+        if delimiter_character.is_some_and(is_source_coordination_delimiter) {
+            let suffix_start = delimiter_index.saturating_add(delimiter_len);
+            let suffix = &line[suffix_start..];
+            let denial = if coordinated_continuation_lead(suffix) {
+                continuation_after_coordinator(suffix)
+            } else if delimiter_character == Some(';') {
+                suffix
+            } else {
+                bare_no_answer_allowed = false;
+                continue;
+            };
+            let denial_offset = leading_whitespace
+                .saturating_add(suffix_start)
+                .saturating_add(suffix.len().saturating_sub(denial.len()));
+            apply_section_denial_update(
+                &mut framing,
+                &mut suspended,
+                &mut transitions,
+                denial_offset,
+                denial,
+            );
+            bare_no_answer_allowed = false;
+            continue;
+        }
         let colon_index = delimiter_index;
         let (heading_candidate, heading_offset) = inline_heading_prefix(line, colon_index);
         let denial_answer_label = matches!(
@@ -1999,10 +2033,10 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
         if changed {
             framing = next;
             suspended = None;
-            let body = &line[colon_index + 1..];
+            let body = &line[colon_index + delimiter_len..];
             let body_offset = leading_whitespace
                 .saturating_add(colon_index)
-                .saturating_add(1);
+                .saturating_add(delimiter_len);
             let transition_offset = if body.trim().is_empty() {
                 leading_whitespace.saturating_add(heading_offset)
             } else {
@@ -2018,10 +2052,10 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
             );
             bare_no_answer_allowed = false;
         } else if denial_answer_label {
-            let body = &line[colon_index + 1..];
+            let body = &line[colon_index + delimiter_len..];
             let body_offset = leading_whitespace
                 .saturating_add(colon_index)
-                .saturating_add(1);
+                .saturating_add(delimiter_len);
             apply_section_answer_denial_update(
                 &mut framing,
                 &mut suspended,
@@ -7308,6 +7342,36 @@ mod tests {
             source_framing_for_segment(inline_sections, "Pay workers promptly.", None),
             None
         );
+        let fullwidth_inline_sections =
+            "Common Problems\nKey Risks： Injury may occur.\nOverview follows.";
+        for framed in ["Injury may occur.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(fullwidth_inline_sections, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        assert_eq!(
+            source_framing_for_segment(
+                fullwidth_inline_sections,
+                "Key Risks： Injury may occur.",
+                None,
+            ),
+            None
+        );
+        let fullwidth_inline_reset =
+            "Key Risks\nSolutions： Pay workers promptly.\nOverview follows.";
+        for unframed in ["Pay workers promptly.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(fullwidth_inline_reset, unframed, None),
+                None
+            );
+        }
+        let fullwidth_labeled_answer =
+            "Key Risks\nAny known risks？ Response： None reported.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(fullwidth_labeled_answer, "Overview follows.", None),
+            None
+        );
         let collapsed_inline_sections =
             "Common Problems: Late payments are frequent. Solutions: Pay workers promptly.";
         assert_eq!(
@@ -8091,6 +8155,39 @@ mod tests {
                     Some(SourceFraming::Risk)
                 );
             }
+        }
+        for trailing_denial in [
+            "Key Risks\nRisks emerged, but no risks remain.\nOverview follows.",
+            "Key Risks\nRisks emerged， however, no risks remain.\nOverview follows.",
+            "Key Risks\nRisks emerged، yet no risks remain.\nOverview follows.",
+            "Key Risks\nRisks emerged; no risks remain.\nOverview follows.",
+            "Key Risks\nRisks emerged — but no risks remain.\nOverview follows.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(
+                    trailing_denial,
+                    trailing_denial.lines().nth(1).unwrap(),
+                    None,
+                ),
+                None
+            );
+            for unframed in ["no risks remain.", "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(trailing_denial, unframed, None),
+                    None
+                );
+            }
+        }
+        for non_denial_continuation in [
+            "Key Risks\nRisks emerged, because no risks remain.\nOverview follows.",
+            "Key Risks\nRisks emerged, no risks remain.\nOverview follows.",
+            "Key Risks\nRisks emerged, but no control eliminates every risk.\nOverview follows.",
+            "Key Risks\nRisks emerged; because no risks remain.\nOverview follows.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(non_denial_continuation, "Overview follows.", None),
+                Some(SourceFraming::Risk)
+            );
         }
         for qualified_semicolon in [
             "Key Risks\nNo risks were identified; because the review is incomplete.\nOverview follows.",
