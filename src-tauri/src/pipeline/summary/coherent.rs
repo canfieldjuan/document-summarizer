@@ -987,13 +987,27 @@ fn bounded_section_denial_predicate(
         }
     }
 
-    while words.get(cursor).is_some_and(|word| {
-        matches!(
-            word.as_str(),
-            "are" | "been" | "had" | "has" | "have" | "is" | "was" | "were"
-        )
-    }) {
-        cursor += 1;
+    let mut consumed_temporal_adverb = false;
+    loop {
+        if words.get(cursor).is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "are" | "been" | "had" | "has" | "have" | "is" | "was" | "were"
+            )
+        }) {
+            cursor += 1;
+            continue;
+        }
+        if !consumed_temporal_adverb
+            && words
+                .get(cursor)
+                .is_some_and(|word| matches!(word.as_str(), "currently" | "yet"))
+        {
+            consumed_temporal_adverb = true;
+            cursor += 1;
+            continue;
+        }
+        break;
     }
     if !words.get(cursor).is_some_and(|word| {
         matches!(
@@ -5792,6 +5806,14 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(begins_with_section_denial(
+            "No risks have yet been identified.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks are currently present.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
             "No risks remain.",
             SourceFraming::Risk,
         ));
@@ -5906,6 +5928,8 @@ mod tests {
             "No risks and no control eliminates every fraud risk.",
             "No risks remain possible.",
             "No exceptions apply to every worker.",
+            "No risks have yet been identified because the review is incomplete.",
+            "No risks are currently present in this area.",
         ] {
             assert!(!begins_with_section_denial(
                 residual_risk,
@@ -6174,6 +6198,24 @@ mod tests {
             assert_eq!(
                 source_framing_for_segment(detected_denial, unframed, None),
                 None
+            );
+        }
+        for temporal_denial in [
+            "Key Risks\nNo risks have yet been identified.\nLater unrelated text.",
+            "Key Risks\nNo risks are currently present.\nLater unrelated text.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(temporal_denial, "Later unrelated text.", None),
+                None
+            );
+        }
+        for qualified_temporal_statement in [
+            "Key Risks\nNo risks have yet been identified because the review is incomplete.\nLater text.",
+            "Key Risks\nNo risks are currently present in this area.\nLater text.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(qualified_temporal_statement, "Later text.", None),
+                Some(SourceFraming::Risk)
             );
         }
         let remaining_denial = "Key Risks\nNo risks remain.\nLater unrelated text.";
