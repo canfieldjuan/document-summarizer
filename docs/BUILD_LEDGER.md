@@ -3397,19 +3397,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `e3c3f0ace1ef731e5b0e3ee5a4f7da06c2db8ae8`
+- The final product-code head `7ebc94b856aad163a1e24d95543e8e0f1bea4991`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 98.95 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 96.81 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `dcd7bbefef461a4e432bf9aa1b863f1b1b4e59bcb4cf1b4822fb4abd1539b005` and
+  `e4f524265b97ceee27c82c53bf81ee5122c03005744abc31619b36bf75b37b2c` and
   citation integrity hash
-  `b97ef3db6e3bf2aeeaec8fe0e0610449105d6e36f1408cc5d0f62e090a17cda0`.
+  `172c1d26ff55f5d6f5625f2d08358cd06fb7c1ff5fe5cff7ceb3eb77cb962024`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3463,7 +3463,8 @@ release acceptance exposed issue #49
   after the transient selection labels are unavailable,
   neutral reset at uncertainty-qualified sentence-case framing headings,
   bounded `detected`, `remain` and `apply` denials, one bounded `currently` or
-  `yet` inside an auxiliary denial predicate with substantive-tail rejection,
+  `yet` inside an auxiliary denial predicate or before an existential `no`,
+  with category-mismatch and substantive-tail rejection,
   resolved/eliminated absence continuations with unresolved-risk
   reintroduction, punctuation-scoped residual-predicate negation with
   conditional-clause and same-clause controls, exact neutral and affirmative
