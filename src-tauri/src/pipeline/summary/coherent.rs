@@ -1529,6 +1529,88 @@ fn section_denial_tail(words: &[String]) -> bool {
             ))
 }
 
+fn section_question_accepts_bare_no(text: &str, active_framing: SourceFraming) -> bool {
+    let text = marked_heading_title(text.trim()).unwrap_or(text.trim());
+    let words = text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(10)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if words.is_empty() || words.len() > 9 {
+        return false;
+    }
+    let mut framing_term = None;
+    let mut cursor = 0;
+    while cursor < words.len() {
+        if let Some((framing, after_term)) = source_framing_term_at(&words, cursor) {
+            if framing_term.is_some() {
+                return false;
+            }
+            framing_term = Some((framing, cursor, after_term));
+            cursor = after_term;
+        } else {
+            cursor += 1;
+        }
+    }
+    let Some((framing, term_start, term_end)) = framing_term else {
+        return false;
+    };
+    if framing != active_framing
+        || !words[..term_start].iter().all(|word| {
+            matches!(
+                word.as_str(),
+                "any"
+                    | "are"
+                    | "did"
+                    | "do"
+                    | "does"
+                    | "had"
+                    | "has"
+                    | "have"
+                    | "is"
+                    | "known"
+                    | "there"
+                    | "was"
+                    | "were"
+            )
+        })
+    {
+        return false;
+    }
+    let suffix = &words[term_end..];
+    suffix.is_empty()
+        || (suffix.len() == 1 && section_question_presence_predicate(&suffix[0]))
+        || (suffix.len() == 2
+            && suffix[0] == "been"
+            && section_question_presence_predicate(&suffix[1]))
+}
+
+fn section_question_presence_predicate(word: &str) -> bool {
+    matches!(
+        word,
+        "apply"
+            | "applicable"
+            | "applies"
+            | "detected"
+            | "discovered"
+            | "exist"
+            | "exists"
+            | "found"
+            | "identified"
+            | "known"
+            | "noted"
+            | "observed"
+            | "occurred"
+            | "possible"
+            | "present"
+            | "remain"
+            | "remains"
+            | "reported"
+            | "unresolved"
+    )
+}
+
 fn apply_section_denial_update(
     framing: &mut Option<SourceFraming>,
     transitions: &mut Vec<(usize, Option<SourceFraming>)>,
@@ -1543,8 +1625,15 @@ fn apply_section_answer_denial_update(
     transitions: &mut Vec<(usize, Option<SourceFraming>)>,
     base_offset: usize,
     text: &str,
+    allow_bare_no_answer: bool,
 ) {
-    apply_section_denial_update_with_answer_context(framing, transitions, base_offset, text, true);
+    apply_section_denial_update_with_answer_context(
+        framing,
+        transitions,
+        base_offset,
+        text,
+        allow_bare_no_answer,
+    );
 }
 
 fn apply_section_denial_update_with_answer_context(
@@ -1581,6 +1670,7 @@ fn source_framing_line_update(
     let line = line.trim();
     let mut framing = current;
     let mut transitions = Vec::new();
+    let mut bare_no_answer_allowed = false;
     apply_section_denial_update(&mut framing, &mut transitions, leading_whitespace, line);
     for (delimiter_index, delimiter) in line
         .match_indices(|character: char| character == ':' || is_source_sentence_terminal(character))
@@ -1589,6 +1679,9 @@ fn source_framing_line_update(
         let delimiter_character = delimiter.chars().next();
         if delimiter_character.is_some_and(is_source_question_terminal) {
             let (heading_candidate, heading_offset) = inline_heading_prefix(line, delimiter_index);
+            bare_no_answer_allowed = framing.is_some_and(|active_framing| {
+                section_question_accepts_bare_no(heading_candidate, active_framing)
+            });
             if possible_interrogative_framing_boundary(heading_candidate) {
                 framing = None;
                 transitions.push((leading_whitespace.saturating_add(heading_offset), framing));
@@ -1602,6 +1695,7 @@ fn source_framing_line_update(
                 &mut transitions,
                 answer_offset,
                 answer,
+                bare_no_answer_allowed,
             );
             continue;
         }
@@ -1611,6 +1705,7 @@ fn source_framing_line_update(
                 .saturating_add(delimiter_index)
                 .saturating_add(delimiter_len);
             apply_section_denial_update(&mut framing, &mut transitions, suffix_offset, suffix);
+            bare_no_answer_allowed = false;
             continue;
         }
         let colon_index = delimiter_index;
@@ -1633,12 +1728,22 @@ fn source_framing_line_update(
             };
             transitions.push((transition_offset, framing));
             apply_section_denial_update(&mut framing, &mut transitions, body_offset, body);
+            bare_no_answer_allowed = false;
         } else if denial_answer_label {
             let body = &line[colon_index + 1..];
             let body_offset = leading_whitespace
                 .saturating_add(colon_index)
                 .saturating_add(1);
-            apply_section_answer_denial_update(&mut framing, &mut transitions, body_offset, body);
+            apply_section_answer_denial_update(
+                &mut framing,
+                &mut transitions,
+                body_offset,
+                body,
+                bare_no_answer_allowed,
+            );
+            bare_no_answer_allowed = false;
+        } else {
+            bare_no_answer_allowed = false;
         }
     }
     if transitions.is_empty() {
@@ -7202,6 +7307,10 @@ mod tests {
             "Any known risks? No.",
             "Any known risks? Answer: No.",
             "Any known risks? Response: No!",
+            "Are there risks? No.",
+            "Were risks identified? No.",
+            "Have any risks been identified? No.",
+            "Do any risks exist? No.",
         ] {
             let block = format!("Key Risks\n{bare_answer}\nOverview follows.");
             for unframed in ["No.", "No!", "Overview follows."] {
@@ -7217,6 +7326,10 @@ mod tests {
         for retained_bare_answer in [
             "Any known risks? No? Verify the record.",
             "Any known risks? No because the review is incomplete.",
+            "Did the control fail? No.",
+            "Did the risk control fail? No.",
+            "Did the control fail? Answer: No.",
+            "What risks remain? No.",
         ] {
             let block = format!("Key Risks\n{retained_bare_answer}\nOverview follows.");
             assert_eq!(
@@ -7225,6 +7338,16 @@ mod tests {
                 "{retained_bare_answer} should retain framing",
             );
         }
+        let substantive_question_explicit_denial =
+            "Key Risks\nDid the control fail? No risks were identified.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(
+                substantive_question_explicit_denial,
+                "Overview follows.",
+                None,
+            ),
+            None
+        );
         for (labeled_answer, denied_text) in [
             ("Any known risks? Answer: None reported.", "None reported."),
             (
