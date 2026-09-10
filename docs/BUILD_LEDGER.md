@@ -3476,7 +3476,7 @@ release acceptance exposed issue #49
   section boundary or unavailable visual gap. Blank-line, cross-block,
   explicit-boundary and synthesis/verification parity controls pass. The
   focused classifier test and full deterministic gate passed.
-- The final product-code head `ee020922153d4dd9b507e8a2159d565036465367`
+- Product-code head `ee020922153d4dd9b507e8a2159d565036465367`
   recognizes bounded comma-separated framing denials before clause splitting
   and uses the shared declarative-terminal predicate when deciding whether a
   sentence-shaped line can reset active framing. ASCII, full-width and Arabic
@@ -3484,6 +3484,12 @@ release acceptance exposed issue #49
   compound-noun splits and question terminals fail closed. Supported Unicode
   declarative terminals preserve active framing. The focused boundary probe and
   full deterministic gate passed.
+- The final product-code head `3880c825ed8b51bbe6cb281f70a5a53c63f0e31f`
+  resets framing for bounded auxiliary-led solution and control questions, and
+  parses bounded expanded or apostrophe-contracted negated existential denials.
+  Risk questions, control-failure questions, extra qualifiers, missing
+  determiners, mismatched categories and interrogative denials retain framing.
+  The focused two-sided classifier probe and full deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
