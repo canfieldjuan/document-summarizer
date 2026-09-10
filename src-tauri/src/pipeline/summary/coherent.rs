@@ -1124,13 +1124,32 @@ fn coordinated_clause_boundary(
         })
 }
 
-fn is_bounded_not_applicable_abbreviation(text: &str) -> bool {
-    let text = text.trim();
-    let abbreviation = text
-        .strip_suffix('.')
-        .or_else(|| text.strip_suffix('!'))
-        .unwrap_or(text);
-    abbreviation.eq_ignore_ascii_case("N/A") || abbreviation.eq_ignore_ascii_case("N.A")
+fn bounded_not_applicable_abbreviation_end(text: &str) -> Option<usize> {
+    let abbreviation_end = ["N/A", "N.A"].into_iter().find_map(|abbreviation| {
+        text.get(..abbreviation.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(abbreviation))
+            .then_some(abbreviation.len())
+    })?;
+    let remainder = &text[abbreviation_end..];
+    if remainder.is_empty() {
+        return Some(abbreviation_end);
+    }
+    let mut terminal_end = abbreviation_end;
+    for character in remainder.chars() {
+        if !is_source_sentence_terminal(character) {
+            break;
+        }
+        terminal_end = terminal_end.saturating_add(character.len_utf8());
+    }
+    if terminal_end == abbreviation_end
+        || text
+            .get(terminal_end..)
+            .and_then(|continuation| continuation.chars().next())
+            .is_some_and(|character| !character.is_whitespace())
+    {
+        return None;
+    }
+    Some(abbreviation_end)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1152,22 +1171,26 @@ fn section_denial_update_with_answer_context(
     let trimmed = text.trim_start();
     let text = marked_heading_title(trimmed).unwrap_or(trimmed);
     let text_offset = denial_offset.saturating_add(trimmed.find(text).unwrap_or(0));
-    if is_bounded_not_applicable_abbreviation(text) {
-        return Some(SectionDenialUpdate {
-            denial_offset,
-            reintroduction_offset: None,
-        });
-    }
-    let sentence_terminal = text
-        .char_indices()
-        .find(|(_, character)| is_source_sentence_terminal(*character));
-    let terminal_index = sentence_terminal.map_or(text.len(), |(index, _)| index);
-    let coordinated_boundary = coordinated_clause_boundary(text, active_framing, terminal_index);
-    let (sentence_end, remainder_start) = match (sentence_terminal, coordinated_boundary) {
-        (_, Some(boundary)) => (boundary, boundary + 1),
-        (Some((terminal, _)), None) => (terminal, terminal),
-        (None, None) => (text.len(), text.len()),
-    };
+    let abbreviation_end = bounded_not_applicable_abbreviation_end(text);
+    let sentence_terminal = abbreviation_end.is_none().then(|| {
+        text.char_indices()
+            .find(|(_, character)| is_source_sentence_terminal(*character))
+    });
+    let sentence_terminal = sentence_terminal.flatten();
+    let terminal_index = abbreviation_end
+        .or_else(|| sentence_terminal.map(|(index, _)| index))
+        .unwrap_or(text.len());
+    let coordinated_boundary = abbreviation_end
+        .is_none()
+        .then(|| coordinated_clause_boundary(text, active_framing, terminal_index))
+        .flatten();
+    let (sentence_end, remainder_start) =
+        match (abbreviation_end, sentence_terminal, coordinated_boundary) {
+            (Some(abbreviation), _, _) => (abbreviation, abbreviation),
+            (_, _, Some(boundary)) => (boundary, boundary + 1),
+            (_, Some((terminal, _)), None) => (terminal, terminal),
+            (None, None, None) => (text.len(), text.len()),
+        };
     let sentence_remainder = &text[remainder_start..];
     if sentence_remainder
         .chars()
@@ -1183,7 +1206,8 @@ fn section_denial_update_with_answer_context(
         .saturating_add(remainder_start)
         .saturating_add(sentence_remainder.len().saturating_sub(continuation.len()));
     let sentence = &text[..sentence_end];
-    if !bounded_section_denial_clause(sentence, active_framing)
+    if abbreviation_end.is_none()
+        && !bounded_section_denial_clause(sentence, active_framing)
         && !(allow_bare_no_answer && is_bounded_bare_no_answer(sentence))
     {
         return None;
@@ -7192,10 +7216,34 @@ mod tests {
         for not_applicable_abbreviation in [
             "Key Risks\nN/A.\nOverview follows.",
             "Key Risks\n1. N.A.\nOverview follows.",
+            "Key Risks\nN/A. Overview follows.",
+            "Key Risks\n1. N.A. Overview follows.",
         ] {
             assert_eq!(
                 source_framing_for_segment(not_applicable_abbreviation, "Overview follows.", None,),
                 None
+            );
+        }
+        for retained_abbreviation in [
+            "Key Risks\nN/A? Verify the record.\nOverview follows.",
+            "Key Risks\nN/A because the review is incomplete.\nOverview follows.",
+            "Key Risks\nN/A.example remains a path.\nOverview follows.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(retained_abbreviation, "Overview follows.", None),
+                Some(SourceFraming::Risk),
+                "{retained_abbreviation} should retain framing",
+            );
+        }
+        let abbreviation_reintroduction = "Key Risks\nN/A. Risks are unresolved.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(abbreviation_reintroduction, "N/A.", None),
+            None
+        );
+        for framed in ["Risks are unresolved.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(abbreviation_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
             );
         }
         let no_risks_to_report = "Key Risks\nNo risks to report.\nLater unrelated text.";
