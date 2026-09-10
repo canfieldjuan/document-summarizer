@@ -3369,7 +3369,10 @@ release acceptance exposed issue #49
   that mixes framing in one unit receives one bounded repair instruction to
   split only invalid units; the repair must preserve every individually valid
   sibling's rendered text and ordered evidence IDs, and a repeated violation,
-  omission or rewrite fails closed. Those exact repair requirements are consumed
+  omission or rewrite fails closed. The repair request includes the rejected
+  response as explicitly untrusted draft data so the model can preserve those
+  siblings instead of regenerating them without seeing their prior wording.
+  Those exact repair requirements are consumed
   after that repaired response passes, allowing a later validator repair to
   correct independently invalid wording. The initial
   General prompt and schema use the larger of the base unit budget and total
@@ -3397,19 +3400,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `1647aa4b6fbb6048ad5f61a9a13d65f10e69e55a`
+- The final product-code head `097957a1c979492bae2ffe61a2ecb4dca1913393`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 122.33 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 111.89 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `8025425cb65485e6c1b9a9faeddd471f5e3de96af9da875ff345de0eb8bc8d4f` and
+  `ca4c5b65bdd4e53686848972d09879c73028297b018d8f0a108075f08c7fbed7` and
   citation integrity hash
-  `e55eae9bc9943998ff61556338544f918b13c5c0e756a963cfdce55cccc011ef`.
+  `46b925b0794370eff1c1f516e5e33845d54b953093870549d68dcdd10eace635`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3454,8 +3457,8 @@ release acceptance exposed issue #49
   text and negative-rule, residual-risk, qualified-denial and `None of ...`
   retention,
   retention across punctuated title-case, all-caps and sentence-case body text,
-  bounded mixed-framing
-  repair with exact valid-sibling preservation, exact per-invalid-unit source
+  bounded mixed-framing repair grounded in the rejected untrusted draft, with
+  exact valid-sibling preservation, exact per-invalid-unit source
   coverage, omission/rewrite/partial-source and repeated-response failure, distinct
   initial and expanded repair contracts, worst-permitted compatibility-group
   split capacity with Story isolation, and
@@ -3470,8 +3473,11 @@ release acceptance exposed issue #49
   reintroduction, punctuation-scoped residual-predicate negation with
   conditional-clause and same-clause controls, adverse-subject gating for
   residual possibilities with positive, recovery and protective-compound
-  rejection, comma-coordinated denial continuations, bounded `Answer` and
-  `Response` denial bodies, exact neutral and affirmative
+  rejection, comma- and semicolon-coordinated denial continuations with
+  additive, contrast, bare-independent-clause, noun-list and qualification
+  controls, complement-aware `remain not possible` versus `remain not
+  eliminated` polarity, bounded `Answer` and `Response` denial bodies, exact
+  neutral and affirmative
   transitions within one denial/reintroduction line and its colon-body form,
   post-question denial answers with interrogative and qualified-tail rejection,
   and fail-closed
