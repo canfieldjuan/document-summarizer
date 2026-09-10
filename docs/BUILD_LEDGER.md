@@ -3391,19 +3391,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `25cf5fdb04e4c1d89b55468ee330e61a34e2e87d`
+- The final product-code head `9ce1e129c071aae69db602d40bd0da319fba355a`
   reran the full 111-page public DOL acceptance through
-  `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,224
-  MiB for the Ollama process. The evidence-traced test passed in 97.00 seconds
+  `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
+  MiB for the Ollama process. The evidence-traced test passed in 97.60 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `b61ef4050e3f9151d335d18cc7e98ae3b7104774b21b43c2b615c1c8fa58bb36` and
+  `815ebf60d1c8b84a69b0cc60aaa6fbd2213d1b8340240df9f476f8d48b5cf78e` and
   citation integrity hash
-  `2d771ae7c2872d089d9db97639a476e370cd661105395f6a81da99ef6135434b`.
+  `624e72c80c4f5bfefc293898232055995c882e8a55b310332beade9ba7621ab6`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3455,6 +3455,10 @@ release acceptance exposed issue #49
   split capacity with Story isolation, and
   zero/exact/over-limit persisted-count boundaries and selected-window capacity
   after the transient selection labels are unavailable,
+  neutral reset at uncertainty-qualified sentence-case framing headings,
+  bounded `detected` denial, exact neutral and affirmative transitions within
+  one denial/reintroduction line and its colon-body form, and fail-closed
+  rejection of a source candidate spanning those transitions,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry
