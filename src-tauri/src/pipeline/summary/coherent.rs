@@ -1112,49 +1112,54 @@ fn normalize_contracted_auxiliary(word: &str) -> (&str, bool) {
     }
 }
 
-fn residual_continuation_reintroduces_source_framing(
+fn source_framing_reintroduction_offset(
     continuation: &str,
     active_framing: SourceFraming,
     skip_coordinator: bool,
-) -> bool {
+) -> Option<usize> {
     if !begins_with_declarative_source_clause(continuation) {
-        return false;
+        return None;
     }
     let continuation_body = if skip_coordinator {
-        continuation
-            .split_once(|character: char| !character.is_alphanumeric())
-            .map(|(_, body)| body)
-            .unwrap_or("")
+        continuation_after_coordinator(continuation)
     } else {
         continuation
     };
+    let continuation_body_offset = continuation.len().saturating_sub(continuation_body.len());
     let contrast_body = continuation_body.trim_start_matches(|character: char| {
         character.is_whitespace() || matches!(character, ',' | ':' | ';')
     });
+    let contrast_offset = continuation_body_offset
+        .saturating_add(continuation_body.len().saturating_sub(contrast_body.len()));
     if continuation_reintroduces_source_framing(contrast_body, active_framing) {
-        return true;
+        return Some(if skip_coordinator { 0 } else { contrast_offset });
     }
     if !matches!(active_framing, SourceFraming::Problem | SourceFraming::Risk) {
-        return false;
+        return None;
     }
     if skip_coordinator && bounded_anaphoric_framing_reintroduction(contrast_body) {
-        return true;
+        return Some(0);
     }
     let mut words = Vec::new();
     let mut clause_starts = Vec::new();
+    let mut word_starts = Vec::new();
     let mut clause_start = 0usize;
+    let mut segment_start = 0usize;
     for segment in contrast_body.split_inclusive(|character: char| !character.is_alphanumeric()) {
         let word = segment.trim_matches(|character: char| !character.is_alphanumeric());
         if !word.is_empty() && words.len() < 17 {
             clause_starts.push(clause_start);
+            word_starts.push(segment_start.saturating_add(segment.find(word).unwrap_or(0)));
             words.push(word.to_ascii_lowercase());
         }
-        if segment
-            .chars()
-            .any(|character| matches!(character, ',' | ';' | ':' | '.' | '?' | '!'))
-        {
+        if segment.chars().any(|character| {
+            is_source_sentence_terminal(character)
+                || is_source_coordination_delimiter(character)
+                || is_source_inline_colon(character)
+        }) {
             clause_start = words.len();
         }
+        segment_start = segment_start.saturating_add(segment.len());
         if words.len() == 17 {
             break;
         }
@@ -1223,20 +1228,49 @@ fn residual_continuation_reintroduces_source_framing(
                     | "violations"
             )
     };
-    words.windows(2).enumerate().any(|(index, window)| {
-        predicate_is_affirmative(index)
-            && residual_subject_is_adverse(index)
-            && matches!(
-                (window[0].as_str(), window[1].as_str()),
-                ("remain" | "remained" | "remains", "possible")
-            )
-    }) || words.windows(3).enumerate().any(|(index, window)| {
-        predicate_is_affirmative(index)
-            && residual_subject_is_adverse(index)
-            && matches!(
-                (window[0].as_str(), window[1].as_str(), window[2].as_str()),
-                ("are" | "is" | "was" | "were", "still", "possible")
-            )
+    let predicate_begins_declarative_clause = |predicate_start: usize| {
+        clause_starts
+            .get(predicate_start)
+            .and_then(|clause_start| word_starts.get(*clause_start))
+            .is_some_and(|clause_offset| {
+                begins_with_declarative_source_clause(&contrast_body[*clause_offset..])
+            })
+    };
+    let predicate_start = words
+        .windows(2)
+        .enumerate()
+        .find_map(|(index, window)| {
+            (predicate_is_affirmative(index)
+                && residual_subject_is_adverse(index)
+                && predicate_begins_declarative_clause(index)
+                && matches!(
+                    (window[0].as_str(), window[1].as_str()),
+                    ("remain" | "remained" | "remains", "possible")
+                ))
+            .then_some(index)
+        })
+        .or_else(|| {
+            words.windows(3).enumerate().find_map(|(index, window)| {
+                (predicate_is_affirmative(index)
+                    && residual_subject_is_adverse(index)
+                    && predicate_begins_declarative_clause(index)
+                    && matches!(
+                        (window[0].as_str(), window[1].as_str(), window[2].as_str()),
+                        ("are" | "is" | "was" | "were", "still", "possible")
+                    ))
+                .then_some(index)
+            })
+        })?;
+    let clause_start = clause_starts.get(predicate_start).copied()?;
+    let clause_offset = word_starts.get(clause_start).copied()?;
+    let coordinator_sentence_continues = skip_coordinator
+        && !contrast_body[..clause_offset]
+            .chars()
+            .any(is_source_sentence_terminal);
+    Some(if coordinator_sentence_continues {
+        0
+    } else {
+        contrast_offset.saturating_add(clause_offset)
     })
 }
 
@@ -1460,16 +1494,15 @@ fn section_denial_update_with_answer_context(
     {
         return None;
     }
-    let contrast_continuation = coordinated_continuation_lead(continuation);
-    let reintroduced = continuation_reintroduces_source_framing(continuation, active_framing)
-        || residual_continuation_reintroduces_source_framing(
-            continuation,
-            active_framing,
-            contrast_continuation,
-        );
+    let reintroduction_offset = source_framing_reintroduction_offset(
+        continuation,
+        active_framing,
+        coordinated_continuation_lead(continuation),
+    )
+    .map(|offset| continuation_offset.saturating_add(offset));
     Some(SectionDenialUpdate {
         denial_offset,
-        reintroduction_offset: reintroduced.then_some(continuation_offset),
+        reintroduction_offset,
     })
 }
 
@@ -1949,18 +1982,20 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
     let mut suspended = current.suspended;
     let mut transitions = Vec::new();
     let mut bare_no_answer_allowed = false;
-    if framing.is_none()
-        && suspended.is_some_and(|category| {
-            continuation_reintroduces_source_framing(line, category)
-                || residual_continuation_reintroduces_source_framing(
-                    line,
-                    category,
-                    coordinated_continuation_lead(line),
-                )
-        })
-    {
-        framing = suspended.take();
-        transitions.push((leading_whitespace, framing));
+    if framing.is_none() {
+        if let Some(reintroduction_offset) = suspended.and_then(|category| {
+            source_framing_reintroduction_offset(
+                line,
+                category,
+                coordinated_continuation_lead(line),
+            )
+        }) {
+            framing = suspended.take();
+            transitions.push((
+                leading_whitespace.saturating_add(reintroduction_offset),
+                framing,
+            ));
+        }
     }
     apply_section_denial_update(
         &mut framing,
@@ -8310,6 +8345,43 @@ mod tests {
                 source_framing_for_segment(declarative_prefix_reintroduction, framed, None),
                 Some(SourceFraming::Risk)
             );
+        }
+        for terminal in ['.', '!', '。', '！', '۔', '։', '।'] {
+            let unicode_residual_reintroduction = format!(
+                "Key Risks\nNo risks were identified. No issue remains{terminal} Fraud remains possible.\nOverview follows."
+            );
+            for unframed in [
+                format!("No issue remains{terminal}"),
+                format!("No issue remains{terminal} Fraud remains possible."),
+            ] {
+                assert_eq!(
+                    source_framing_for_segment(&unicode_residual_reintroduction, &unframed, None,),
+                    None,
+                    "{terminal} should preserve the exact adverse-clause transition",
+                );
+            }
+            for framed in ["Fraud remains possible.", "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&unicode_residual_reintroduction, framed, None,),
+                    Some(SourceFraming::Risk),
+                    "{terminal} should delimit a declarative adverse clause",
+                );
+            }
+        }
+        for terminal in ['?', '？', '؟'] {
+            let interrogative_residual = format!(
+                "Key Risks\nNo risks were identified. No issue remains. Fraud remains possible{terminal}\nOverview follows."
+            );
+            for unframed in [
+                format!("Fraud remains possible{terminal}"),
+                "Overview follows.".to_owned(),
+            ] {
+                assert_eq!(
+                    source_framing_for_segment(&interrogative_residual, &unframed, None),
+                    None,
+                    "{terminal} should keep an interrogative adverse clause unframed",
+                );
+            }
         }
         let split_reintroduction =
             "Key Risks\nNo risks were identified. Risks later emerged.\nLater text.";
