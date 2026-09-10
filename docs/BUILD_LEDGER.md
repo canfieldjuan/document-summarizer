@@ -3291,8 +3291,8 @@ release acceptance exposed issue #49
   Empty or visual-processing pages reset inherited state before and after the
   page because their complete governing text is unavailable. The resolver scans
   each extracted line so a subsequent bounded heading-shaped line, including
-  a decimal, Roman or letter-marked heading or a sentence-case heading with an
-  explicit heading signal, resets the label. An unmarked sentence ending in a
+  a decimal, Roman or uppercase/lowercase letter-marked heading or a sentence-case
+  heading with an explicit heading signal, resets the label. An unmarked sentence ending in a
   period, exclamation point or semicolon remains body text; numbering alone
   does not create a heading. A
   reliable heading followed by a colon and body on the same line changes state
@@ -3310,8 +3310,10 @@ release acceptance exposed issue #49
   the relationship; a genuinely inline heading transitions at its body. The
   final transition controls following text.
   A bounded denial such as `None reported`, `None have been identified`, `No
-  limitations were identified` or `There are no known risks at this time`
-  clears an active label. Direct `No`/`Neither` and existential denials must
+  limitations were identified`, `No risks exist` or `There are no known risks
+  at this time` clears an active label. An implicit `None` denial can clear any
+  label; an explicit denial must name a noun in the active framing category.
+  Direct `No`/`Neither` and existential denials must
   consist of a framing-noun phrase plus a bounded absence or reporting
   predicate; only the leading complete sentence is inspected so later prose on
   the extracted line does not hide the reset. Repeated determiners after noun
@@ -3331,7 +3333,9 @@ release acceptance exposed issue #49
   labels cannot govern one generated unit. Exact source evidence, source order,
   citation rendering and persisted schemas remain unchanged. A model response
   that mixes framing in one unit receives one bounded repair instruction to
-  split only invalid units; a repeated violation fails closed.
+  split only invalid units; a repeated violation fails closed. The General
+  unit ceiling is at least the number of distinct selection-window and framing
+  compatibility groups, while Story and Contract retain their prior ceiling.
 - Synthesis, verification and final-summary versions advance for the changed
   output contract. Completed version-7 summaries remain readable; in-progress
   coherent version-7 checkpoints retry, while version-7 claim-ledger fallbacks
@@ -3341,8 +3345,9 @@ release acceptance exposed issue #49
 - Before the deterministic repair, a GPU DOL run passed mechanically but emitted
   a page-21 paragraph beginning `Employees paid a piece rate may fall below the
   minimum wage` while its cited exact quote began `Common Problems`.
-- The final product code's live run used `qwen3-30b-a3b:latest` at 100% GPU and
-  passed in 117.81 seconds after 187 model requests. Its delivered page-21
+- The live run before the final compatibility and denial-boundary fixes used
+  `qwen3-30b-a3b:latest` at 100% GPU and passed in 117.81 seconds after 187 model
+  requests. Its delivered page-21
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
@@ -3354,25 +3359,28 @@ release acceptance exposed issue #49
   sentence-case or punctuated marked solution section, retention across short
   capitalized and numbered-list body paragraphs, reset across empty and
   visual-processing pages, retention across an introductory colon, single- and
-  excess-newline framing and reset headings, decimal/Roman/letter framing
+  excess-newline framing and reset headings, decimal/Roman/uppercase and
+  lowercase letter framing
   headings, inline framing and reset headings, fail-closed transition-spanning
   sources, whole standalone-colon heading/body candidates, inline transition
   isolation, reset at uncertain and negated inline framing headings, retention
   across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
   denial clearing in following-line and inline bodies with trailing prose and
-  repeated determiners, retention through interrogative denials and negative-rule,
+  repeated determiners and exact existential predicates, active-category noun
+  matching, retention through interrogative denials and negative-rule,
   residual-risk, qualified-denial and `None of ...` retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
-  repair and repeated-response failure,
+  repair and repeated-response failure, compatibility-group unit capacity with
+  Story isolation,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry
   behavior. A focused live GPU probe accepted a final framed claim whose exact
   segment omitted the heading and rejected framing applied to an invented
-  resolution. The full Rust library suite passed 441 tests with 13 intentional
+  resolution. The full Rust library suite passed 442 tests with 13 intentional
   ignores.
-- `cargo test --all-targets` passed those 441 library tests, 3 office tests and
+- `cargo test --all-targets` passed those 442 library tests, 3 office tests and
   all 3 release-contract tests; 13 opt-in library tests and 3 opt-in office
   tests remained ignored. Strict all-target/all-feature Clippy, Rust formatting,
   the TypeScript/Vite production build and `git diff --check` passed.

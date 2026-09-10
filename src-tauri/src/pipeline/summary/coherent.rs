@@ -239,14 +239,7 @@ fn framing_from_heading_candidate(
     {
         return None;
     }
-    match words.last()?.as_str() {
-        "problem" | "problems" | "issue" | "issues" => Some(SourceFraming::Problem),
-        "risk" | "risks" | "hazard" | "hazards" => Some(SourceFraming::Risk),
-        "warning" | "warnings" | "caution" | "cautions" => Some(SourceFraming::Warning),
-        "exception" | "exceptions" => Some(SourceFraming::Exception),
-        "limitation" | "limitations" => Some(SourceFraming::Limitation),
-        _ => None,
-    }
+    source_framing_from_noun(words.last()?.as_str())
 }
 
 fn framing_from_heading(heading: &str) -> Option<SourceFraming> {
@@ -287,7 +280,7 @@ fn marked_heading_title(heading: &str) -> Option<&str> {
         && marker.chars().count() == 1
         && marker
             .chars()
-            .all(|character| character.is_ascii_uppercase());
+            .all(|character| character.is_ascii_alphabetic());
     let roman = has_marker_punctuation
         && (2..=8).contains(&marker.chars().count())
         && marker
@@ -479,7 +472,7 @@ fn apply_inline_heading_candidate(
     }
 }
 
-fn begins_with_section_denial(text: &str) -> bool {
+fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool {
     let sentence_terminal = text
         .char_indices()
         .find(|(_, character)| matches!(character, '.' | '?' | '!'));
@@ -508,13 +501,13 @@ fn begins_with_section_denial(text: &str) -> bool {
         if words.len() == 1 {
             return true;
         }
-        return bounded_section_denial_predicate(&words, 1, false);
+        return bounded_section_denial_predicate(&words, 1, None);
     }
     if first == "no" {
-        return bounded_section_denial_predicate(&words, 1, true);
+        return bounded_section_denial_predicate(&words, 1, Some(active_framing));
     }
     if first == "neither" {
-        return bounded_section_denial_predicate(&words, 1, true);
+        return bounded_section_denial_predicate(&words, 1, Some(active_framing));
     }
     first == "there"
         && matches!(
@@ -522,16 +515,17 @@ fn begins_with_section_denial(text: &str) -> bool {
             Some("are" | "is" | "was" | "were")
         )
         && words.get(2).is_some_and(|word| word == "no")
-        && bounded_section_denial_predicate(&words, 3, true)
+        && bounded_section_denial_predicate(&words, 3, Some(active_framing))
 }
 
 fn bounded_section_denial_predicate(
     words: &[String],
     mut cursor: usize,
-    requires_framing_noun: bool,
+    required_framing: Option<SourceFraming>,
 ) -> bool {
-    if requires_framing_noun {
-        let Some(after_nouns) = consume_section_denial_nouns(words, cursor) else {
+    if let Some(required_framing) = required_framing {
+        let Some(after_nouns) = consume_section_denial_nouns(words, cursor, required_framing)
+        else {
             return false;
         };
         cursor = after_nouns;
@@ -551,7 +545,15 @@ fn bounded_section_denial_predicate(
     if !words.get(cursor).is_some_and(|word| {
         matches!(
             word.as_str(),
-            "applicable" | "found" | "identified" | "known" | "noted" | "observed" | "reported"
+            "applicable"
+                | "exist"
+                | "exists"
+                | "found"
+                | "identified"
+                | "known"
+                | "noted"
+                | "observed"
+                | "reported"
         )
     }) {
         return false;
@@ -560,8 +562,13 @@ fn bounded_section_denial_predicate(
     section_denial_tail(&words[cursor..])
 }
 
-fn consume_section_denial_nouns(words: &[String], mut cursor: usize) -> Option<usize> {
+fn consume_section_denial_nouns(
+    words: &[String],
+    mut cursor: usize,
+    required_framing: SourceFraming,
+) -> Option<usize> {
     let mut after_conjunction = false;
+    let mut contains_required_framing = false;
     loop {
         if after_conjunction
             && words
@@ -576,18 +583,16 @@ fn consume_section_denial_nouns(words: &[String], mut cursor: usize) -> Option<u
         {
             cursor += 1;
         }
-        if !words
+        let noun_framing = words
             .get(cursor)
-            .is_some_and(|word| is_source_framing_noun(word))
-        {
-            return None;
-        }
+            .and_then(|word| source_framing_from_noun(word))?;
+        contains_required_framing |= noun_framing == required_framing;
         cursor += 1;
         if !words
             .get(cursor)
             .is_some_and(|word| matches!(word.as_str(), "and" | "nor" | "or"))
         {
-            return Some(cursor);
+            return contains_required_framing.then_some(cursor);
         }
         cursor += 1;
         after_conjunction = true;
@@ -595,25 +600,18 @@ fn consume_section_denial_nouns(words: &[String], mut cursor: usize) -> Option<u
 }
 
 fn is_source_framing_noun(word: &str) -> bool {
-    matches!(
-        word,
-        "caution"
-            | "cautions"
-            | "exception"
-            | "exceptions"
-            | "hazard"
-            | "hazards"
-            | "issue"
-            | "issues"
-            | "limitation"
-            | "limitations"
-            | "problem"
-            | "problems"
-            | "risk"
-            | "risks"
-            | "warning"
-            | "warnings"
-    )
+    source_framing_from_noun(word).is_some()
+}
+
+fn source_framing_from_noun(word: &str) -> Option<SourceFraming> {
+    match word {
+        "problem" | "problems" | "issue" | "issues" => Some(SourceFraming::Problem),
+        "risk" | "risks" | "hazard" | "hazards" => Some(SourceFraming::Risk),
+        "warning" | "warnings" | "caution" | "cautions" => Some(SourceFraming::Warning),
+        "exception" | "exceptions" => Some(SourceFraming::Exception),
+        "limitation" | "limitations" => Some(SourceFraming::Limitation),
+        _ => None,
+    }
 }
 
 fn section_denial_tail(words: &[String]) -> bool {
@@ -639,7 +637,7 @@ fn source_framing_line_update(
     let line = line.trim();
     let mut framing = current;
     let mut transitions = Vec::new();
-    if framing.is_some() && begins_with_section_denial(line) {
+    if framing.is_some_and(|active| begins_with_section_denial(line, active)) {
         framing = None;
         transitions.push((leading_whitespace, framing));
     }
@@ -658,7 +656,7 @@ fn source_framing_line_update(
                 body_offset
             };
             transitions.push((transition_offset, framing));
-            if framing.is_some() && begins_with_section_denial(body) {
+            if framing.is_some_and(|active| begins_with_section_denial(body, active)) {
                 framing = None;
                 let body_leading_whitespace = body.len().saturating_sub(body.trim_start().len());
                 transitions.push((body_offset.saturating_add(body_leading_whitespace), framing));
@@ -872,15 +870,22 @@ struct SourceCatalog {
     omitted_source_units: usize,
 }
 
-fn maximum_summary_units_for_catalog(catalog: &SourceCatalog) -> usize {
-    let represented_windows = catalog
+fn maximum_summary_units_for_catalog(profile: SummaryProfile, catalog: &SourceCatalog) -> usize {
+    let compatibility_groups = catalog
         .candidates
         .iter()
-        .filter_map(|candidate| candidate.selection_window)
+        .map(|candidate| {
+            (
+                candidate.selection_window,
+                (profile == SummaryProfile::General)
+                    .then_some(candidate.source_framing)
+                    .flatten(),
+            )
+        })
         .collect::<HashSet<_>>()
         .len();
     maximum_summary_units(catalog.candidates.len())
-        .max(represented_windows)
+        .max(compatibility_groups)
         .min(MAX_SUMMARY_CLAIMS)
 }
 
@@ -3208,7 +3213,7 @@ fn prompt_and_schema(
             false,
         ));
     }
-    let maximum_units = maximum_summary_units_for_catalog(catalog);
+    let maximum_units = maximum_summary_units_for_catalog(profile, catalog);
     let prompt = Prompt {
         maximum_units,
         source_segments: catalog
@@ -3291,7 +3296,8 @@ fn parse_response(
     catalog: &SourceCatalog,
 ) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
     let raw: RawResponse = serde_json::from_str(response).map_err(|_| invalid_response())?;
-    if raw.units.is_empty() || raw.units.len() > maximum_summary_units_for_catalog(catalog) {
+    if raw.units.is_empty() || raw.units.len() > maximum_summary_units_for_catalog(profile, catalog)
+    {
         return Err(invalid_response());
     }
     let candidates = catalog
@@ -3472,7 +3478,8 @@ fn parse_response_without_clipped_units(
         return Err(clipped_unit_response());
     }
     let raw: RawResponse = serde_json::from_str(response).map_err(|_| invalid_response())?;
-    if raw.units.is_empty() || raw.units.len() > maximum_summary_units_for_catalog(catalog) {
+    if raw.units.is_empty() || raw.units.len() > maximum_summary_units_for_catalog(profile, catalog)
+    {
         return Err(invalid_response());
     }
     let known_sources = catalog
@@ -4857,6 +4864,7 @@ mod tests {
             ("2. Common Problems.", SourceFraming::Problem),
             ("IV. Risks", SourceFraming::Risk),
             ("A. Exceptions", SourceFraming::Exception),
+            ("a. Exceptions", SourceFraming::Exception),
             ("Key Risks", SourceFraming::Risk),
             ("Safety Warning", SourceFraming::Warning),
             ("Important Exceptions", SourceFraming::Exception),
@@ -4911,28 +4919,53 @@ mod tests {
         assert!(!possible_inline_framing_boundary("Note"));
         assert!(!possible_inline_framing_boundary("Important Note"));
         assert!(!possible_inline_framing_boundary("Supporting Example"));
-        assert!(begins_with_section_denial("None reported."));
         assert!(begins_with_section_denial(
-            "None reported. See the appendix for terminology."
-        ));
-        assert!(begins_with_section_denial("None have been identified."));
-        assert!(begins_with_section_denial(
-            "There are no known risks at this time."
+            "None reported.",
+            SourceFraming::Problem
         ));
         assert!(begins_with_section_denial(
-            "No risks or limitations were identified."
+            "None reported. See the appendix for terminology.",
+            SourceFraming::Warning,
         ));
         assert!(begins_with_section_denial(
-            "Neither issues nor risks were reported."
+            "None have been identified.",
+            SourceFraming::Exception,
         ));
         assert!(begins_with_section_denial(
-            "No risks and no limitations were identified."
+            "There are no known risks at this time.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks or limitations were identified.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks or limitations were identified.",
+            SourceFraming::Limitation,
+        ));
+        assert!(begins_with_section_denial(
+            "Neither issues nor risks were reported.",
+            SourceFraming::Problem,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks and no limitations were identified.",
+            SourceFraming::Limitation,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks exist.",
+            SourceFraming::Risk,
         ));
         assert!(!begins_with_section_denial(
-            "None of the controls fully eliminates fraud."
+            "No limitations were identified.",
+            SourceFraming::Risk,
         ));
         assert!(!begins_with_section_denial(
-            "No worker may be paid below minimum wage."
+            "None of the controls fully eliminates fraud.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
+            "No worker may be paid below minimum wage.",
+            SourceFraming::Problem,
         ));
         for residual_risk in [
             "No control eliminates every fraud risk.",
@@ -4947,7 +4980,10 @@ mod tests {
             "None reported? Verify the records.",
             "No risks and no control eliminates every fraud risk.",
         ] {
-            assert!(!begins_with_section_denial(residual_risk));
+            assert!(!begins_with_section_denial(
+                residual_risk,
+                SourceFraming::Risk
+            ));
         }
         for body in [
             "2",
@@ -5123,12 +5159,31 @@ mod tests {
                 None
             );
         }
+        let existential_denial = "Key Risks\nNo risks exist.\nLater unrelated text.";
+        for unframed in ["No risks exist.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(existential_denial, unframed, None),
+                None
+            );
+        }
+        let mismatched_denial =
+            "Key Risks\nNo limitations were identified.\nFraud remains possible.";
+        assert_eq!(
+            source_framing_for_segment(mismatched_denial, "Fraud remains possible.", None),
+            Some(SourceFraming::Risk)
+        );
         let denied_inline = "Common Problems: None reported.";
         assert_eq!(
             source_framing_for_segment(denied_inline, "None reported.", None),
             None
         );
         assert_eq!(source_framing_after_block(denied_inline, None), None);
+        let mismatched_inline_denial =
+            "Key Risks: No limitations were identified. Fraud remains possible.";
+        assert_eq!(
+            source_framing_for_segment(mismatched_inline_denial, "Fraud remains possible.", None,),
+            Some(SourceFraming::Risk)
+        );
         let denied_inline_followed_by_prose =
             "Common Problems: None reported. See the appendix for terminology.\nLater text.";
         for unframed in ["See the appendix for terminology.", "Later text."] {
@@ -5173,6 +5228,11 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(interrogative_denial, "Workers may fall.", None),
             Some(SourceFraming::Risk)
+        );
+        let lowercase_marker = "Key Risks\na. Exceptions\nThe deadline does not apply.";
+        assert_eq!(
+            source_framing_for_segment(lowercase_marker, "The deadline does not apply.", None,),
+            Some(SourceFraming::Exception)
         );
         let negative_problem = "Common Problems\nNo worker may be paid below minimum wage.";
         assert_eq!(
@@ -6024,6 +6084,57 @@ mod tests {
     }
 
     #[test]
+    fn framing_groups_expand_the_summary_unit_ceiling() {
+        let mut grouped = SourceCatalog {
+            candidates: vec![
+                candidate("s1", "evidence-1", 1),
+                candidate("s2", "evidence-2", 2),
+                candidate("s3", "evidence-3", 3),
+            ],
+            omitted_source_units: 0,
+        };
+        grouped.candidates[0].source_framing = Some(SourceFraming::Problem);
+        grouped.candidates[2].source_framing = Some(SourceFraming::Risk);
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::General, &grouped),
+            3
+        );
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::Story, &grouped),
+            1
+        );
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &grouped).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&prompt).unwrap()["maximum_units"],
+            3
+        );
+        assert_eq!(schema["properties"]["units"]["maxItems"], 3);
+        let response = json!({
+            "units": [
+                {"text": "The document identifies a problem.", "source_ids": ["s1"]},
+                {"text": "The document also states a neutral fact.", "source_ids": ["s2"]},
+                {"text": "The document identifies a risk.", "source_ids": ["s3"]}
+            ]
+        })
+        .to_string();
+        assert_eq!(
+            parse_response(SummaryProfile::General, &response, "document-1", &grouped)
+                .unwrap()
+                .0
+                .len(),
+            3
+        );
+
+        for candidate in &mut grouped.candidates {
+            candidate.source_framing = Some(SourceFraming::Problem);
+        }
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::General, &grouped),
+            1
+        );
+    }
+
+    #[test]
     fn windowed_summary_units_reject_cross_window_and_mixed_sources() {
         let response = json!({
             "units": [{
@@ -6035,7 +6146,10 @@ mod tests {
         let mut windowed = catalog();
         windowed.candidates[0].selection_window = Some(0);
         windowed.candidates[1].selection_window = Some(1);
-        assert_eq!(maximum_summary_units_for_catalog(&windowed), 2);
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::General, &windowed),
+            2
+        );
         let failure = parse_response(SummaryProfile::General, &response, "document-1", &windowed)
             .expect_err("cross-window sources must fail closed");
         assert_eq!(failure.code, WINDOW_MIXED_RESPONSE_CODE);
@@ -6663,8 +6777,13 @@ mod tests {
         assert_eq!(general_name, SCHEMA_NAME);
         assert_eq!(story_name, STORY_SCHEMA_NAME);
         assert_eq!(contract_name, CONTRACT_SCHEMA_NAME);
-        assert_eq!(general_schema, story_schema);
-        assert_eq!(general_schema, contract_schema);
+        assert_eq!(story_schema, contract_schema);
+        assert_eq!(general_schema["properties"]["units"]["maxItems"], 2);
+        assert_eq!(story_schema["properties"]["units"]["maxItems"], 1);
+        let mut general_schema_without_framing_capacity = (*general_schema).clone();
+        general_schema_without_framing_capacity["properties"]["units"]["maxItems"] =
+            story_schema["properties"]["units"]["maxItems"].clone();
+        assert_eq!(&general_schema_without_framing_capacity, story_schema);
         assert!(uses_schema_name(general_name));
         assert!(uses_schema_name(story_name));
         assert!(uses_schema_name(contract_name));
