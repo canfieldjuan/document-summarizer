@@ -3319,9 +3319,10 @@ release acceptance exposed issue #49
   Direct `No`/`Neither` and existential denials must
   consist of a framing-noun phrase plus a bounded absence or reporting
   predicate; only the leading complete sentence is inspected so later prose on
-  the extracted line does not hide the reset. Repeated determiners after noun
-  conjunctions remain within that grammar, while interrogative clauses cannot
-  reset it. Negative rules and residual-risk propositions such as `No worker
+  the extracted line does not hide the reset, unless the next sentence begins
+  with a bounded contrast marker that may reintroduce framed content. Repeated
+  determiners after noun conjunctions remain within that grammar, while
+  interrogative clauses cannot reset it. Negative rules and residual-risk propositions such as `No worker
   may be paid below minimum wage`, `No control eliminates every fraud risk`
   and `None of ...` retain their governing context.
   A bounded source segment
@@ -3377,9 +3378,9 @@ release acceptance exposed issue #49
   denial clearing in following-line and inline bodies with trailing prose and
   repeated determiners, exact existential predicates, bounded `to report` and
   bounded `Not applicable`, active-category noun matching, retention through
-  interrogative denials, explanatory `Not applicable because ...` and `No risks
-  to report because ...` text and negative-rule,
-  residual-risk, qualified-denial and `None of ...` retention,
+  interrogative denials, post-denial contrast sentences, explanatory `Not
+  applicable because ...` and `No risks to report because ...` text and
+  negative-rule, residual-risk, qualified-denial and `None of ...` retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
   repair and repeated-response failure, compatibility-group unit capacity with
   Story isolation, and zero/exact/over-limit persisted-count boundaries,

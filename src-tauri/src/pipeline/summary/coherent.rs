@@ -479,11 +479,27 @@ fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool
         .char_indices()
         .find(|(_, character)| matches!(character, '.' | '?' | '!'));
     let sentence_end = sentence_terminal.map_or(text.len(), |(index, _)| index);
-    if text[sentence_end..]
+    let sentence_remainder = &text[sentence_end..];
+    if sentence_remainder
         .chars()
         .take_while(|character| matches!(character, '.' | '?' | '!'))
         .any(|character| character == '?')
     {
+        return false;
+    }
+    let continuation = sentence_remainder.trim_start_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '.' | '!')
+    });
+    let continuation_lead = continuation
+        .split(|character: char| !character.is_alphanumeric())
+        .find(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase);
+    if continuation_lead.is_some_and(|lead| {
+        matches!(
+            lead.as_str(),
+            "but" | "however" | "nevertheless" | "nonetheless" | "still" | "yet"
+        )
+    }) {
         return false;
     }
     let text = &text[..sentence_end];
@@ -4947,6 +4963,10 @@ mod tests {
             "None reported. See the appendix for terminology.",
             SourceFraming::Warning,
         ));
+        assert!(!begins_with_section_denial(
+            "No risks were identified. However, fraud remains possible.",
+            SourceFraming::Risk,
+        ));
         assert!(begins_with_section_denial(
             "None have been identified.",
             SourceFraming::Exception,
@@ -5308,6 +5328,14 @@ mod tests {
             assert_eq!(
                 source_framing_for_segment(no_risks_to_report, unframed, None),
                 None
+            );
+        }
+        let post_denial_contrast =
+            "Key Risks\nNo risks were identified. However, fraud remains possible.\nLater text.";
+        for framed in ["However, fraud remains possible.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(post_denial_contrast, framed, None),
+                Some(SourceFraming::Risk)
             );
         }
         let negative_problem = "Common Problems\nNo worker may be paid below minimum wage.";
