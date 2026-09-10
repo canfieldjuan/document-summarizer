@@ -398,6 +398,14 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "who"
             | "why"
     );
+    let nonaffirmative_framing_boundary = ends_with_source_framing_term(
+        &words
+            .iter()
+            .map(|word| word.to_ascii_lowercase())
+            .collect::<Vec<_>>(),
+    ) && words
+        .iter()
+        .any(|word| matches!(word.to_ascii_lowercase().as_str(), "possible" | "potential"));
     let punctuated_marked_section_lead = matches!(
         words[0].to_ascii_lowercase().as_str(),
         "about"
@@ -423,7 +431,7 @@ fn possible_framing_boundary(text: &str) -> bool {
     let sentence_case_has_heading_shape = !heading.ends_with(['.', '!', ';']);
     (sentence_case_has_heading_shape || marked_title.is_some() && punctuated_marked_section_lead)
         && (starts_uppercase || marked_title.is_some())
-        && (all_uppercase || title_case || sentence_case_lead)
+        && (all_uppercase || title_case || sentence_case_lead || nonaffirmative_framing_boundary)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -852,11 +860,22 @@ fn is_bounded_not_applicable_abbreviation(text: &str) -> bool {
     abbreviation.eq_ignore_ascii_case("N/A") || abbreviation.eq_ignore_ascii_case("N.A")
 }
 
-fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool {
-    let text = text.trim_start();
-    let text = marked_heading_title(text).unwrap_or(text);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SectionDenialUpdate {
+    denial_offset: usize,
+    reintroduction_offset: Option<usize>,
+}
+
+fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<SectionDenialUpdate> {
+    let denial_offset = text.len().saturating_sub(text.trim_start().len());
+    let trimmed = text.trim_start();
+    let text = marked_heading_title(trimmed).unwrap_or(trimmed);
+    let text_offset = denial_offset.saturating_add(trimmed.find(text).unwrap_or(0));
     if is_bounded_not_applicable_abbreviation(text) {
-        return true;
+        return Some(SectionDenialUpdate {
+            denial_offset,
+            reintroduction_offset: None,
+        });
     }
     let sentence_terminal = text
         .char_indices()
@@ -868,11 +887,59 @@ fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool
         .take_while(|character| matches!(character, '.' | '?' | '!'))
         .any(|character| character == '?')
     {
-        return false;
+        return None;
     }
     let continuation = sentence_remainder.trim_start_matches(|character: char| {
         character.is_whitespace() || matches!(character, '.' | '!')
     });
+    let continuation_offset = text_offset
+        .saturating_add(sentence_end)
+        .saturating_add(sentence_remainder.len().saturating_sub(continuation.len()));
+    let sentence = &text[..sentence_end];
+    let words = sentence
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(17)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if words.len() > 16 {
+        return None;
+    }
+    let first = words.first().map(String::as_str)?;
+    let denied = if first == "not" {
+        words.get(1).is_some_and(|word| word == "applicable") && section_denial_tail(&words[2..])
+    } else if first == "none" {
+        words.len() == 1 || bounded_section_denial_predicate(&words, 1, None)
+    } else if matches!(first, "no" | "neither") {
+        bounded_section_denial_predicate(&words, 1, Some(active_framing))
+    } else {
+        let existential_noun_start = if first == "there"
+            && matches!(
+                words.get(1).map(String::as_str),
+                Some("are" | "is" | "was" | "were")
+            )
+            && words.get(2).is_some_and(|word| word == "no")
+        {
+            Some(3)
+        } else if first == "there"
+            && matches!(
+                words.get(1).map(String::as_str),
+                Some("had" | "has" | "have")
+            )
+            && words.get(2).is_some_and(|word| word == "been")
+            && words.get(3).is_some_and(|word| word == "no")
+        {
+            Some(4)
+        } else {
+            None
+        };
+        existential_noun_start.is_some_and(|noun_start| {
+            bounded_section_denial_predicate(&words, noun_start, Some(active_framing))
+        })
+    };
+    if !denied {
+        return None;
+    }
     let continuation_lead = continuation
         .split(|character: char| !character.is_alphanumeric())
         .find(|word| !word.is_empty())
@@ -883,64 +950,19 @@ fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool
             "but" | "however" | "nevertheless" | "nonetheless" | "still" | "yet"
         )
     });
-    if continuation_reintroduces_source_framing(continuation, active_framing)
+    let reintroduced = continuation_reintroduces_source_framing(continuation, active_framing)
         || contrast_continuation
-            && contrast_continuation_reintroduces_source_framing(continuation, active_framing)
-    {
-        return false;
-    }
-    let text = &text[..sentence_end];
-    let words = text
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .take(17)
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    if words.len() > 16 {
-        return false;
-    }
-    let Some(first) = words.first().map(String::as_str) else {
-        return false;
-    };
-    if first == "not" {
-        return words.get(1).is_some_and(|word| word == "applicable")
-            && section_denial_tail(&words[2..]);
-    }
-    if first == "none" {
-        if words.len() == 1 {
-            return true;
-        }
-        return bounded_section_denial_predicate(&words, 1, None);
-    }
-    if first == "no" {
-        return bounded_section_denial_predicate(&words, 1, Some(active_framing));
-    }
-    if first == "neither" {
-        return bounded_section_denial_predicate(&words, 1, Some(active_framing));
-    }
-    let existential_noun_start = if first == "there"
-        && matches!(
-            words.get(1).map(String::as_str),
-            Some("are" | "is" | "was" | "were")
-        )
-        && words.get(2).is_some_and(|word| word == "no")
-    {
-        Some(3)
-    } else if first == "there"
-        && matches!(
-            words.get(1).map(String::as_str),
-            Some("had" | "has" | "have")
-        )
-        && words.get(2).is_some_and(|word| word == "been")
-        && words.get(3).is_some_and(|word| word == "no")
-    {
-        Some(4)
-    } else {
-        None
-    };
-    existential_noun_start.is_some_and(|noun_start| {
-        bounded_section_denial_predicate(&words, noun_start, Some(active_framing))
+            && contrast_continuation_reintroduces_source_framing(continuation, active_framing);
+    Some(SectionDenialUpdate {
+        denial_offset,
+        reintroduction_offset: reintroduced.then_some(continuation_offset),
     })
+}
+
+#[cfg(test)]
+fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool {
+    section_denial_update(text, active_framing)
+        .is_some_and(|update| update.reintroduction_offset.is_none())
 }
 
 fn bounded_section_denial_predicate(
@@ -977,6 +999,7 @@ fn bounded_section_denial_predicate(
         matches!(
             word.as_str(),
             "applicable"
+                | "detected"
                 | "exist"
                 | "exists"
                 | "found"
@@ -1055,6 +1078,26 @@ fn section_denial_tail(words: &[String]) -> bool {
             ))
 }
 
+fn apply_section_denial_update(
+    framing: &mut Option<SourceFraming>,
+    transitions: &mut Vec<(usize, Option<SourceFraming>)>,
+    base_offset: usize,
+    text: &str,
+) {
+    let Some(active_framing) = *framing else {
+        return;
+    };
+    let Some(update) = section_denial_update(text, active_framing) else {
+        return;
+    };
+    *framing = None;
+    transitions.push((base_offset.saturating_add(update.denial_offset), *framing));
+    if let Some(reintroduction_offset) = update.reintroduction_offset {
+        *framing = Some(active_framing);
+        transitions.push((base_offset.saturating_add(reintroduction_offset), *framing));
+    }
+}
+
 fn source_framing_line_update(
     current: Option<SourceFraming>,
     line: &str,
@@ -1063,10 +1106,7 @@ fn source_framing_line_update(
     let line = line.trim();
     let mut framing = current;
     let mut transitions = Vec::new();
-    if framing.is_some_and(|active| begins_with_section_denial(line, active)) {
-        framing = None;
-        transitions.push((leading_whitespace, framing));
-    }
+    apply_section_denial_update(&mut framing, &mut transitions, leading_whitespace, line);
     for (delimiter_index, delimiter) in line.match_indices([':', '?']) {
         if delimiter == "?" {
             let (heading_candidate, heading_offset) = inline_heading_prefix(line, delimiter_index);
@@ -1091,11 +1131,7 @@ fn source_framing_line_update(
                 body_offset
             };
             transitions.push((transition_offset, framing));
-            if framing.is_some_and(|active| begins_with_section_denial(body, active)) {
-                framing = None;
-                let body_leading_whitespace = body.len().saturating_sub(body.trim_start().len());
-                transitions.push((body_offset.saturating_add(body_leading_whitespace), framing));
-            }
+            apply_section_denial_update(&mut framing, &mut transitions, body_offset, body);
         }
     }
     if transitions.is_empty() {
@@ -5517,6 +5553,7 @@ mod tests {
             assert!(possible_framing_boundary(heading));
         }
         assert!(possible_framing_boundary("How to avoid common problems"));
+        assert!(possible_framing_boundary("Potential risks"));
         assert!(possible_inline_framing_boundary("Solutions"));
         assert!(possible_inline_framing_boundary("Payment Terms"));
         assert!(possible_inline_framing_boundary("Potential Risks"));
@@ -5660,6 +5697,10 @@ mod tests {
         ));
         assert!(begins_with_section_denial(
             "No risks are present.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were detected.",
             SourceFraming::Risk,
         ));
         assert!(begins_with_section_denial(
@@ -5816,6 +5857,16 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(compound_heading, "Fraud may occur.", None),
             Some(SourceFraming::Risk)
+        );
+        let qualified_heading_reset =
+            "Common Problems\nLate payment occurs.\nPotential risks\nFraud may occur.";
+        assert_eq!(
+            source_framing_for_segment(qualified_heading_reset, "Fraud may occur.", None),
+            None
+        );
+        assert_eq!(
+            required_source_framing("Potential risks\nFraud may occur."),
+            None
         );
         let inline_compound_heading =
             "Common Problems: Late payment. Risk Factors: Fraud may occur.";
@@ -6020,6 +6071,13 @@ mod tests {
             source_framing_for_segment(copular_presence_denial, "Later unrelated text.", None,),
             None
         );
+        let detected_denial = "Key Risks\nNo risks were detected.\nLater unrelated text.";
+        for unframed in ["No risks were detected.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(detected_denial, unframed, None),
+                None
+            );
+        }
         let perfect_existential_denial =
             "Key Risks\nThere have been no risks identified.\nLater unrelated text.";
         for unframed in [
@@ -6308,6 +6366,45 @@ mod tests {
         for framed in ["Risks subsequently emerged during testing.", "Later text."] {
             assert_eq!(
                 source_framing_for_segment(explicit_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let split_reintroduction =
+            "Key Risks\nNo risks were identified. Risks later emerged.\nLater text.";
+        let split_line = "No risks were identified. Risks later emerged.";
+        let split_update = section_denial_update(split_line, SourceFraming::Risk).unwrap();
+        assert_eq!(split_update.denial_offset, 0);
+        assert_eq!(
+            &split_line[split_update.reintroduction_offset.unwrap()..],
+            "Risks later emerged."
+        );
+        assert_eq!(
+            source_framing_for_segment(split_reintroduction, "No risks were identified.", None),
+            None
+        );
+        for framed in ["Risks later emerged.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(split_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        assert_eq!(
+            source_framing_for_segment(split_reintroduction, split_line, None),
+            None
+        );
+        let inline_split_reintroduction =
+            "Key Risks: No risks were identified. Risks later emerged.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(
+                inline_split_reintroduction,
+                "No risks were identified.",
+                None
+            ),
+            None
+        );
+        for framed in ["Risks later emerged.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(inline_split_reintroduction, framed, None),
                 Some(SourceFraming::Risk)
             );
         }
