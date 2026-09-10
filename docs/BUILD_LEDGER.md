@@ -3397,19 +3397,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `afc1babc4bb243ddfa9981723ee52584855475e6`
+- The final product-code head `95e8127dcf0648d3443da1da94a2ebba3251fd21`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 96.82 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 97.14 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `2b828819f08b3a52c7e4add5649719438ab814e190a1dfe6930c074335d95160` and
+  `25b68b53c497af42f90b844f050061da773cd001babcf71dfb5e8c35b922cbec` and
   citation integrity hash
-  `23c334879e5c82a981b8093f6ec8a73546d5e76b64d9c1fc0cc4f7891c9917b6`.
+  `b23f8350360e14b611f1629cfeeb60fbc37fc4bf58a4e83230da4179f905e626`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3468,7 +3468,9 @@ release acceptance exposed issue #49
   with category-mismatch and substantive-tail rejection,
   resolved/eliminated absence continuations with unresolved-risk
   reintroduction, punctuation-scoped residual-predicate negation with
-  conditional-clause and same-clause controls, exact neutral and affirmative
+  conditional-clause and same-clause controls, adverse-subject gating for
+  residual possibilities with positive and recovery-subject rejection, exact
+  neutral and affirmative
   transitions within one denial/reintroduction line and its colon-body form,
   post-question denial answers with interrogative and qualified-tail rejection,
   and fail-closed
