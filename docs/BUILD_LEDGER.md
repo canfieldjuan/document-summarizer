@@ -3522,7 +3522,7 @@ release acceptance exposed issue #49
   and labeled-answer colons transition at the body without labeling a source
   that crosses the transition. The focused two-sided propagation probe and full
   deterministic gate passed.
-- The final product-code head `99585de5bb4a736b70c1d486e608b12b964673d7`
+- Product-code head `99585de5bb4a736b70c1d486e608b12b964673d7`
   retains an active category through a title-case question about that category's
   presence, while a bounded negative answer still clears it. Coordinated `it`
   and `they` continuations reuse the existing adverse-predicate grammar to
@@ -3531,6 +3531,17 @@ release acceptance exposed issue #49
   resolution, wrong-complement and double-negation anaphoric controls remain
   neutral. The focused two-sided propagation probe and full deterministic gate
   passed.
+- The final product-code head `7e38aea2fe222e40901611234d4bd36cff1f978b`
+  uses the shared Unicode sentence-terminal, coordination-delimiter and inline-
+  colon predicates when scanning a suspended category for an adverse residual
+  clause, and records the exact byte offset where framing resumes. A neutral
+  clause before that adverse clause remains unframed, while a leading
+  coordinator and same-sentence condition stay attached to the adverse clause.
+  ASCII, full-width and Arabic questions do not restore framing. The focused
+  two-sided boundary probe passed; the full gate passed 442 library tests, 3
+  office tests and 3 release-contract tests with the documented opt-in tests
+  ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
