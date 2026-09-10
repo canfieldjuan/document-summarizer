@@ -2346,7 +2346,7 @@ fn generate_summary_with_validation_repair(
     let mut clipped_repairs = 0;
     let mut clipped_fallback: Option<SafeSiblingFallback> = None;
     let mut framing_repairs = 0;
-    let mut framing_repair_siblings: Option<Vec<CitedClaim>> = None;
+    let mut framing_repair_requirements: Option<SourceFramingRepairRequirements> = None;
     loop {
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
         let ordinal = starting_request_ordinal
@@ -2458,15 +2458,16 @@ fn generate_summary_with_validation_repair(
             Err(failure)
                 if failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE && framing_repairs == 0 =>
             {
-                framing_repair_siblings = Some(parse_response_without_mixed_source_framing_units(
-                    profile,
-                    &response.text,
-                    document_id,
-                    catalog,
-                    response_maximum_units,
-                )?);
+                framing_repair_requirements =
+                    Some(parse_response_without_mixed_source_framing_units(
+                        profile,
+                        &response.text,
+                        document_id,
+                        catalog,
+                        response_maximum_units,
+                    )?);
                 let feedback = vec![
-                    "One or more General units mixed source_ids with different or absent source_framing values. Keep every other unit and its wording unchanged; split only each invalid unit so all source_ids in every resulting unit either share one identical source_framing value or all omit source_framing"
+                    "One or more General units mixed source_ids with different or absent source_framing values. Keep every other unit and its wording unchanged; split only each invalid unit, preserving every source_id from that unit exactly once across its splits, so all source_ids in every resulting unit either share one identical source_framing value or all omit source_framing"
                         .to_string(),
                 ];
                 request_prompt = prompt_with_validation_feedback(&request_prompt, &feedback)?;
@@ -2560,9 +2561,9 @@ fn generate_summary_with_validation_repair(
                 return Err(failure);
             }
         };
-        if framing_repair_siblings
+        if framing_repair_requirements
             .as_ref()
-            .is_some_and(|required| preserved_claim_positions(&parsed.0, required).is_none())
+            .is_some_and(|requirements| !satisfies_source_framing_repair(&parsed.0, requirements))
         {
             return Err(source_framing_repair_integrity_response());
         }
@@ -2759,6 +2760,23 @@ fn preserved_claim_positions(
         next_candidate = index + 1;
     }
     Some(consumed)
+}
+
+fn satisfies_source_framing_repair(
+    candidate: &[CitedClaim],
+    requirements: &SourceFramingRepairRequirements,
+) -> bool {
+    let Some(mut consumed) = preserved_claim_positions(candidate, &requirements.preserved_claims)
+    else {
+        return false;
+    };
+    let required_mixed_units = requirements
+        .mixed_unit_evidence_ids
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    consume_required_sibling_claims(candidate, &mut consumed, &required_mixed_units)
+        && consumed.into_iter().all(|is_consumed| is_consumed)
 }
 
 fn consume_required_sibling_claims(
@@ -3976,9 +3994,14 @@ fn source_framing_repair_integrity_response() -> PipelineFailure {
     stage_failure(
         PipelineStage::Synthesize,
         SOURCE_FRAMING_MIXED_RESPONSE_CODE,
-        "The bounded source-framing repair changed or omitted a valid sibling unit",
+        "The bounded source-framing repair changed a valid sibling or failed to preserve one invalid unit's complete source set",
         false,
     )
+}
+
+struct SourceFramingRepairRequirements {
+    preserved_claims: Vec<CitedClaim>,
+    mixed_unit_evidence_ids: Vec<Vec<String>>,
 }
 
 fn parse_response_without_mixed_source_framing_units(
@@ -3987,7 +4010,7 @@ fn parse_response_without_mixed_source_framing_units(
     document_id: &str,
     catalog: &SourceCatalog,
     maximum_units: usize,
-) -> Result<Vec<CitedClaim>, PipelineFailure> {
+) -> Result<SourceFramingRepairRequirements, PipelineFailure> {
     if profile != SummaryProfile::General {
         return Err(mixed_source_framing_response());
     }
@@ -3996,20 +4019,42 @@ fn parse_response_without_mixed_source_framing_units(
         return Err(invalid_response());
     }
     let mut retained = Vec::with_capacity(raw.units.len());
-    let mut withheld = 0usize;
+    let mut mixed_unit_evidence_ids = Vec::new();
     for unit in raw.units {
+        let source_ids = unit.source_ids.clone();
         let singleton = serde_json::to_string(&RawResponse { units: vec![unit] })
             .map_err(|_| invalid_response())?;
         match parse_response_with_maximum_units(profile, &singleton, document_id, catalog, 1) {
             Ok((mut claims, _)) => retained.append(&mut claims),
-            Err(failure) if failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE => withheld += 1,
+            Err(failure) if failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE => {
+                let mut evidence_positions = Vec::with_capacity(source_ids.len());
+                for source_id in source_ids {
+                    let (position, candidate) = catalog
+                        .candidates
+                        .iter()
+                        .enumerate()
+                        .find(|(_, candidate)| candidate.request_id == source_id)
+                        .ok_or_else(invalid_response)?;
+                    evidence_positions.push((position, candidate.evidence.evidence_id.clone()));
+                }
+                evidence_positions.sort_by_key(|(position, _)| *position);
+                mixed_unit_evidence_ids.push(
+                    evidence_positions
+                        .into_iter()
+                        .map(|(_, evidence_id)| evidence_id)
+                        .collect(),
+                );
+            }
             Err(failure) => return Err(failure),
         }
     }
-    if withheld == 0 {
+    if mixed_unit_evidence_ids.is_empty() {
         return Err(mixed_source_framing_response());
     }
-    Ok(retained)
+    Ok(SourceFramingRepairRequirements {
+        preserved_claims: retained,
+        mixed_unit_evidence_ids,
+    })
 }
 
 fn is_windowed_general_catalog(profile: SummaryProfile, catalog: &SourceCatalog) -> bool {
@@ -4752,6 +4797,7 @@ mod tests {
         RepeatMixed,
         OmitSibling,
         RewriteSibling,
+        OmitMixedSource,
     }
 
     #[derive(Clone, Copy)]
@@ -4984,6 +5030,10 @@ mod tests {
                     {"text":"The statement remains substantially unchanged.","source_ids":["s2"]},
                     {"text":"Problem statement.","source_ids":["s1"]},
                     {"text":"Ordinary statement.","source_ids":["s3"]}
+                ]),
+                (true, FramingRepairBehavior::OmitMixedSource) => json!([
+                    {"text":"The unchanged statement remains.","source_ids":["s2"]},
+                    {"text":"Problem statement.","source_ids":["s1"]}
                 ]),
             };
             Ok(ModelResponse {
@@ -9914,6 +9964,7 @@ mod tests {
         for behavior in [
             FramingRepairBehavior::OmitSibling,
             FramingRepairBehavior::RewriteSibling,
+            FramingRepairBehavior::OmitMixedSource,
         ] {
             let runtime = FramingRepairRuntime::new(behavior);
             let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
@@ -9929,7 +9980,7 @@ mod tests {
                 1,
                 &UNCONTROLLED_EXECUTION,
             )
-            .expect_err("a framing repair must preserve every valid sibling exactly");
+            .expect_err("a framing repair must preserve siblings and every mixed source exactly");
             assert_eq!(failure.code, SOURCE_FRAMING_MIXED_RESPONSE_CODE);
             assert_eq!(runtime.requests().len(), 2);
         }
