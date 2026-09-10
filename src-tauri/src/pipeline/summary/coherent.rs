@@ -283,9 +283,12 @@ fn marked_heading_title(heading: &str) -> Option<&str> {
             .all(|character| character.is_ascii_alphabetic());
     let roman = has_marker_punctuation
         && (2..=8).contains(&marker.chars().count())
-        && marker
-            .chars()
-            .all(|character| matches!(character, 'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'));
+        && marker.chars().all(|character| {
+            matches!(
+                character.to_ascii_uppercase(),
+                'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'
+            )
+        });
     (!title.is_empty() && (decimal || alphabetic || roman)).then_some(title)
 }
 
@@ -528,13 +531,29 @@ fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool
     if first == "neither" {
         return bounded_section_denial_predicate(&words, 1, Some(active_framing));
     }
-    first == "there"
+    let existential_noun_start = if first == "there"
         && matches!(
             words.get(1).map(String::as_str),
             Some("are" | "is" | "was" | "were")
         )
         && words.get(2).is_some_and(|word| word == "no")
-        && bounded_section_denial_predicate(&words, 3, Some(active_framing))
+    {
+        Some(3)
+    } else if first == "there"
+        && matches!(
+            words.get(1).map(String::as_str),
+            Some("had" | "has" | "have")
+        )
+        && words.get(2).is_some_and(|word| word == "been")
+        && words.get(3).is_some_and(|word| word == "no")
+    {
+        Some(4)
+    } else {
+        None
+    };
+    existential_noun_start.is_some_and(|noun_start| {
+        bounded_section_denial_predicate(&words, noun_start, Some(active_framing))
+    })
 }
 
 fn bounded_section_denial_predicate(
@@ -4916,6 +4935,8 @@ mod tests {
             ("a. Exceptions", SourceFraming::Exception),
             ("(a) Exceptions", SourceFraming::Exception),
             ("(IV) Risks", SourceFraming::Risk),
+            ("iv. Exceptions", SourceFraming::Exception),
+            ("(iv) Risks", SourceFraming::Risk),
             ("Key Risks", SourceFraming::Risk),
             ("Safety Warning", SourceFraming::Warning),
             ("Important Exceptions", SourceFraming::Exception),
@@ -4936,6 +4957,8 @@ mod tests {
             "1.. Common Problems\n\nBody text.",
             "(a. Exceptions\n\nBody text.",
             "((a)) Exceptions\n\nBody text.",
+            "(iv.) Risks\n\nBody text.",
+            "iv Risks\n\nBody text.",
             "2026 Common Problems\n\nBody text.",
             "problems.\n\nOrdinary wrapped prose.",
             "No Known Issues\n\nNo defects were found.",
@@ -4994,6 +5017,16 @@ mod tests {
             "There are no known risks at this time.",
             SourceFraming::Risk,
         ));
+        for perfect_existential in [
+            "There has been no risk identified.",
+            "There have been no risks identified.",
+            "There had been no risks identified.",
+        ] {
+            assert!(begins_with_section_denial(
+                perfect_existential,
+                SourceFraming::Risk,
+            ));
+        }
         assert!(begins_with_section_denial(
             "No risks or limitations were identified.",
             SourceFraming::Risk,
@@ -5059,6 +5092,7 @@ mod tests {
             "No known control eliminates every fraud risk.",
             "No risk can be completely eliminated.",
             "There is no control that eliminates every risk.",
+            "There has been no control that eliminates every risk.",
             "Neither control eliminates all risks.",
             "No risks were identified, but fraud remains possible.",
             "No risks were identified, but fraud remains possible. See the appendix.",
@@ -5265,6 +5299,17 @@ mod tests {
                 None
             );
         }
+        let perfect_existential_denial =
+            "Key Risks\nThere have been no risks identified.\nLater unrelated text.";
+        for unframed in [
+            "There have been no risks identified.",
+            "Later unrelated text.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(perfect_existential_denial, unframed, None),
+                None
+            );
+        }
         let mismatched_denial =
             "Key Risks\nNo limitations were identified.\nFraud remains possible.";
         assert_eq!(
@@ -5338,6 +5383,15 @@ mod tests {
             source_framing_for_segment(parenthesized_marker, "The deadline does not apply.", None,),
             Some(SourceFraming::Exception)
         );
+        let lowercase_roman_marker = "Key Risks\n(iv) Exceptions\nThe deadline does not apply.";
+        assert_eq!(
+            source_framing_for_segment(
+                lowercase_roman_marker,
+                "The deadline does not apply.",
+                None,
+            ),
+            Some(SourceFraming::Exception)
+        );
         let interrogative_heading = "Key Risks\nCommon Problems?\nLate payment may occur.";
         assert_eq!(
             source_framing_for_segment(interrogative_heading, "Late payment may occur.", None,),
@@ -5391,6 +5445,7 @@ mod tests {
             "No known control eliminates every fraud risk.",
             "No risk can be completely eliminated.",
             "There is no control that eliminates every risk.",
+            "There has been no control that eliminates every risk.",
             "Neither control eliminates all risks.",
             "No risks were identified, but fraud remains possible.",
         ] {

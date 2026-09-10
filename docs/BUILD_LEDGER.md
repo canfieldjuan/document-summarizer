@@ -3291,9 +3291,9 @@ release acceptance exposed issue #49
   Empty or visual-processing pages reset inherited state before and after the
   page because their complete governing text is unavailable. The resolver scans
   each extracted line so a subsequent bounded heading-shaped line, including
-  a decimal, Roman or uppercase/lowercase letter-marked heading, including a
-  fully parenthesized outline marker, or a sentence-case heading with an explicit
-  heading signal, resets the label. An unmarked sentence ending in a
+  a decimal, uppercase/lowercase Roman or uppercase/lowercase letter-marked
+  heading, including a fully parenthesized outline marker, or a sentence-case
+  heading with an explicit heading signal, resets the label. An unmarked sentence ending in a
   period, exclamation point or semicolon remains body text; numbering alone
   does not turn a punctuated sentence-case body line into a heading. A
   reliable heading followed by a colon and body on the same line changes state
@@ -3318,8 +3318,8 @@ release acceptance exposed issue #49
   explicit denial must name a noun in the active framing category.
   Explicit denial noun phrases may use the same conservative framing modifiers
   as headings; uncertainty modifiers remain outside the grammar.
-  Direct `No`/`Neither` and existential denials must
-  consist of a framing-noun phrase plus a bounded absence or reporting
+  Direct `No`/`Neither`, copular existential, and perfect existential denials
+  must consist of a framing-noun phrase plus a bounded absence or reporting
   predicate; only the leading complete sentence is inspected so later prose on
   the extracted line does not hide the reset, unless the next sentence begins
   with a bounded contrast marker that may reintroduce framed content. Repeated
@@ -3372,8 +3372,8 @@ release acceptance exposed issue #49
   across short capitalized, numbered-list and numbered sentence-case body
   paragraphs, reset across empty and
   visual-processing pages, retention across an introductory colon, single- and
-  excess-newline framing and reset headings, decimal/Roman/uppercase,
-  lowercase-letter and fully parenthesized outline framing
+  excess-newline framing and reset headings, decimal/uppercase/lowercase Roman,
+  uppercase/lowercase-letter and fully parenthesized outline framing
   headings, inline framing and reset headings, rejection of standalone and
   inline interrogative framing headings, fail-closed transition-spanning
   sources, whole standalone-colon heading/body candidates, inline transition
@@ -3381,7 +3381,8 @@ release acceptance exposed issue #49
   across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
   denial clearing in following-line and inline bodies with trailing prose and
-  repeated determiners, conservative modifiers, exact existential predicates,
+  repeated determiners, conservative modifiers, bounded copular and perfect
+  existential predicates,
   bounded `to report` and bounded `Not applicable`, active-category noun
   matching, rejection of uncertainty modifiers, retention through
   interrogative denials, post-denial contrast sentences, explanatory `Not
