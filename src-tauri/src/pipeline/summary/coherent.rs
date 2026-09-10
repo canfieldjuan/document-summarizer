@@ -633,7 +633,7 @@ fn apply_inline_heading_candidate(
 }
 
 fn possible_interrogative_framing_boundary(text: &str) -> bool {
-    if !possible_framing_boundary(text) || !possible_inline_framing_boundary(text) {
+    if !possible_framing_boundary(text) {
         return false;
     }
     let words = text
@@ -641,6 +641,10 @@ fn possible_interrogative_framing_boundary(text: &str) -> bool {
         .filter(|word| !word.is_empty())
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
+    let mitigation_question = interrogative_mitigation_boundary(&words);
+    if !possible_inline_framing_boundary(text) && !mitigation_question {
+        return false;
+    }
     let starts_with_wh_word = words.first().is_some_and(|word| {
         matches!(
             word.as_str(),
@@ -651,6 +655,79 @@ fn possible_interrogative_framing_boundary(text: &str) -> bool {
         || words
             .get(..3)
             .is_some_and(|prefix| prefix == ["how", "to", "avoid"])
+        || mitigation_question
+}
+
+fn interrogative_mitigation_boundary(words: &[String]) -> bool {
+    if !(3..=8).contains(&words.len()) {
+        return false;
+    }
+    match words.first().map(String::as_str) {
+        Some("how") => {
+            let failure_qualified = words.iter().skip(1).any(|word| {
+                matches!(
+                    word.as_str(),
+                    "cannot"
+                        | "fail"
+                        | "failed"
+                        | "failing"
+                        | "failure"
+                        | "failures"
+                        | "ineffective"
+                        | "not"
+                )
+            });
+            !failure_qualified
+                && words.iter().skip(1).any(|word| {
+                    matches!(
+                        word.as_str(),
+                        "address"
+                            | "addressed"
+                            | "avoid"
+                            | "avoided"
+                            | "control"
+                            | "controlled"
+                            | "eliminate"
+                            | "eliminated"
+                            | "fix"
+                            | "fixed"
+                            | "manage"
+                            | "managed"
+                            | "mitigate"
+                            | "mitigated"
+                            | "prevent"
+                            | "prevented"
+                            | "reduce"
+                            | "reduced"
+                            | "remedied"
+                            | "remedy"
+                            | "resolve"
+                            | "resolved"
+                    )
+                })
+        }
+        Some("what") => {
+            matches!(words.get(1).map(String::as_str), Some("are" | "is"))
+                && (words.last().is_some_and(|word| {
+                    matches!(
+                        word.as_str(),
+                        "control"
+                            | "controls"
+                            | "mitigation"
+                            | "mitigations"
+                            | "recommendation"
+                            | "recommendations"
+                            | "remedies"
+                            | "remedy"
+                            | "solution"
+                            | "solutions"
+                    )
+                }) || words
+                    .get(words.len().saturating_sub(2)..)
+                    .is_some_and(|suffix| suffix == ["control", "measures"]))
+        }
+        _ => false,
+    }
 }
 
 fn continuation_reintroduces_source_framing(
@@ -6094,6 +6171,24 @@ mod tests {
             assert!(!possible_framing_boundary(ordinary_prose));
         }
         assert!(possible_framing_boundary("How to avoid common problems"));
+        for mitigation_question in [
+            "How can risks be reduced?",
+            "How should these problems be mitigated?",
+            "What are the solutions?",
+            "What are the recommended control measures?",
+        ] {
+            assert!(possible_interrogative_framing_boundary(mitigation_question));
+        }
+        for substantive_question in [
+            "How did controls fail?",
+            "How did controls fail to prevent fraud?",
+            "What happens if controls fail?",
+            "What risks remain?",
+        ] {
+            assert!(!possible_interrogative_framing_boundary(
+                substantive_question
+            ));
+        }
         assert!(possible_framing_boundary("Potential risks"));
         assert!(possible_inline_framing_boundary("Solutions"));
         assert!(possible_inline_framing_boundary("Payment Terms"));
@@ -7183,6 +7278,8 @@ mod tests {
             "Why did controls fail? Fraud remains possible.",
             "What happens if controls fail? Fraud remains possible.",
             "How did controls fail? Fraud remains possible.",
+            "How did controls fail to prevent fraud? Fraud remains possible.",
+            "What risks remain? Fraud remains possible.",
             "Who can be harmed? Fraud remains possible.",
             "Why are workers at risk? Fraud remains possible.",
         ] {
@@ -7195,6 +7292,21 @@ mod tests {
                 ),
                 Some(SourceFraming::Risk)
             );
+        }
+        for mitigation_question in [
+            "How can risks be reduced? Enable MFA.",
+            "How should these problems be mitigated? Enable MFA.",
+            "What are the solutions? Enable MFA.",
+            "What are the recommended control measures? Enable MFA.",
+        ] {
+            let block = format!("Key Risks\n{mitigation_question}\nOverview follows.");
+            for unframed in ["Enable MFA.", "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "{mitigation_question} should clear framing",
+                );
+            }
         }
         let interrogative_section_heading =
             "Key Risks\nHow to avoid common problems? Apply the documented controls.";
