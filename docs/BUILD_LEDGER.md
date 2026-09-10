@@ -3513,7 +3513,7 @@ release acceptance exposed issue #49
   full-width and Arabic questions remain neutral; declarative controls restore
   framing. The focused two-sided propagation probe and full deterministic gate
   passed.
-- The final product-code head `87770baa08c0eb5a27f2eb67830bad52f2c91438`
+- Product-code head `87770baa08c0eb5a27f2eb67830bad52f2c91438`
   scans bounded coordinated suffixes for a denial that follows an affirmative
   clause and recognizes full-width inline colons using their UTF-8 byte length.
   ASCII, full-width and Arabic comma coordinators, semicolon clauses and an
@@ -3522,6 +3522,15 @@ release acceptance exposed issue #49
   and labeled-answer colons transition at the body without labeling a source
   that crosses the transition. The focused two-sided propagation probe and full
   deterministic gate passed.
+- The final product-code head `99585de5bb4a736b70c1d486e608b12b964673d7`
+  retains an active category through a title-case question about that category's
+  presence, while a bounded negative answer still clears it. Coordinated `it`
+  and `they` continuations reuse the existing adverse-predicate grammar to
+  restore a denied Problem or Risk category. Affirmative answers and bounded
+  occurrence questions retain framing; negative answers clear it; affirmative
+  resolution, wrong-complement and double-negation anaphoric controls remain
+  neutral. The focused two-sided propagation probe and full deterministic gate
+  passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
