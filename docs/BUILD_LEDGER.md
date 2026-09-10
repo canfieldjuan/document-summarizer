@@ -3439,12 +3439,19 @@ release acceptance exposed issue #49
   and full deterministic gate passed. No further DOL model run was made because
   issue #53 already reproduces the independent cross-window failure twice and
   neither added predicate occurs in the affected DOL source text.
-- The final product-code head `c815b2bfd94e0b39dc78836f07bc699255547ae8`
+- Product-code head `c815b2bfd94e0b39dc78836f07bc699255547ae8`
   recognizes a leading bounded `N/A` or `N.A` before splitting its same-line
   continuation. `N/A. Overview follows.` therefore clears prior framing before
   the overview, while an interrogative, qualified, or attached path-like form
   retains it and an explicit adverse continuation can restore framing. The
   focused classifier test and full deterministic gate passed.
+- The final product-code head `d9dc80d48c4cd720b364e5be7c7a7a9728c2e030`
+  resets prior framing at bounded mitigation questions such as `How can risks be
+  reduced?` and `What are the solutions?` before their answers. Equivalent
+  mitigation verbs and solution/control nouns share that bounded grammar, while
+  failure-qualified questions and substantive questions about remaining risks
+  retain their active framing. The focused classifier test and full
+  deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3460,6 +3467,8 @@ release acceptance exposed issue #49
   marked lowercase and title-case prose retention, inline framing and reset headings,
   bounded mitigation/control neutral headings in standalone, marked and inline
   forms with ordinary mitigation sentences retained as body text,
+  bounded mitigation questions with failure-qualified and substantive-question
+  controls,
   rejection of standalone and
   bounded compound `Risk Factors`, `Warning Signs` and `Problem Areas`
   headings with the existing conservative modifiers, rejection of unrelated
