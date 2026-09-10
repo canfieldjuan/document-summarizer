@@ -3303,7 +3303,8 @@ release acceptance exposed issue #49
   introductory labels such as `Example:`, `Note:` or `Important Note:` remain
   prose. An explicit inline prefix ending in a framing noun resets prior state
   when negation, uncertainty or unsupported modifiers prevent assigning a new
-  label. A recognized framing heading replaces the
+  label. An interrogative heading can end prior state but cannot assign an
+  affirmative framing label. A recognized framing heading replaces the
   prior label. Inline transitions
   retain byte positions: a source after one inherits its state, while a source
   crossing one remains unframed. A standalone colon heading transitions at the
@@ -3366,7 +3367,8 @@ release acceptance exposed issue #49
   visual-processing pages, retention across an introductory colon, single- and
   excess-newline framing and reset headings, decimal/Roman/uppercase,
   lowercase-letter and fully parenthesized outline framing
-  headings, inline framing and reset headings, fail-closed transition-spanning
+  headings, inline framing and reset headings, rejection of standalone and
+  inline interrogative framing headings, fail-closed transition-spanning
   sources, whole standalone-colon heading/body candidates, inline transition
   isolation, reset at uncertain and negated inline framing headings, retention
   across inline and standalone introductory labels,

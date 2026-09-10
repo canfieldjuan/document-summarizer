@@ -215,7 +215,7 @@ fn framing_from_heading_candidate(
     has_explicit_inline_signal: bool,
 ) -> Option<SourceFraming> {
     let heading = heading.trim();
-    if heading.is_empty() || heading.contains('\n') || heading.chars().count() > 80 {
+    if heading.is_empty() || heading.contains(['\n', '?']) || heading.chars().count() > 80 {
         return None;
     }
     let marked_heading = marked_heading_title(heading);
@@ -4907,6 +4907,7 @@ mod tests {
             "No Known Issues\n\nNo defects were found.",
             "Possible Exceptions\n\nAn exception might apply.",
             "Potential Risks\n\nA risk might arise.",
+            "Common Problems?\n\nLate payment may occur.",
             "Avoiding Common Problems\n\nUse the documented solution.",
             "Solutions to Common Problems\n\nUse the documented solution.",
             "Problem Solving Techniques\n\nBody text.",
@@ -4934,6 +4935,7 @@ mod tests {
         assert!(possible_inline_framing_boundary("Potential Risks"));
         assert!(possible_inline_framing_boundary("No Known Issues"));
         assert!(possible_inline_framing_boundary("potential risks"));
+        assert_eq!(framing_from_inline_heading("Common Problems?"), None);
         assert!(!possible_inline_framing_boundary("Example"));
         assert!(!possible_inline_framing_boundary("Note"));
         assert!(!possible_inline_framing_boundary("Important Note"));
@@ -5277,6 +5279,11 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(parenthesized_marker, "The deadline does not apply.", None,),
             Some(SourceFraming::Exception)
+        );
+        let interrogative_heading = "Key Risks\nCommon Problems?\nLate payment may occur.";
+        assert_eq!(
+            source_framing_for_segment(interrogative_heading, "Late payment may occur.", None,),
+            None
         );
         let not_applicable = "Key Risks\nNot applicable.\nLater unrelated text.";
         for unframed in ["Not applicable.", "Later unrelated text."] {
