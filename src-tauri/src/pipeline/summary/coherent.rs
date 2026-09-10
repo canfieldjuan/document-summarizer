@@ -687,49 +687,7 @@ fn interrogative_mitigation_boundary(words: &[String]) -> bool {
         return false;
     }
     match words.first().map(String::as_str) {
-        Some("how") => {
-            let failure_qualified = words.iter().skip(1).any(|word| {
-                matches!(
-                    word.as_str(),
-                    "cannot"
-                        | "fail"
-                        | "failed"
-                        | "failing"
-                        | "failure"
-                        | "failures"
-                        | "ineffective"
-                        | "not"
-                )
-            });
-            !failure_qualified
-                && words.iter().skip(1).any(|word| {
-                    matches!(
-                        word.as_str(),
-                        "address"
-                            | "addressed"
-                            | "avoid"
-                            | "avoided"
-                            | "control"
-                            | "controlled"
-                            | "eliminate"
-                            | "eliminated"
-                            | "fix"
-                            | "fixed"
-                            | "manage"
-                            | "managed"
-                            | "mitigate"
-                            | "mitigated"
-                            | "prevent"
-                            | "prevented"
-                            | "reduce"
-                            | "reduced"
-                            | "remedied"
-                            | "remedy"
-                            | "resolve"
-                            | "resolved"
-                    )
-                })
-        }
+        Some("how") => mitigation_question_has_action(words, true),
         Some("what") => {
             matches!(words.get(1).map(String::as_str), Some("are" | "is"))
                 && (words
@@ -740,8 +698,59 @@ fn interrogative_mitigation_boundary(words: &[String]) -> bool {
                         .is_some_and(|suffix| suffix == ["control", "measures"]))
         }
         Some("are" | "is" | "was" | "were") => auxiliary_mitigation_question(words),
+        Some("can" | "could" | "must" | "shall" | "should" | "will" | "would") => {
+            mitigation_question_has_action(words, false)
+        }
         _ => false,
     }
+}
+
+fn mitigation_question_has_action(words: &[String], bare_control_is_action: bool) -> bool {
+    let failure_qualified = words.iter().skip(1).any(|word| {
+        matches!(
+            word.as_str(),
+            "cannot"
+                | "fail"
+                | "failed"
+                | "failing"
+                | "failure"
+                | "failures"
+                | "ineffective"
+                | "not"
+        )
+    });
+    !failure_qualified
+        && words.iter().enumerate().skip(1).any(|(index, word)| {
+            matches!(
+                word.as_str(),
+                "address"
+                    | "addressed"
+                    | "avoid"
+                    | "avoided"
+                    | "controlled"
+                    | "eliminate"
+                    | "eliminated"
+                    | "fix"
+                    | "fixed"
+                    | "manage"
+                    | "managed"
+                    | "mitigate"
+                    | "mitigated"
+                    | "prevent"
+                    | "prevented"
+                    | "reduce"
+                    | "reduced"
+                    | "remedied"
+                    | "remedy"
+                    | "resolve"
+                    | "resolved"
+            ) || word == "control"
+                && (bare_control_is_action
+                    || words
+                        .get(index + 1)
+                        .and_then(|next| source_framing_from_noun(next))
+                        .is_some())
+        })
 }
 
 fn is_mitigation_question_noun(word: &str) -> bool {
@@ -1472,7 +1481,7 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
     let mut consumed_temporal_adverb = false;
     if words
         .get(cursor)
-        .is_some_and(|word| matches!(word.as_str(), "currently" | "yet"))
+        .is_some_and(|word| is_section_temporal_adverb(word))
     {
         consumed_temporal_adverb = true;
         cursor += 1;
@@ -1490,8 +1499,11 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
     };
     cursor += 1;
 
-    let expanded_negative = words.get(cursor).is_some_and(|word| word == "not");
+    let mut expanded_negative = words.get(cursor).is_some_and(|word| word == "not");
     if expanded_negative {
+        if contracted_negative {
+            return None;
+        }
         cursor += 1;
     }
 
@@ -1499,9 +1511,16 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
         if !consumed_temporal_adverb
             && words
                 .get(cursor)
-                .is_some_and(|word| matches!(word.as_str(), "currently" | "yet"))
+                .is_some_and(|word| is_section_temporal_adverb(word))
         {
             consumed_temporal_adverb = true;
+            cursor += 1;
+        }
+        if words.get(cursor).is_some_and(|word| word == "not") {
+            if contracted_negative || expanded_negative {
+                return None;
+            }
+            expanded_negative = true;
             cursor += 1;
         }
         if words.get(cursor).map(String::as_str) != Some("been") {
@@ -1512,8 +1531,15 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
     if !consumed_temporal_adverb
         && words
             .get(cursor)
-            .is_some_and(|word| matches!(word.as_str(), "currently" | "yet"))
+            .is_some_and(|word| is_section_temporal_adverb(word))
     {
+        cursor += 1;
+    }
+    if words.get(cursor).is_some_and(|word| word == "not") {
+        if contracted_negative || expanded_negative {
+            return None;
+        }
+        expanded_negative = true;
         cursor += 1;
     }
     if contracted_negative || expanded_negative {
@@ -1526,6 +1552,10 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
         .get(cursor)
         .is_some_and(|word| word == "no")
         .then_some(cursor + 1)
+}
+
+fn is_section_temporal_adverb(word: &str) -> bool {
+    matches!(word, "currently" | "yet")
 }
 
 #[cfg(test)]
@@ -6542,6 +6572,10 @@ mod tests {
             "Are there any solutions?",
             "Is there a recommended control?",
             "Were control measures available?",
+            "Can these risks be mitigated?",
+            "Can we control risks?",
+            "Could fraud be prevented?",
+            "Should this problem be addressed?",
         ] {
             assert!(
                 possible_interrogative_framing_boundary(mitigation_question),
@@ -6556,6 +6590,10 @@ mod tests {
             "Are there any risks?",
             "Are controls ineffective?",
             "Are control failures documented?",
+            "Can controls fail?",
+            "Can the control remain?",
+            "Could controls fail to prevent fraud?",
+            "Can risks remain?",
         ] {
             assert!(!possible_interrogative_framing_boundary(
                 substantive_question
@@ -6779,10 +6817,15 @@ mod tests {
         ));
         for negated_existential in [
             "There are not any risks.",
+            "There are currently not any risks.",
+            "There are not currently any risks.",
             "There aren't any risks.",
             "There aren’t any risks.",
             "There isn't any risk.",
             "There haven't been any risks identified.",
+            "There haven't currently been any risks identified.",
+            "There have currently not been any risks identified.",
+            "There have not yet been any risks identified.",
         ] {
             assert!(begins_with_section_denial(
                 negated_existential,
@@ -6794,11 +6837,17 @@ mod tests {
             "There aren't any limitations.",
             "There aren't any risks because the review is incomplete.",
             "There aren't any risks?",
+            "There aren't not any risks.",
+            "There are not currently not any risks.",
+            "There have not currently not been any risks identified.",
         ] {
-            assert!(!begins_with_section_denial(
-                qualified_or_mismatched_negated_existential,
-                SourceFraming::Risk,
-            ));
+            assert!(
+                !begins_with_section_denial(
+                    qualified_or_mismatched_negated_existential,
+                    SourceFraming::Risk,
+                ),
+                "{qualified_or_mismatched_negated_existential} must retain framing",
+            );
         }
         assert!(begins_with_section_denial(
             "There have currently been no risks identified.",
@@ -7765,6 +7814,10 @@ mod tests {
             "Are there any solutions? Enable MFA.",
             "Is there a recommended control? Enable MFA.",
             "Were control measures available? Enable MFA.",
+            "Can these risks be mitigated? Enable MFA.",
+            "Can we control risks? Enable MFA.",
+            "Could fraud be prevented? Enable MFA.",
+            "Should this problem be addressed? Enable MFA.",
         ] {
             let block = format!("Key Risks\n{mitigation_question}\nOverview follows.");
             for unframed in ["Enable MFA.", "Overview follows."] {
@@ -7842,9 +7895,13 @@ mod tests {
         }
         for negated_existential in [
             "There are not any risks.",
+            "There are currently not any risks.",
+            "There are not currently any risks.",
             "There aren't any risks.",
             "There aren’t any risks.",
             "There haven't been any risks identified.",
+            "There have currently not been any risks identified.",
+            "There have not yet been any risks identified.",
         ] {
             let block = format!("Key Risks\n{negated_existential}\nOverview follows.");
             for unframed in [negated_existential, "Overview follows."] {
