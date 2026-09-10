@@ -488,7 +488,7 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "summary"
     );
     let mitigation_control_section_heading = mitigation_control_section_heading(&words);
-    let sentence_case_has_heading_shape = !heading.ends_with(['.', '!', ';']);
+    let sentence_case_has_heading_shape = !heading_ends_with_declarative_terminal(heading);
     (sentence_case_has_heading_shape
         || marked_title.is_some()
             && (punctuated_marked_section_lead || mitigation_control_section_heading))
@@ -1222,6 +1222,12 @@ fn coordinated_clause_boundary(
     active_framing: SourceFraming,
     limit: usize,
 ) -> Option<(usize, usize)> {
+    if text
+        .get(..limit)
+        .is_some_and(|clause| bounded_section_denial_clause(clause, active_framing))
+    {
+        return None;
+    }
     text.match_indices([',', ';', '–', '—'])
         .find_map(|(index, delimiter)| {
             let continuation_start = index.saturating_add(delimiter.len());
@@ -1353,12 +1359,7 @@ fn is_bounded_bare_no_answer(text: &str) -> bool {
 }
 
 fn bounded_section_denial_clause(text: &str, active_framing: SourceFraming) -> bool {
-    let words = text
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .take(17)
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
+    let (words, comma_before) = section_denial_words(text);
     if words.len() > 16 {
         return false;
     }
@@ -1368,15 +1369,51 @@ fn bounded_section_denial_clause(text: &str, active_framing: SourceFraming) -> b
     if first == "not" {
         words.get(1).is_some_and(|word| word == "applicable") && section_denial_tail(&words[2..])
     } else if first == "none" {
-        words.len() == 1 || bounded_section_denial_predicate(&words, 1, None)
+        words.len() == 1 || bounded_section_denial_predicate(&words, &comma_before, 1, None)
     } else if matches!(first, "no" | "neither") {
-        bounded_section_denial_predicate(&words, 1, Some(active_framing))
+        bounded_section_denial_predicate(&words, &comma_before, 1, Some(active_framing))
     } else {
         let existential_noun_start = existential_denial_noun_start(&words);
         existential_noun_start.is_some_and(|noun_start| {
-            bounded_section_denial_predicate(&words, noun_start, Some(active_framing))
+            bounded_section_denial_predicate(
+                &words,
+                &comma_before,
+                noun_start,
+                Some(active_framing),
+            )
         })
     }
+}
+
+fn section_denial_words(text: &str) -> (Vec<String>, Vec<bool>) {
+    let mut spans = Vec::new();
+    let mut word_start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_alphanumeric() {
+            word_start.get_or_insert(index);
+        } else if let Some(start) = word_start.take() {
+            spans.push((start, index));
+            if spans.len() == 17 {
+                break;
+            }
+        }
+    }
+    if spans.len() < 17 {
+        if let Some(start) = word_start {
+            spans.push((start, text.len()));
+        }
+    }
+    let words = spans
+        .iter()
+        .map(|(start, end)| text[*start..*end].to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let mut comma_before = vec![false; words.len()];
+    for index in 1..spans.len() {
+        comma_before[index] = text[spans[index - 1].1..spans[index].0]
+            .chars()
+            .any(|character| matches!(character, ',' | '،' | '，'));
+    }
+    (words, comma_before)
 }
 
 fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
@@ -1441,11 +1478,13 @@ fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool
 
 fn bounded_section_denial_predicate(
     words: &[String],
+    comma_before: &[bool],
     mut cursor: usize,
     required_framing: Option<SourceFraming>,
 ) -> bool {
     if let Some(required_framing) = required_framing {
-        let Some(after_nouns) = consume_section_denial_nouns(words, cursor, required_framing)
+        let Some(after_nouns) =
+            consume_section_denial_nouns(words, comma_before, cursor, required_framing)
         else {
             return false;
         };
@@ -1512,36 +1551,58 @@ fn bounded_section_denial_predicate(
 
 fn consume_section_denial_nouns(
     words: &[String],
+    comma_before: &[bool],
     mut cursor: usize,
     required_framing: SourceFraming,
 ) -> Option<usize> {
-    let mut after_conjunction = false;
+    let mut after_separator = false;
+    let mut comma_before_current_is_separator = false;
     let mut contains_required_framing = false;
     loop {
-        if after_conjunction
+        if comma_before.get(cursor).copied().unwrap_or(false) && !comma_before_current_is_separator
+        {
+            return None;
+        }
+        comma_before_current_is_separator = false;
+        if after_separator
             && words
                 .get(cursor)
                 .is_some_and(|word| matches!(word.as_str(), "neither" | "no"))
         {
             cursor += 1;
+            if comma_before.get(cursor).copied().unwrap_or(false) {
+                return None;
+            }
         }
         while words
             .get(cursor)
             .is_some_and(|word| word == "applicable" || is_source_framing_modifier(word.as_str()))
         {
             cursor += 1;
+            if comma_before.get(cursor).copied().unwrap_or(false) {
+                return None;
+            }
         }
         let (noun_framing, after_noun) = source_framing_term_at(words, cursor)?;
+        if after_noun > cursor + 1 && comma_before.get(cursor + 1).copied().unwrap_or(false) {
+            return None;
+        }
         contains_required_framing |= noun_framing == required_framing;
         cursor = after_noun;
-        if !words
+        if words
             .get(cursor)
             .is_some_and(|word| matches!(word.as_str(), "and" | "nor" | "or"))
         {
-            return contains_required_framing.then_some(cursor);
+            cursor += 1;
+            after_separator = true;
+            continue;
         }
-        cursor += 1;
-        after_conjunction = true;
+        if comma_before.get(cursor).copied().unwrap_or(false) {
+            after_separator = true;
+            comma_before_current_is_separator = true;
+            continue;
+        }
+        return contains_required_framing.then_some(cursor);
     }
 }
 
@@ -6799,6 +6860,33 @@ mod tests {
             "No limitations were identified.",
             SourceFraming::Risk,
         ));
+        for comma_separated_denial in [
+            "No risks, hazards, or issues were identified.",
+            "No significant risks, known hazards, or issues were identified.",
+            "No risks， hazards， or issues were identified.",
+            "No risks، hazards، or issues were identified.",
+        ] {
+            assert!(begins_with_section_denial(
+                comma_separated_denial,
+                SourceFraming::Risk,
+            ));
+        }
+        for invalid_noun_list in [
+            "No risks hazards or issues were identified.",
+            "No risks, controls, or issues were identified.",
+            "No, risks or hazards were identified.",
+            "No risks and, hazards were identified.",
+            "No risks, no, hazards were identified.",
+            "No risks, significant, hazards were identified.",
+            "No risk, factors were identified.",
+            "No limitations, exceptions, or warnings were identified.",
+            "No risks, hazards, or issues were identified?",
+        ] {
+            assert!(!begins_with_section_denial(
+                invalid_noun_list,
+                SourceFraming::Risk,
+            ));
+        }
         assert!(!begins_with_section_denial(
             "None of the controls fully eliminates fraud.",
             SourceFraming::Risk,
@@ -7115,6 +7203,20 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
+        for declarative_terminal in ['.', '!', '。', '！', '۔', '։', '।'] {
+            let recommendations = format!(
+                "Key Risks\nRecommendations may reduce injury{declarative_terminal}\nLater risk detail."
+            );
+            for framed in [
+                format!("Recommendations may reduce injury{declarative_terminal}"),
+                "Later risk detail.".to_string(),
+            ] {
+                assert_eq!(
+                    source_framing_for_segment(&recommendations, &framed, None),
+                    Some(SourceFraming::Risk)
+                );
+            }
+        }
         let denied_problem = "Common Problems\nNone reported.\nLater unrelated text.";
         for unframed in ["None reported.", "Later unrelated text."] {
             assert_eq!(
@@ -7138,6 +7240,16 @@ mod tests {
                 source_framing_for_segment(repeated_denial, unframed, None),
                 None
             );
+        }
+        for comma_separated_denial in [
+            "No risks, hazards, or issues were identified.",
+            "No risks， hazards， or issues were identified.",
+            "No risks، hazards، or issues were identified.",
+        ] {
+            let block = format!("Key Risks\n{comma_separated_denial}\nOverview follows.");
+            for unframed in [comma_separated_denial, "Overview follows."] {
+                assert_eq!(source_framing_for_segment(&block, unframed, None), None);
+            }
         }
         let existential_denial = "Key Risks\nNo risks exist.\nLater unrelated text.";
         for unframed in ["No risks exist.", "Later unrelated text."] {
