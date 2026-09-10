@@ -997,16 +997,23 @@ fn continuation_after_coordinator(text: &str) -> &str {
         })
 }
 
+fn is_source_sentence_terminal(character: char) -> bool {
+    matches!(
+        character,
+        '.' | '!' | '?' | '。' | '！' | '？' | '؟' | '۔' | '։' | '।'
+    )
+}
+
+fn is_source_question_terminal(character: char) -> bool {
+    matches!(character, '?' | '？' | '؟')
+}
+
 fn begins_with_declarative_section_denial(text: &str, active_framing: SourceFraming) -> bool {
-    !matches!(
-        text.chars().find(|character| {
-            matches!(
-                character,
-                '.' | '!' | '?' | '。' | '！' | '？' | '؟' | '۔' | '։' | '।'
-            )
-        }),
-        Some('?' | '？' | '؟')
-    ) && bounded_section_denial_clause(text, active_framing)
+    !text
+        .chars()
+        .find(|character| is_source_sentence_terminal(*character))
+        .is_some_and(is_source_question_terminal)
+        && bounded_section_denial_clause(text, active_framing)
 }
 
 fn denial_qualification_lead(text: &str) -> bool {
@@ -1081,7 +1088,7 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
     }
     let sentence_terminal = text
         .char_indices()
-        .find(|(_, character)| matches!(character, '.' | '?' | '!'));
+        .find(|(_, character)| is_source_sentence_terminal(*character));
     let terminal_index = sentence_terminal.map_or(text.len(), |(index, _)| index);
     let coordinated_boundary = coordinated_clause_boundary(text, active_framing, terminal_index);
     let (sentence_end, remainder_start) = match (sentence_terminal, coordinated_boundary) {
@@ -1092,13 +1099,13 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
     let sentence_remainder = &text[remainder_start..];
     if sentence_remainder
         .chars()
-        .take_while(|character| matches!(character, '.' | '?' | '!'))
-        .any(|character| character == '?')
+        .take_while(|character| is_source_sentence_terminal(*character))
+        .any(is_source_question_terminal)
     {
         return None;
     }
     let continuation = sentence_remainder.trim_start_matches(|character: char| {
-        character.is_whitespace() || matches!(character, '.' | '!')
+        character.is_whitespace() || is_source_sentence_terminal(character)
     });
     let continuation_offset = text_offset
         .saturating_add(remainder_start)
@@ -6054,6 +6061,14 @@ mod tests {
                 SourceFraming::Risk,
             ));
         }
+        for declarative_terminal in ['。', '！', '۔', '։', '।'] {
+            assert!(begins_with_section_denial(
+                &format!(
+                    "No risks were identified{declarative_terminal} Overview follows{declarative_terminal}"
+                ),
+                SourceFraming::Risk,
+            ));
+        }
         for qualified_semicolon in [
             "No risks were identified; because the review is incomplete.",
             "No risks were identified; if the preliminary record is accurate.",
@@ -6448,6 +6463,17 @@ mod tests {
                 ),
                 Some(SourceFraming::Risk)
             );
+        }
+        for declarative_terminal in ['。', '！', '۔', '։', '।'] {
+            let unicode_declarative_denial = format!(
+                "Key Risks\nNo risks were identified{declarative_terminal} Overview follows{declarative_terminal}\nLater text."
+            );
+            for neutral in ["Overview follows", "Later text."] {
+                assert_eq!(
+                    source_framing_for_segment(&unicode_declarative_denial, neutral, None),
+                    None
+                );
+            }
         }
         let unpunctuated_title_case = "Key Risks\nWorkers May Fall\nLater text.";
         assert_eq!(
