@@ -3400,7 +3400,7 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `1a3c90425ab0c4eed2dea58eda09b6dfff938f38`
+- The preceding product-code head `1a3c90425ab0c4eed2dea58eda09b6dfff938f38`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
   MiB for the Ollama process. The evidence-traced test passed in 120.48 seconds
@@ -3418,6 +3418,19 @@ release acceptance exposed issue #49
   Problem sources in one unusually long unit. The unchanged retry passed; this
   proves one acceptable exact-head execution, not deterministic live-model
   reliability.
+- The final product-code head `eb6a17b58cd049b67508105d29f64b01ff9682c9`
+  also clears an active section after a bounded bare `No` answer to a section
+  question and after a bounded denial that follows an earlier declarative
+  sentence on the same normalized line. A bare `No` is accepted only in an
+  answer context; interrogative, qualified and substantive `No ...` text keeps
+  the active framing. The full deterministic gate passed on this head. Two
+  unchanged-head live DOL runs used `qwen3-30b-a3b:latest` with an 8192-token
+  context at 100% GPU, but both failed closed with
+  `MODEL_SUMMARY_RESPONSE_WINDOW_MIXED` after 102.88 and 106.30 seconds when the
+  model combined `s19`, `s20` and Problem-framed `s22` in one unit. No summary
+  was persisted. The preceding exact product head therefore supplies this
+  slice's representative live output; these final-head runs prove rejection,
+  not successful live completion. Follow-up is tracked in issue #53.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3495,7 +3508,10 @@ release acceptance exposed issue #49
   sentence-terminal family, bounded `Answer` and `Response` denial bodies, exact
   neutral and affirmative
   transitions within one denial/reintroduction line and its colon-body form,
-  post-question denial answers with interrogative and qualified-tail rejection,
+  post-question denial answers including bounded bare `No` with interrogative,
+  qualified-tail and substantive-`No` rejection, declarative sentence-suffix
+  denials after ASCII and CJK terminals with non-denial and explicit
+  reintroduction controls,
   and fail-closed
   rejection of a source candidate spanning those transitions,
   framing-repair integrity release before a subsequent modal repair,
@@ -3524,5 +3540,9 @@ release acceptance exposed issue #49
   the bounded repair context still fails the run closed with
   `SYNTHESIS_REPAIR_INPUT_TOO_LARGE`; this slice does not add an automatic
   whole-run retry policy. Follow-up is tracked in issue #52.
+- A long-document General response that combines sources from distinct selection
+  windows still fails closed with `MODEL_SUMMARY_RESPONSE_WINDOW_MIXED`; this
+  slice does not add a model retry or redesign selection windows. Follow-up is
+  tracked in issue #53.
 - This slice does not change Story or Contract behavior, routing, UI, persistence
   schemas, source selection, ingestion, OCR or model configuration.
