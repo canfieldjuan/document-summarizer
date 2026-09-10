@@ -3490,12 +3490,19 @@ release acceptance exposed issue #49
   Risk questions, control-failure questions, extra qualifiers, missing
   determiners, mismatched categories and interrogative denials retain framing.
   The focused two-sided classifier probe and full deterministic gate passed.
-- The final product-code head `a289dc20c02d4752f88441d9d99a24f8ea9cec93`
+- Product-code head `a289dc20c02d4752f88441d9d99a24f8ea9cec93`
   admits bounded modal-led mitigation-action questions and supported temporal
   adverb positions around expanded negation. Modal failure and residual-state
   questions, noun uses of `control`, repeated negation, mismatched categories
   and qualified denials retain framing. The focused two-sided propagation probe
   and full deterministic gate passed.
+- The final product-code head `c4985e22eae058649e879473e522397db371dbee`
+  uses the apostrophe-preserving bounded tokenizer for framing reintroductions,
+  normalizes contracted auxiliaries into the existing polarity checks, and
+  recognizes full-width and Arabic commas as byte-safe coordinated-denial
+  delimiters. Wrong complements, repeated negation and qualified continuations
+  remain unframed. The focused two-sided propagation probe and full
+  deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
