@@ -809,6 +809,9 @@ fn continuation_reintroduces_source_framing(
     continuation: &str,
     active_framing: SourceFraming,
 ) -> bool {
+    if !begins_with_declarative_source_clause(continuation) {
+        return false;
+    }
     let (words, _) = section_denial_words(continuation);
     let framing_phrase_start = usize::from(
         words
@@ -1114,6 +1117,9 @@ fn residual_continuation_reintroduces_source_framing(
     active_framing: SourceFraming,
     skip_coordinator: bool,
 ) -> bool {
+    if !begins_with_declarative_source_clause(continuation) {
+        return false;
+    }
     let continuation_body = if skip_coordinator {
         continuation
             .split_once(|character: char| !character.is_alphanumeric())
@@ -1284,11 +1290,15 @@ fn is_source_question_terminal(character: char) -> bool {
 }
 
 fn begins_with_declarative_section_denial(text: &str, active_framing: SourceFraming) -> bool {
+    begins_with_declarative_source_clause(text)
+        && bounded_section_denial_clause(text, active_framing)
+}
+
+fn begins_with_declarative_source_clause(text: &str) -> bool {
     !text
         .chars()
         .find(|character| is_source_sentence_terminal(*character))
         .is_some_and(is_source_question_terminal)
-        && bounded_section_denial_clause(text, active_framing)
 }
 
 fn denial_qualification_lead(text: &str) -> bool {
@@ -8361,6 +8371,39 @@ mod tests {
                 format!("Key Risks\nNo risks were identified. {ruled_out_risk}\nLater text.");
             for unframed in [ruled_out_risk, "Later text."] {
                 assert_eq!(source_framing_for_segment(&block, unframed, None), None);
+            }
+        }
+        for interrogative_reintroduction in [
+            "Risks later emerged?",
+            "Risks later emerged？",
+            "Risks later emerged؟",
+            "Risks have not been ruled out?",
+        ] {
+            let block = format!(
+                "Key Risks\nNo risks were identified.\n{interrogative_reintroduction}\nOverview follows."
+            );
+            for unframed in [interrogative_reintroduction, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "{interrogative_reintroduction} must not restore framing",
+                );
+            }
+        }
+        for declarative_reintroduction in [
+            "Risks later emerged!",
+            "Risks later emerged。",
+            "Risks have not been ruled out.",
+        ] {
+            let block = format!(
+                "Key Risks\nNo risks were identified.\n{declarative_reintroduction}\nOverview follows."
+            );
+            for framed in [declarative_reintroduction, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{declarative_reintroduction} should restore framing",
+                );
             }
         }
         let no_longer_eliminated =
