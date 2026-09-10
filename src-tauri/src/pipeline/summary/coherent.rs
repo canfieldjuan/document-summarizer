@@ -714,17 +714,23 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
             .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
         {
             cursor = skip_adverbs(cursor + 1);
-            return words
-                .get(cursor)
-                .is_some_and(|word| matches!(word.as_str(), "absent" | "eliminated" | "resolved"));
+            return words.get(cursor).is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "absent" | "eliminated" | "impossible" | "resolved"
+                )
+            });
         }
         if words.get(cursor).is_some_and(|word| word == "no")
             && words.get(cursor + 1).is_some_and(|word| word == "longer")
         {
             cursor = skip_adverbs(cursor + 2);
-            return words
-                .get(cursor)
-                .is_some_and(|word| matches!(word.as_str(), "absent" | "eliminated" | "resolved"));
+            return words.get(cursor).is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "absent" | "eliminated" | "impossible" | "resolved"
+                )
+            });
         }
         return !words.get(cursor).is_some_and(|word| {
             matches!(
@@ -973,6 +979,24 @@ fn coordinated_continuation_lead(text: &str) -> bool {
         })
 }
 
+fn disjunctive_continuation_lead(text: &str) -> bool {
+    text.split(|character: char| !character.is_alphanumeric())
+        .find(|word| !word.is_empty())
+        .is_some_and(|word| word.eq_ignore_ascii_case("or"))
+}
+
+fn continuation_after_coordinator(text: &str) -> &str {
+    let text = text.trim_start_matches(|character: char| {
+        character.is_whitespace() || matches!(character, ',' | ':' | ';')
+    });
+    text.split_once(|character: char| !character.is_alphanumeric())
+        .map(|(_, continuation)| continuation)
+        .unwrap_or("")
+        .trim_start_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ',' | ':' | ';')
+        })
+}
+
 fn denial_qualification_lead(text: &str) -> bool {
     text.split(|character: char| !character.is_alphanumeric())
         .find(|word| !word.is_empty())
@@ -1000,9 +1024,18 @@ fn coordinated_clause_boundary(
     text.match_indices([',', ';'])
         .find_map(|(index, delimiter)| {
             let continuation = &text[index + 1..];
+            let coordinated = coordinated_continuation_lead(continuation);
+            let continuation_starts_boundary = if coordinated {
+                !disjunctive_continuation_lead(continuation)
+                    || bounded_section_denial_clause(
+                        continuation_after_coordinator(continuation),
+                        active_framing,
+                    )
+            } else {
+                delimiter == ";" && !denial_qualification_lead(continuation)
+            };
             (index < limit
-                && (coordinated_continuation_lead(continuation)
-                    || delimiter == ";" && !denial_qualification_lead(continuation))
+                && continuation_starts_boundary
                 && bounded_section_denial_clause(&text[..index], active_framing))
             .then_some(index)
         })
@@ -5991,6 +6024,14 @@ mod tests {
             "No risks were identified, while monitoring will continue.",
             SourceFraming::Risk,
         ));
+        assert!(!begins_with_section_denial(
+            "No risks were identified, or the review was incomplete.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were identified, or no risks were reported.",
+            SourceFraming::Risk,
+        ));
         for qualified_semicolon in [
             "No risks were identified; because the review is incomplete.",
             "No risks were identified; if the preliminary record is accurate.",
@@ -6355,6 +6396,18 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
+        let disjunctive_qualification =
+            "Key Risks\nNo risks were identified, or the review was incomplete.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(disjunctive_qualification, "Overview follows.", None,),
+            Some(SourceFraming::Risk)
+        );
+        let disjunctive_denial =
+            "Key Risks\nNo risks were identified, or no risks were reported.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(disjunctive_denial, "Overview follows.", None),
+            None
+        );
         let unpunctuated_title_case = "Key Risks\nWorkers May Fall\nLater text.";
         assert_eq!(
             source_framing_for_segment(unpunctuated_title_case, "Later text.", None),
@@ -7135,7 +7188,12 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
-        for negated_resolution in ["Risks remain not eliminated.", "Risks remain not resolved."] {
+        for negated_resolution in [
+            "Risks remain not eliminated.",
+            "Risks remain not resolved.",
+            "Risks remain not impossible.",
+            "Risks remain never impossible.",
+        ] {
             let block =
                 format!("Key Risks\nNo risks were identified. {negated_resolution}\nLater text.");
             for framed in [negated_resolution, "Later text."] {
@@ -7150,6 +7208,14 @@ mod tests {
         for framed in ["Risks remain no longer eliminated.", "Later text."] {
             assert_eq!(
                 source_framing_for_segment(no_longer_eliminated, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let no_longer_impossible =
+            "Key Risks\nNo risks were identified. Risks remain no longer impossible.\nLater text.";
+        for framed in ["Risks remain no longer impossible.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(no_longer_impossible, framed, None),
                 Some(SourceFraming::Risk)
             );
         }
