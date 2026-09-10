@@ -3400,19 +3400,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `949cb8d88c1b2a3f13feec1c7b15004c7f88b780`
+- The final product-code head `46551165b1afd8c6b4c44ad919a1a3b93194d3dd`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 106.53 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 106.73 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `7756459b11144a30c56a7a0a3f6a1bc56e237f0f9d12a087dde372ade54f4ffd` and
+  `72ccfed4007f80aeb20224f9d6899b530cadab02b1925db2646d620022a183cf` and
   citation integrity hash
-  `ac3a73222453d03264f82c8ff4d01d2fbd611ef1058a0273ddafc29d82b8e69e`.
+  `a3129c0890b1f3e1a915aa4c3021b678d881670dc553c5b29711fc5b8f5cd480`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3478,8 +3478,9 @@ release acceptance exposed issue #49
   controls, complement-aware `remain not possible` versus `remain not
   eliminated` polarity including double-negative `not impossible` inversion,
   and disjunctive continuations admitted only when their second disjunct is an
-  independent declarative bounded denial, with an interrogative second disjunct
-  rejected, bounded `Answer` and `Response` denial bodies, exact
+  independent declarative bounded denial, with ASCII, full-width and Arabic
+  interrogative second disjuncts rejected, bounded `Answer` and `Response`
+  denial bodies, exact
   neutral and affirmative
   transitions within one denial/reintroduction line and its colon-body form,
   post-question denial answers with interrogative and qualified-tail rejection,
