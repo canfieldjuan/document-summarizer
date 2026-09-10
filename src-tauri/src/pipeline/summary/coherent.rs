@@ -391,7 +391,7 @@ fn apply_heading_candidate(
     }
 }
 
-fn inline_heading_prefix(line: &str, colon_index: usize) -> &str {
+fn inline_heading_prefix(line: &str, colon_index: usize) -> (&str, usize) {
     let before_colon = &line[..colon_index];
     let prefix_start = before_colon
         .char_indices()
@@ -400,7 +400,12 @@ fn inline_heading_prefix(line: &str, colon_index: usize) -> &str {
         .map_or(0, |(index, character)| {
             index.saturating_add(character.len_utf8())
         });
-    before_colon[prefix_start..].trim()
+    let prefix = &before_colon[prefix_start..];
+    let prefix_leading_whitespace = prefix.len().saturating_sub(prefix.trim_start().len());
+    (
+        prefix.trim(),
+        prefix_start.saturating_add(prefix_leading_whitespace),
+    )
 }
 
 fn possible_inline_framing_boundary(text: &str) -> bool {
@@ -475,10 +480,17 @@ fn apply_inline_heading_candidate(
 }
 
 fn begins_with_section_denial(text: &str) -> bool {
-    let sentence_end = text
+    let sentence_terminal = text
         .char_indices()
-        .find(|(_, character)| matches!(character, '.' | '?' | '!'))
-        .map_or(text.len(), |(index, _)| index);
+        .find(|(_, character)| matches!(character, '.' | '?' | '!'));
+    let sentence_end = sentence_terminal.map_or(text.len(), |(index, _)| index);
+    if text[sentence_end..]
+        .chars()
+        .take_while(|character| matches!(character, '.' | '?' | '!'))
+        .any(|character| character == '?')
+    {
+        return false;
+    }
     let text = &text[..sentence_end];
     let words = text
         .split(|character: char| !character.is_alphanumeric())
@@ -549,7 +561,15 @@ fn bounded_section_denial_predicate(
 }
 
 fn consume_section_denial_nouns(words: &[String], mut cursor: usize) -> Option<usize> {
+    let mut after_conjunction = false;
     loop {
+        if after_conjunction
+            && words
+                .get(cursor)
+                .is_some_and(|word| matches!(word.as_str(), "neither" | "no"))
+        {
+            cursor += 1;
+        }
         if words
             .get(cursor)
             .is_some_and(|word| matches!(word.as_str(), "applicable" | "known"))
@@ -570,6 +590,7 @@ fn consume_section_denial_nouns(words: &[String], mut cursor: usize) -> Option<u
             return Some(cursor);
         }
         cursor += 1;
+        after_conjunction = true;
     }
 }
 
@@ -623,15 +644,20 @@ fn source_framing_line_update(
         transitions.push((leading_whitespace, framing));
     }
     for (colon_index, _) in line.match_indices(':') {
-        let (next, changed) =
-            apply_inline_heading_candidate(framing, inline_heading_prefix(line, colon_index));
+        let (heading_candidate, heading_offset) = inline_heading_prefix(line, colon_index);
+        let (next, changed) = apply_inline_heading_candidate(framing, heading_candidate);
         if changed {
             framing = next;
+            let body = &line[colon_index + 1..];
             let body_offset = leading_whitespace
                 .saturating_add(colon_index)
                 .saturating_add(1);
-            transitions.push((body_offset, framing));
-            let body = &line[colon_index + 1..];
+            let transition_offset = if body.trim().is_empty() {
+                leading_whitespace.saturating_add(heading_offset)
+            } else {
+                body_offset
+            };
+            transitions.push((transition_offset, framing));
             if framing.is_some() && begins_with_section_denial(body) {
                 framing = None;
                 let body_leading_whitespace = body.len().saturating_sub(body.trim_start().len());
@@ -4899,6 +4925,9 @@ mod tests {
         assert!(begins_with_section_denial(
             "Neither issues nor risks were reported."
         ));
+        assert!(begins_with_section_denial(
+            "No risks and no limitations were identified."
+        ));
         assert!(!begins_with_section_denial(
             "None of the controls fully eliminates fraud."
         ));
@@ -4913,6 +4942,10 @@ mod tests {
             "Neither control eliminates all risks.",
             "No risks were identified, but fraud remains possible.",
             "No risks were identified, but fraud remains possible. See the appendix.",
+            "No risks? Think again.",
+            "No risks!? Think again.",
+            "None reported? Verify the records.",
+            "No risks and no control eliminates every fraud risk.",
         ] {
             assert!(!begins_with_section_denial(residual_risk));
         }
@@ -5079,6 +5112,17 @@ mod tests {
             source_framing_for_segment(denied_limitation, "Later unrelated text.", None),
             None
         );
+        let repeated_denial =
+            "Key Risks\nNo risks and no limitations were identified.\nLater unrelated text.";
+        for unframed in [
+            "No risks and no limitations were identified.",
+            "Later unrelated text.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(repeated_denial, unframed, None),
+                None
+            );
+        }
         let denied_inline = "Common Problems: None reported.";
         assert_eq!(
             source_framing_for_segment(denied_inline, "None reported.", None),
@@ -5111,6 +5155,25 @@ mod tests {
             None
         );
         assert_eq!(source_framing_after_block(negated_inline, None), None);
+        let standalone_colon = "Common Problems:\nLate payments are frequent.";
+        assert_eq!(
+            source_framing_for_segment(standalone_colon, standalone_colon, None),
+            Some(SourceFraming::Problem)
+        );
+        let inline_colon = "Common Problems: Late payments are frequent.";
+        assert_eq!(
+            source_framing_for_segment(inline_colon, inline_colon, None),
+            None
+        );
+        assert_eq!(
+            source_framing_for_segment(inline_colon, "Late payments are frequent.", None,),
+            Some(SourceFraming::Problem)
+        );
+        let interrogative_denial = "Key Risks\nNo risks? Think again.\nWorkers may fall.";
+        assert_eq!(
+            source_framing_for_segment(interrogative_denial, "Workers may fall.", None),
+            Some(SourceFraming::Risk)
+        );
         let negative_problem = "Common Problems\nNo worker may be paid below minimum wage.";
         assert_eq!(
             source_framing_for_segment(

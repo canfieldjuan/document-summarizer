@@ -3305,13 +3305,18 @@ release acceptance exposed issue #49
   label. A recognized framing heading replaces the
   prior label. Inline transitions
   retain byte positions: a source after one inherits its state, while a source
-  crossing one remains unframed. The final transition controls following text.
+  crossing one remains unframed. A standalone colon heading transitions at the
+  heading start so a quote containing that heading and its next-line body keeps
+  the relationship; a genuinely inline heading transitions at its body. The
+  final transition controls following text.
   A bounded denial such as `None reported`, `None have been identified`, `No
   limitations were identified` or `There are no known risks at this time`
   clears an active label. Direct `No`/`Neither` and existential denials must
   consist of a framing-noun phrase plus a bounded absence or reporting
   predicate; only the leading complete sentence is inspected so later prose on
-  the extracted line does not hide the reset. Negative rules and residual-risk propositions such as `No worker
+  the extracted line does not hide the reset. Repeated determiners after noun
+  conjunctions remain within that grammar, while interrogative clauses cannot
+  reset it. Negative rules and residual-risk propositions such as `No worker
   may be paid below minimum wage`, `No control eliminates every fraud risk`
   and `None of ...` retain their governing context.
   A bounded source segment
@@ -3336,8 +3341,9 @@ release acceptance exposed issue #49
 - Before the deterministic repair, a GPU DOL run passed mechanically but emitted
   a page-21 paragraph beginning `Employees paid a piece rate may fall below the
   minimum wage` while its cited exact quote began `Common Problems`.
-- The final implementation's exact-code run used `qwen3-30b-a3b:latest` at 100%
-  GPU and passed in 114.23 seconds. Its delivered page-21 paragraph begins `The
+- A live run before the final parser boundary fixes used
+  `qwen3-30b-a3b:latest` at 100% GPU and passed in 114.23 seconds. Its delivered
+  page-21 paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
@@ -3350,11 +3356,12 @@ release acceptance exposed issue #49
   visual-processing pages, retention across an introductory colon, single- and
   excess-newline framing and reset headings, decimal/Roman/letter framing
   headings, inline framing and reset headings, fail-closed transition-spanning
-  sources, reset at uncertain and negated inline framing headings, retention
+  sources, whole standalone-colon heading/body candidates, inline transition
+  isolation, reset at uncertain and negated inline framing headings, retention
   across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
-  denial clearing in following-line and inline bodies with trailing prose,
-  negative-rule,
+  denial clearing in following-line and inline bodies with trailing prose and
+  repeated determiners, retention through interrogative denials and negative-rule,
   residual-risk, qualified-denial and `None of ...` retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
   repair and repeated-response failure,
