@@ -806,18 +806,30 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
         return false;
     }
     cursor = skip_adverbs(cursor + 1);
-    let negated = words
+    let explicitly_negated = words
         .get(cursor)
         .is_some_and(|word| matches!(word.as_str(), "never" | "not"));
-    if negated {
+    let no_longer = words.get(cursor).is_some_and(|word| word == "no")
+        && words.get(cursor + 1).is_some_and(|word| word == "longer");
+    if explicitly_negated {
         cursor = skip_adverbs(cursor + 1);
+    } else if no_longer {
+        cursor = skip_adverbs(cursor + 2);
+    }
+    if explicitly_negated || no_longer {
         if words.get(cursor).is_some_and(|word| word == "been") {
             cursor = skip_adverbs(cursor + 1);
         }
         return words.get(cursor).is_some_and(|word| {
             matches!(
                 word.as_str(),
-                "absent" | "eliminated" | "none" | "resolved" | "unidentified" | "unreported"
+                "absent"
+                    | "eliminated"
+                    | "impossible"
+                    | "none"
+                    | "resolved"
+                    | "unidentified"
+                    | "unreported"
             )
         });
     }
@@ -7268,6 +7280,9 @@ mod tests {
             "Risks remain never possible.",
             "Risks remain no longer possible.",
             "Risks remain impossible.",
+            "Risks are not possible.",
+            "Risks are impossible.",
+            "Risks are no longer possible.",
         ] {
             let resolved_continuation =
                 format!("Key Risks\nNo risks were identified. {resolved_state}\nLater text.");
@@ -7291,6 +7306,9 @@ mod tests {
             "Risks remain not resolved.",
             "Risks remain not impossible.",
             "Risks remain never impossible.",
+            "Risks are not impossible.",
+            "Risks were never impossible.",
+            "Risks are no longer impossible.",
         ] {
             let block =
                 format!("Key Risks\nNo risks were identified. {negated_resolution}\nLater text.");
