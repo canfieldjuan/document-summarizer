@@ -343,11 +343,8 @@ fn possible_framing_boundary(text: &str) -> bool {
     starts_uppercase && (all_uppercase || title_case || sentence_case_lead)
 }
 
-fn source_framing_after_paragraph(
-    current: Option<SourceFraming>,
-    paragraph: &str,
-) -> Option<SourceFraming> {
-    let heading_candidate = paragraph.lines().next().unwrap_or_default().trim();
+fn source_framing_after_line(current: Option<SourceFraming>, line: &str) -> Option<SourceFraming> {
+    let heading_candidate = line.trim();
     if let Some(next) = framing_from_heading(heading_candidate) {
         Some(next)
     } else if possible_framing_boundary(heading_candidate) {
@@ -362,8 +359,8 @@ fn source_framing_after_block(
     inherited: Option<SourceFraming>,
 ) -> Option<SourceFraming> {
     normalized_block
-        .split("\n\n")
-        .fold(inherited, source_framing_after_paragraph)
+        .lines()
+        .fold(inherited, source_framing_after_line)
 }
 
 fn source_framing_at_block_starts(
@@ -399,20 +396,18 @@ fn source_framing_for_segment(
     let segment_end = segment_start.checked_add(exact_quote.len())?;
     let mut framing = inherited;
     let mut governing_framing = inherited;
-    let mut paragraph_start = 0usize;
-    for paragraph in normalized_block.split("\n\n") {
-        if paragraph_start >= segment_end {
+    let mut line_start = 0usize;
+    for line in normalized_block.split_inclusive('\n') {
+        if line_start >= segment_end {
             break;
         }
-        framing = source_framing_after_paragraph(framing, paragraph.trim());
-        if paragraph_start <= segment_start {
+        framing = source_framing_after_line(framing, line);
+        if line_start <= segment_start {
             governing_framing = framing;
         } else if framing != governing_framing {
             return None;
         }
-        paragraph_start = paragraph_start
-            .saturating_add(paragraph.len())
-            .saturating_add(2);
+        line_start = line_start.saturating_add(line.len());
     }
     governing_framing
 }
@@ -4550,6 +4545,20 @@ mod tests {
             source_framing_for_segment(single_newline_reset, "Pay workers promptly.", None),
             None
         );
+        let single_newline_sections =
+            "Common Problems\nLate payments are frequent.\nSolutions\nPay workers promptly.";
+        assert_eq!(
+            source_framing_for_segment(
+                single_newline_sections,
+                "Late payments are frequent.",
+                None,
+            ),
+            Some(SourceFraming::Problem)
+        );
+        assert_eq!(
+            source_framing_for_segment(single_newline_sections, "Pay workers promptly.", None,),
+            None
+        );
     }
 
     #[test]
@@ -4587,6 +4596,13 @@ mod tests {
                 text_page(4, "after-empty", "Key Risks\n\nRisk detail.", false),
                 text_page(5, "visual", "Key Risks\n\nVisible risk detail.", true),
                 text_page(6, "after-visual", "Later detail.", false),
+                text_page(
+                    7,
+                    "excess-newlines",
+                    "Key Risks\n\nRisk detail.\n\n\nSolutions\n\nSolution detail.",
+                    false,
+                ),
+                text_page(8, "after-excess-newlines", "Later detail.", false),
             ],
             warnings: Vec::new(),
         };
@@ -4595,6 +4611,7 @@ mod tests {
         assert_eq!(starts["after-empty"], None);
         assert_eq!(starts["visual"], None);
         assert_eq!(starts["after-visual"], None);
+        assert_eq!(starts["after-excess-newlines"], None);
     }
 
     #[test]

@@ -3287,9 +3287,8 @@ release acceptance exposed issue #49
   nearest reliable section heading in canonical document order, including later
   segments and fully available continuation pages that no longer contain it.
   Empty or visual-processing pages reset inherited state before and after the
-  page because their complete governing text is unavailable. A subsequent
-  bounded heading-shaped paragraph, including a heading followed by body text
-  with one extracted newline, and including
+  page because their complete governing text is unavailable. The resolver scans
+  each extracted line so a subsequent bounded heading-shaped line, including
   a decimal, Roman or letter-marked heading or a sentence-case heading with an
   explicit heading signal, resets the label; numbering alone does not. A
   recognized framing heading replaces it. A bounded source segment
@@ -3317,14 +3316,15 @@ release acceptance exposed issue #49
   presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
-  multiline, overlong, negated, uncertainty-qualified, solution-oriented and
-  unrelated headings. Tests
+  multi-line heading candidates, overlong, negated, uncertainty-qualified,
+  solution-oriented and unrelated headings. Tests
   also prove application-owned framing of neutral General units, propagation to
   later segments and page blocks of a split section, reset at a later
   sentence-case or punctuated marked solution section, retention across short
   capitalized and numbered-list body paragraphs, reset across empty and
-  visual-processing pages, retention across an introductory colon, single-newline
-  framing and reset headings, decimal/Roman/letter framing headings, fail-closed
+  visual-processing pages, retention across an introductory colon, single- and
+  excess-newline framing and reset headings, decimal/Roman/letter framing
+  headings, fail-closed
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry
