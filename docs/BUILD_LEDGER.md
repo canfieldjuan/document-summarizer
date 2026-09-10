@@ -3397,19 +3397,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `14175d6515e7f12c302191c3e7c10503e40ec35e`
+- The final product-code head `afc1babc4bb243ddfa9981723ee52584855475e6`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 96.76 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 96.82 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `b340e86a9824bc681f62c1cf7ac9bde7602ee5838978adb993596d50b59c4016` and
+  `2b828819f08b3a52c7e4add5649719438ab814e190a1dfe6930c074335d95160` and
   citation integrity hash
-  `6fc07a74b772aecbbfce637bdf791296e1a0f7aa8a055751da3f91154793f4ea`.
+  `23c334879e5c82a981b8093f6ec8a73546d5e76b64d9c1fc0cc4f7891c9917b6`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3469,8 +3469,9 @@ release acceptance exposed issue #49
   resolved/eliminated absence continuations with unresolved-risk
   reintroduction, punctuation-scoped residual-predicate negation with
   conditional-clause and same-clause controls, exact neutral and affirmative
-  transitions within
-  one denial/reintroduction line and its colon-body form, and fail-closed
+  transitions within one denial/reintroduction line and its colon-body form,
+  post-question denial answers with interrogative and qualified-tail rejection,
+  and fail-closed
   rejection of a source candidate spanning those transitions,
   framing-repair integrity release before a subsequent modal repair,
   mixed verification context, Story isolation, and rejection of a short source
