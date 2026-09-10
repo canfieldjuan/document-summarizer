@@ -3310,7 +3310,9 @@ release acceptance exposed issue #49
   unsupported modifiers prevent assigning a new label. An interrogative
   heading can end prior state but cannot assign an
   affirmative framing label, including when its answer or another label follows
-  on the same line. Ordinary substantive questions do not create that reset. A
+  on the same line. Direct framing/section phrases and the bounded `How to avoid
+  ...` form qualify; ordinary substantive wh-questions do not create that reset,
+  even when their prose mentions a framing noun. A
   recognized framing heading replaces the
   prior label. Inline transitions
   are applied in byte order and retain byte positions, so the last textual

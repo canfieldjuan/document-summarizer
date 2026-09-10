@@ -556,6 +556,27 @@ fn apply_inline_heading_candidate(
     }
 }
 
+fn possible_interrogative_framing_boundary(text: &str) -> bool {
+    if !possible_framing_boundary(text) || !possible_inline_framing_boundary(text) {
+        return false;
+    }
+    let words = text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let starts_with_wh_word = words.first().is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "how" | "what" | "when" | "where" | "who" | "why"
+        )
+    });
+    !starts_with_wh_word
+        || words
+            .get(..3)
+            .is_some_and(|prefix| prefix == ["how", "to", "avoid"])
+}
+
 fn continuation_reintroduces_source_framing(
     continuation: &str,
     active_framing: SourceFraming,
@@ -948,9 +969,7 @@ fn source_framing_line_update(
                 continue;
             }
             let (heading_candidate, heading_offset) = inline_heading_prefix(line, delimiter_index);
-            if possible_framing_boundary(heading_candidate)
-                && possible_inline_framing_boundary(heading_candidate)
-            {
+            if possible_interrogative_framing_boundary(heading_candidate) {
                 framing = None;
                 transitions.push((leading_whitespace.saturating_add(heading_offset), framing));
             }
@@ -5937,6 +5956,33 @@ mod tests {
                 None,
             ),
             Some(SourceFraming::Risk)
+        );
+        for wh_question in [
+            "Why did controls fail? Fraud remains possible.",
+            "What happens if controls fail? Fraud remains possible.",
+            "How did controls fail? Fraud remains possible.",
+            "Who can be harmed? Fraud remains possible.",
+            "Why are workers at risk? Fraud remains possible.",
+        ] {
+            let substantive_wh_question = format!("Key Risks\n{wh_question}");
+            assert_eq!(
+                source_framing_for_segment(
+                    &substantive_wh_question,
+                    "Fraud remains possible.",
+                    None,
+                ),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let interrogative_section_heading =
+            "Key Risks\nHow to avoid common problems? Apply the documented controls.";
+        assert_eq!(
+            source_framing_for_segment(
+                interrogative_section_heading,
+                "Apply the documented controls.",
+                None,
+            ),
+            None
         );
         let not_applicable = "Key Risks\nNot applicable.\nLater unrelated text.";
         for unframed in ["Not applicable.", "Later unrelated text."] {
