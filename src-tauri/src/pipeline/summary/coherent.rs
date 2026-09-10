@@ -261,8 +261,11 @@ fn required_source_framing(exact_quote: &str) -> Option<SourceFraming> {
 fn marked_heading_title(heading: &str) -> Option<&str> {
     let separator = heading.find(char::is_whitespace)?;
     let raw_marker = &heading[..separator];
-    let stripped_marker = raw_marker
-        .strip_suffix('.')
+    let parenthesized_marker = raw_marker
+        .strip_prefix('(')
+        .and_then(|marker| marker.strip_suffix(')'));
+    let stripped_marker = parenthesized_marker
+        .or_else(|| raw_marker.strip_suffix('.'))
         .or_else(|| raw_marker.strip_suffix(')'))
         .or_else(|| raw_marker.strip_suffix(':'));
     let (marker, has_marker_punctuation) = stripped_marker
@@ -497,6 +500,10 @@ fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool
     let Some(first) = words.first().map(String::as_str) else {
         return false;
     };
+    if first == "not" {
+        return words.get(1).is_some_and(|word| word == "applicable")
+            && section_denial_tail(&words[2..]);
+    }
     if first == "none" {
         if words.len() == 1 {
             return true;
@@ -4867,6 +4874,8 @@ mod tests {
             ("IV. Risks", SourceFraming::Risk),
             ("A. Exceptions", SourceFraming::Exception),
             ("a. Exceptions", SourceFraming::Exception),
+            ("(a) Exceptions", SourceFraming::Exception),
+            ("(IV) Risks", SourceFraming::Risk),
             ("Key Risks", SourceFraming::Risk),
             ("Safety Warning", SourceFraming::Warning),
             ("Important Exceptions", SourceFraming::Exception),
@@ -4885,6 +4894,8 @@ mod tests {
             "Common Problems",
             "0. Common Problems\n\nBody text.",
             "1.. Common Problems\n\nBody text.",
+            "(a. Exceptions\n\nBody text.",
+            "((a)) Exceptions\n\nBody text.",
             "2026 Common Problems\n\nBody text.",
             "problems.\n\nOrdinary wrapped prose.",
             "No Known Issues\n\nNo defects were found.",
@@ -4955,6 +4966,18 @@ mod tests {
         ));
         assert!(begins_with_section_denial(
             "No risks exist.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "Not applicable.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
+            "Not applicable because the control already applies.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
+            "Not applicable? Verify the record.",
             SourceFraming::Risk,
         ));
         assert!(!begins_with_section_denial(
@@ -5236,6 +5259,18 @@ mod tests {
             source_framing_for_segment(lowercase_marker, "The deadline does not apply.", None,),
             Some(SourceFraming::Exception)
         );
+        let parenthesized_marker = "Key Risks\n(a) Exceptions\nThe deadline does not apply.";
+        assert_eq!(
+            source_framing_for_segment(parenthesized_marker, "The deadline does not apply.", None,),
+            Some(SourceFraming::Exception)
+        );
+        let not_applicable = "Key Risks\nNot applicable.\nLater unrelated text.";
+        for unframed in ["Not applicable.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(not_applicable, unframed, None),
+                None
+            );
+        }
         let negative_problem = "Common Problems\nNo worker may be paid below minimum wage.";
         assert_eq!(
             source_framing_for_segment(
