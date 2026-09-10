@@ -432,6 +432,21 @@ struct SourceFramingLineUpdate {
     transitions: Vec<(usize, Option<SourceFraming>)>,
 }
 
+fn is_introductory_colon_label(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_end_matches(':')
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches!(
+        normalized.as_str(),
+        "example" | "examples include" | "important note" | "note" | "supporting example"
+    )
+}
+
 fn apply_heading_candidate(
     current: Option<SourceFraming>,
     heading_candidate: &str,
@@ -439,7 +454,9 @@ fn apply_heading_candidate(
     if let Some(next) = framing_from_heading(heading_candidate) {
         (Some(next), true)
     } else if heading_candidate.trim().ends_with(':') {
-        if possible_inline_framing_boundary(heading_candidate) {
+        if !is_introductory_colon_label(heading_candidate)
+            && possible_framing_boundary(heading_candidate)
+        {
             (None, true)
         } else {
             (current, false)
@@ -5767,6 +5784,21 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(standalone_note, "The guard may become hot.", None),
             Some(SourceFraming::Warning)
+        );
+        let standalone_example = "Common Problems\nExample:\nLate payment may occur.";
+        assert_eq!(
+            source_framing_for_segment(standalone_example, "Late payment may occur.", None),
+            Some(SourceFraming::Problem)
+        );
+        let standalone_discussion = "Key Risks\nDiscussion:\nThe survey results follow.";
+        assert_eq!(
+            source_framing_for_segment(standalone_discussion, "The survey results follow.", None,),
+            None
+        );
+        let inline_discussion = "Key Risks\nDiscussion: The survey results follow.";
+        assert_eq!(
+            source_framing_for_segment(inline_discussion, "The survey results follow.", None,),
+            Some(SourceFraming::Risk)
         );
         let standalone_solution = "Common Problems\nSolutions:\nPay workers promptly.";
         assert_eq!(

@@ -3303,9 +3303,10 @@ release acceptance exposed issue #49
   reliable heading followed by a colon and body on the same line changes state
   at the body boundary, including when the heading ends a preceding body line
   and its own body begins on the next line. Generic colon-ended resets require a
-  marked heading or an explicit section lead in both inline and standalone layouts, so
-  introductory labels such as `Example:`, `Note:` or `Important Note:` remain
-  prose. An explicit inline prefix ending in a framing noun or one of the
+  marked heading or an explicit section lead. A conventional standalone
+  title-case colon heading resets prior state; the exact introductory labels
+  `Example:`, `Examples Include:`, `Note:`, `Important Note:` and `Supporting
+  Example:` remain prose in either layout. An explicit inline prefix ending in a framing noun or one of the
   bounded compound terms resets prior state when negation, uncertainty or
   unsupported modifiers prevent assigning a new label. An interrogative
   heading can end prior state but cannot assign an
