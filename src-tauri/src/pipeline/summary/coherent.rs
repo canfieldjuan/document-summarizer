@@ -927,26 +927,7 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
     } else if matches!(first, "no" | "neither") {
         bounded_section_denial_predicate(&words, 1, Some(active_framing))
     } else {
-        let existential_noun_start = if first == "there"
-            && matches!(
-                words.get(1).map(String::as_str),
-                Some("are" | "is" | "was" | "were")
-            )
-            && words.get(2).is_some_and(|word| word == "no")
-        {
-            Some(3)
-        } else if first == "there"
-            && matches!(
-                words.get(1).map(String::as_str),
-                Some("had" | "has" | "have")
-            )
-            && words.get(2).is_some_and(|word| word == "been")
-            && words.get(3).is_some_and(|word| word == "no")
-        {
-            Some(4)
-        } else {
-            None
-        };
+        let existential_noun_start = existential_denial_noun_start(&words);
         existential_noun_start.is_some_and(|noun_start| {
             bounded_section_denial_predicate(&words, noun_start, Some(active_framing))
         })
@@ -971,6 +952,51 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
         denial_offset,
         reintroduction_offset: reintroduced.then_some(continuation_offset),
     })
+}
+
+fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
+    if words.first().map(String::as_str) != Some("there") {
+        return None;
+    }
+    let mut cursor = 2;
+    let perfect = matches!(
+        words.get(1).map(String::as_str),
+        Some("had" | "has" | "have")
+    );
+    if !perfect
+        && !matches!(
+            words.get(1).map(String::as_str),
+            Some("are" | "is" | "was" | "were")
+        )
+    {
+        return None;
+    }
+
+    let mut consumed_temporal_adverb = false;
+    if words
+        .get(cursor)
+        .is_some_and(|word| matches!(word.as_str(), "currently" | "yet"))
+    {
+        consumed_temporal_adverb = true;
+        cursor += 1;
+    }
+    if perfect {
+        if words.get(cursor).map(String::as_str) != Some("been") {
+            return None;
+        }
+        cursor += 1;
+        if !consumed_temporal_adverb
+            && words
+                .get(cursor)
+                .is_some_and(|word| matches!(word.as_str(), "currently" | "yet"))
+        {
+            cursor += 1;
+        }
+    }
+    words
+        .get(cursor)
+        .is_some_and(|word| word == "no")
+        .then_some(cursor + 1)
 }
 
 #[cfg(test)]
@@ -5786,6 +5812,18 @@ mod tests {
             "There are no known risks at this time.",
             SourceFraming::Risk,
         ));
+        assert!(begins_with_section_denial(
+            "There are currently no risks.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "There have currently been no risks identified.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
+            "There are currently no limitations.",
+            SourceFraming::Risk,
+        ));
         for perfect_existential in [
             "There has been no risk identified.",
             "There have been no risks identified.",
@@ -5949,6 +5987,7 @@ mod tests {
             "No exceptions apply to every worker.",
             "No risks have yet been identified because the review is incomplete.",
             "No risks are currently present in this area.",
+            "There are currently no risks in this area.",
         ] {
             assert!(!begins_with_section_denial(
                 residual_risk,
@@ -6495,6 +6534,14 @@ mod tests {
         for unframed in ["No risks to report.", "Later unrelated text."] {
             assert_eq!(
                 source_framing_for_segment(no_risks_to_report, unframed, None),
+                None
+            );
+        }
+        let existential_temporal_denial =
+            "Key Risks\nThere are currently no risks.\nLater unrelated text.";
+        for unframed in ["There are currently no risks.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(existential_temporal_denial, unframed, None),
                 None
             );
         }
