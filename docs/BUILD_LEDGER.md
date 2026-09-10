@@ -3333,9 +3333,9 @@ release acceptance exposed issue #49
 - Before the deterministic repair, a GPU DOL run passed mechanically but emitted
   a page-21 paragraph beginning `Employees paid a piece rate may fall below the
   minimum wage` while its cited exact quote began `Common Problems`.
-- The final implementation's run used `qwen3-30b-a3b:latest` at 100% GPU and
-  passed in 103.07 seconds. Its delivered page-21 paragraph begins `The document
-  presents the following as a problem`, retains the minimum-wage details and
+- The final implementation's exact-code run used `qwen3-30b-a3b:latest` at 100%
+  GPU and passed in 114.23 seconds. Its delivered page-21 paragraph begins `The
+  document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
