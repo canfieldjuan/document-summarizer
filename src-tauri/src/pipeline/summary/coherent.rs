@@ -500,9 +500,15 @@ fn possible_framing_boundary(text: &str) -> bool {
             || mitigation_control_section_heading)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SourceFramingState {
+    active: Option<SourceFraming>,
+    suspended: Option<SourceFraming>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceFramingLineUpdate {
-    framing: Option<SourceFraming>,
+    state: SourceFramingState,
     transitions: Vec<(usize, Option<SourceFraming>)>,
 }
 
@@ -1649,15 +1655,24 @@ fn section_question_presence_predicate(word: &str) -> bool {
 
 fn apply_section_denial_update(
     framing: &mut Option<SourceFraming>,
+    suspended: &mut Option<SourceFraming>,
     transitions: &mut Vec<(usize, Option<SourceFraming>)>,
     base_offset: usize,
     text: &str,
 ) {
-    apply_section_denial_update_with_answer_context(framing, transitions, base_offset, text, false);
+    apply_section_denial_update_with_answer_context(
+        framing,
+        suspended,
+        transitions,
+        base_offset,
+        text,
+        false,
+    );
 }
 
 fn apply_section_answer_denial_update(
     framing: &mut Option<SourceFraming>,
+    suspended: &mut Option<SourceFraming>,
     transitions: &mut Vec<(usize, Option<SourceFraming>)>,
     base_offset: usize,
     text: &str,
@@ -1665,6 +1680,7 @@ fn apply_section_answer_denial_update(
 ) {
     apply_section_denial_update_with_answer_context(
         framing,
+        suspended,
         transitions,
         base_offset,
         text,
@@ -1674,6 +1690,7 @@ fn apply_section_answer_denial_update(
 
 fn apply_section_denial_update_with_answer_context(
     framing: &mut Option<SourceFraming>,
+    suspended: &mut Option<SourceFraming>,
     transitions: &mut Vec<(usize, Option<SourceFraming>)>,
     base_offset: usize,
     text: &str,
@@ -1691,23 +1708,42 @@ fn apply_section_denial_update_with_answer_context(
         return;
     };
     *framing = None;
+    *suspended = Some(active_framing);
     transitions.push((base_offset.saturating_add(update.denial_offset), *framing));
     if let Some(reintroduction_offset) = update.reintroduction_offset {
         *framing = Some(active_framing);
+        *suspended = None;
         transitions.push((base_offset.saturating_add(reintroduction_offset), *framing));
     }
 }
 
-fn source_framing_line_update(
-    current: Option<SourceFraming>,
-    line: &str,
-) -> SourceFramingLineUpdate {
+fn source_framing_line_update(current: SourceFramingState, line: &str) -> SourceFramingLineUpdate {
     let leading_whitespace = line.len().saturating_sub(line.trim_start().len());
     let line = line.trim();
-    let mut framing = current;
+    let mut framing = current.active;
+    let mut suspended = current.suspended;
     let mut transitions = Vec::new();
     let mut bare_no_answer_allowed = false;
-    apply_section_denial_update(&mut framing, &mut transitions, leading_whitespace, line);
+    if framing.is_none()
+        && suspended.is_some_and(|category| {
+            continuation_reintroduces_source_framing(line, category)
+                || residual_continuation_reintroduces_source_framing(
+                    line,
+                    category,
+                    coordinated_continuation_lead(line),
+                )
+        })
+    {
+        framing = suspended.take();
+        transitions.push((leading_whitespace, framing));
+    }
+    apply_section_denial_update(
+        &mut framing,
+        &mut suspended,
+        &mut transitions,
+        leading_whitespace,
+        line,
+    );
     for (delimiter_index, delimiter) in line
         .match_indices(|character: char| character == ':' || is_source_sentence_terminal(character))
     {
@@ -1720,6 +1756,7 @@ fn source_framing_line_update(
             });
             if possible_interrogative_framing_boundary(heading_candidate) {
                 framing = None;
+                suspended = None;
                 transitions.push((leading_whitespace.saturating_add(heading_offset), framing));
             }
             let answer = &line[delimiter_index + delimiter_len..];
@@ -1728,6 +1765,7 @@ fn source_framing_line_update(
                 .saturating_add(delimiter_len);
             apply_section_answer_denial_update(
                 &mut framing,
+                &mut suspended,
                 &mut transitions,
                 answer_offset,
                 answer,
@@ -1740,7 +1778,13 @@ fn source_framing_line_update(
             let suffix_offset = leading_whitespace
                 .saturating_add(delimiter_index)
                 .saturating_add(delimiter_len);
-            apply_section_denial_update(&mut framing, &mut transitions, suffix_offset, suffix);
+            apply_section_denial_update(
+                &mut framing,
+                &mut suspended,
+                &mut transitions,
+                suffix_offset,
+                suffix,
+            );
             bare_no_answer_allowed = false;
             continue;
         }
@@ -1753,6 +1797,7 @@ fn source_framing_line_update(
         let (next, changed) = apply_inline_heading_candidate(framing, heading_candidate);
         if changed {
             framing = next;
+            suspended = None;
             let body = &line[colon_index + 1..];
             let body_offset = leading_whitespace
                 .saturating_add(colon_index)
@@ -1763,7 +1808,13 @@ fn source_framing_line_update(
                 body_offset
             };
             transitions.push((transition_offset, framing));
-            apply_section_denial_update(&mut framing, &mut transitions, body_offset, body);
+            apply_section_denial_update(
+                &mut framing,
+                &mut suspended,
+                &mut transitions,
+                body_offset,
+                body,
+            );
             bare_no_answer_allowed = false;
         } else if denial_answer_label {
             let body = &line[colon_index + 1..];
@@ -1772,6 +1823,7 @@ fn source_framing_line_update(
                 .saturating_add(1);
             apply_section_answer_denial_update(
                 &mut framing,
+                &mut suspended,
                 &mut transitions,
                 body_offset,
                 body,
@@ -1786,52 +1838,87 @@ fn source_framing_line_update(
         let (next, changed) = apply_heading_candidate(framing, line);
         framing = next;
         if changed {
+            suspended = None;
             transitions.push((leading_whitespace, framing));
         }
     }
     SourceFramingLineUpdate {
-        framing,
+        state: SourceFramingState {
+            active: framing,
+            suspended,
+        },
         transitions,
     }
 }
 
-fn source_framing_after_line(current: Option<SourceFraming>, line: &str) -> Option<SourceFraming> {
-    source_framing_line_update(current, line).framing
+fn source_framing_after_line(current: SourceFramingState, line: &str) -> SourceFramingState {
+    source_framing_line_update(current, line).state
 }
 
-fn source_framing_after_block(
+fn source_framing_after_block_state(
     normalized_block: &str,
-    inherited: Option<SourceFraming>,
-) -> Option<SourceFraming> {
+    inherited: SourceFramingState,
+) -> SourceFramingState {
     normalized_block
         .lines()
         .fold(inherited, source_framing_after_line)
 }
 
+#[cfg(test)]
+fn source_framing_after_block(
+    normalized_block: &str,
+    inherited: Option<SourceFraming>,
+) -> Option<SourceFraming> {
+    source_framing_after_block_state(
+        normalized_block,
+        SourceFramingState {
+            active: inherited,
+            suspended: None,
+        },
+    )
+    .active
+}
+
 fn source_framing_at_block_starts(
     normalized: &NormalizedDocument,
-) -> HashMap<String, Option<SourceFraming>> {
-    let mut framing = None;
+) -> HashMap<String, SourceFramingState> {
+    let mut framing = SourceFramingState::default();
     let mut starts = HashMap::new();
     for page in &normalized.pages {
         if page.requires_visual_processing || page.content.is_empty() {
-            framing = None;
+            framing = SourceFramingState::default();
         }
         for block in &page.content {
             starts.insert(block.block_id.clone(), framing);
-            framing = source_framing_after_block(&block.text, framing);
+            framing = source_framing_after_block_state(&block.text, framing);
         }
         if page.requires_visual_processing {
-            framing = None;
+            framing = SourceFramingState::default();
         }
     }
     starts
 }
 
+#[cfg(test)]
 fn source_framing_for_segment(
     normalized_block: &str,
     exact_quote: &str,
     inherited: Option<SourceFraming>,
+) -> Option<SourceFraming> {
+    source_framing_for_segment_with_state(
+        normalized_block,
+        exact_quote,
+        SourceFramingState {
+            active: inherited,
+            suspended: None,
+        },
+    )
+}
+
+fn source_framing_for_segment_with_state(
+    normalized_block: &str,
+    exact_quote: &str,
+    inherited: SourceFramingState,
 ) -> Option<SourceFraming> {
     let mut matches = normalized_block.match_indices(exact_quote);
     let (segment_start, _) = matches.next()?;
@@ -1843,7 +1930,7 @@ fn source_framing_for_segment(
     }
     let segment_end = segment_start.checked_add(exact_quote.len())?;
     let mut framing = inherited;
-    let mut governing_framing = inherited;
+    let mut governing_framing = inherited.active;
     let mut line_start = 0usize;
     for line in normalized_block.split_inclusive('\n') {
         if line_start >= segment_end {
@@ -1852,12 +1939,12 @@ fn source_framing_for_segment(
         let line_end = line_start.saturating_add(line.len());
         let update = source_framing_line_update(framing, line);
         if line_end <= segment_start {
-            framing = update.framing;
-            governing_framing = framing;
+            framing = update.state;
+            governing_framing = framing.active;
             line_start = line_end;
             continue;
         }
-        let mut framing_at_segment_start = framing;
+        let mut framing_at_segment_start = framing.active;
         for (transition_offset, next) in &update.transitions {
             let transition = line_start.saturating_add(*transition_offset);
             if transition <= segment_start {
@@ -1866,7 +1953,7 @@ fn source_framing_for_segment(
                 return None;
             }
         }
-        framing = update.framing;
+        framing = update.state;
         if line_start <= segment_start {
             governing_framing = framing_at_segment_start;
         }
@@ -1894,13 +1981,13 @@ pub(super) fn verification_source_framing(
         .iter()
         .filter_map(|item| {
             let framing = blocks.get(item.block_id.as_str()).and_then(|block| {
-                source_framing_for_segment(
+                source_framing_for_segment_with_state(
                     &block.text,
                     &item.exact_quote,
                     framing_at_block_starts
                         .get(item.block_id.as_str())
                         .copied()
-                        .flatten(),
+                        .unwrap_or_default(),
                 )
             })?;
             Some((item.evidence_id.clone(), framing.label().to_string()))
@@ -5142,13 +5229,13 @@ fn source_catalog_for_synthesis_version(
                     false,
                 )
             })?;
-            let source_framing = source_framing_for_segment(
+            let source_framing = source_framing_for_segment_with_state(
                 &block.text,
                 &source.exact_quote,
                 framing_at_block_starts
                     .get(source.block_id.as_str())
                     .copied()
-                    .flatten(),
+                    .unwrap_or_default(),
             );
             let evidence_id = deterministic_id(
                 "summary-evidence",
@@ -7771,6 +7858,27 @@ mod tests {
             source_framing_for_segment(split_reintroduction, split_line, None),
             None
         );
+        let next_line_reintroduction =
+            "Key Risks\nNo risks were identified.\nRisks later emerged.\nOverview follows.";
+        for framed in ["Risks later emerged.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(next_line_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let blank_line_reintroduction =
+            "Key Risks\nNo risks were identified.\n\nRisks later emerged.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(blank_line_reintroduction, "Overview follows.", None),
+            Some(SourceFraming::Risk)
+        );
+        let bounded_suspension = "Key Risks\nNo risks were identified.\nMonitoring continues.\nSolutions\nRisks later emerged.\nOverview follows.";
+        for unframed in ["Risks later emerged.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(bounded_suspension, unframed, None),
+                None
+            );
+        }
         let inline_split_reintroduction =
             "Key Risks: No risks were identified. Risks later emerged.\nLater text.";
         assert_eq!(
@@ -8043,16 +8151,46 @@ mod tests {
                     false,
                 ),
                 text_page(10, "after-wrapped-prose", "Unrelated detail.", false),
+                text_page(
+                    11,
+                    "denied-at-block-end",
+                    "Key Risks\nNo risks were identified.",
+                    false,
+                ),
+                text_page(
+                    12,
+                    "next-block-reintroduction",
+                    "Risks later emerged.",
+                    false,
+                ),
+                text_page(13, "after-reintroduction", "Overview follows.", false),
             ],
             warnings: Vec::new(),
         };
         let starts = source_framing_at_block_starts(&normalized);
-        assert_eq!(starts["continuation"], Some(SourceFraming::Problem));
-        assert_eq!(starts["after-empty"], None);
-        assert_eq!(starts["visual"], None);
-        assert_eq!(starts["after-visual"], None);
-        assert_eq!(starts["after-excess-newlines"], None);
-        assert_eq!(starts["after-wrapped-prose"], None);
+        assert_eq!(starts["continuation"].active, Some(SourceFraming::Problem));
+        assert_eq!(starts["after-empty"].active, None);
+        assert_eq!(starts["visual"].active, None);
+        assert_eq!(starts["after-visual"].active, None);
+        assert_eq!(starts["after-excess-newlines"].active, None);
+        assert_eq!(starts["after-wrapped-prose"].active, None);
+        assert_eq!(starts["next-block-reintroduction"].active, None);
+        assert_eq!(
+            starts["next-block-reintroduction"].suspended,
+            Some(SourceFraming::Risk)
+        );
+        assert_eq!(
+            source_framing_for_segment_with_state(
+                "Risks later emerged.",
+                "Risks later emerged.",
+                starts["next-block-reintroduction"],
+            ),
+            Some(SourceFraming::Risk)
+        );
+        assert_eq!(
+            starts["after-reintroduction"].active,
+            Some(SourceFraming::Risk)
+        );
     }
 
     #[test]
