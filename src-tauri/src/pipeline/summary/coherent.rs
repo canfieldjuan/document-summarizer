@@ -397,7 +397,7 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "why"
     );
     let sentence_case_has_heading_shape = !heading.ends_with(['.', '!', ';']);
-    starts_uppercase
+    (starts_uppercase || marked_title.is_some())
         && (all_uppercase || title_case || sentence_case_lead && sentence_case_has_heading_shape)
 }
 
@@ -541,7 +541,11 @@ fn continuation_reintroduces_source_framing(
         .take(17)
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
-    let Some((framing, noun_end)) = source_framing_term_at(&words, 0) else {
+    let term_start = words
+        .iter()
+        .take_while(|word| is_source_framing_modifier(word.as_str()) || word.as_str() == "new")
+        .count();
+    let Some((framing, noun_end)) = source_framing_term_at(&words, term_start) else {
         return false;
     };
     framing == active_framing && !framing_noun_is_denied(&words, noun_end)
@@ -5285,6 +5289,14 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(!begins_with_section_denial(
+            "No risks were identified. New risks emerged during testing.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
+            "No risks were identified. Important new risk factors emerged during testing.",
+            SourceFraming::Risk,
+        ));
+        assert!(!begins_with_section_denial(
             "No risks were identified. Risks were not eliminated.",
             SourceFraming::Risk,
         ));
@@ -5293,6 +5305,7 @@ mod tests {
             "No risks were identified. Risks did not emerge.",
             "No risks were identified. Risks have not been identified.",
             "No risks were identified. Risks were eliminated.",
+            "No risks were identified. New risks were not identified later.",
         ] {
             assert!(begins_with_section_denial(
                 repeated_absence,
@@ -5439,6 +5452,7 @@ mod tests {
         for body in [
             "2",
             "1. Workers may fall from ladders.",
+            "1. workers may fall from ladders.",
             "A. Workers may fall from ladders.",
             "1. When guards fail, workers may be injured.",
             "Examples include:",
@@ -5752,6 +5766,11 @@ mod tests {
             source_framing_for_segment(lowercase_marker, "The deadline does not apply.", None,),
             Some(SourceFraming::Exception)
         );
+        let lowercase_marked_reset = "Key Risks\na. solutions\nPay workers promptly.";
+        assert_eq!(
+            source_framing_for_segment(lowercase_marked_reset, "Pay workers promptly.", None,),
+            None
+        );
         let parenthesized_marker = "Key Risks\n(a) Exceptions\nThe deadline does not apply.";
         assert_eq!(
             source_framing_for_segment(parenthesized_marker, "The deadline does not apply.", None,),
@@ -5845,6 +5864,19 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
+        let modified_reintroduction =
+            "Key Risks\nNo risks were identified. New risks emerged during testing.\nLater text.";
+        for framed in ["New risks emerged during testing.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(modified_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let uncertain_reintroduction = "Key Risks\nNo risks were identified. Potential risks emerged during testing.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(uncertain_reintroduction, "Later text.", None),
+            None
+        );
         let causal_reintroduction = "Key Risks\nNo risks were identified. Risks emerged because controls were not applied.\nLater text.";
         for framed in [
             "Risks emerged because controls were not applied.",
