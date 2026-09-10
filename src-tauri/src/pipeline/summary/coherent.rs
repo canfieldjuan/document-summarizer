@@ -850,14 +850,58 @@ fn contrast_continuation_reintroduces_source_framing(
             )
         })
     };
+    let residual_subject_is_adverse = |predicate_start: usize| {
+        let clause_start = clause_starts.get(predicate_start).copied().unwrap_or(0);
+        words[clause_start..predicate_start].iter().any(|word| {
+            source_framing_from_noun(word.as_str()) == Some(active_framing)
+                || matches!(
+                    word.as_str(),
+                    "abuse"
+                        | "accident"
+                        | "accidents"
+                        | "breach"
+                        | "breaches"
+                        | "damage"
+                        | "damages"
+                        | "danger"
+                        | "dangers"
+                        | "defect"
+                        | "defects"
+                        | "error"
+                        | "errors"
+                        | "exposure"
+                        | "exposures"
+                        | "failure"
+                        | "failures"
+                        | "fraud"
+                        | "harm"
+                        | "hazard"
+                        | "hazards"
+                        | "injuries"
+                        | "injury"
+                        | "loss"
+                        | "losses"
+                        | "misconduct"
+                        | "noncompliance"
+                        | "shortfall"
+                        | "shortfalls"
+                        | "underpayment"
+                        | "underpayments"
+                        | "violation"
+                        | "violations"
+                )
+        })
+    };
     words.windows(2).enumerate().any(|(index, window)| {
         predicate_is_affirmative(index)
+            && residual_subject_is_adverse(index)
             && matches!(
                 (window[0].as_str(), window[1].as_str()),
                 ("remain" | "remained" | "remains", "possible")
             )
     }) || words.windows(3).enumerate().any(|(index, window)| {
         predicate_is_affirmative(index)
+            && residual_subject_is_adverse(index)
             && matches!(
                 (window[0].as_str(), window[1].as_str(), window[2].as_str()),
                 ("are" | "is" | "was" | "were", "still", "possible")
@@ -5782,6 +5826,30 @@ mod tests {
             "No risks were identified. However, monitoring will continue.",
             SourceFraming::Risk,
         ));
+        for nonadverse_possibility in [
+            "No risks were identified. However, success remains possible.",
+            "No risks were identified. However, recovery is still possible.",
+            "No risks were identified. However, if controls are not applied, success remains possible.",
+        ] {
+            assert!(begins_with_section_denial(
+                nonadverse_possibility,
+                SourceFraming::Risk,
+            ));
+        }
+        for adverse_possibility in [
+            "No risks were identified. However, financial loss remains possible.",
+            "No risks were identified. However, worker injury is still possible.",
+            "No problems were identified. However, underpayment remains possible.",
+        ] {
+            assert!(!begins_with_section_denial(
+                adverse_possibility,
+                if adverse_possibility.starts_with("No problems") {
+                    SourceFraming::Problem
+                } else {
+                    SourceFraming::Risk
+                },
+            ));
+        }
         for adjectival_continuation in [
             "No risks were identified. Risk management continues.",
             "No risks were identified. Risk assessment follows.",
@@ -6643,6 +6711,23 @@ mod tests {
             assert_eq!(
                 source_framing_for_segment(unrelated_post_denial_contrast, unframed, None),
                 None
+            );
+        }
+        let positive_post_denial_contrast = "Key Risks\nNo risks were identified. However, success remains possible.\nOverview follows.";
+        for unframed in ["However, success remains possible.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(positive_post_denial_contrast, unframed, None),
+                None
+            );
+        }
+        let adverse_post_denial_contrast = "Key Risks\nNo risks were identified. However, financial loss remains possible.\nOverview follows.";
+        for framed in [
+            "However, financial loss remains possible.",
+            "Overview follows.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(adverse_post_denial_contrast, framed, None),
+                Some(SourceFraming::Risk)
             );
         }
         let adjectival_post_denial =
