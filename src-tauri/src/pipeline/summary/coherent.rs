@@ -997,6 +997,14 @@ fn continuation_after_coordinator(text: &str) -> &str {
         })
 }
 
+fn begins_with_declarative_section_denial(text: &str, active_framing: SourceFraming) -> bool {
+    !matches!(
+        text.chars()
+            .find(|character| matches!(character, '.' | '?' | '!')),
+        Some('?')
+    ) && bounded_section_denial_clause(text, active_framing)
+}
+
 fn denial_qualification_lead(text: &str) -> bool {
     text.split(|character: char| !character.is_alphanumeric())
         .find(|word| !word.is_empty())
@@ -1027,7 +1035,7 @@ fn coordinated_clause_boundary(
             let coordinated = coordinated_continuation_lead(continuation);
             let continuation_starts_boundary = if coordinated {
                 !disjunctive_continuation_lead(continuation)
-                    || bounded_section_denial_clause(
+                    || begins_with_declarative_section_denial(
                         continuation_after_coordinator(continuation),
                         active_framing,
                     )
@@ -6032,6 +6040,10 @@ mod tests {
             "No risks were identified, or no risks were reported.",
             SourceFraming::Risk,
         ));
+        assert!(!begins_with_section_denial(
+            "No risks were identified, or no risks were reported?",
+            SourceFraming::Risk,
+        ));
         for qualified_semicolon in [
             "No risks were identified; because the review is incomplete.",
             "No risks were identified; if the preliminary record is accurate.",
@@ -6407,6 +6419,12 @@ mod tests {
         assert_eq!(
             source_framing_for_segment(disjunctive_denial, "Overview follows.", None),
             None
+        );
+        let interrogative_disjunction =
+            "Key Risks\nNo risks were identified, or no risks were reported?\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(interrogative_disjunction, "Overview follows.", None,),
+            Some(SourceFraming::Risk)
         );
         let unpunctuated_title_case = "Key Risks\nWorkers May Fall\nLater text.";
         assert_eq!(
