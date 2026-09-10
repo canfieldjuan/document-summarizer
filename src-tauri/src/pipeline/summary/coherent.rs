@@ -657,15 +657,15 @@ fn apply_inline_heading_candidate(
 }
 
 fn possible_interrogative_framing_boundary(text: &str) -> bool {
-    if !possible_framing_boundary(text) {
-        return false;
-    }
     let words = text
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
     let mitigation_question = interrogative_mitigation_boundary(&words);
+    if !possible_framing_boundary(text) && !mitigation_question {
+        return false;
+    }
     if !possible_inline_framing_boundary(text) && !mitigation_question {
         return false;
     }
@@ -732,26 +732,68 @@ fn interrogative_mitigation_boundary(words: &[String]) -> bool {
         }
         Some("what") => {
             matches!(words.get(1).map(String::as_str), Some("are" | "is"))
-                && (words.last().is_some_and(|word| {
-                    matches!(
-                        word.as_str(),
-                        "control"
-                            | "controls"
-                            | "mitigation"
-                            | "mitigations"
-                            | "recommendation"
-                            | "recommendations"
-                            | "remedies"
-                            | "remedy"
-                            | "solution"
-                            | "solutions"
-                    )
-                }) || words
-                    .get(words.len().saturating_sub(2)..)
-                    .is_some_and(|suffix| suffix == ["control", "measures"]))
+                && (words
+                    .last()
+                    .is_some_and(|word| is_mitigation_question_noun(word))
+                    || words
+                        .get(words.len().saturating_sub(2)..)
+                        .is_some_and(|suffix| suffix == ["control", "measures"]))
         }
+        Some("are" | "is" | "was" | "were") => auxiliary_mitigation_question(words),
         _ => false,
     }
+}
+
+fn is_mitigation_question_noun(word: &str) -> bool {
+    matches!(
+        word,
+        "control"
+            | "controls"
+            | "mitigation"
+            | "mitigations"
+            | "recommendation"
+            | "recommendations"
+            | "remedies"
+            | "remedy"
+            | "solution"
+            | "solutions"
+    )
+}
+
+fn auxiliary_mitigation_question(words: &[String]) -> bool {
+    let mut cursor = 1;
+    if words.get(cursor).is_some_and(|word| word == "there") {
+        cursor += 1;
+    }
+    while words.get(cursor).is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "a" | "an" | "any" | "documented" | "proposed" | "recommended" | "the"
+        )
+    }) {
+        cursor += 1;
+    }
+    let noun_end = if words
+        .get(cursor..cursor.saturating_add(2))
+        .is_some_and(|suffix| suffix == ["control", "measures"])
+    {
+        cursor + 2
+    } else if words
+        .get(cursor)
+        .is_some_and(|word| is_mitigation_question_noun(word))
+    {
+        cursor + 1
+    } else {
+        return false;
+    };
+    words.get(noun_end..).is_some_and(|tail| {
+        tail.is_empty()
+            || tail.len() == 1
+                && matches!(
+                    tail[0].as_str(),
+                    "available" | "documented" | "proposed" | "recommended"
+                )
+    })
 }
 
 fn continuation_reintroduces_source_framing(
@@ -1389,7 +1431,13 @@ fn section_denial_words(text: &str) -> (Vec<String>, Vec<bool>) {
     let mut spans = Vec::new();
     let mut word_start = None;
     for (index, character) in text.char_indices() {
-        if character.is_alphanumeric() {
+        let internal_apostrophe = matches!(character, '\'' | '’')
+            && word_start.is_some()
+            && text[index + character.len_utf8()..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric);
+        if character.is_alphanumeric() || internal_apostrophe {
             word_start.get_or_insert(index);
         } else if let Some(start) = word_start.take() {
             spans.push((start, index));
@@ -1429,19 +1477,23 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
         consumed_temporal_adverb = true;
         cursor += 1;
     }
-    let perfect = matches!(
-        words.get(cursor).map(String::as_str),
-        Some("had" | "has" | "have")
-    );
-    if !perfect
-        && !matches!(
-            words.get(cursor).map(String::as_str),
-            Some("are" | "is" | "was" | "were")
-        )
-    {
-        return None;
-    }
+    let (perfect, contracted_negative) = match words.get(cursor).map(String::as_str) {
+        Some("had" | "has" | "have") => (true, false),
+        Some("hadn't" | "hadn’t" | "hasn't" | "hasn’t" | "haven't" | "haven’t") => {
+            (true, true)
+        }
+        Some("are" | "is" | "was" | "were") => (false, false),
+        Some(
+            "aren't" | "aren’t" | "isn't" | "isn’t" | "wasn't" | "wasn’t" | "weren't" | "weren’t",
+        ) => (false, true),
+        _ => return None,
+    };
     cursor += 1;
+
+    let expanded_negative = words.get(cursor).is_some_and(|word| word == "not");
+    if expanded_negative {
+        cursor += 1;
+    }
 
     if perfect {
         if !consumed_temporal_adverb
@@ -1463,6 +1515,12 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
             .is_some_and(|word| matches!(word.as_str(), "currently" | "yet"))
     {
         cursor += 1;
+    }
+    if contracted_negative || expanded_negative {
+        return words
+            .get(cursor)
+            .is_some_and(|word| word == "any")
+            .then_some(cursor + 1);
     }
     words
         .get(cursor)
@@ -6481,14 +6539,23 @@ mod tests {
             "How should these problems be mitigated?",
             "What are the solutions?",
             "What are the recommended control measures?",
+            "Are there any solutions?",
+            "Is there a recommended control?",
+            "Were control measures available?",
         ] {
-            assert!(possible_interrogative_framing_boundary(mitigation_question));
+            assert!(
+                possible_interrogative_framing_boundary(mitigation_question),
+                "{mitigation_question} should be a mitigation boundary",
+            );
         }
         for substantive_question in [
             "How did controls fail?",
             "How did controls fail to prevent fraud?",
             "What happens if controls fail?",
             "What risks remain?",
+            "Are there any risks?",
+            "Are controls ineffective?",
+            "Are control failures documented?",
         ] {
             assert!(!possible_interrogative_framing_boundary(
                 substantive_question
@@ -6710,6 +6777,29 @@ mod tests {
             "There currently are no risks.",
             SourceFraming::Risk,
         ));
+        for negated_existential in [
+            "There are not any risks.",
+            "There aren't any risks.",
+            "There aren’t any risks.",
+            "There isn't any risk.",
+            "There haven't been any risks identified.",
+        ] {
+            assert!(begins_with_section_denial(
+                negated_existential,
+                SourceFraming::Risk,
+            ));
+        }
+        for qualified_or_mismatched_negated_existential in [
+            "There aren't risks.",
+            "There aren't any limitations.",
+            "There aren't any risks because the review is incomplete.",
+            "There aren't any risks?",
+        ] {
+            assert!(!begins_with_section_denial(
+                qualified_or_mismatched_negated_existential,
+                SourceFraming::Risk,
+            ));
+        }
         assert!(begins_with_section_denial(
             "There have currently been no risks identified.",
             SourceFraming::Risk,
@@ -7672,6 +7762,9 @@ mod tests {
             "How should these problems be mitigated? Enable MFA.",
             "What are the solutions? Enable MFA.",
             "What are the recommended control measures? Enable MFA.",
+            "Are there any solutions? Enable MFA.",
+            "Is there a recommended control? Enable MFA.",
+            "Were control measures available? Enable MFA.",
         ] {
             let block = format!("Key Risks\n{mitigation_question}\nOverview follows.");
             for unframed in ["Enable MFA.", "Overview follows."] {
@@ -7746,6 +7839,17 @@ mod tests {
                 source_framing_for_segment(existential_temporal_denial, unframed, None),
                 None
             );
+        }
+        for negated_existential in [
+            "There are not any risks.",
+            "There aren't any risks.",
+            "There aren’t any risks.",
+            "There haven't been any risks identified.",
+        ] {
+            let block = format!("Key Risks\n{negated_existential}\nOverview follows.");
+            for unframed in [negated_existential, "Overview follows."] {
+                assert_eq!(source_framing_for_segment(&block, unframed, None), None);
+            }
         }
         let no_significant_risks =
             "Key Risks\nNo significant risks were identified.\nLater unrelated text.";
