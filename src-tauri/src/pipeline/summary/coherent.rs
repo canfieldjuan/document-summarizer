@@ -203,8 +203,6 @@ fn heading_has_only_framing_modifiers(words: &[String]) -> bool {
                 | "known"
                 | "major"
                 | "material"
-                | "possible"
-                | "potential"
                 | "safety"
                 | "significant"
         )
@@ -4453,6 +4451,8 @@ mod tests {
             "1.. Common Problems\n\nBody text.",
             "2026 Common Problems\n\nBody text.",
             "No Known Issues\n\nNo defects were found.",
+            "Possible Exceptions\n\nAn exception might apply.",
+            "Potential Risks\n\nA risk might arise.",
             "Avoiding Common Problems\n\nUse the documented solution.",
             "Solutions to Common Problems\n\nUse the documented solution.",
             "Problem Solving Techniques\n\nBody text.",

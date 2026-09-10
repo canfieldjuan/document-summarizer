@@ -3316,7 +3316,8 @@ release acceptance exposed issue #49
   presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
-  multiline, overlong, negated, solution-oriented and unrelated headings. Tests
+  multiline, overlong, negated, uncertainty-qualified, solution-oriented and
+  unrelated headings. Tests
   also prove application-owned framing of neutral General units, propagation to
   later segments and page blocks of a split section, reset at a later
   sentence-case or punctuated marked solution section, retention across short
