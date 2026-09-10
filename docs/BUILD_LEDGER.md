@@ -3400,19 +3400,24 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `543cd7116c2570faa0fea4eeb945d2cbda592723`
+- The final product-code head `03b445fc80f1272fa76a48f60ab11ec9094146ac`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 119.53 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 151.35 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `d2d4e7309633730b1a8ca84a8de224ebfde2b3362a12494dc988831fac7f6dbf` and
+  `9bf6ea09aef37a64472fb5acc341746f88bc287471dc78b8306a495cb32e9a59` and
   citation integrity hash
-  `e9f382333a06a4e0d6f05aaa92f61e2c639ab54ed3de1be249c1d5e418fd360f`.
+  `11bf3872dafaf8e028de604e7a8725cbfe9795094f68e5580ab1692a024d2d01`.
+  An immediately preceding exact-head run failed closed with
+  `SYNTHESIS_REPAIR_INPUT_TOO_LARGE` after the model combined neutral and
+  Problem sources in one unusually long unit. The unchanged retry passed; this
+  proves one acceptable exact-head execution, not deterministic live-model
+  reliability.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3479,6 +3484,8 @@ release acceptance exposed issue #49
   additive, contrast, bare-independent-clause, noun-list and qualification
   controls, complement-aware `remain not possible` versus `remain not
   eliminated` polarity including double-negative `not impossible` inversion,
+  matching copular polarity for `are impossible`, `are not possible`, and
+  `are not`, `were never`, or `are no longer impossible`,
   and disjunctive continuations admitted only when their second disjunct is an
   independent declarative bounded denial, with ASCII, full-width and Arabic
   interrogative second disjuncts rejected, and denial/continuation splitting
@@ -3511,5 +3518,9 @@ release acceptance exposed issue #49
   application-owned relationship, so selecting either category for every later
   segment would overstate the source; combined relationships require a separate
   contract and compatibility design.
+- A model response whose invalid mixed-framing unit is too large to include in
+  the bounded repair context still fails the run closed with
+  `SYNTHESIS_REPAIR_INPUT_TOO_LARGE`; this slice does not add an automatic
+  whole-run retry policy.
 - This slice does not change Story or Contract behavior, routing, UI, persistence
   schemas, source selection, ingestion, OCR or model configuration.
