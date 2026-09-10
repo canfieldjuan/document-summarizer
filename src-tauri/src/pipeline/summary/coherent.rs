@@ -1181,6 +1181,11 @@ fn source_framing_line_update(
                 framing = None;
                 transitions.push((leading_whitespace.saturating_add(heading_offset), framing));
             }
+            let answer = &line[delimiter_index + 1..];
+            let answer_offset = leading_whitespace
+                .saturating_add(delimiter_index)
+                .saturating_add(1);
+            apply_section_denial_update(&mut framing, &mut transitions, answer_offset, answer);
             continue;
         }
         let colon_index = delimiter_index;
@@ -6504,6 +6509,47 @@ mod tests {
             ),
             Some(SourceFraming::Risk)
         );
+        let question_answer_denial =
+            "Key Risks\nAny known risks? None reported.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(question_answer_denial, "Any known risks?", None),
+            Some(SourceFraming::Risk)
+        );
+        for unframed in ["None reported.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(question_answer_denial, unframed, None),
+                None
+            );
+        }
+        assert_eq!(
+            source_framing_for_segment(
+                question_answer_denial,
+                "Any known risks? None reported.",
+                None,
+            ),
+            None
+        );
+        for retained_question_answer in [
+            "Any known risks? None reported? Verify the record.",
+            "Any known risks? None reported because the review is incomplete.",
+        ] {
+            let block = format!("Key Risks\n{retained_question_answer}\nOverview follows.");
+            assert_eq!(
+                source_framing_for_segment(&block, "Overview follows.", None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let question_answer_reintroduction = "Key Risks\nAny known risks? None reported. However, fraud remains possible.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(question_answer_reintroduction, "None reported.", None,),
+            None
+        );
+        for framed in ["However, fraud remains possible.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(question_answer_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
         for wh_question in [
             "Why did controls fail? Fraud remains possible.",
             "What happens if controls fail? Fraud remains possible.",
