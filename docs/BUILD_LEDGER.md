@@ -3496,13 +3496,17 @@ release acceptance exposed issue #49
   questions, noun uses of `control`, repeated negation, mismatched categories
   and qualified denials retain framing. The focused two-sided propagation probe
   and full deterministic gate passed.
-- The final product-code head `c4985e22eae058649e879473e522397db371dbee`
+- Product-code head `c4985e22eae058649e879473e522397db371dbee`
   uses the apostrophe-preserving bounded tokenizer for framing reintroductions,
   normalizes contracted auxiliaries into the existing polarity checks, and
   recognizes full-width and Arabic commas as byte-safe coordinated-denial
   delimiters. Wrong complements, repeated negation and qualified continuations
   remain unframed. The focused two-sided propagation probe and full
   deterministic gate passed.
+- The final product-code head `8c9aeacf33d7e45976d4ae6761c54df000a43606`
+  admits `discovered` in the existing affirmative copular and perfect
+  reintroduction predicates. Explicitly negated discovery remains neutral. The
+  focused two-sided propagation probe and full deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
