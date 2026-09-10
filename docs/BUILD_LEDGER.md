@@ -3418,7 +3418,7 @@ release acceptance exposed issue #49
   Problem sources in one unusually long unit. The unchanged retry passed; this
   proves one acceptable exact-head execution, not deterministic live-model
   reliability.
-- The final product-code head `eb6a17b58cd049b67508105d29f64b01ff9682c9`
+- Product-code head `eb6a17b58cd049b67508105d29f64b01ff9682c9`
   also clears an active section after a bounded bare `No` answer to a section
   question and after a bounded denial that follows an earlier declarative
   sentence on the same normalized line. A bare `No` is accepted only in an
@@ -3431,6 +3431,14 @@ release acceptance exposed issue #49
   was persisted. The preceding exact product head therefore supplies this
   slice's representative live output; these final-head runs prove rejection,
   not successful live completion. Follow-up is tracked in issue #53.
+- The final product-code head `4cfaa383db21314f626f32371f60ac5b497af947`
+  admits bounded `No risks were discovered` as an empty-section predicate and
+  restores Risk for `Risks are unresolved` after a prior denial. Qualified
+  discovery statements, `Risks are resolved`, and `Risks are not unresolved`
+  remain on the opposite side of those boundaries. The focused classifier test
+  and full deterministic gate passed. No further DOL model run was made because
+  issue #53 already reproduces the independent cross-window failure twice and
+  neither added predicate occurs in the affected DOL source text.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3487,11 +3495,11 @@ release acceptance exposed issue #49
   zero/exact/over-limit persisted-count boundaries and selected-window capacity
   after the transient selection labels are unavailable,
   neutral reset at uncertainty-qualified sentence-case framing headings,
-  bounded `detected`, `remain` and `apply` denials, one bounded `currently` or
+  bounded `detected`, `discovered`, `remain` and `apply` denials, one bounded `currently` or
   `yet` inside an auxiliary denial predicate or around an existential auxiliary
   and `no`,
   with category-mismatch and substantive-tail rejection,
-  resolved/eliminated absence continuations with unresolved-risk
+  resolved/eliminated absence continuations with `remain` and copular unresolved-risk
   reintroduction, punctuation-scoped residual-predicate negation with
   conditional-clause and same-clause controls, adverse-subject gating for
   residual possibilities with positive, recovery and protective-compound
