@@ -207,6 +207,22 @@ fn is_source_framing_modifier(word: &str) -> bool {
     )
 }
 
+fn source_framing_from_compound_heading(words: &[String]) -> Option<SourceFraming> {
+    let (modifiers, compound) = words.split_at(words.len().checked_sub(2)?);
+    if !modifiers
+        .iter()
+        .all(|word| is_source_framing_modifier(word))
+    {
+        return None;
+    }
+    match (compound[0].as_str(), compound[1].as_str()) {
+        ("risk", "factor" | "factors") => Some(SourceFraming::Risk),
+        ("warning", "sign" | "signs") => Some(SourceFraming::Warning),
+        ("problem", "area" | "areas") => Some(SourceFraming::Problem),
+        _ => None,
+    }
+}
+
 fn framing_from_heading_candidate(
     heading: &str,
     has_explicit_inline_signal: bool,
@@ -229,11 +245,13 @@ fn framing_from_heading_candidate(
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
         .collect::<Vec<_>>();
-    if words.is_empty()
-        || words.len() > 8
-        || heading_negates_framing(&words)
-        || !heading_has_only_framing_modifiers(&words)
-    {
+    if words.is_empty() || words.len() > 8 || heading_negates_framing(&words) {
+        return None;
+    }
+    if let Some(framing) = source_framing_from_compound_heading(&words) {
+        return Some(framing);
+    }
+    if !heading_has_only_framing_modifiers(&words) {
         return None;
     }
     source_framing_from_noun(words.last()?.as_str())
@@ -5149,7 +5167,13 @@ mod tests {
             ("iv. Exceptions", SourceFraming::Exception),
             ("(iv) Risks", SourceFraming::Risk),
             ("Key Risks", SourceFraming::Risk),
+            ("Risk Factors", SourceFraming::Risk),
+            ("Key Risk Factors", SourceFraming::Risk),
             ("Safety Warning", SourceFraming::Warning),
+            ("Warning Signs", SourceFraming::Warning),
+            ("Important Warning Signs", SourceFraming::Warning),
+            ("Problem Areas", SourceFraming::Problem),
+            ("Common Problem Areas", SourceFraming::Problem),
             ("Important Exceptions", SourceFraming::Exception),
             ("Known Limitations", SourceFraming::Limitation),
         ] {
@@ -5175,10 +5199,13 @@ mod tests {
             "No Known Issues\n\nNo defects were found.",
             "Possible Exceptions\n\nAn exception might apply.",
             "Potential Risks\n\nA risk might arise.",
+            "Potential Risk Factors\n\nA risk might arise.",
             "Common Problems?\n\nLate payment may occur.",
             "Avoiding Common Problems\n\nUse the documented solution.",
             "Solutions to Common Problems\n\nUse the documented solution.",
             "Problem Solving Techniques\n\nBody text.",
+            "Risk Management\n\nBody text.",
+            "Warning System\n\nBody text.",
             "Ordinary Overview\n\nBody text.",
             "First line\nSecond line\n\nBody text.",
         ] {
@@ -5404,6 +5431,17 @@ mod tests {
         }
         assert_eq!(
             source_framing_for_segment(sectioned, "Risk detail.", None),
+            Some(SourceFraming::Risk)
+        );
+        let compound_heading = "Common Problems\nEarlier problem.\nRisk Factors\nFraud may occur.";
+        assert_eq!(
+            source_framing_for_segment(compound_heading, "Fraud may occur.", None),
+            Some(SourceFraming::Risk)
+        );
+        let inline_compound_heading =
+            "Common Problems: Late payment. Risk Factors: Fraud may occur.";
+        assert_eq!(
+            source_framing_for_segment(inline_compound_heading, "Fraud may occur.", None),
             Some(SourceFraming::Risk)
         );
         assert_eq!(

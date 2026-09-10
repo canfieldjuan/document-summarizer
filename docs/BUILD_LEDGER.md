@@ -3400,6 +3400,9 @@ release acceptance exposed issue #49
   excess-newline framing and reset headings, decimal/uppercase/lowercase Roman,
   uppercase/lowercase-letter and fully parenthesized outline framing
   headings, inline framing and reset headings, rejection of standalone and
+  bounded compound `Risk Factors`, `Warning Signs` and `Problem Areas`
+  headings with the existing conservative modifiers, rejection of unrelated
+  or uncertainty-qualified compound headings,
   inline interrogative framing headings, same-line interrogative reset before
   answer text with substantive-question retention, byte-ordered colon/question
   precedence in both directions, fail-closed
