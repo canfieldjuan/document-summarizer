@@ -611,10 +611,10 @@ fn continuation_reintroduces_source_framing(
     let Some((framing, noun_end)) = source_framing_term_at(&words, term_start) else {
         return false;
     };
-    framing == active_framing && !framing_noun_is_denied(&words, noun_end)
+    framing == active_framing && framing_noun_predicate_reintroduces(&words, noun_end)
 }
 
-fn framing_noun_is_denied(words: &[String], noun_end: usize) -> bool {
+fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> bool {
     let skip_adverbs = |mut cursor: usize| {
         while words.get(cursor).is_some_and(|word| {
             matches!(
@@ -628,17 +628,74 @@ fn framing_noun_is_denied(words: &[String], noun_end: usize) -> bool {
     };
     let mut cursor = skip_adverbs(noun_end);
     let Some(predicate) = words.get(cursor).map(String::as_str) else {
-        return false;
+        return true;
     };
     if matches!(
         predicate,
         "absent" | "no" | "none" | "unidentified" | "unreported" | "without"
     ) {
+        return false;
+    }
+    if matches!(
+        predicate,
+        "appear"
+            | "appeared"
+            | "appears"
+            | "arise"
+            | "arises"
+            | "arising"
+            | "arose"
+            | "continue"
+            | "continued"
+            | "continues"
+            | "continuing"
+            | "emerge"
+            | "emerged"
+            | "emerges"
+            | "emerging"
+            | "exist"
+            | "existed"
+            | "exists"
+            | "existing"
+            | "occur"
+            | "occurred"
+            | "occurs"
+            | "occurring"
+            | "persist"
+            | "persisted"
+            | "persists"
+            | "persisting"
+    ) {
         return true;
+    }
+    if matches!(
+        predicate,
+        "can" | "could" | "may" | "might" | "must" | "shall" | "should" | "will" | "would"
+    ) {
+        cursor = skip_adverbs(cursor + 1);
+        if words
+            .get(cursor)
+            .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
+        {
+            return false;
+        }
+        return words.get(cursor).is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "appear"
+                    | "arise"
+                    | "continue"
+                    | "emerge"
+                    | "exist"
+                    | "occur"
+                    | "persist"
+                    | "remain"
+            )
+        });
     }
     if matches!(predicate, "remain" | "remained" | "remains") {
         cursor = skip_adverbs(cursor + 1);
-        return words.get(cursor).is_some_and(|word| {
+        return !words.get(cursor).is_some_and(|word| {
             matches!(
                 word.as_str(),
                 "absent" | "none" | "unidentified" | "unreported"
@@ -647,19 +704,19 @@ fn framing_noun_is_denied(words: &[String], noun_end: usize) -> bool {
     }
     if matches!(predicate, "do" | "does" | "did") {
         cursor = skip_adverbs(cursor + 1);
-        if !words
+        let negated = words
             .get(cursor)
-            .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
-        {
-            return false;
+            .is_some_and(|word| matches!(word.as_str(), "never" | "not"));
+        if negated {
+            cursor = skip_adverbs(cursor + 1);
         }
-        cursor = skip_adverbs(cursor + 1);
-        return words.get(cursor).is_some_and(|word| {
-            matches!(
-                word.as_str(),
-                "appear" | "emerge" | "exist" | "occur" | "remain"
-            )
-        });
+        return !negated
+            && words.get(cursor).is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "appear" | "emerge" | "exist" | "occur" | "remain"
+                )
+            });
     }
     if matches!(predicate, "have" | "had" | "has") {
         cursor = skip_adverbs(cursor + 1);
@@ -676,16 +733,23 @@ fn framing_noun_is_denied(words: &[String], noun_end: usize) -> bool {
             if negated {
                 matches!(
                     word.as_str(),
-                    "detected"
+                    "absent" | "eliminated" | "resolved" | "unidentified" | "unreported"
+                )
+            } else {
+                matches!(
+                    word.as_str(),
+                    "appeared"
+                        | "detected"
                         | "emerged"
+                        | "existed"
                         | "found"
                         | "identified"
                         | "observed"
                         | "occurred"
+                        | "persisted"
+                        | "present"
                         | "reported"
                 )
-            } else {
-                matches!(word.as_str(), "absent" | "eliminated" | "resolved")
             }
         });
     }
@@ -704,21 +768,25 @@ fn framing_noun_is_denied(words: &[String], noun_end: usize) -> bool {
         return words.get(cursor).is_some_and(|word| {
             matches!(
                 word.as_str(),
-                "detected"
-                    | "emerging"
-                    | "found"
-                    | "identified"
-                    | "observed"
-                    | "occurring"
-                    | "present"
-                    | "reported"
+                "absent" | "eliminated" | "none" | "resolved" | "unidentified" | "unreported"
             )
         });
     }
     words.get(cursor).is_some_and(|word| {
         matches!(
             word.as_str(),
-            "absent" | "eliminated" | "none" | "resolved" | "unidentified" | "unreported"
+            "appearing"
+                | "detected"
+                | "emerging"
+                | "existing"
+                | "found"
+                | "identified"
+                | "observed"
+                | "occurring"
+                | "persisting"
+                | "possible"
+                | "present"
+                | "reported"
         )
     })
 }
@@ -994,9 +1062,6 @@ fn source_framing_line_update(
     }
     for (delimiter_index, delimiter) in line.match_indices([':', '?']) {
         if delimiter == "?" {
-            if line[delimiter_index + 1..].trim().is_empty() {
-                continue;
-            }
             let (heading_candidate, heading_offset) = inline_heading_prefix(line, delimiter_index);
             if possible_interrogative_framing_boundary(heading_candidate) {
                 framing = None;
@@ -2238,6 +2303,7 @@ fn generate_summary_with_validation_repair(
     let mut clipped_repairs = 0;
     let mut clipped_fallback: Option<SafeSiblingFallback> = None;
     let mut framing_repairs = 0;
+    let mut framing_repair_siblings: Option<Vec<CitedClaim>> = None;
     loop {
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
         let ordinal = starting_request_ordinal
@@ -2349,6 +2415,13 @@ fn generate_summary_with_validation_repair(
             Err(failure)
                 if failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE && framing_repairs == 0 =>
             {
+                framing_repair_siblings = Some(parse_response_without_mixed_source_framing_units(
+                    profile,
+                    &response.text,
+                    document_id,
+                    catalog,
+                    response_maximum_units,
+                )?);
                 let feedback = vec![
                     "One or more General units mixed source_ids with different or absent source_framing values. Keep every other unit and its wording unchanged; split only each invalid unit so all source_ids in every resulting unit either share one identical source_framing value or all omit source_framing"
                         .to_string(),
@@ -2444,6 +2517,12 @@ fn generate_summary_with_validation_repair(
                 return Err(failure);
             }
         };
+        if framing_repair_siblings
+            .as_ref()
+            .is_some_and(|required| preserved_claim_positions(&parsed.0, required).is_none())
+        {
+            return Err(source_framing_repair_integrity_response());
+        }
         let repaired_clipped_response_is_incomplete = clipped_repairs > 0
             && clipped_fallback
                 .as_ref()
@@ -3850,6 +3929,46 @@ fn mixed_source_framing_response() -> PipelineFailure {
     )
 }
 
+fn source_framing_repair_integrity_response() -> PipelineFailure {
+    stage_failure(
+        PipelineStage::Synthesize,
+        SOURCE_FRAMING_MIXED_RESPONSE_CODE,
+        "The bounded source-framing repair changed or omitted a valid sibling unit",
+        false,
+    )
+}
+
+fn parse_response_without_mixed_source_framing_units(
+    profile: SummaryProfile,
+    response: &str,
+    document_id: &str,
+    catalog: &SourceCatalog,
+    maximum_units: usize,
+) -> Result<Vec<CitedClaim>, PipelineFailure> {
+    if profile != SummaryProfile::General {
+        return Err(mixed_source_framing_response());
+    }
+    let raw: RawResponse = serde_json::from_str(response).map_err(|_| invalid_response())?;
+    if raw.units.is_empty() || raw.units.len() > maximum_units {
+        return Err(invalid_response());
+    }
+    let mut retained = Vec::with_capacity(raw.units.len());
+    let mut withheld = 0usize;
+    for unit in raw.units {
+        let singleton = serde_json::to_string(&RawResponse { units: vec![unit] })
+            .map_err(|_| invalid_response())?;
+        match parse_response_with_maximum_units(profile, &singleton, document_id, catalog, 1) {
+            Ok((mut claims, _)) => retained.append(&mut claims),
+            Err(failure) if failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE => withheld += 1,
+            Err(failure) => return Err(failure),
+        }
+    }
+    if withheld == 0 {
+        return Err(mixed_source_framing_response());
+    }
+    Ok(retained)
+}
+
 fn is_windowed_general_catalog(profile: SummaryProfile, catalog: &SourceCatalog) -> bool {
     profile == SummaryProfile::General
         && !catalog.candidates.is_empty()
@@ -4581,7 +4700,15 @@ mod tests {
 
     struct FramingRepairRuntime {
         requests: Mutex<Vec<ModelRequest>>,
-        corrects_repair: bool,
+        behavior: FramingRepairBehavior,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FramingRepairBehavior {
+        Correct,
+        RepeatMixed,
+        OmitSibling,
+        RewriteSibling,
     }
 
     #[derive(Clone, Copy)]
@@ -4656,10 +4783,10 @@ mod tests {
     }
 
     impl FramingRepairRuntime {
-        fn new(corrects_repair: bool) -> Self {
+        fn new(behavior: FramingRepairBehavior) -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
-                corrects_repair,
+                behavior,
             }
         }
 
@@ -4796,17 +4923,25 @@ mod tests {
             self.requests.lock().unwrap().push(request.clone());
             let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
             let is_repair = prompt.get("validation_feedback").is_some();
-            let units = if is_repair && self.corrects_repair {
-                json!([
+            let units = match (is_repair, self.behavior) {
+                (false, _) | (true, FramingRepairBehavior::RepeatMixed) => json!([
+                    {"text":"The unchanged statement remains.","source_ids":["s2"]},
+                    {"text":"Combined statement.","source_ids":["s1","s3"]}
+                ]),
+                (true, FramingRepairBehavior::Correct) => json!([
                     {"text":"The unchanged statement remains.","source_ids":["s2"]},
                     {"text":"Problem statement.","source_ids":["s1"]},
                     {"text":"Ordinary statement.","source_ids":["s3"]}
-                ])
-            } else {
-                json!([
-                    {"text":"The unchanged statement remains.","source_ids":["s2"]},
-                    {"text":"Combined statement.","source_ids":["s1","s3"]}
-                ])
+                ]),
+                (true, FramingRepairBehavior::OmitSibling) => json!([
+                    {"text":"Problem statement.","source_ids":["s1"]},
+                    {"text":"Ordinary statement.","source_ids":["s3"]}
+                ]),
+                (true, FramingRepairBehavior::RewriteSibling) => json!([
+                    {"text":"The statement remains substantially unchanged.","source_ids":["s2"]},
+                    {"text":"Problem statement.","source_ids":["s1"]},
+                    {"text":"Ordinary statement.","source_ids":["s3"]}
+                ]),
             };
             Ok(ModelResponse {
                 text: json!({"units":units}).to_string(),
@@ -5426,10 +5561,28 @@ mod tests {
             "No risks were identified. Risks were not eliminated.",
             SourceFraming::Risk,
         ));
+        for modal_reintroduction in [
+            "No risks were identified. Risks may emerge during testing.",
+            "No risks were identified. Risk continues after testing.",
+        ] {
+            assert!(!begins_with_section_denial(
+                modal_reintroduction,
+                SourceFraming::Risk,
+            ));
+        }
         assert!(begins_with_section_denial(
             "No risks were identified. However, monitoring will continue.",
             SourceFraming::Risk,
         ));
+        for adjectival_continuation in [
+            "No risks were identified. Risk management continues.",
+            "No risks were identified. Risk assessment follows.",
+        ] {
+            assert!(begins_with_section_denial(
+                adjectival_continuation,
+                SourceFraming::Risk,
+            ));
+        }
         for negated_contrast in [
             "No risks were identified. However, no fraud remains possible.",
             "No risks were identified. However, fraud does not remain possible.",
@@ -6003,6 +6156,25 @@ mod tests {
             source_framing_for_segment(colon_before_interrogative, "Late payment may occur.", None,),
             None
         );
+        let trailing_interrogative_heading = "Key Risks: Common Problems?\nLate payment may occur.";
+        assert_eq!(
+            source_framing_for_segment(
+                trailing_interrogative_heading,
+                "Late payment may occur.",
+                None,
+            ),
+            None
+        );
+        let trailing_substantive_question =
+            "Key Risks: Why did controls fail?\nFraud remains possible.";
+        assert_eq!(
+            source_framing_for_segment(
+                trailing_substantive_question,
+                "Fraud remains possible.",
+                None,
+            ),
+            Some(SourceFraming::Risk)
+        );
         let colon_after_interrogative = "Common Problems? Answer: Key Risks: Injury may occur.";
         assert_eq!(
             source_framing_for_segment(colon_after_interrogative, "Injury may occur.", None,),
@@ -6093,6 +6265,12 @@ mod tests {
                 None
             );
         }
+        let adjectival_post_denial =
+            "Key Risks\nNo risks were identified. Risk management continues.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(adjectival_post_denial, "Overview follows.", None),
+            None
+        );
         let negated_post_denial_contrast = "Key Risks\nNo risks were identified. However, no fraud remains possible.\nOverview follows.";
         for unframed in ["However, no fraud remains possible.", "Overview follows."] {
             assert_eq!(
@@ -9533,7 +9711,7 @@ mod tests {
         )
         .expect_err("the initial response must not consume framing-repair capacity");
         assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
-        let runtime = FramingRepairRuntime::new(true);
+        let runtime = FramingRepairRuntime::new(FramingRepairBehavior::Correct);
         let generated = generate_summary_with_validation_repair(
             SummaryProfile::General,
             &runtime,
@@ -9581,7 +9759,7 @@ mod tests {
         };
         assert_eq!(repair_schema["properties"]["units"]["maxItems"], 4);
 
-        let repeating = FramingRepairRuntime::new(false);
+        let repeating = FramingRepairRuntime::new(FramingRepairBehavior::RepeatMixed);
         let failure = generate_summary_with_validation_repair(
             SummaryProfile::General,
             &repeating,
@@ -9597,6 +9775,29 @@ mod tests {
         .expect_err("a repeated mixed-framing response must fail closed");
         assert_eq!(failure.code, SOURCE_FRAMING_MIXED_RESPONSE_CODE);
         assert_eq!(repeating.requests().len(), 2);
+
+        for behavior in [
+            FramingRepairBehavior::OmitSibling,
+            FramingRepairBehavior::RewriteSibling,
+        ] {
+            let runtime = FramingRepairRuntime::new(behavior);
+            let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+            let failure = generate_summary_with_validation_repair(
+                SummaryProfile::General,
+                &runtime,
+                "document-1",
+                &catalog,
+                prompt,
+                schema,
+                usize::MAX,
+                0,
+                1,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .expect_err("a framing repair must preserve every valid sibling exactly");
+            assert_eq!(failure.code, SOURCE_FRAMING_MIXED_RESPONSE_CODE);
+            assert_eq!(runtime.requests().len(), 2);
+        }
     }
 
     #[test]
