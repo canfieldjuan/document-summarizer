@@ -3292,7 +3292,9 @@ release acceptance exposed issue #49
   page because their complete governing text is unavailable. The resolver scans
   each extracted line so a subsequent bounded heading-shaped line, including
   a decimal, Roman or letter-marked heading or a sentence-case heading with an
-  explicit heading signal, resets the label; numbering alone does not. A
+  explicit heading signal, resets the label. An unmarked sentence ending in a
+  period, exclamation point or semicolon remains body text; numbering alone
+  does not create a heading. A
   reliable heading followed by a colon and body on the same line changes state
   at the body boundary, including when the heading ends a preceding body line
   and its own body begins on the next line. Generic colon-ended resets require a
@@ -3315,7 +3317,9 @@ release acceptance exposed issue #49
   a source, Rust adds the application-owned relationship to the final claim text
   before the existing source-aware semantic verifier runs. Distinct framing
   labels cannot govern one generated unit. Exact source evidence, source order,
-  citation rendering and persisted schemas remain unchanged.
+  citation rendering and persisted schemas remain unchanged. A model response
+  that mixes framing in one unit receives one bounded repair instruction to
+  split only invalid units; a repeated violation fails closed.
 - Synthesis, verification and final-summary versions advance for the changed
   output contract. Completed version-7 summaries remain readable; in-progress
   coherent version-7 checkpoints retry, while version-7 claim-ledger fallbacks
@@ -3342,14 +3346,16 @@ release acceptance exposed issue #49
   sources, retention across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
   denial clearing in following-line and inline bodies with negative-rule retention,
+  retention across punctuated sentence-case body text, bounded mixed-framing
+  repair and repeated-response failure,
   mixed verification context, Story isolation, and rejection of a short source
   segment spanning both problem and solution sections,
   lossy drafting-claim suppression and exact version-pair retry
   behavior. A focused live GPU probe accepted a final framed claim whose exact
   segment omitted the heading and rejected framing applied to an invented
-  resolution. The full Rust library suite passed 440 tests with 13 intentional
+  resolution. The full Rust library suite passed 441 tests with 13 intentional
   ignores.
-- `cargo test --all-targets` passed those 440 library tests, 3 office tests and
+- `cargo test --all-targets` passed those 441 library tests, 3 office tests and
   all 3 release-contract tests; 13 opt-in library tests and 3 opt-in office
   tests remained ignored. Strict all-target/all-feature Clippy, Rust formatting,
   the TypeScript/Vite production build and `git diff --check` passed.

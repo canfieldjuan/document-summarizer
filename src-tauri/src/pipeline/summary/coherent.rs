@@ -28,6 +28,7 @@ const TARGET_SELECTED_SOURCES: usize = 16;
 const MAX_SOURCE_SELECTION_CANDIDATES_PER_REQUEST: usize = 16;
 const MAX_SOURCE_SELECTION_REQUESTS: usize = 64;
 const WINDOW_MIXED_RESPONSE_CODE: &str = "MODEL_SUMMARY_RESPONSE_WINDOW_MIXED";
+const SOURCE_FRAMING_MIXED_RESPONSE_CODE: &str = "MODEL_SUMMARY_RESPONSE_FRAMING_MIXED";
 const UNIT_CLIPPED_RESPONSE_CODE: &str = "MODEL_SUMMARY_RESPONSE_UNIT_CLIPPED";
 const CLIPPED_UNIT_WITHHELD_WARNING_CODE: &str = "COHERENT_SUMMARY_CLIPPED_UNITS_WITHHELD";
 const MODAL_UNIT_WITHHELD_WARNING_CODE: &str = "COHERENT_SUMMARY_MODAL_STRENGTHENED_UNITS_WITHHELD";
@@ -359,7 +360,10 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "who"
             | "why"
     );
-    starts_uppercase && (all_uppercase || title_case || sentence_case_lead)
+    let sentence_case_has_heading_shape =
+        marked_title.is_some() || !heading.ends_with(['.', '!', ';']);
+    starts_uppercase
+        && (all_uppercase || title_case || sentence_case_lead && sentence_case_has_heading_shape)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1707,6 +1711,7 @@ fn generate_summary_with_validation_repair(
     let mut modal_fallback = None;
     let mut clipped_repairs = 0;
     let mut clipped_fallback: Option<SafeSiblingFallback> = None;
+    let mut framing_repairs = 0;
     loop {
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
         let ordinal = starting_request_ordinal
@@ -1804,6 +1809,35 @@ fn generate_summary_with_validation_repair(
         }
         let parsed = match parsed_response {
             Ok(parsed) => parsed,
+            Err(failure)
+                if failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE && framing_repairs == 0 =>
+            {
+                let feedback = vec![
+                    "One or more General units mixed source_ids with different or absent source_framing values. Keep every other unit and its wording unchanged; split only each invalid unit so all source_ids in every resulting unit either share one identical source_framing value or all omit source_framing"
+                        .to_string(),
+                ];
+                request_prompt = prompt_with_validation_feedback(&request_prompt, &feedback)?;
+                if synthesis_request_characters(profile, &request_prompt, &output_schema)?
+                    > input_limit
+                {
+                    if let Some(generated) = take_generated_fallback(
+                        &mut modal_fallback,
+                        &mut window_fallback,
+                        &mut clipped_fallback,
+                    ) {
+                        return Ok(generated);
+                    }
+                    return Err(stage_failure(
+                        PipelineStage::Synthesize,
+                        "SYNTHESIS_REPAIR_INPUT_TOO_LARGE",
+                        "The bounded summary validation repair cannot fit the synthesis context",
+                        false,
+                    ));
+                }
+                framing_repairs += 1;
+                request_ordinal += 1;
+                continue;
+            }
             Err(failure) if failure.code == WINDOW_MIXED_RESPONSE_CODE && window_repairs == 0 => {
                 let latest_window_fallback = parse_response_without_mixed_windows(
                     profile,
@@ -3241,7 +3275,7 @@ fn parse_response(
 fn mixed_source_framing_response() -> PipelineFailure {
     stage_failure(
         PipelineStage::Synthesize,
-        "MODEL_SUMMARY_RESPONSE_FRAMING_MIXED",
+        SOURCE_FRAMING_MIXED_RESPONSE_CODE,
         "A General summary unit mixed sources with different or absent application-derived framing labels",
         true,
     )
@@ -3977,6 +4011,11 @@ mod tests {
         corrects_repair: bool,
     }
 
+    struct FramingRepairRuntime {
+        requests: Mutex<Vec<ModelRequest>>,
+        corrects_repair: bool,
+    }
+
     #[derive(Clone, Copy)]
     enum ClippedRepairBehavior {
         Correct,
@@ -4036,6 +4075,19 @@ mod tests {
     }
 
     impl WindowRepairRuntime {
+        fn new(corrects_repair: bool) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                corrects_repair,
+            }
+        }
+
+        fn requests(&self) -> Vec<ModelRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl FramingRepairRuntime {
         fn new(corrects_repair: bool) -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
@@ -4168,6 +4220,42 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "window-repair-model"
+        }
+    }
+
+    impl ModelRuntime for FramingRepairRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            self.requests.lock().unwrap().push(request.clone());
+            let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+            let is_repair = prompt.get("validation_feedback").is_some();
+            let units = if is_repair && self.corrects_repair {
+                json!([
+                    {"text":"Problem statement.","source_ids":["s1"]},
+                    {"text":"Ordinary statement.","source_ids":["s3"]}
+                ])
+            } else {
+                json!([
+                    {"text":"Combined statement.","source_ids":["s1","s3"]}
+                ])
+            };
+            Ok(ModelResponse {
+                text: json!({"units":units}).to_string(),
+                runtime_id: self.runtime_id().to_string(),
+                model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
+            })
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "framing-repair-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "framing-repair-model"
         }
     }
 
@@ -4709,6 +4797,7 @@ mod tests {
             "Employees paid by piece rate",
             "employees below minimum wage",
             "This is a complete sentence.",
+            "When guards fail, workers may be injured.",
             "A heading with far too many separate words to fit the supported boundary",
         ] {
             assert!(!possible_framing_boundary(body));
@@ -4754,6 +4843,15 @@ mod tests {
         let numbered_list = "Key Risks\n\n1. Workers may fall from ladders.";
         assert_eq!(
             source_framing_for_segment(numbered_list, numbered_list, None),
+            Some(SourceFraming::Risk)
+        );
+        let sentence_case_body = "Key Risks\nWhen guards fail, workers may be injured.";
+        assert_eq!(
+            source_framing_for_segment(
+                sentence_case_body,
+                "When guards fail, workers may be injured.",
+                None,
+            ),
             Some(SourceFraming::Risk)
         );
         let introductory_colon = "Common Problems\n\nExamples include:\n\nLate payment.";
@@ -8083,6 +8181,74 @@ mod tests {
         )
         .expect_err("a second modal-strengthening response must fail closed");
         assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
+        assert_eq!(repeating.requests().len(), 2);
+    }
+
+    #[test]
+    fn mixed_source_framing_gets_one_bounded_repair() {
+        let mut candidates = vec![
+            candidate("s1", "evidence-1", 1),
+            candidate("s2", "evidence-2", 2),
+            candidate("s3", "evidence-3", 3),
+            candidate("s4", "evidence-4", 4),
+            candidate("s5", "evidence-5", 5),
+            candidate("s6", "evidence-6", 6),
+        ];
+        candidates[0].evidence.claim_text = "Problem statement.".into();
+        candidates[0].evidence.exact_quote = "Problem statement.".into();
+        candidates[0].source_framing = Some(SourceFraming::Problem);
+        candidates[2].evidence.claim_text = "Ordinary statement.".into();
+        candidates[2].evidence.exact_quote = "Ordinary statement.".into();
+        let catalog = SourceCatalog {
+            candidates,
+            omitted_source_units: 0,
+        };
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let runtime = FramingRepairRuntime::new(true);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &runtime,
+            "document-1",
+            &catalog,
+            prompt.clone(),
+            schema.clone(),
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("one bounded repair should split mixed source framing");
+        assert_eq!(generated.withheld_unit_kind, None);
+        assert_eq!(generated.claims.len(), 2);
+        assert_eq!(
+            generated.claims[0].text,
+            "The document presents the following as a problem: Problem statement."
+        );
+        assert_eq!(generated.claims[1].text, "Ordinary statement.");
+        let requests = runtime.requests();
+        assert_eq!(requests.len(), 2);
+        let repair_prompt = serde_json::from_str::<Value>(&requests[1].user_prompt).unwrap();
+        assert!(repair_prompt["validation_feedback"]
+            .as_array()
+            .is_some_and(|feedback| feedback.iter().any(|item| item
+                .as_str()
+                .is_some_and(|message| message.contains("source_framing")))));
+
+        let repeating = FramingRepairRuntime::new(false);
+        let failure = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &repeating,
+            "document-1",
+            &catalog,
+            prompt,
+            schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect_err("a repeated mixed-framing response must fail closed");
+        assert_eq!(failure.code, SOURCE_FRAMING_MIXED_RESPONSE_CODE);
         assert_eq!(repeating.requests().len(), 2);
     }
 
