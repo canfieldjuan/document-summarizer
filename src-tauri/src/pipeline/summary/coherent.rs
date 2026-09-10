@@ -1024,6 +1024,7 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
                     word.as_str(),
                     "appeared"
                         | "detected"
+                        | "discovered"
                         | "emerged"
                         | "existed"
                         | "found"
@@ -1068,6 +1069,7 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
             word.as_str(),
             "appearing"
                 | "detected"
+                | "discovered"
                 | "emerging"
                 | "existing"
                 | "found"
@@ -8313,6 +8315,8 @@ mod tests {
         }
         for residual_risk in [
             "Risks have not been ruled out.",
+            "A risk was discovered.",
+            "Risks have been discovered.",
             "Risks haven't been ruled out.",
             "Risks haven’t been ruled out.",
             "Risk has not been ruled out.",
@@ -8340,6 +8344,8 @@ mod tests {
         }
         for ruled_out_risk in [
             "Risks have been ruled out.",
+            "Risks have not been discovered.",
+            "Risks were not discovered.",
             "Risks haven't been ruled in.",
             "Risks were ruled out.",
             "Risks have not been ruled in.",
