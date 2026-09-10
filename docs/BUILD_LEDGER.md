@@ -3469,13 +3469,21 @@ release acceptance exposed issue #49
   that end as declarative sentences. Wrong complements, qualified dash clauses,
   and marked or colon-signaled heading controls preserve their prior behavior.
   The focused classifier test and full deterministic gate passed.
-- The final product-code head `e9ea756744309abfb2c5b4866a46344d2a7ae00a`
+- Product-code head `e9ea756744309abfb2c5b4866a46344d2a7ae00a`
   retains a denied category as non-governing parser state, allowing a bounded
   adverse continuation on a later line or normalized block to restore it. The
   suspended category does not label neutral text and clears at a recognized
   section boundary or unavailable visual gap. Blank-line, cross-block,
   explicit-boundary and synthesis/verification parity controls pass. The
   focused classifier test and full deterministic gate passed.
+- The final product-code head `ee020922153d4dd9b507e8a2159d565036465367`
+  recognizes bounded comma-separated framing denials before clause splitting
+  and uses the shared declarative-terminal predicate when deciding whether a
+  sentence-shaped line can reset active framing. ASCII, full-width and Arabic
+  comma forms pass; missing and misplaced commas, mixed noun categories,
+  compound-noun splits and question terminals fail closed. Supported Unicode
+  declarative terminals preserve active framing. The focused boundary probe and
+  full deterministic gate passed.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
