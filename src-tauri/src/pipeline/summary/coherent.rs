@@ -852,45 +852,58 @@ fn contrast_continuation_reintroduces_source_framing(
     };
     let residual_subject_is_adverse = |predicate_start: usize| {
         let clause_start = clause_starts.get(predicate_start).copied().unwrap_or(0);
-        words[clause_start..predicate_start].iter().any(|word| {
-            source_framing_from_noun(word.as_str()) == Some(active_framing)
-                || matches!(
-                    word.as_str(),
-                    "abuse"
-                        | "accident"
-                        | "accidents"
-                        | "breach"
-                        | "breaches"
-                        | "damage"
-                        | "damages"
-                        | "danger"
-                        | "dangers"
-                        | "defect"
-                        | "defects"
-                        | "error"
-                        | "errors"
-                        | "exposure"
-                        | "exposures"
-                        | "failure"
-                        | "failures"
-                        | "fraud"
-                        | "harm"
-                        | "hazard"
-                        | "hazards"
-                        | "injuries"
-                        | "injury"
-                        | "loss"
-                        | "losses"
-                        | "misconduct"
-                        | "noncompliance"
-                        | "shortfall"
-                        | "shortfalls"
-                        | "underpayment"
-                        | "underpayments"
-                        | "violation"
-                        | "violations"
-                )
-        })
+        let mut head_end = predicate_start;
+        while head_end > clause_start
+            && words
+                .get(head_end - 1)
+                .is_some_and(|word| matches!(word.as_str(), "currently" | "now" | "still" | "yet"))
+        {
+            head_end -= 1;
+        }
+        let Some(head) = head_end
+            .checked_sub(1)
+            .and_then(|index| words.get(index))
+            .map(String::as_str)
+        else {
+            return false;
+        };
+        source_framing_from_noun(head) == Some(active_framing)
+            || matches!(
+                head,
+                "abuse"
+                    | "accident"
+                    | "accidents"
+                    | "breach"
+                    | "breaches"
+                    | "damage"
+                    | "damages"
+                    | "danger"
+                    | "dangers"
+                    | "defect"
+                    | "defects"
+                    | "error"
+                    | "errors"
+                    | "exposure"
+                    | "exposures"
+                    | "failure"
+                    | "failures"
+                    | "fraud"
+                    | "harm"
+                    | "hazard"
+                    | "hazards"
+                    | "injuries"
+                    | "injury"
+                    | "loss"
+                    | "losses"
+                    | "misconduct"
+                    | "noncompliance"
+                    | "shortfall"
+                    | "shortfalls"
+                    | "underpayment"
+                    | "underpayments"
+                    | "violation"
+                    | "violations"
+            )
     };
     words.windows(2).enumerate().any(|(index, window)| {
         predicate_is_affirmative(index)
@@ -907,6 +920,22 @@ fn contrast_continuation_reintroduces_source_framing(
                 ("are" | "is" | "was" | "were", "still", "possible")
             )
     })
+}
+
+fn contrast_continuation_lead(text: &str) -> bool {
+    text.split(|character: char| !character.is_alphanumeric())
+        .find(|word| !word.is_empty())
+        .is_some_and(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "but" | "however" | "nevertheless" | "nonetheless" | "still" | "yet"
+            )
+        })
+}
+
+fn comma_contrast_boundary(text: &str) -> Option<usize> {
+    text.match_indices(',')
+        .find_map(|(index, _)| contrast_continuation_lead(&text[index + 1..]).then_some(index))
 }
 
 fn is_bounded_not_applicable_abbreviation(text: &str) -> bool {
@@ -938,8 +967,14 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
     let sentence_terminal = text
         .char_indices()
         .find(|(_, character)| matches!(character, '.' | '?' | '!'));
-    let sentence_end = sentence_terminal.map_or(text.len(), |(index, _)| index);
-    let sentence_remainder = &text[sentence_end..];
+    let comma_contrast = comma_contrast_boundary(text);
+    let (sentence_end, remainder_start) = match (sentence_terminal, comma_contrast) {
+        (Some((terminal, _)), Some(comma)) if comma < terminal => (comma, comma + 1),
+        (Some((terminal, _)), _) => (terminal, terminal),
+        (None, Some(comma)) => (comma, comma + 1),
+        (None, None) => (text.len(), text.len()),
+    };
+    let sentence_remainder = &text[remainder_start..];
     if sentence_remainder
         .chars()
         .take_while(|character| matches!(character, '.' | '?' | '!'))
@@ -951,7 +986,7 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
         character.is_whitespace() || matches!(character, '.' | '!')
     });
     let continuation_offset = text_offset
-        .saturating_add(sentence_end)
+        .saturating_add(remainder_start)
         .saturating_add(sentence_remainder.len().saturating_sub(continuation.len()));
     let sentence = &text[..sentence_end];
     let words = sentence
@@ -979,16 +1014,7 @@ fn section_denial_update(text: &str, active_framing: SourceFraming) -> Option<Se
     if !denied {
         return None;
     }
-    let continuation_lead = continuation
-        .split(|character: char| !character.is_alphanumeric())
-        .find(|word| !word.is_empty())
-        .map(str::to_ascii_lowercase);
-    let contrast_continuation = continuation_lead.is_some_and(|lead| {
-        matches!(
-            lead.as_str(),
-            "but" | "however" | "nevertheless" | "nonetheless" | "still" | "yet"
-        )
-    });
+    let contrast_continuation = contrast_continuation_lead(continuation);
     let reintroduced = continuation_reintroduces_source_framing(continuation, active_framing)
         || contrast_continuation
             && contrast_continuation_reintroduces_source_framing(continuation, active_framing);
@@ -1234,6 +1260,10 @@ fn source_framing_line_update(
         }
         let colon_index = delimiter_index;
         let (heading_candidate, heading_offset) = inline_heading_prefix(line, colon_index);
+        let denial_answer_label = matches!(
+            heading_candidate.trim().to_ascii_lowercase().as_str(),
+            "answer" | "response"
+        );
         let (next, changed) = apply_inline_heading_candidate(framing, heading_candidate);
         if changed {
             framing = next;
@@ -1247,6 +1277,12 @@ fn source_framing_line_update(
                 body_offset
             };
             transitions.push((transition_offset, framing));
+            apply_section_denial_update(&mut framing, &mut transitions, body_offset, body);
+        } else if denial_answer_label {
+            let body = &line[colon_index + 1..];
+            let body_offset = leading_whitespace
+                .saturating_add(colon_index)
+                .saturating_add(1);
             apply_section_denial_update(&mut framing, &mut transitions, body_offset, body);
         }
     }
@@ -5830,12 +5866,23 @@ mod tests {
             "No risks were identified. However, success remains possible.",
             "No risks were identified. However, recovery is still possible.",
             "No risks were identified. However, if controls are not applied, success remains possible.",
+            "No risks were identified. However, risk reduction remains possible.",
+            "No risks were identified. However, fraud prevention is still possible.",
+            "No risks were identified. However, worker injury prevention remains possible.",
         ] {
             assert!(begins_with_section_denial(
                 nonadverse_possibility,
                 SourceFraming::Risk,
             ));
         }
+        assert!(begins_with_section_denial(
+            "No risks were identified, but monitoring will continue.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were identified, but risk reduction remains possible.",
+            SourceFraming::Risk,
+        ));
         for adverse_possibility in [
             "No risks were identified. However, financial loss remains possible.",
             "No risks were identified. However, worker injury is still possible.",
@@ -6597,6 +6644,34 @@ mod tests {
             ),
             None
         );
+        for (labeled_answer, denied_text) in [
+            ("Any known risks? Answer: None reported.", "None reported."),
+            (
+                "Any known risks? Response: No risks were identified.",
+                "No risks were identified.",
+            ),
+        ] {
+            let block = format!("Key Risks\n{labeled_answer}\nOverview follows.");
+            for unframed in [denied_text, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "{labeled_answer} should clear framing",
+                );
+            }
+        }
+        for retained_labeled_answer in [
+            "Any known risks? Answer: None reported because the review is incomplete.",
+            "Any known risks? Answering: None reported.",
+            "Any known risks? Answer: Fraud remains possible.",
+        ] {
+            let block = format!("Key Risks\n{retained_labeled_answer}\nOverview follows.");
+            assert_eq!(
+                source_framing_for_segment(&block, "Overview follows.", None),
+                Some(SourceFraming::Risk),
+                "{retained_labeled_answer} should retain framing",
+            );
+        }
         for retained_question_answer in [
             "Any known risks? None reported? Verify the record.",
             "Any known risks? None reported because the review is incomplete.",
@@ -6720,6 +6795,19 @@ mod tests {
                 None
             );
         }
+        for protective_post_denial_contrast in [
+            "Key Risks\nNo risks were identified. However, risk reduction remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified. However, fraud prevention is still possible.\nOverview follows.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(
+                    protective_post_denial_contrast,
+                    "Overview follows.",
+                    None,
+                ),
+                None
+            );
+        }
         let adverse_post_denial_contrast = "Key Risks\nNo risks were identified. However, financial loss remains possible.\nOverview follows.";
         for framed in [
             "However, financial loss remains possible.",
@@ -6727,6 +6815,29 @@ mod tests {
         ] {
             assert_eq!(
                 source_framing_for_segment(adverse_post_denial_contrast, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let coordinated_neutral =
+            "Key Risks\nNo risks were identified, but monitoring will continue.\nOverview follows.";
+        for unframed in [
+            "No risks were identified, but monitoring will continue.",
+            "Overview follows.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(coordinated_neutral, unframed, None),
+                None
+            );
+        }
+        let coordinated_adverse =
+            "Key Risks\nNo risks were identified, but fraud remains possible.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(coordinated_adverse, "No risks were identified", None),
+            None
+        );
+        for framed in ["fraud remains possible.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(coordinated_adverse, framed, None),
                 Some(SourceFraming::Risk)
             );
         }
@@ -6891,7 +7002,6 @@ mod tests {
             "There is no control that eliminates every risk.",
             "There has been no control that eliminates every risk.",
             "Neither control eliminates all risks.",
-            "No risks were identified, but fraud remains possible.",
         ] {
             let negative_risk = format!("Key Risks\n{residual_risk}");
             assert_eq!(
@@ -6899,6 +7009,12 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
+        let coordinated_transition = "No risks were identified, but fraud remains possible.";
+        let coordinated_risk = format!("Key Risks\n{coordinated_transition}");
+        assert_eq!(
+            source_framing_for_segment(&coordinated_risk, coordinated_transition, None),
+            None
+        );
         let single_newline = "Common Problems\nLate payments are frequent.";
         assert_eq!(
             source_framing_for_segment(single_newline, "Late payments are frequent.", None),
