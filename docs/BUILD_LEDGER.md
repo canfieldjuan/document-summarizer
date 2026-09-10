@@ -3302,9 +3302,10 @@ release acceptance exposed issue #49
   and its own body begins on the next line. Generic colon-ended resets require a
   marked heading or an explicit section lead in both inline and standalone layouts, so
   introductory labels such as `Example:`, `Note:` or `Important Note:` remain
-  prose. An explicit inline prefix ending in a framing noun resets prior state
-  when negation, uncertainty or unsupported modifiers prevent assigning a new
-  label. An interrogative heading can end prior state but cannot assign an
+  prose. An explicit inline prefix ending in a framing noun or one of the
+  bounded compound terms resets prior state when negation, uncertainty or
+  unsupported modifiers prevent assigning a new label. An interrogative
+  heading can end prior state but cannot assign an
   affirmative framing label, including when its answer or another label follows
   on the same line. Ordinary substantive questions do not create that reset. A
   recognized framing heading replaces the
@@ -3411,7 +3412,7 @@ release acceptance exposed issue #49
   inline transition
   isolation, heading-only candidate neutrality with state propagation, marked
   standalone-colon transition at the full marker, reset at uncertain and
-  negated inline framing headings, retention
+  negated inline simple or compound framing headings, retention
   across inline and standalone introductory labels,
   trailing inline headings, rejection of lowercase wrapped framing nouns,
   denial clearing in following-line and inline bodies with trailing prose and

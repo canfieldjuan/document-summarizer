@@ -235,6 +235,16 @@ fn source_framing_term_at(words: &[String], cursor: usize) -> Option<(SourceFram
     source_framing_from_noun(word).map(|framing| (framing, cursor + 1))
 }
 
+fn ends_with_source_framing_term(words: &[String]) -> bool {
+    [1_usize, 2].into_iter().any(|term_length| {
+        words
+            .len()
+            .checked_sub(term_length)
+            .and_then(|cursor| source_framing_term_at(words, cursor))
+            .is_some_and(|(_, after_term)| after_term == words.len())
+    })
+}
+
 fn framing_from_heading_candidate(
     heading: &str,
     has_explicit_inline_signal: bool,
@@ -456,15 +466,14 @@ fn possible_inline_framing_boundary(text: &str) -> bool {
     let inline_words = heading
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
     let bounded_framing_reference = !heading.is_empty()
         && !heading.contains('\n')
         && heading.chars().count() <= 80
         && !inline_words.is_empty()
         && inline_words.len() <= 8
-        && inline_words
-            .last()
-            .is_some_and(|word| is_source_framing_noun(&word.to_ascii_lowercase()));
+        && ends_with_source_framing_term(&inline_words);
     if bounded_framing_reference {
         return true;
     }
@@ -815,10 +824,6 @@ fn consume_section_denial_nouns(
         cursor += 1;
         after_conjunction = true;
     }
-}
-
-fn is_source_framing_noun(word: &str) -> bool {
-    source_framing_from_noun(word).is_some()
 }
 
 fn source_framing_from_noun(word: &str) -> Option<SourceFraming> {
@@ -5247,6 +5252,8 @@ mod tests {
         assert!(possible_inline_framing_boundary("Solutions"));
         assert!(possible_inline_framing_boundary("Payment Terms"));
         assert!(possible_inline_framing_boundary("Potential Risks"));
+        assert!(possible_inline_framing_boundary("Potential Risk Factors"));
+        assert!(possible_inline_framing_boundary("No Warning Signs"));
         assert!(possible_inline_framing_boundary("No Known Issues"));
         assert!(possible_inline_framing_boundary("potential risks"));
         assert_eq!(framing_from_inline_heading("Common Problems?"), None);
@@ -5254,6 +5261,9 @@ mod tests {
         assert!(!possible_inline_framing_boundary("Note"));
         assert!(!possible_inline_framing_boundary("Important Note"));
         assert!(!possible_inline_framing_boundary("Supporting Example"));
+        assert!(!possible_inline_framing_boundary(
+            "Potential Risk Management"
+        ));
         assert!(begins_with_section_denial(
             "None reported.",
             SourceFraming::Problem
@@ -5685,6 +5695,19 @@ mod tests {
             None
         );
         assert_eq!(source_framing_after_block(uncertain_inline, None), None);
+        let uncertain_compound_inline = "Common Problems: Late payments occur. Potential Risk Factors: A different harm may occur.";
+        assert_eq!(
+            source_framing_for_segment(
+                uncertain_compound_inline,
+                "A different harm may occur.",
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            source_framing_after_block(uncertain_compound_inline, None),
+            None
+        );
         let negated_inline =
             "Common Problems: Late payments occur. No Known Issues: No defects were found.";
         assert_eq!(
@@ -5746,6 +5769,11 @@ mod tests {
         let interrogative_heading = "Key Risks\nCommon Problems?\nLate payment may occur.";
         assert_eq!(
             source_framing_for_segment(interrogative_heading, "Late payment may occur.", None,),
+            None
+        );
+        let compound_interrogative_heading = "Common Problems\nRisk Factors? Fraud may occur.";
+        assert_eq!(
+            source_framing_for_segment(compound_interrogative_heading, "Fraud may occur.", None,),
             None
         );
         let inline_interrogative_heading =
