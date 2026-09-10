@@ -3387,18 +3387,18 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `20e1a819b4bff5c3e58f646132a046b6d1e81b55`
+- The final product-code head `56d57e3c994c19b6273cf002de9dd38adf00c914`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,224
-  MiB for the Ollama process. The test passed in 102.75 seconds after 186 model
-  requests and produced 81 claims backed by 97 evidence items. The delivered
+  MiB for the Ollama process. The test passed in 109.35 seconds after 187 model
+  requests and produced 81 claims with 91 persisted evidence items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `be3e49c5ead82bea76cdbf2279a545414d214ffe2d01be97ab4e04b2fb2b403a` and
+  `50b03489656527b702f1cf1b642f0e1d2f7a9942a43eaae065cb496614ebda3e` and
   citation integrity hash
-  `e96262d36ef17920af8a2b0a81b8faee69e31ea03a74f1559fd0ed144543fd27`.
+  `37c35ba58c6681c39a47c02703d2ff63bfd9284aacc18496b5da0b92647f988a`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
