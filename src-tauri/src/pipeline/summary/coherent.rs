@@ -4798,6 +4798,7 @@ mod tests {
         OmitSibling,
         RewriteSibling,
         OmitMixedSource,
+        AddUnit,
     }
 
     #[derive(Clone, Copy)]
@@ -5034,6 +5035,12 @@ mod tests {
                 (true, FramingRepairBehavior::OmitMixedSource) => json!([
                     {"text":"The unchanged statement remains.","source_ids":["s2"]},
                     {"text":"Problem statement.","source_ids":["s1"]}
+                ]),
+                (true, FramingRepairBehavior::AddUnit) => json!([
+                    {"text":"The unchanged statement remains.","source_ids":["s2"]},
+                    {"text":"Problem statement.","source_ids":["s1"]},
+                    {"text":"Ordinary statement.","source_ids":["s3"]},
+                    {"text":"An added statement appears.","source_ids":["s2"]}
                 ]),
             };
             Ok(ModelResponse {
@@ -9965,6 +9972,7 @@ mod tests {
             FramingRepairBehavior::OmitSibling,
             FramingRepairBehavior::RewriteSibling,
             FramingRepairBehavior::OmitMixedSource,
+            FramingRepairBehavior::AddUnit,
         ] {
             let runtime = FramingRepairRuntime::new(behavior);
             let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();

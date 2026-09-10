@@ -3391,19 +3391,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `9ce1e129c071aae69db602d40bd0da319fba355a`
+- The final product-code head `38bb915efc464ed172d1a55d4d8580732c59f2a7`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 97.60 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 97.52 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `815ebf60d1c8b84a69b0cc60aaa6fbd2213d1b8340240df9f476f8d48b5cf78e` and
+  `46df8bd581993cb4d1bcfc91bc6df6a0cfc9618674446bbaf42f8fe056eca99a` and
   citation integrity hash
-  `624e72c80c4f5bfefc293898232055995c882e8a55b310332beade9ba7621ab6`.
+  `e19b55268efaceb88b3f055830d47669126fb3ef81ff2825b2365cf2e9aafd44`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3449,8 +3449,8 @@ release acceptance exposed issue #49
   retention,
   retention across punctuated title-case, all-caps and sentence-case body text,
   bounded mixed-framing
-  repair with exact valid-sibling preservation, omission/rewrite and
-  repeated-response failure, distinct
+  repair with exact valid-sibling preservation, exact per-invalid-unit source
+  coverage, omission/rewrite/partial-source and repeated-response failure, distinct
   initial and expanded repair contracts, worst-permitted compatibility-group
   split capacity with Story isolation, and
   zero/exact/over-limit persisted-count boundaries and selected-window capacity
