@@ -470,7 +470,18 @@ fn begins_with_section_denial(text: &str) -> bool {
         return false;
     };
     if first == "none" {
-        return true;
+        if words.len() == 1 {
+            return true;
+        }
+        if words.get(1).is_some_and(|word| word == "of") {
+            return false;
+        }
+        return words.iter().skip(1).any(|word| {
+            matches!(
+                word.as_str(),
+                "applicable" | "found" | "identified" | "known" | "noted" | "observed" | "reported"
+            )
+        });
     }
     let direct_denial = matches!(first, "neither" | "no");
     let existential_denial = first == "there"
@@ -4783,8 +4794,12 @@ mod tests {
         assert!(!possible_inline_framing_boundary("Important Note"));
         assert!(!possible_inline_framing_boundary("Supporting Example"));
         assert!(begins_with_section_denial("None reported."));
+        assert!(begins_with_section_denial("None have been identified."));
         assert!(begins_with_section_denial(
             "There are no known risks at this time."
+        ));
+        assert!(!begins_with_section_denial(
+            "None of the controls fully eliminates fraud."
         ));
         assert!(!begins_with_section_denial(
             "No worker may be paid below minimum wage."
@@ -4966,6 +4981,15 @@ mod tests {
                 None,
             ),
             Some(SourceFraming::Problem)
+        );
+        let negative_risk = "Key Risks\nNone of the controls fully eliminates fraud.";
+        assert_eq!(
+            source_framing_for_segment(
+                negative_risk,
+                "None of the controls fully eliminates fraud.",
+                None,
+            ),
+            Some(SourceFraming::Risk)
         );
         let single_newline = "Common Problems\nLate payments are frequent.";
         assert_eq!(
