@@ -492,6 +492,36 @@ fn apply_inline_heading_candidate(
     }
 }
 
+fn continuation_reintroduces_source_framing(
+    continuation: &str,
+    active_framing: SourceFraming,
+) -> bool {
+    let words = continuation
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(17)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    words
+        .first()
+        .and_then(|word| source_framing_from_noun(word))
+        == Some(active_framing)
+        && !words.iter().skip(1).take(8).any(|word| {
+            matches!(
+                word.as_str(),
+                "absent"
+                    | "eliminated"
+                    | "never"
+                    | "no"
+                    | "none"
+                    | "not"
+                    | "unidentified"
+                    | "unreported"
+                    | "without"
+            )
+        })
+}
+
 fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool {
     let text = text.trim_start();
     let text = marked_heading_title(text).unwrap_or(text);
@@ -519,7 +549,8 @@ fn begins_with_section_denial(text: &str, active_framing: SourceFraming) -> bool
             lead.as_str(),
             "but" | "however" | "nevertheless" | "nonetheless" | "still" | "yet"
         )
-    }) {
+    }) || continuation_reintroduces_source_framing(continuation, active_framing)
+    {
         return false;
     }
     let text = &text[..sentence_end];
@@ -5101,6 +5132,18 @@ mod tests {
             "No risks were identified. However, fraud remains possible.",
             SourceFraming::Risk,
         ));
+        assert!(!begins_with_section_denial(
+            "No risks were identified. Risks subsequently emerged during testing.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were identified. Risks were not identified later.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No risks were identified. Problems subsequently emerged.",
+            SourceFraming::Risk,
+        ));
         assert!(begins_with_section_denial(
             "None have been identified.",
             SourceFraming::Exception,
@@ -5578,6 +5621,19 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
+        let explicit_reintroduction = "Key Risks\nNo risks were identified. Risks subsequently emerged during testing.\nLater text.";
+        for framed in ["Risks subsequently emerged during testing.", "Later text."] {
+            assert_eq!(
+                source_framing_for_segment(explicit_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
+            );
+        }
+        let repeated_absence =
+            "Key Risks\nNo risks were identified. Risks were not identified later.\nLater text.";
+        assert_eq!(
+            source_framing_for_segment(repeated_absence, "Later text.", None),
+            None
+        );
         let negative_problem = "Common Problems\nNo worker may be paid below minimum wage.";
         assert_eq!(
             source_framing_for_segment(

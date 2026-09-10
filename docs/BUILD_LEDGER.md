@@ -3327,8 +3327,10 @@ release acceptance exposed issue #49
   must consist of a framing-noun phrase plus a bounded absence or reporting
   predicate; only the leading complete sentence is inspected so later prose on
   the extracted line does not hide the reset, unless the next sentence begins
-  with a bounded contrast marker that may reintroduce framed content. Repeated
-  determiners after noun conjunctions remain within that grammar, while
+  with a bounded contrast marker or explicitly reintroduces the active framing
+  category without absence or negation terms. A repeated absence or a different
+  framing category still clears state. Repeated determiners after noun
+  conjunctions remain within that grammar, while
   interrogative clauses cannot reset it. A recognized outline marker may
   precede the bounded denial; invalid markers and marked negative rules cannot
   clear state. Negative rules and residual-risk propositions such as `No worker
@@ -3410,9 +3412,11 @@ release acceptance exposed issue #49
   bounded copular and perfect existential predicates,
   bounded `to report` and bounded `Not applicable`, active-category noun
   matching, rejection of uncertainty modifiers, retention through
-  interrogative denials, post-denial contrast sentences, explanatory `Not
-  applicable because ...` and `No risks to report because ...` text and
-  negative-rule, residual-risk, qualified-denial and `None of ...` retention,
+  interrogative denials, post-denial contrast sentences, explicit same-line
+  framing reintroduction with repeated-absence and category-mismatch rejection,
+  explanatory `Not applicable because ...` and `No risks to report because ...`
+  text and negative-rule, residual-risk, qualified-denial and `None of ...`
+  retention,
   retention across punctuated sentence-case body text, bounded mixed-framing
   repair with an unchanged valid sibling, repeated-response failure, distinct
   initial and expanded repair contracts, worst-permitted compatibility-group
