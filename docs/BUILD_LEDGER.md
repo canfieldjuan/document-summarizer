@@ -3400,19 +3400,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `40e72e316bac905011ef753b835e10a67e864200`
+- The final product-code head `543cd7116c2570faa0fea4eeb945d2cbda592723`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 107.49 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 119.53 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `ed82ae139409581cac2a94e2f4cc92112cf3b38442515c8ccceeac9cfbb23fbb` and
+  `d2d4e7309633730b1a8ca84a8de224ebfde2b3362a12494dc988831fac7f6dbf` and
   citation integrity hash
-  `5ede1e44191b1cebcc7c03759671a09eabbe817b5466983b7fced172f68953d8`.
+  `e9f382333a06a4e0d6f05aaa92f61e2c639ab54ed3de1be249c1d5e418fd360f`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3431,7 +3431,9 @@ release acceptance exposed issue #49
   headings with the existing conservative modifiers, rejection of unrelated
   or uncertainty-qualified compound headings,
   inline interrogative framing headings, same-line and trailing interrogative
-  reset before answer text with substantive-question retention, byte-ordered
+  reset before answer text with substantive-question retention, full-width and
+  Arabic question terminals in standalone and inline headings with UTF-8-safe
+  answer offsets, byte-ordered
   colon/question precedence in both directions, fail-closed
   transition-spanning sources, whole standalone-colon heading/body candidates,
   inline transition
