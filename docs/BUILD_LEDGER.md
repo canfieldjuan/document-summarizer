@@ -3326,7 +3326,8 @@ release acceptance exposed issue #49
   governs later source blocks.
   A bounded denial such as `None reported`, `None have been identified`, `No
   limitations were identified`, `No risks exist`, `No risks remain`, `No
-  exceptions apply`, `No risks to report`, `Not applicable`, `N/A`, `N.A.` or
+  exceptions apply`, `No risks have yet been identified`, `No risks are
+  currently present`, `No risks to report`, `Not applicable`, `N/A`, `N.A.` or
   `There are no known risks at this time` clears an active label. An implicit
   `None` denial or bounded not-applicable form can
   clear any label; an
@@ -3396,19 +3397,19 @@ release acceptance exposed issue #49
   paragraph begins `The
   document presents the following as a problem`, retains the minimum-wage details and
   page citation, and its unchanged exact quote begins `Common Problems`.
-- The final product-code head `ce39d2c0d39dfc6d90b5ab799ef1a583edb59d3a`
+- The final product-code head `bdc4950a634540d7d4183c4d5b20d2888c3f0755`
   reran the full 111-page public DOL acceptance through
   `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
-  MiB for the Ollama process. The evidence-traced test passed in 97.10 seconds
+  MiB for the Ollama process. The evidence-traced test passed in 96.99 seconds
   after 186 model requests and produced 81 claims with 97 persisted evidence
   items. The delivered
   page-21 paragraph reads `The document presents the following as a problem:
   Common problems include employees paid a piece rate falling below the minimum
   wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
   The run recorded summary integrity hash
-  `5bac73bb862495c27735cd3e53a5abf453b041b96b06e2344bb07c89a0a4876f` and
+  `4fcf97c62cfa26537f56a506a5d8f049bf05a11cd5b735fda72996638e1d3fa4` and
   citation integrity hash
-  `cde12061d664ad3575f1abfdf229cc6389c32a04972b1fae5dd66b5be26a0da3`.
+  `50b82e7244e1069bb0dbf2536810ede787bc11aa68d2d431647bfb1b7265dc09`.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3461,9 +3462,10 @@ release acceptance exposed issue #49
   zero/exact/over-limit persisted-count boundaries and selected-window capacity
   after the transient selection labels are unavailable,
   neutral reset at uncertainty-qualified sentence-case framing headings,
-  bounded `detected`, `remain` and `apply` denials, resolved/eliminated absence
-  continuations with unresolved-risk reintroduction, exact neutral and
-  affirmative transitions within
+  bounded `detected`, `remain` and `apply` denials, one bounded `currently` or
+  `yet` inside an auxiliary denial predicate with substantive-tail rejection,
+  resolved/eliminated absence continuations with unresolved-risk
+  reintroduction, exact neutral and affirmative transitions within
   one denial/reintroduction line and its colon-body form, and fail-closed
   rejection of a source candidate spanning those transitions,
   framing-repair integrity release before a subsequent modal repair,
