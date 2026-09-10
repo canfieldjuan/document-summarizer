@@ -258,6 +258,12 @@ fn framing_from_heading_candidate(
         return None;
     }
     let marked_heading = marked_heading_title(heading);
+    if !has_explicit_inline_signal
+        && marked_heading.is_none()
+        && heading_ends_with_declarative_terminal(heading)
+    {
+        return None;
+    }
     let heading = marked_heading.unwrap_or(heading);
     let starts_uppercase = heading
         .chars()
@@ -281,6 +287,18 @@ fn framing_from_heading_candidate(
         return None;
     }
     source_framing_from_noun(words.last()?.as_str())
+}
+
+fn heading_ends_with_declarative_terminal(heading: &str) -> bool {
+    heading
+        .trim_end()
+        .trim_end_matches(['"', '\'', ')', ']', '}', '’', '”'])
+        .chars()
+        .last()
+        .is_some_and(|terminal| {
+            !is_source_question_terminal(terminal)
+                && (is_source_sentence_terminal(terminal) || matches!(terminal, ';' | '؛'))
+        })
 }
 
 fn framing_from_heading(heading: &str) -> Option<SourceFraming> {
@@ -833,6 +851,18 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
         "can" | "could" | "may" | "might" | "must" | "shall" | "should" | "will" | "would"
     ) {
         cursor = skip_adverbs(cursor + 1);
+        if words.get(cursor).is_some_and(|word| word == "no")
+            && words.get(cursor + 1).is_some_and(|word| word == "longer")
+        {
+            cursor = skip_adverbs(cursor + 2);
+            if words
+                .get(cursor)
+                .is_some_and(|word| matches!(word.as_str(), "be" | "been"))
+            {
+                cursor = skip_adverbs(cursor + 1);
+            }
+            return negated_resolution_remains_open(cursor);
+        }
         if words
             .get(cursor)
             .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
@@ -1185,10 +1215,11 @@ fn coordinated_clause_boundary(
     text: &str,
     active_framing: SourceFraming,
     limit: usize,
-) -> Option<usize> {
-    text.match_indices([',', ';'])
+) -> Option<(usize, usize)> {
+    text.match_indices([',', ';', '–', '—'])
         .find_map(|(index, delimiter)| {
-            let continuation = &text[index + 1..];
+            let continuation_start = index.saturating_add(delimiter.len());
+            let continuation = &text[continuation_start..];
             let coordinated = coordinated_continuation_lead(continuation);
             let continuation_starts_boundary = if coordinated {
                 !disjunctive_continuation_lead(continuation)
@@ -1202,7 +1233,7 @@ fn coordinated_clause_boundary(
             (index < limit
                 && continuation_starts_boundary
                 && bounded_section_denial_clause(&text[..index], active_framing))
-            .then_some(index)
+            .then_some((index, continuation_start))
         })
 }
 
@@ -1269,7 +1300,7 @@ fn section_denial_update_with_answer_context(
     let (sentence_end, remainder_start) =
         match (abbreviation_end, sentence_terminal, coordinated_boundary) {
             (Some(abbreviation), _, _) => (abbreviation, abbreviation),
-            (_, _, Some(boundary)) => (boundary, boundary + 1),
+            (_, _, Some((boundary, continuation_start))) => (boundary, continuation_start),
             (_, Some((terminal, _)), None) => (terminal, terminal),
             (None, None, None) => (text.len(), text.len()),
         };
@@ -6233,6 +6264,10 @@ mod tests {
             "iv Risks\n\nBody text.",
             "2026 Common Problems\n\nBody text.",
             "problems.\n\nOrdinary wrapped prose.",
+            "Common problems.\n\nUse the documented solution.",
+            "Known limitations!\n\nUse the documented solution.",
+            "Key risks;\n\nUse the documented solution.",
+            "\"Common problems.\"\n\nUse the documented solution.",
             "No Known Issues\n\nNo defects were found.",
             "Possible Exceptions\n\nAn exception might apply.",
             "Potential Risks\n\nA risk might arise.",
@@ -6250,6 +6285,18 @@ mod tests {
         }
         let overlong_heading = format!("{} Problems\n\nBody text.", "x".repeat(80));
         assert_eq!(required_source_framing(&overlong_heading), None);
+        for ordinary_sentence in [
+            "Common problems.",
+            "Known limitations!",
+            "Key risks;",
+            "\"Common problems.\"",
+        ] {
+            let block = format!("{ordinary_sentence}\nUse the documented solution.");
+            assert_eq!(
+                source_framing_for_segment(&block, "Use the documented solution.", None),
+                None
+            );
+        }
         for heading_only in ["Common Problems", "2. Common Problems:"] {
             assert_eq!(
                 source_framing_for_segment(heading_only, heading_only, None),
@@ -7575,6 +7622,8 @@ mod tests {
             "Key Risks\nNo risks were identified; monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified, while monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified, nor were limitations found.\nOverview follows.",
+            "Key Risks\nNo risks were identified — however, monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified – however, monitoring will continue.\nOverview follows.",
         ] {
             let coordinated_line = coordinated_neutral.lines().nth(1).unwrap();
             for unframed in [coordinated_line, "Overview follows."] {
@@ -7590,6 +7639,7 @@ mod tests {
             "Key Risks\nNo risks were identified; however, fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified; fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified, while fraud remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified — however, fraud remains possible.\nOverview follows.",
         ] {
             assert_eq!(
                 source_framing_for_segment(
@@ -7617,6 +7667,7 @@ mod tests {
         for qualified_semicolon in [
             "Key Risks\nNo risks were identified; because the review is incomplete.\nOverview follows.",
             "Key Risks\nNo risks were identified; if the preliminary record is accurate.\nOverview follows.",
+            "Key Risks\nNo risks were identified — because the review is incomplete.\nOverview follows.",
         ] {
             assert_eq!(
                 source_framing_for_segment(qualified_semicolon, "Overview follows.", None),
@@ -7829,6 +7880,8 @@ mod tests {
             "Risks are not ruled out.",
             "Risks cannot be ruled out.",
             "Risks could not be ruled out.",
+            "Risks can no longer be ruled out.",
+            "Risks may no longer be ruled out.",
         ] {
             let block =
                 format!("Key Risks\nNo risks were identified. {residual_risk}\nLater text.");
@@ -7844,6 +7897,8 @@ mod tests {
             "Risks were ruled out.",
             "Risks have not been ruled in.",
             "Risks could not be ruled in.",
+            "Risks can no longer be ruled in.",
+            "Risks can no longer be identified.",
         ] {
             let block =
                 format!("Key Risks\nNo risks were identified. {ruled_out_risk}\nLater text.");
