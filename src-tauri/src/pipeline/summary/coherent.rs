@@ -1718,30 +1718,36 @@ fn bounded_section_denial_predicate(
         }
         break;
     }
-    if !words.get(cursor).is_some_and(|word| {
-        matches!(
-            word.as_str(),
-            "apply"
-                | "applicable"
-                | "applies"
-                | "detected"
-                | "discovered"
-                | "exist"
-                | "exists"
-                | "found"
-                | "identified"
-                | "known"
-                | "noted"
-                | "observed"
-                | "present"
-                | "remain"
-                | "remains"
-                | "reported"
-        )
-    }) {
+    let Some(predicate) = words.get(cursor).map(String::as_str) else {
+        return false;
+    };
+    if !matches!(
+        predicate,
+        "apply"
+            | "applicable"
+            | "applies"
+            | "detected"
+            | "discovered"
+            | "exist"
+            | "exists"
+            | "found"
+            | "identified"
+            | "known"
+            | "noted"
+            | "observed"
+            | "present"
+            | "remain"
+            | "remains"
+            | "reported"
+    ) {
         return false;
     }
     cursor += 1;
+    if matches!(predicate, "remain" | "remains")
+        && words.get(cursor).is_some_and(|word| word == "outstanding")
+    {
+        cursor += 1;
+    }
     section_denial_tail(&words[cursor..])
 }
 
@@ -7074,6 +7080,18 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(begins_with_section_denial(
+            "No risks remain outstanding.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
+            "No problems remain outstanding at present.",
+            SourceFraming::Problem,
+        ));
+        assert!(begins_with_section_denial(
+            "No risk remains outstanding at this time.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
             "No exceptions apply.",
             SourceFraming::Exception,
         ));
@@ -7210,6 +7228,7 @@ mod tests {
             "None reported? Verify the records.",
             "No risks and no control eliminates every fraud risk.",
             "No risks remain possible.",
+            "No risks remain outstanding in this review.",
             "No exceptions apply to every worker.",
             "No risks have yet been identified because the review is incomplete.",
             "No risks are currently present in this area.",
@@ -7637,6 +7656,43 @@ mod tests {
             assert_eq!(
                 source_framing_for_segment(remaining_denial, unframed, None),
                 None
+            );
+        }
+        let outstanding_denial = "Key Risks\nNo risks remain outstanding.\nLater unrelated text.";
+        for unframed in ["No risks remain outstanding.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(outstanding_denial, unframed, None),
+                None
+            );
+        }
+        for retained_outstanding in [
+            "No risks remain outstanding? Verify the record.",
+            "No risks remain outstanding in this review.",
+            "No limitations remain outstanding.",
+        ] {
+            let block = format!("Key Risks\n{retained_outstanding}\nOverview follows.");
+            for framed in [retained_outstanding, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{retained_outstanding} should retain Risk",
+                );
+            }
+        }
+        let outstanding_reintroduction =
+            "Key Risks\nNo risks remain outstanding. Fraud is possible.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(
+                outstanding_reintroduction,
+                "No risks remain outstanding. Fraud is possible.",
+                None,
+            ),
+            None
+        );
+        for framed in ["Fraud is possible.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(outstanding_reintroduction, framed, None),
+                Some(SourceFraming::Risk)
             );
         }
         let applying_denial = "Exceptions\nNo exceptions apply.\nLater unrelated text.";
