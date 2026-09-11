@@ -3605,7 +3605,7 @@ release acceptance exposed issue #49
   442 library tests, 3 office tests and 3 release-contract tests with the
   documented opt-in tests ignored, plus strict Clippy, Rust formatting,
   `git diff --check` and the TypeScript/Vite production build.
-- The final product-code head `0a65c09df1b4985a1f2189d7e4fd46b1df06190d`
+- Product-code head `0a65c09df1b4985a1f2189d7e4fd46b1df06190d`
   routes direct `continue` predicates through the shared occurrence-complement
   check and consumes bounded `to`, `be`, `been` and `being` links before
   classifying the complement. Direct and modal resolving forms such as
@@ -3615,6 +3615,16 @@ release acceptance exposed issue #49
   office tests and 3 release-contract tests with the documented opt-in tests
   ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
+- The final product-code head `cc665da46659d990b043080ea716d30b9604389e`
+  recognizes a bounded framing or reset heading before an en or em dash and
+  transitions at the following body, while keeping a source that spans the
+  heading/body boundary unframed. It also routes direct and modal appearance
+  predicates through the shared complement check, so resolved or eliminated
+  appearance stays neutral while bare, possible or unresolved appearance
+  restores framing. The focused two-sided boundary probe passed; the full gate
+  passed 442 library tests, 3 office tests and 3 release-contract tests with
+  the documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3690,6 +3700,7 @@ release acceptance exposed issue #49
   modal and non-modal `remain` or `continue` occurrence complements bounded to
   the current sentence for both explicit framing nouns and residual subjects,
   including direct and modal `to`/copula-linked complements,
+  resolved, eliminated, possible, unresolved and bare appearance complements,
   matching copular polarity for `are impossible`, `are not possible`, and
   `are not`, `were never`, or `are no longer impossible`,
   bounded residual-risk forms using `has`, `have`, `had`, copular, `cannot`, or
@@ -3697,8 +3708,9 @@ release acceptance exposed issue #49
   controls,
   modal `no longer be ruled out` predicates with wrong-complement controls,
   coordinated en/em-dash denial continuations with neutral, adverse and
-  qualification controls, and unmarked punctuated framing-phrase rejection with
-  marked and colon-signaled controls,
+  qualification controls, bounded en/em-dash inline framing transitions with
+  transition-spanning rejection, and unmarked punctuated framing-phrase
+  rejection with marked and colon-signaled controls,
   non-governing denied-category suspension across blank lines and normalized
   blocks, bounded next-line reintroduction, explicit section-boundary and visual
   reset, and shared synthesis/verification state reconstruction,
