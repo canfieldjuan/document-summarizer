@@ -351,8 +351,14 @@ impl GatewayClient {
                 if request_expired(record, acknowledgement_started_at)? {
                     return Ok(Some(result));
                 }
-                match self.acknowledge(conn, key, &record.request_id) {
-                    Ok(()) => Ok(Some(result)),
+                match self.acknowledge(&record.request_id) {
+                    Ok(()) => {
+                        // The completion is already durable and the gateway has accepted the ACK.
+                        // A transient local write failure must not turn that success into a failed
+                        // pipeline; leaving the row Completed keeps later reconciliation idempotent.
+                        let _ = mark_acknowledged(conn, key, (self.clock)());
+                        Ok(Some(result))
+                    }
                     Err(error) => {
                         let current =
                             load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
@@ -377,12 +383,7 @@ impl GatewayClient {
         }
     }
 
-    fn acknowledge(
-        &self,
-        conn: &mut Connection,
-        key: &GatewayRequestKey,
-        request_id: &str,
-    ) -> Result<(), GatewayClientError> {
+    fn acknowledge(&self, request_id: &str) -> Result<(), GatewayClientError> {
         let body = encode_json(&AcknowledgementEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id,
@@ -404,7 +405,6 @@ impl GatewayClient {
                 "acknowledgement envelope is invalid",
             ));
         }
-        mark_acknowledged(conn, key, (self.clock)())?;
         Ok(())
     }
 
@@ -1764,6 +1764,65 @@ mod tests {
             acknowledged_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         );
         assert!(acknowledged >= completed);
+    }
+
+    #[test]
+    fn accepted_ack_with_local_write_lock_returns_and_reconciles_later() {
+        let (context, mut conn) = TestContext::new();
+        conn.busy_timeout(Duration::ZERO).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let transport = Arc::new(FakeTransport::default());
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayClientError::Transport));
+        let client = client_at(&context, transport.clone(), now);
+        assert!(matches!(
+            client.execute(&mut conn, &key(0), &request(), now),
+            Err(GatewayClientError::Transport)
+        ));
+        let record = load_request(&conn, &key(0)).unwrap().unwrap();
+        let held_lock = Arc::new(Mutex::new(None));
+        let callback_lock = held_lock.clone();
+        let database = context.database.clone();
+        transport
+            .before_ack_response
+            .lock()
+            .unwrap()
+            .replace(Box::new(move || {
+                let lock = Connection::open(database).unwrap();
+                lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+                callback_lock.lock().unwrap().replace(lock);
+            }));
+        transport.responses.lock().unwrap().extend([
+            response(200, completed(&record.request_id)),
+            response(200, acknowledged(&record.request_id)),
+        ]);
+
+        let result = client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        held_lock.lock().unwrap().take();
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Completed
+        );
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(response(200, acknowledged(&record.request_id)));
+        assert_eq!(
+            client.execute(&mut conn, &key(0), &request(), now).unwrap(),
+            result
+        );
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Acknowledged
+        );
     }
 
     #[test]
