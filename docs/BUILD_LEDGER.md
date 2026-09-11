@@ -3594,7 +3594,7 @@ release acceptance exposed issue #49
   and 3 release-contract tests with the documented opt-in tests ignored, plus
   strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
   production build.
-- The final product-code head `9448f6e8c72a6a2aa043fcb7d567223ff132d57a`
+- Product-code head `9448f6e8c72a6a2aa043fcb7d567223ff132d57a`
   bounds modal occurrence parsing to the current sentence and checks the
   complement of `remain` and `continue` before restoring a suspended Problem
   or Risk category. Resolving complements such as `impossible`, `resolved` and
@@ -3605,6 +3605,16 @@ release acceptance exposed issue #49
   442 library tests, 3 office tests and 3 release-contract tests with the
   documented opt-in tests ignored, plus strict Clippy, Rust formatting,
   `git diff --check` and the TypeScript/Vite production build.
+- The final product-code head `0a65c09df1b4985a1f2189d7e4fd46b1df06190d`
+  routes direct `continue` predicates through the shared occurrence-complement
+  check and consumes bounded `to`, `be`, `been` and `being` links before
+  classifying the complement. Direct and modal resolving forms such as
+  `continue resolved` and `continue to be eliminated` stay neutral, while
+  `continue unresolved` and `continue to exist` restore framing. The focused
+  two-sided boundary probe passed; the full gate passed 442 library tests, 3
+  office tests and 3 release-contract tests with the documented opt-in tests
+  ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3679,6 +3689,7 @@ release acceptance exposed issue #49
   eliminated` polarity including double-negative `not impossible` inversion,
   modal and non-modal `remain` or `continue` occurrence complements bounded to
   the current sentence for both explicit framing nouns and residual subjects,
+  including direct and modal `to`/copula-linked complements,
   matching copular polarity for `are impossible`, `are not possible`, and
   `are not`, `were never`, or `are no longer impossible`,
   bounded residual-risk forms using `has`, `have`, `had`, copular, `cannot`, or
