@@ -3582,7 +3582,7 @@ release acceptance exposed issue #49
   office tests and 3 release-contract tests with the documented opt-in tests
   ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
-- The final product-code head `435fb1308388dbc49bf02c217eee9dfa8af505c0`
+- Product-code head `435fb1308388dbc49bf02c217eee9dfa8af505c0`
   restores a suspended Problem or Risk category for bounded affirmative modal
   occurrence clauses with an adverse subject, while preserving polarity,
   declarative-clause and same-clause checks. It also inspects each immediate
@@ -3594,6 +3594,17 @@ release acceptance exposed issue #49
   and 3 release-contract tests with the documented opt-in tests ignored, plus
   strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
   production build.
+- The final product-code head `9448f6e8c72a6a2aa043fcb7d567223ff132d57a`
+  bounds modal occurrence parsing to the current sentence and checks the
+  complement of `remain` and `continue` before restoring a suspended Problem
+  or Risk category. Resolving complements such as `impossible`, `resolved` and
+  `eliminated` remain neutral, while `possible`, `unresolved`, continuing
+  existence and double-negative forms restore framing. The same bounded
+  predicate contract now governs explicit framing nouns and adverse residual
+  subjects. The focused two-sided boundary probe passed; the full gate passed
+  442 library tests, 3 office tests and 3 release-contract tests with the
+  documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3666,6 +3677,8 @@ release acceptance exposed issue #49
   additive, contrast, bare-independent-clause, noun-list and qualification
   controls, complement-aware `remain not possible` versus `remain not
   eliminated` polarity including double-negative `not impossible` inversion,
+  modal and non-modal `remain` or `continue` occurrence complements bounded to
+  the current sentence for both explicit framing nouns and residual subjects,
   matching copular polarity for `are impossible`, `are not possible`, and
   `are not`, `were never`, or `are no longer impossible`,
   bounded residual-risk forms using `has`, `have`, `had`, copular, `cannot`, or
