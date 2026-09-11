@@ -258,16 +258,30 @@ fn negated_source_framing_heading(words: &[String]) -> bool {
     if !heading_negates_framing(words) {
         return false;
     }
-    let Some(noun_start) = source_framing_term_start(words) else {
+    let Some((negation, conjuncts)) = words.split_first() else {
         return false;
     };
-    let Some((negation, modifiers)) = words[..noun_start].split_first() else {
-        return false;
-    };
-    matches!(
+    if !matches!(
         negation.as_str(),
         "neither" | "no" | "non" | "not" | "without"
-    ) && has_only_source_framing_modifiers(modifiers)
+    ) {
+        return false;
+    }
+    let mut conjunct_start = 0;
+    for (index, word) in conjuncts.iter().enumerate() {
+        if matches!(word.as_str(), "nor" | "or") {
+            if !source_framing_heading_conjunct(&conjuncts[conjunct_start..index]) {
+                return false;
+            }
+            conjunct_start = index.saturating_add(1);
+        }
+    }
+    source_framing_heading_conjunct(&conjuncts[conjunct_start..])
+}
+
+fn source_framing_heading_conjunct(words: &[String]) -> bool {
+    source_framing_term_start(words)
+        .is_some_and(|noun_start| has_only_source_framing_modifiers(&words[..noun_start]))
 }
 
 fn framing_from_heading_candidate(
@@ -7017,6 +7031,17 @@ mod tests {
             source_framing_for_segment(inline_negated_heading, "Overview follows.", None),
             None,
         );
+        for coordinated_negated_heading in [
+            "Common Problems\nNo risks or limitations\nOverview follows.",
+            "Common Problems\nNo risks or limitations: Overview follows.",
+            "Common Problems\n2. No risk factors nor known limitations.\nOverview follows.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(coordinated_negated_heading, "Overview follows.", None,),
+                None,
+                "coordinated negated category headings must clear inherited framing",
+            );
+        }
 
         for heading in [
             "Solutions",
@@ -8305,6 +8330,7 @@ mod tests {
             "Key Risks\nNo potential risks?\nFraud remains possible.",
             "Key Risks\n2. No controls eliminate all risks.\nFraud remains possible.",
             "Key Risks\nNo controls eliminate all risks: Fraud remains possible.",
+            "Key Risks\nNo controls eliminate all risks or limitations\nFraud remains possible.",
         ] {
             assert_eq!(
                 source_framing_for_segment(retained_risk_source, "Fraud remains possible.", None),
