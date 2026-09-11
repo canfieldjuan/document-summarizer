@@ -882,13 +882,23 @@ fn occurrence_predicate_reintroduces(words: &[String], predicate_start: usize) -
     };
     if matches!(
         predicate,
-        "appear" | "arise" | "emerge" | "exist" | "occur" | "persist"
+        "arise" | "emerge" | "exist" | "occur" | "persist"
     ) {
         return true;
     }
     if !matches!(
         predicate,
-        "continue" | "continued" | "continues" | "continuing" | "remain" | "remained" | "remains"
+        "appear"
+            | "appeared"
+            | "appearing"
+            | "appears"
+            | "continue"
+            | "continued"
+            | "continues"
+            | "continuing"
+            | "remain"
+            | "remained"
+            | "remains"
     ) {
         return false;
     }
@@ -945,10 +955,7 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
     }
     if matches!(
         predicate,
-        "appear"
-            | "appeared"
-            | "appears"
-            | "arise"
+        "arise"
             | "arises"
             | "arising"
             | "arose"
@@ -1024,7 +1031,17 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
     }
     if matches!(
         predicate,
-        "continue" | "continued" | "continues" | "continuing" | "remain" | "remained" | "remains"
+        "appear"
+            | "appeared"
+            | "appearing"
+            | "appears"
+            | "continue"
+            | "continued"
+            | "continues"
+            | "continuing"
+            | "remain"
+            | "remained"
+            | "remains"
     ) {
         return occurrence_predicate_reintroduces(words, cursor);
     }
@@ -2218,6 +2235,31 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
         if delimiter_character.is_some_and(is_source_coordination_delimiter) {
             let suffix_start = delimiter_index.saturating_add(delimiter_len);
             let suffix = &line[suffix_start..];
+            if matches!(delimiter_character, Some('–' | '—')) {
+                let (heading_candidate, heading_offset) =
+                    inline_heading_prefix(line, delimiter_index);
+                let (next, changed) = apply_inline_heading_candidate(framing, heading_candidate);
+                if changed {
+                    framing = next;
+                    suspended = None;
+                    let body_offset = leading_whitespace.saturating_add(suffix_start);
+                    let transition_offset = if suffix.trim().is_empty() {
+                        leading_whitespace.saturating_add(heading_offset)
+                    } else {
+                        body_offset
+                    };
+                    transitions.push((transition_offset, framing));
+                    apply_section_denial_update(
+                        &mut framing,
+                        &mut suspended,
+                        &mut transitions,
+                        body_offset,
+                        suffix,
+                    );
+                    bare_no_answer_allowed = false;
+                    continue;
+                }
+            }
             let denial = if coordinated_continuation_lead(suffix) {
                 continuation_after_coordinator(suffix)
             } else if matches!(delimiter_character, Some(';' | '؛')) {
@@ -7612,6 +7654,26 @@ mod tests {
             ),
             None
         );
+        for dash in ['—', '–'] {
+            let dash_inline_sections =
+                format!("Common Problems\nKey Risks {dash} Injury may occur.\nOverview follows.");
+            for framed in ["Injury may occur.", "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&dash_inline_sections, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{dash} should introduce Risk framing",
+                );
+            }
+            assert_eq!(
+                source_framing_for_segment(
+                    &dash_inline_sections,
+                    &format!("Key Risks {dash} Injury may occur."),
+                    None,
+                ),
+                None,
+                "a source spanning the {dash} transition must stay unframed",
+            );
+        }
         let fullwidth_inline_reset =
             "Key Risks\nSolutions： Pay workers promptly.\nOverview follows.";
         for unframed in ["Pay workers promptly.", "Overview follows."] {
@@ -9070,6 +9132,9 @@ mod tests {
             "Risks may remain impossible.",
             "Risks may remain resolved.",
             "Risks may remain eliminated.",
+            "Risks may appear to be resolved.",
+            "Risks appear resolved.",
+            "Risks appear to be eliminated.",
             "Risks may continue resolved.",
             "Risks may continue to be resolved.",
             "Risks continue resolved.",
@@ -9090,6 +9155,9 @@ mod tests {
             "Risks may remain possible.",
             "Risks may remain unresolved.",
             "Risks may remain not impossible.",
+            "Risks may appear to be possible.",
+            "Risks appear unresolved.",
+            "Risks appear.",
             "Risks may continue to exist.",
             "Risks may continue to be unresolved.",
             "Risks continue unresolved.",
