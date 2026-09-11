@@ -812,7 +812,7 @@ fn continuation_reintroduces_source_framing(
     if !begins_with_declarative_source_clause(continuation) {
         return false;
     }
-    let (words, _) = section_denial_words(continuation);
+    let (words, _) = section_denial_words(first_source_sentence(continuation));
     let framing_phrase_start = usize::from(
         words
             .first()
@@ -829,26 +829,76 @@ fn continuation_reintroduces_source_framing(
     framing == active_framing && framing_noun_predicate_reintroduces(&words, noun_end)
 }
 
+fn is_source_state_adverb(word: &str) -> bool {
+    matches!(
+        word,
+        "currently" | "later" | "now" | "previously" | "still" | "subsequently" | "yet"
+    )
+}
+
+fn skip_source_state_adverbs(words: &[String], mut cursor: usize) -> usize {
+    while words
+        .get(cursor)
+        .is_some_and(|word| is_source_state_adverb(word))
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn resolution_complement_is_closed(words: &[String], cursor: usize) -> bool {
+    words.get(cursor).is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "absent" | "eliminated" | "impossible" | "resolved"
+        ) || (word == "ruled" && words.get(cursor + 1).is_some_and(|next| next == "out"))
+    })
+}
+
+fn occurrence_complement_is_closed(words: &[String], cursor: usize) -> bool {
+    resolution_complement_is_closed(words, cursor)
+        || words
+            .get(cursor)
+            .is_some_and(|word| matches!(word.as_str(), "none" | "unidentified" | "unreported"))
+}
+
+fn occurrence_predicate_reintroduces(words: &[String], predicate_start: usize) -> bool {
+    let Some(predicate) = words.get(predicate_start).map(String::as_str) else {
+        return false;
+    };
+    if matches!(
+        predicate,
+        "appear" | "arise" | "emerge" | "exist" | "occur" | "persist"
+    ) {
+        return true;
+    }
+    if !matches!(
+        predicate,
+        "continue" | "continued" | "continues" | "continuing" | "remain" | "remained" | "remains"
+    ) {
+        return false;
+    }
+    let mut cursor = skip_source_state_adverbs(words, predicate_start + 1);
+    if words
+        .get(cursor)
+        .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
+    {
+        cursor = skip_source_state_adverbs(words, cursor + 1);
+        return resolution_complement_is_closed(words, cursor);
+    }
+    if words.get(cursor).is_some_and(|word| word == "no")
+        && words.get(cursor + 1).is_some_and(|word| word == "longer")
+    {
+        cursor = skip_source_state_adverbs(words, cursor + 2);
+        return resolution_complement_is_closed(words, cursor);
+    }
+    !occurrence_complement_is_closed(words, cursor)
+}
+
 fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> bool {
-    let negated_resolution_remains_open = |cursor: usize| {
-        words.get(cursor).is_some_and(|word| {
-            matches!(
-                word.as_str(),
-                "absent" | "eliminated" | "impossible" | "resolved"
-            ) || (word == "ruled" && words.get(cursor + 1).is_some_and(|next| next == "out"))
-        })
-    };
-    let skip_adverbs = |mut cursor: usize| {
-        while words.get(cursor).is_some_and(|word| {
-            matches!(
-                word.as_str(),
-                "currently" | "later" | "now" | "previously" | "still" | "subsequently" | "yet"
-            )
-        }) {
-            cursor += 1;
-        }
-        cursor
-    };
+    let negated_resolution_remains_open =
+        |cursor: usize| resolution_complement_is_closed(words, cursor);
+    let skip_adverbs = |cursor: usize| skip_source_state_adverbs(words, cursor);
     let mut cursor = skip_adverbs(noun_end);
     let Some(raw_predicate) = words.get(cursor).map(String::as_str) else {
         return false;
@@ -941,47 +991,10 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
             }
             return negated_resolution_remains_open(cursor);
         }
-        return words.get(cursor).is_some_and(|word| {
-            matches!(
-                word.as_str(),
-                "appear"
-                    | "arise"
-                    | "continue"
-                    | "emerge"
-                    | "exist"
-                    | "occur"
-                    | "persist"
-                    | "remain"
-            )
-        });
+        return occurrence_predicate_reintroduces(words, cursor);
     }
     if matches!(predicate, "remain" | "remained" | "remains") {
-        cursor = skip_adverbs(cursor + 1);
-        if words
-            .get(cursor)
-            .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
-        {
-            cursor = skip_adverbs(cursor + 1);
-            return negated_resolution_remains_open(cursor);
-        }
-        if words.get(cursor).is_some_and(|word| word == "no")
-            && words.get(cursor + 1).is_some_and(|word| word == "longer")
-        {
-            cursor = skip_adverbs(cursor + 2);
-            return negated_resolution_remains_open(cursor);
-        }
-        return !words.get(cursor).is_some_and(|word| {
-            matches!(
-                word.as_str(),
-                "absent"
-                    | "eliminated"
-                    | "impossible"
-                    | "none"
-                    | "resolved"
-                    | "unidentified"
-                    | "unreported"
-            )
-        });
+        return occurrence_predicate_reintroduces(words, cursor);
     }
     if matches!(predicate, "do" | "does" | "did") {
         cursor = skip_adverbs(cursor + 1);
@@ -1260,20 +1273,17 @@ fn source_framing_reintroduction_offset(
         }) {
             occurrence += 1;
         }
-        predicate_terms_share_clause(predicate_start, occurrence)
-            && words.get(occurrence).is_some_and(|word| {
-                matches!(
-                    word.as_str(),
-                    "appear"
-                        | "arise"
-                        | "continue"
-                        | "emerge"
-                        | "exist"
-                        | "occur"
-                        | "persist"
-                        | "remain"
-                )
-            })
+        if !predicate_terms_share_clause(predicate_start, occurrence) {
+            return false;
+        }
+        let occurrence_clause = clause_starts.get(occurrence).copied();
+        let clause_end = clause_starts
+            .iter()
+            .enumerate()
+            .skip(occurrence + 1)
+            .find_map(|(index, clause)| (Some(*clause) != occurrence_clause).then_some(index))
+            .unwrap_or(words.len());
+        occurrence_predicate_reintroduces(&words[..clause_end], occurrence)
     };
     let predicate_start = words
         .iter()
@@ -8408,6 +8418,8 @@ mod tests {
             "Financial losses can arise.",
             "Worker injuries could still emerge.",
             "Underpayment might persist.",
+            "Fraud may remain possible.",
+            "Fraud may remain unresolved.",
         ] {
             let block =
                 format!("Key Risks\nNo risks were identified. {modal_residual}\nOverview follows.");
@@ -8436,6 +8448,10 @@ mod tests {
             "Fraud may not occur.",
             "Fraud may never occur.",
             "Fraud may occur?",
+            "Fraud may remain impossible.",
+            "Fraud may remain resolved.",
+            "Fraud may remain eliminated.",
+            "Fraud may continue resolved.",
             "Success may occur.",
             "Fraud prevention may occur.",
             "Fraud may. Occur.",
@@ -9015,6 +9031,40 @@ mod tests {
                     source_framing_for_segment(&block, framed, None),
                     Some(SourceFraming::Risk),
                     "{declarative_reintroduction} should restore framing",
+                );
+            }
+        }
+        for neutral_modal_complement in [
+            "Risks may remain impossible.",
+            "Risks may remain resolved.",
+            "Risks may remain eliminated.",
+            "Risks may continue resolved.",
+        ] {
+            let block = format!(
+                "Key Risks\nNo risks were identified. {neutral_modal_complement}\nOverview follows."
+            );
+            for unframed in [neutral_modal_complement, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "{neutral_modal_complement} should stay unframed",
+                );
+            }
+        }
+        for adverse_modal_complement in [
+            "Risks may remain possible.",
+            "Risks may remain unresolved.",
+            "Risks may remain not impossible.",
+            "Risks may continue to exist.",
+        ] {
+            let block = format!(
+                "Key Risks\nNo risks were identified. {adverse_modal_complement}\nOverview follows."
+            );
+            for framed in [adverse_modal_complement, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{adverse_modal_complement} should restore Risk",
                 );
             }
         }
