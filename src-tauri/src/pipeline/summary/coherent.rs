@@ -706,9 +706,9 @@ fn interrogative_mitigation_boundary(words: &[String]) -> bool {
                         .is_some_and(|suffix| suffix == ["control", "measures"]))
         }
         Some("are" | "is" | "was" | "were") => auxiliary_mitigation_question(words),
-        Some("can" | "could" | "must" | "shall" | "should" | "will" | "would") => {
-            mitigation_question_has_action(words, false)
-        }
+        Some(
+            "can" | "could" | "may" | "might" | "must" | "shall" | "should" | "will" | "would",
+        ) => mitigation_question_has_action(words, false),
         _ => false,
     }
 }
@@ -6933,6 +6933,8 @@ mod tests {
             "Can these risks be mitigated?",
             "Can we control risks?",
             "Could fraud be prevented?",
+            "May these risks be mitigated?",
+            "Might fraud be prevented?",
             "Should this problem be addressed?",
         ] {
             assert!(
@@ -6951,6 +6953,8 @@ mod tests {
             "Can controls fail?",
             "Can the control remain?",
             "Could controls fail to prevent fraud?",
+            "May controls fail?",
+            "Might controls fail to prevent fraud?",
             "Can risks remain?",
         ] {
             assert!(!possible_interrogative_framing_boundary(
@@ -8389,6 +8393,8 @@ mod tests {
             "What risks remain? Fraud remains possible.",
             "Who can be harmed? Fraud remains possible.",
             "Why are workers at risk? Fraud remains possible.",
+            "May controls fail? Fraud remains possible.",
+            "Might controls fail to prevent fraud? Fraud remains possible.",
         ] {
             let substantive_wh_question = format!("Key Risks\n{wh_question}");
             assert_eq!(
@@ -8411,6 +8417,8 @@ mod tests {
             "Can these risks be mitigated? Enable MFA.",
             "Can we control risks? Enable MFA.",
             "Could fraud be prevented? Enable MFA.",
+            "May these risks be mitigated? Enable MFA.",
+            "Might fraud be prevented? Enable MFA.",
             "Should this problem be addressed? Enable MFA.",
         ] {
             let block = format!("Key Risks\n{mitigation_question}\nOverview follows.");
