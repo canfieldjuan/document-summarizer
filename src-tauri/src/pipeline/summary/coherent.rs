@@ -1236,27 +1236,77 @@ fn source_framing_reintroduction_offset(
                 begins_with_declarative_source_clause(&contrast_body[*clause_offset..])
             })
     };
+    let predicate_terms_share_clause = |start: usize, end: usize| {
+        clause_starts
+            .get(start)
+            .zip(clause_starts.get(end))
+            .is_some_and(|(start_clause, end_clause)| start_clause == end_clause)
+    };
+    let modal_occurrence_predicate = |predicate_start: usize| {
+        if !words.get(predicate_start).is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "can" | "could" | "may" | "might" | "must" | "shall" | "should" | "will" | "would"
+            )
+        }) {
+            return false;
+        }
+        let mut occurrence = predicate_start.saturating_add(1);
+        while words.get(occurrence).is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "currently" | "later" | "now" | "previously" | "still" | "subsequently" | "yet"
+            )
+        }) {
+            occurrence += 1;
+        }
+        predicate_terms_share_clause(predicate_start, occurrence)
+            && words.get(occurrence).is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "appear"
+                        | "arise"
+                        | "continue"
+                        | "emerge"
+                        | "exist"
+                        | "occur"
+                        | "persist"
+                        | "remain"
+                )
+            })
+    };
     let predicate_start = words
-        .windows(2)
+        .iter()
         .enumerate()
-        .find_map(|(index, window)| {
+        .find_map(|(index, _)| {
             (predicate_is_affirmative(index)
                 && residual_subject_is_adverse(index)
                 && predicate_begins_declarative_clause(index)
-                && matches!(
-                    (window[0].as_str(), window[1].as_str()),
-                    (
-                        "are" | "is" | "remain" | "remained" | "remains" | "was" | "were",
-                        "possible"
-                    )
-                ))
+                && modal_occurrence_predicate(index))
             .then_some(index)
+        })
+        .or_else(|| {
+            words.windows(2).enumerate().find_map(|(index, window)| {
+                (predicate_is_affirmative(index)
+                    && residual_subject_is_adverse(index)
+                    && predicate_begins_declarative_clause(index)
+                    && predicate_terms_share_clause(index, index + 1)
+                    && matches!(
+                        (window[0].as_str(), window[1].as_str()),
+                        (
+                            "are" | "is" | "remain" | "remained" | "remains" | "was" | "were",
+                            "possible"
+                        )
+                    ))
+                .then_some(index)
+            })
         })
         .or_else(|| {
             words.windows(3).enumerate().find_map(|(index, window)| {
                 (predicate_is_affirmative(index)
                     && residual_subject_is_adverse(index)
                     && predicate_begins_declarative_clause(index)
+                    && predicate_terms_share_clause(index, index + 2)
                     && matches!(
                         (window[0].as_str(), window[1].as_str(), window[2].as_str()),
                         ("are" | "is" | "was" | "were", "still", "possible")
@@ -2006,6 +2056,40 @@ fn apply_section_denial_update_with_answer_context(
     }
 }
 
+fn first_source_sentence(text: &str) -> &str {
+    let end = text
+        .char_indices()
+        .find(|(_, character)| is_source_sentence_terminal(*character))
+        .map(|(index, character)| index.saturating_add(character.len_utf8()))
+        .unwrap_or(text.len());
+    &text[..end]
+}
+
+fn apply_suspended_framing_reintroduction(
+    framing: &mut Option<SourceFraming>,
+    suspended: &mut Option<SourceFraming>,
+    transitions: &mut Vec<(usize, Option<SourceFraming>)>,
+    base_offset: usize,
+    text: &str,
+) {
+    if framing.is_some() {
+        return;
+    }
+    let Some(category) = *suspended else {
+        return;
+    };
+    let sentence = first_source_sentence(text);
+    let Some(reintroduction_offset) = source_framing_reintroduction_offset(
+        sentence,
+        category,
+        coordinated_continuation_lead(sentence),
+    ) else {
+        return;
+    };
+    *framing = suspended.take();
+    transitions.push((base_offset.saturating_add(reintroduction_offset), *framing));
+}
+
 fn source_framing_line_update(current: SourceFramingState, line: &str) -> SourceFramingLineUpdate {
     let leading_whitespace = line.len().saturating_sub(line.trim_start().len());
     let line = line.trim();
@@ -2072,6 +2156,13 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
             let suffix_offset = leading_whitespace
                 .saturating_add(delimiter_index)
                 .saturating_add(delimiter_len);
+            apply_suspended_framing_reintroduction(
+                &mut framing,
+                &mut suspended,
+                &mut transitions,
+                suffix_offset,
+                suffix,
+            );
             apply_section_denial_update(
                 &mut framing,
                 &mut suspended,
@@ -8312,6 +8403,54 @@ mod tests {
                 );
             }
         }
+        for modal_residual in [
+            "Fraud may occur.",
+            "Financial losses can arise.",
+            "Worker injuries could still emerge.",
+            "Underpayment might persist.",
+        ] {
+            let block =
+                format!("Key Risks\nNo risks were identified. {modal_residual}\nOverview follows.");
+            assert_eq!(
+                source_framing_for_segment(&block, "No risks were identified.", None),
+                None
+            );
+            assert_eq!(
+                source_framing_for_segment(
+                    &block,
+                    &format!("No risks were identified. {modal_residual}"),
+                    None,
+                ),
+                None
+            );
+            for framed in [modal_residual, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{modal_residual} should restore Risk",
+                );
+            }
+        }
+        for neutral_modal_residual in [
+            "Fraud cannot occur.",
+            "Fraud may not occur.",
+            "Fraud may never occur.",
+            "Fraud may occur?",
+            "Success may occur.",
+            "Fraud prevention may occur.",
+            "Fraud may. Occur.",
+        ] {
+            let block = format!(
+                "Key Risks\nNo risks were identified. {neutral_modal_residual}\nOverview follows."
+            );
+            for unframed in [neutral_modal_residual, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "{neutral_modal_residual} should stay unframed",
+                );
+            }
+        }
         for neutral_copular_residual in [
             "Fraud is not possible.",
             "Fraud is possible?",
@@ -8615,6 +8754,27 @@ mod tests {
             source_framing_for_segment(split_reintroduction, split_line, None),
             None
         );
+        for terminal in ['.', '!', '。', '！', '۔', '։', '।'] {
+            let neutral_then_reintroduction = format!(
+                "Key Risks\nNo risks were identified.\nOverview follows{terminal} Risks later emerged.\nLater text."
+            );
+            let neutral = format!("Overview follows{terminal}");
+            let crossing = format!("Overview follows{terminal} Risks later emerged.");
+            for unframed in [&neutral, &crossing] {
+                assert_eq!(
+                    source_framing_for_segment(&neutral_then_reintroduction, unframed, None),
+                    None,
+                    "{terminal} should preserve the later exact transition",
+                );
+            }
+            for framed in ["Risks later emerged.", "Later text."] {
+                assert_eq!(
+                    source_framing_for_segment(&neutral_then_reintroduction, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{terminal} should allow later-sentence reintroduction",
+                );
+            }
+        }
         let next_line_reintroduction =
             "Key Risks\nNo risks were identified.\nRisks later emerged.\nOverview follows.";
         for framed in ["Risks later emerged.", "Overview follows."] {
