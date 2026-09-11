@@ -171,6 +171,11 @@ pub(crate) struct GatewayClient {
     transport: Arc<dyn GatewayTransport>,
 }
 
+enum TokenOrTerminal {
+    Token(String),
+    Terminal(GatewayResult),
+}
+
 impl GatewayClient {
     pub(crate) fn new(config: GatewayClientConfig) -> Result<Self, GatewayClientError> {
         let base_url = validate_https_origin(&config.base_url)?;
@@ -316,7 +321,10 @@ impl GatewayClient {
                 "local request state is invalid before submission",
             ));
         }
-        let token = self.read_token()?;
+        let token = match self.read_token_or_terminal(conn, key)? {
+            TokenOrTerminal::Token(token) => token,
+            TokenOrTerminal::Terminal(result) => return Ok(result),
+        };
         let current = load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
         if let Some(result) = self.resolve_local_record(conn, key, &current, (self.clock)())? {
             return Ok(result);
@@ -372,7 +380,10 @@ impl GatewayClient {
                 if request_expired(record, (self.clock)())? {
                     return Ok(Some(result));
                 }
-                let token = self.read_token()?;
+                let token = match self.read_token_or_terminal(conn, key)? {
+                    TokenOrTerminal::Token(token) => token,
+                    TokenOrTerminal::Terminal(result) => return Ok(Some(result)),
+                };
                 if request_expired(record, (self.clock)())? {
                     return Ok(Some(result));
                 }
@@ -475,6 +486,30 @@ impl GatewayClient {
             return Err(GatewayClientError::Credential);
         }
         Ok(token.to_string())
+    }
+
+    fn read_token_or_terminal(
+        &self,
+        conn: &Connection,
+        key: &GatewayRequestKey,
+    ) -> Result<TokenOrTerminal, GatewayClientError> {
+        match self.read_token() {
+            Ok(token) => Ok(TokenOrTerminal::Token(token)),
+            Err(error) => {
+                let current = load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
+                match current.state {
+                    GatewayRequestState::Acknowledged => {
+                        result_from_record(&current).map(TokenOrTerminal::Terminal)
+                    }
+                    GatewayRequestState::Completed
+                        if request_expired(&current, (self.clock)())? =>
+                    {
+                        result_from_record(&current).map(TokenOrTerminal::Terminal)
+                    }
+                    _ => Err(error),
+                }
+            }
+        }
     }
 }
 
@@ -1802,6 +1837,91 @@ mod tests {
             load_request(&conn, &key(0)).unwrap().unwrap().state,
             GatewayRequestState::Completed
         );
+    }
+
+    #[test]
+    fn credential_failure_after_ack_expiry_returns_durable_completion() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expiry = now + ChronoDuration::seconds(1);
+        let semantic_hash = sha256_hex(&encode_json(&request_core(&request()).unwrap()).unwrap());
+        reserve_request(&mut conn, &key(0), &semantic_hash, expiry, now).unwrap();
+        let request_hash = "a".repeat(64);
+        mark_submitted(&mut conn, &key(0), &request_hash, now).unwrap();
+        let completion = GatewayCompletion::new(
+            "application/json",
+            r#"{"summary":"done"}"#,
+            "office-gateway",
+            1,
+        )
+        .unwrap();
+        let completed =
+            persist_completion(&mut conn, &key(0), &request_hash, &completion, now).unwrap();
+        let times = Arc::new(Mutex::new(VecDeque::from([now, expiry])));
+        let clock_times = times.clone();
+        let transport = Arc::new(FakeTransport::default());
+        let client = GatewayClient::with_transport(
+            context.root.join("missing-token"),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            transport.clone(),
+            Arc::new(move || clock_times.lock().unwrap().pop_front().unwrap()),
+        );
+
+        let result = client
+            .resolve_local_record(&mut conn, &key(0), &completed, now)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert!(transport.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Completed
+        );
+    }
+
+    #[test]
+    fn credential_failure_reconciles_acknowledged_but_not_nonterminal_state() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expiry = now + ChronoDuration::seconds(1);
+        let semantic_hash = sha256_hex(&encode_json(&request_core(&request()).unwrap()).unwrap());
+        reserve_request(&mut conn, &key(0), &semantic_hash, expiry, now).unwrap();
+        let client = GatewayClient::with_transport(
+            context.root.join("missing-token"),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            Arc::new(FakeTransport::default()),
+            Arc::new(move || now),
+        );
+
+        assert!(matches!(
+            client.read_token_or_terminal(&conn, &key(0)),
+            Err(GatewayClientError::Credential)
+        ));
+
+        let request_hash = "a".repeat(64);
+        mark_submitted(&mut conn, &key(0), &request_hash, now).unwrap();
+        let completion = GatewayCompletion::new(
+            "application/json",
+            r#"{"summary":"done"}"#,
+            "office-gateway",
+            1,
+        )
+        .unwrap();
+        persist_completion(&mut conn, &key(0), &request_hash, &completion, now).unwrap();
+        mark_acknowledged(&mut conn, &key(0), now).unwrap();
+
+        let result = match client.read_token_or_terminal(&conn, &key(0)).unwrap() {
+            TokenOrTerminal::Terminal(result) => result,
+            TokenOrTerminal::Token(_) => panic!("missing token unexpectedly loaded"),
+        };
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
     }
 
     #[test]
