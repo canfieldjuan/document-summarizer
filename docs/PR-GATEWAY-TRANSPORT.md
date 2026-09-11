@@ -41,6 +41,8 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 ## Scope
 
 - Add one private `gateway_client` module over the merged gateway ledger.
+- Add a ledger reservation entrypoint whose authoritative creation/expiry clock is sampled only
+  after the SQLite immediate transaction acquires its write lock.
 - Add strict request/response/error/health codecs for gateway protocol v1.
 - Add production reqwest transport with HTTPS, no proxy, no redirects, bounded response reads,
   operating-system roots plus explicit CA trust, and Unix-owner-private token loading.
@@ -53,6 +55,8 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 - Request stage and ordinal must match the durable ledger key before any reservation or transport.
 - Fractional creation times round expiry upward to the next whole second, so even the minimum
   accepted lifetime remains fully available.
+- The immutable lifetime starts after reservation lock acquisition, so SQLite contention cannot
+  create an already-expired unsent identity.
 - A transport failure leaves one submitted identity; retry sends byte-identical JSON with that ID.
 - An unresolved submitted request stops before transport at its exact expiry boundary.
 - A valid response is integrity-checked and durable with deployment/policy provenance before ACK.
@@ -122,10 +126,10 @@ reads.
 
 ## Verification
 
-- `cargo test gateway_client -q` — 25 passed.
-- `cargo test gateway -q` — 30 passed.
+- `cargo test gateway_client -q` — 26 passed.
+- `cargo test gateway -q` — 31 passed.
 - `cargo test --all-targets -- --skip connect::provider::tests::entitlement_gates_manifest_jobs_and_status_while_registration_stays_owned`
-  — 471 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
+  — 472 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
   release-contract tests passed.
 - Exact isolated execution of the pre-existing skipped Connect test — 1 passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
@@ -136,7 +140,7 @@ reads.
 
 ## Estimated diff size
 
-Actual: five files, 2,736 added lines, and 12 removed lines. This exceeds the draft estimate because
+Actual: six files, 2,860 added lines, and 14 removed lines. This exceeds the draft estimate because
 the production security/credential boundary, protocol codecs, durable lifecycle, and two-sided
 failure probes are one reviewable transport unit; splitting its tests from the private client would
 reduce neither risk nor total surface. Runtime/UI work remains explicitly excluded.

@@ -5,9 +5,9 @@
 
 use crate::pipeline::contracts::{ModelOutputFormat, ModelRequest};
 use crate::pipeline::gateway_store::{
-    load_request, mark_acknowledged, mark_submitted, persist_completion, reserve_request,
-    GatewayCompletion, GatewayRequestKey, GatewayRequestRecord, GatewayRequestState,
-    GatewayStoreError,
+    load_request, mark_acknowledged, mark_submitted, persist_completion,
+    reserve_request_after_lock, GatewayCompletion, GatewayRequestKey, GatewayRequestRecord,
+    GatewayRequestState, GatewayStoreError,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use reqwest::blocking::Client;
@@ -273,8 +273,12 @@ impl GatewayClient {
         let core = request_core(request)?;
         let semantic_hash = sha256_hex(&encode_json(&core)?);
         preflight_request_size(&core)?;
-        let request_expires_at = request_expiry(now, self.request_lifetime)?;
-        let record = match reserve_request(conn, key, &semantic_hash, request_expires_at, now) {
+        let record = match reserve_request_after_lock(conn, key, &semantic_hash, || {
+            let reserved_at = (self.clock)();
+            let request_expires_at = request_expiry(reserved_at, self.request_lifetime)
+                .map_err(|_| GatewayStoreError::InvalidInput("request expiry overflowed"))?;
+            Ok((request_expires_at, reserved_at))
+        }) {
             Ok(record) => record,
             Err(error) => matching_terminal_after_store_error(conn, key, &semantic_hash, error)?,
         };
@@ -1052,9 +1056,11 @@ mod tests {
     use super::*;
     use crate::pipeline::contracts::PipelineStage;
     use crate::pipeline::db;
+    use crate::pipeline::gateway_store::reserve_request;
     use std::collections::VecDeque;
     use std::fs;
-    use std::sync::Mutex;
+    use std::sync::{Barrier, Mutex};
+    use std::thread;
     use uuid::Uuid;
 
     #[derive(Debug, Clone)]
@@ -1474,6 +1480,56 @@ mod tests {
     }
 
     #[test]
+    fn reservation_lifetime_starts_after_the_sqlite_write_lock_is_acquired() {
+        let (context, conn) = TestContext::new();
+        let initial = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let acquired = initial + ChronoDuration::seconds(5);
+        let current_time = Arc::new(Mutex::new(initial));
+        let clock_time = current_time.clone();
+        let transport = Arc::new(FakeTransport::default());
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayClientError::Transport));
+        let client = GatewayClient::with_transport(
+            context.token.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            transport,
+            Arc::new(move || *clock_time.lock().unwrap()),
+        );
+        let lock = Connection::open(&context.database).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let ready = Arc::new(Barrier::new(2));
+        let worker_ready = ready.clone();
+        let database = context.database.clone();
+        let handle = thread::spawn(move || {
+            let mut worker = db::init_db(database).unwrap();
+            worker_ready.wait();
+            client.execute(&mut worker, &key(0), &request(), initial)
+        });
+
+        ready.wait();
+        *current_time.lock().unwrap() = acquired;
+        drop(lock);
+        assert!(matches!(
+            handle.join().unwrap(),
+            Err(GatewayClientError::Transport)
+        ));
+
+        let record = load_request(&conn, &key(0)).unwrap().unwrap();
+        assert_eq!(
+            record.request_expires_at,
+            (acquired + ChronoDuration::seconds(1))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+        assert_eq!(record.state, GatewayRequestState::Submitted);
+    }
+
+    #[test]
     fn state_advance_between_reserve_and_mark_uses_local_completion() {
         let (context, mut conn) = TestContext::new();
         let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
@@ -1533,6 +1589,7 @@ mod tests {
             .with_timezone(&Utc);
         let expiry = request_expiry(now, ChronoDuration::seconds(1)).unwrap();
         let times = Arc::new(Mutex::new(VecDeque::from([
+            now,
             expiry - ChronoDuration::milliseconds(1),
             expiry - ChronoDuration::milliseconds(1),
             expiry,

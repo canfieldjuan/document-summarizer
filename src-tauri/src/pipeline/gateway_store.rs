@@ -5,7 +5,7 @@
 
 use crate::pipeline::contracts::PipelineStage;
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -106,17 +106,74 @@ pub(crate) fn reserve_request(
     request_expires_at: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Result<GatewayRequestRecord, GatewayStoreError> {
+    let stage = validate_reservation_identity(key, semantic_request_hash)?;
+    validate_reservation_timing(request_expires_at, now)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    insert_reservation(
+        tx,
+        key,
+        stage,
+        semantic_request_hash,
+        request_expires_at,
+        now,
+    )
+}
+
+pub(crate) fn reserve_request_after_lock<F>(
+    conn: &mut Connection,
+    key: &GatewayRequestKey,
+    semantic_request_hash: &str,
+    timing: F,
+) -> Result<GatewayRequestRecord, GatewayStoreError>
+where
+    F: FnOnce() -> Result<(DateTime<Utc>, DateTime<Utc>), GatewayStoreError>,
+{
+    let stage = validate_reservation_identity(key, semantic_request_hash)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (request_expires_at, now) = timing()?;
+    validate_reservation_timing(request_expires_at, now)?;
+    insert_reservation(
+        tx,
+        key,
+        stage,
+        semantic_request_hash,
+        request_expires_at,
+        now,
+    )
+}
+
+fn validate_reservation_identity(
+    key: &GatewayRequestKey,
+    semantic_request_hash: &str,
+) -> Result<&'static str, GatewayStoreError> {
     let stage = stage_name(&key.stage)?;
     validate_digest(semantic_request_hash)?;
     if key.run_id.is_empty() {
         return Err(GatewayStoreError::InvalidInput("run identity is empty"));
     }
+    Ok(stage)
+}
+
+fn validate_reservation_timing(
+    request_expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<(), GatewayStoreError> {
     if request_expires_at <= now || request_expires_at.timestamp_subsec_nanos() != 0 {
         return Err(GatewayStoreError::InvalidInput(
             "expiry is not a future whole-second timestamp",
         ));
     }
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    Ok(())
+}
+
+fn insert_reservation(
+    tx: Transaction<'_>,
+    key: &GatewayRequestKey,
+    stage: &str,
+    semantic_request_hash: &str,
+    request_expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<GatewayRequestRecord, GatewayStoreError> {
     let timestamp = timestamp_text(now);
     tx.execute(
         "INSERT INTO model_gateway_requests (
@@ -635,6 +692,10 @@ mod tests {
         ));
         assert!(matches!(
             reserve_request(&mut conn, &key(), &digest('a'), now(), now()),
+            Err(GatewayStoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            reserve_request_after_lock(&mut conn, &key(), &digest('a'), || Ok((now(), now()))),
             Err(GatewayStoreError::InvalidInput(_))
         ));
         assert!(matches!(
