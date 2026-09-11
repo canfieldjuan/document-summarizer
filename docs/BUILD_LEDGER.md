@@ -3662,9 +3662,17 @@ release acceptance exposed issue #49
   release-contract tests with the documented opt-in tests ignored, plus strict
   Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
   build.
-- The final product-code head `786e1688bb0cd76930a6ec144f673487fc357178`
+- Product-code head `786e1688bb0cd76930a6ec144f673487fc357178`
   recognizes singular inline `Remedy:` as the same bounded neutral section
   transition as `Remedies:`. The focused boundary probe passed; the full gate
+  passed 442 library tests, 3 office tests and 3 release-contract tests with the
+  documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
+- The final product-code head `7bbf862dc4ef5b4508356b52d897146b12b4be9e`
+  scopes `non` to the following recognized heading modifier, so a qualified
+  heading such as `Non-material risks` establishes Risk framing while direct
+  negations such as `Non-risks`, `Non-risk factors`, and `No material risks`
+  remain unframed. The focused two-sided boundary probe passed; the full gate
   passed 442 library tests, 3 office tests and 3 release-contract tests with the
   documented opt-in tests ignored, plus strict Clippy, Rust formatting,
   `git diff --check` and the TypeScript/Vite production build.
