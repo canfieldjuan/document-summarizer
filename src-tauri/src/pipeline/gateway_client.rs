@@ -324,10 +324,11 @@ impl GatewayClient {
             Ok(completion) => completion,
             Err(error) => return self.reconcile_or_propagate(conn, key, error),
         };
-        let persisted = persist_completion(conn, key, &request_hash, &completion, Utc::now())?;
-        let result = result_from_record(&persisted)?;
-        self.acknowledge(conn, key, &record.request_id, Utc::now())?;
-        Ok(result)
+        let persisted = persist_completion(conn, key, &request_hash, &completion, (self.clock)())?;
+        self.resolve_local_record(conn, key, &persisted, (self.clock)())?
+            .ok_or(GatewayClientError::Protocol(
+                "persisted completion state is invalid",
+            ))
     }
 
     fn resolve_local_record(
@@ -695,11 +696,14 @@ fn parse_failure(
     let failure: FailureEnvelope = decode_response(response)?;
     let ownerless_auth_failure =
         failure.request_id.is_none() && failure.error.code == "unauthenticated";
-    let retryable_auth_failure = failure.error.code == "unauthenticated" && failure.error.retryable;
     if failure.protocol_version != PROTOCOL_VERSION
         || failure.status != "failed"
         || failure.request_id.as_deref() != Some(expected_request_id) && !ownerless_auth_failure
-        || retryable_auth_failure
+        || !valid_failure_status(
+            response.status,
+            &failure.error.code,
+            failure.error.retryable,
+        )
         || failure.error.code.is_empty()
         || failure.error.code.len() > 64
         || !failure
@@ -718,6 +722,21 @@ fn parse_failure(
         retryable: failure.error.retryable,
         retry_after_seconds: failure.error.retry_after_seconds,
     })
+}
+
+fn valid_failure_status(status: u16, code: &str, retryable: bool) -> bool {
+    matches!(
+        (status, code, retryable),
+        (401, "unauthenticated", false)
+            | (403, "forbidden", false)
+            | (409, "request_expired" | "invalid_request", false)
+            | (410, "unknown_request", false)
+            | (422, "invalid_request" | "unsupported_task", false)
+            | (429, "capacity_limited", true)
+            | (500 | 502, "invalid_worker_output", false)
+            | (503, "worker_unavailable", true)
+            | (504, "inference_timeout", true)
+    )
 }
 
 fn result_from_record(
@@ -1457,6 +1476,53 @@ mod tests {
     }
 
     #[test]
+    fn completion_persisted_at_expiry_returns_without_impossible_ack() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00.250Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expiry = request_expiry(now, ChronoDuration::seconds(1)).unwrap();
+        let current_time = Arc::new(Mutex::new(expiry - ChronoDuration::milliseconds(1)));
+        let response_time = current_time.clone();
+        let transport = Arc::new(FakeTransport::default());
+        let reserved = reserve_request(
+            &mut conn,
+            &key(0),
+            &sha256_hex(&encode_json(&request_core(&request()).unwrap()).unwrap()),
+            expiry,
+            now,
+        )
+        .unwrap();
+        transport
+            .before_response
+            .lock()
+            .unwrap()
+            .replace(Box::new(move || *response_time.lock().unwrap() = expiry));
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(response(200, completed(&reserved.request_id)));
+        let clock_time = current_time.clone();
+        let client = GatewayClient::with_transport(
+            context.token.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            transport.clone(),
+            Arc::new(move || *clock_time.lock().unwrap()),
+        );
+
+        let result = client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Completed
+        );
+    }
+
+    #[test]
     fn health_and_failure_envelopes_are_strict_and_bounded() {
         let (context, mut conn) = TestContext::new();
         let transport = Arc::new(FakeTransport::default());
@@ -1689,6 +1755,29 @@ mod tests {
                 ..
             }
         ));
+        for (status, code, retryable) in [
+            (201, "capacity_limited", true),
+            (429, "capacity_limited", false),
+            (503, "capacity_limited", true),
+            (503, "worker_unavailable", false),
+        ] {
+            let error = parse_inference_response(
+                &raw_response(
+                    status,
+                    serde_json::json!({
+                        "protocol_version": 1, "request_id": request_id, "status": "failed",
+                        "error": {"code": code, "retryable": retryable}
+                    }),
+                ),
+                request_id,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                GatewayClientError::Protocol("error envelope is invalid")
+            ));
+            assert!(!error.recoverable());
+        }
 
         for error in [
             serde_json::json!({

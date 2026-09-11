@@ -24,7 +24,8 @@ and the gateway. A correct transport must:
 4. bound request and response bytes and reject malformed, mismatched, or unsupported success/error
    envelopes;
 5. persist validated output and producing deployment/task-policy provenance locally before sending
-   `persisted` acknowledgement;
+   `persisted` acknowledgement, returning that local output without ACK if persistence reaches the
+   immutable expiry;
 6. retry a lost acknowledgement from the local completed row without repeating inference, and
    return completed local output after the remote retention window or acknowledged local output
    without network access;
@@ -53,6 +54,8 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 - A transport failure leaves one submitted identity; retry sends byte-identical JSON with that ID.
 - An unresolved submitted request stops before transport at its exact expiry boundary.
 - A valid response is integrity-checked and durable with deployment/policy provenance before ACK.
+- Persistence that reaches the exact remote-retention expiry returns the same durable local output
+  without attempting an impossible acknowledgement.
 - If ACK fails after local persistence, retry sends only ACK while the request remains remotely
   retained; after expiry it returns the same completed local output without network access or a
   false acknowledgement transition.
@@ -66,6 +69,8 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 - Wrong IDs, versions, media types, statuses, provenance, retry directives, oversized bodies,
   redirects, unsafe Unix token/CA files, and non-HTTPS origins fail closed without secret
   disclosure.
+- Failure envelopes are admitted only for the protocol-v1 HTTP-status, error-code, and retryability
+  combinations actually owned by the gateway contract.
 - An authentication failure is always non-retryable, including an ownerless failure before the
   gateway can bind a request identity.
 - Health succeeds only for an available or degraded `document.summary.step@1` declaration.
@@ -99,10 +104,10 @@ reads.
 
 ## Verification
 
-- `cargo test gateway_client -q` — 12 passed.
-- `cargo test gateway -q` — 17 passed.
+- `cargo test gateway_client -q` — 13 passed.
+- `cargo test gateway -q` — 18 passed.
 - `cargo test --all-targets -- --skip connect::provider::tests::entitlement_gates_manifest_jobs_and_status_while_registration_stays_owned`
-  — 458 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
+  — 459 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
   release-contract tests passed.
 - Exact isolated execution of the pre-existing skipped Connect test — 1 passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
@@ -113,7 +118,7 @@ reads.
 
 ## Estimated diff size
 
-Actual: five files, 1,951 added lines, and 12 removed lines. This exceeds the draft estimate because
+Actual: five files, 2,045 added lines, and 12 removed lines. This exceeds the draft estimate because
 the production security/credential boundary, protocol codecs, durable lifecycle, and two-sided
 failure probes are one reviewable transport unit; splitting its tests from the private client would
 reduce neither risk nor total surface. Runtime/UI work remains explicitly excluded.
