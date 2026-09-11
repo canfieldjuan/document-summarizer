@@ -3563,7 +3563,7 @@ release acceptance exposed issue #49
   and 3 release-contract tests with the documented opt-in tests ignored, plus
   strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
   production build.
-- The final product-code head `019c7a5597a8109437bff3c8a1deb8ed26fc69a9`
+- Product-code head `019c7a5597a8109437bff3c8a1deb8ed26fc69a9`
   requires a predicate before an explicit framing noun can restore suspended
   state, so a punctuated noun fragment such as `Risks.` leaves later text
   neutral. It also accepts bounded copular outstanding denials only after an
@@ -3572,6 +3572,15 @@ release acceptance exposed issue #49
   focused two-sided boundary probe passed; the full gate passed 442 library
   tests, 3 office tests and 3 release-contract tests with the documented opt-in
   tests ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
+- The final product-code head `236693234155b40d3f310a42dfd81dd3d154a6cd`
+  carries the already-validated existential copula state through noun parsing,
+  so bounded direct, contracted and perfect forms such as `There are no risks
+  outstanding` clear their matching section framing. Questions, qualified
+  tails, category mismatches and a missing copula retain framing. The focused
+  two-sided boundary probe passed; the full gate passed 442 library tests, 3
+  office tests and 3 release-contract tests with the documented opt-in tests
+  ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
