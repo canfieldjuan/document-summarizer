@@ -3542,7 +3542,7 @@ release acceptance exposed issue #49
   office tests and 3 release-contract tests with the documented opt-in tests
   ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
-- The final product-code head `459028bca503e580008d6a94e0080b052916a263`
+- Product-code head `459028bca503e580008d6a94e0080b052916a263`
   restores a denied Problem or Risk category for bounded adverse copular
   residuals such as `Fraud is possible`, without requiring `still`, and adds
   the Arabic semicolon to the shared coordinated-clause delimiter family.
@@ -3553,6 +3553,16 @@ release acceptance exposed issue #49
   tests, 3 office tests and 3 release-contract tests with the documented opt-in
   tests ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
+- The final product-code head `96a40208ae50e92cd10a79dd71c859e2fb33b45a`
+  treats bounded `No ... remain outstanding` and singular `No ... remains
+  outstanding` statements as empty-section denials. The complement remains
+  scoped to those two predicates and the existing bounded denial tail;
+  questions, qualified statements and category mismatches retain framing, while
+  a later adverse clause restores it only at that clause. The focused two-sided
+  boundary probe passed; the full gate passed 442 library tests, 3 office tests
+  and 3 release-contract tests with the documented opt-in tests ignored, plus
+  strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
+  production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
