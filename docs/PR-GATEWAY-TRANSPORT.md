@@ -13,7 +13,8 @@ The root cause is the missing authenticated protocol boundary between a durable 
 and the gateway. A correct transport must:
 
 1. build only the gateway's version-1 `document.summary.step@1` request from a structured-output
-   `ModelRequest`;
+   `ModelRequest`, and reject a request whose stage or ordinal disagrees with its durable ledger key
+   before reservation;
 2. reserve/reload the stable request identity, persist the exact outbound JSON digest before any
    POST, reuse the same identity/body after transport ambiguity only while its immutable expiry
    remains open, refresh the clock at submission and immediately before the transport effect, and
@@ -49,6 +50,7 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 ### Acceptance criteria
 
 - First submission writes the exact request-body SHA-256 before the transport observes the POST.
+- Request stage and ordinal must match the durable ledger key before any reservation or transport.
 - Fractional creation times round expiry upward to the next whole second, so even the minimum
   accepted lifetime remains fully available.
 - A transport failure leaves one submitted identity; retry sends byte-identical JSON with that ID.
@@ -107,10 +109,10 @@ reads.
 
 ## Verification
 
-- `cargo test gateway_client -q` — 15 passed.
-- `cargo test gateway -q` — 20 passed.
+- `cargo test gateway_client -q` — 16 passed.
+- `cargo test gateway -q` — 21 passed.
 - `cargo test --all-targets -- --skip connect::provider::tests::entitlement_gates_manifest_jobs_and_status_while_registration_stays_owned`
-  — 461 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
+  — 462 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
   release-contract tests passed.
 - Exact isolated execution of the pre-existing skipped Connect test — 1 passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
@@ -121,7 +123,7 @@ reads.
 
 ## Estimated diff size
 
-Actual: five files, 2,158 added lines, and 12 removed lines. This exceeds the draft estimate because
+Actual: five files, 2,193 added lines, and 12 removed lines. This exceeds the draft estimate because
 the production security/credential boundary, protocol codecs, durable lifecycle, and two-sided
 failure probes are one reviewable transport unit; splitting its tests from the private client would
 reduce neither risk nor total surface. Runtime/UI work remains explicitly excluded.

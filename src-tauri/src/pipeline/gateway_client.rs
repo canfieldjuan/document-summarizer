@@ -260,6 +260,11 @@ impl GatewayClient {
         request: &ModelRequest,
         now: DateTime<Utc>,
     ) -> Result<GatewayResult, GatewayClientError> {
+        if key.stage != request.stage || key.ordinal != request.ordinal {
+            return Err(GatewayClientError::Protocol(
+                "request identity does not match ledger key",
+            ));
+        }
         let core = request_core(request)?;
         let semantic_hash = sha256_hex(&encode_json(&core)?);
         preflight_request_size(&core)?;
@@ -1216,6 +1221,32 @@ mod tests {
     }
 
     #[test]
+    fn request_identity_must_match_ledger_key_before_reservation() {
+        let (context, mut conn) = TestContext::new();
+        let transport = Arc::new(FakeTransport::default());
+        let client = client(&context, transport.clone());
+        let mut wrong_stage = request();
+        wrong_stage.stage = PipelineStage::Verify;
+        let mut wrong_ordinal = request();
+        wrong_ordinal.ordinal = 1;
+
+        for (request_key, model_request) in [
+            (key(0), &wrong_stage),
+            (key(0), &wrong_ordinal),
+            (key(1), &request()),
+        ] {
+            assert!(matches!(
+                client.execute(&mut conn, &request_key, model_request, Utc::now()),
+                Err(GatewayClientError::Protocol(
+                    "request identity does not match ledger key"
+                ))
+            ));
+            assert!(load_request(&conn, &request_key).unwrap().is_none());
+        }
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn retry_reuses_body_and_lost_ack_never_repeats_inference() {
         let (context, mut conn) = TestContext::new();
         let transport = Arc::new(FakeTransport::default());
@@ -1743,6 +1774,8 @@ mod tests {
         fs::set_permissions(&context.token, fs::Permissions::from_mode(0o600)).unwrap();
         let link = context.root.join("token-link");
         symlink(&context.token, &link).unwrap();
+        let mut second_request = request();
+        second_request.ordinal = 1;
         assert!(matches!(
             GatewayClient::with_transport(
                 link,
@@ -1751,7 +1784,7 @@ mod tests {
                 transport,
                 Arc::new(Utc::now)
             )
-            .execute(&mut conn, &key(1), &request(), Utc::now()),
+            .execute(&mut conn, &key(1), &second_request, Utc::now()),
             Err(GatewayClientError::Credential)
         ));
     }
