@@ -269,7 +269,21 @@ impl GatewayClient {
         let semantic_hash = sha256_hex(&encode_json(&core)?);
         preflight_request_size(&core)?;
         let request_expires_at = request_expiry(now, self.request_lifetime)?;
-        let record = reserve_request(conn, key, &semantic_hash, request_expires_at, now)?;
+        let record = match reserve_request(conn, key, &semantic_hash, request_expires_at, now) {
+            Ok(record) => record,
+            Err(error) => {
+                let current = load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
+                if current.semantic_request_hash != semantic_hash
+                    || !matches!(
+                        current.state,
+                        GatewayRequestState::Completed | GatewayRequestState::Acknowledged
+                    )
+                {
+                    return Err(error.into());
+                }
+                current
+            }
+        };
         self.execute_reserved(conn, key, record, core, now)
     }
 
@@ -1891,6 +1905,52 @@ mod tests {
             GatewayRequestState::Completed
         );
         assert_eq!(transport.calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn terminal_rows_remain_readable_when_reservation_is_write_blocked() {
+        for acknowledged_state in [false, true] {
+            let (context, mut conn) = TestContext::new();
+            conn.busy_timeout(Duration::ZERO).unwrap();
+            let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            let expiry = now + ChronoDuration::seconds(1);
+            let semantic_hash =
+                sha256_hex(&encode_json(&request_core(&request()).unwrap()).unwrap());
+            reserve_request(&mut conn, &key(0), &semantic_hash, expiry, now).unwrap();
+            let request_hash = "a".repeat(64);
+            mark_submitted(&mut conn, &key(0), &request_hash, now).unwrap();
+            let completion = GatewayCompletion::new(
+                "application/json",
+                r#"{"summary":"done"}"#,
+                "office-gateway",
+                1,
+            )
+            .unwrap();
+            persist_completion(&mut conn, &key(0), &request_hash, &completion, now).unwrap();
+            if acknowledged_state {
+                mark_acknowledged(&mut conn, &key(0), now).unwrap();
+            }
+            let lock = Connection::open(&context.database).unwrap();
+            lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let transport = Arc::new(FakeTransport::default());
+            let client = client_at(&context, transport.clone(), expiry);
+
+            let result = client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+            assert_eq!(result.content, r#"{"summary":"done"}"#);
+            assert!(transport.calls.lock().unwrap().is_empty());
+            assert_eq!(
+                load_request(&conn, &key(0)).unwrap().unwrap().state,
+                if acknowledged_state {
+                    GatewayRequestState::Acknowledged
+                } else {
+                    GatewayRequestState::Completed
+                }
+            );
+            drop(lock);
+        }
     }
 
     #[test]

@@ -71,6 +71,8 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
   does not fail the pipeline; the Completed row remains eligible for later idempotent reconciliation.
 - A local persistence error reloads and accepts only the same concurrent durable completion; a
   missing or conflicting row preserves the original failure.
+- If reservation is write-blocked, only a matching terminal Completed or Acknowledged row may be
+  returned through the read path; nonterminal, missing, and conflicting rows preserve the failure.
 - An acknowledged request returns its local output without another transport call.
 - If another caller completes or acknowledges the row between reservation and submission, the
   reloaded transition state returns that local output without another inference POST.
@@ -116,10 +118,10 @@ reads.
 
 ## Verification
 
-- `cargo test gateway_client -q` — 20 passed.
-- `cargo test gateway -q` — 25 passed.
+- `cargo test gateway_client -q` — 21 passed.
+- `cargo test gateway -q` — 26 passed.
 - `cargo test --all-targets -- --skip connect::provider::tests::entitlement_gates_manifest_jobs_and_status_while_registration_stays_owned`
-  — 466 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
+  — 467 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
   release-contract tests passed.
 - Exact isolated execution of the pre-existing skipped Connect test — 1 passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
@@ -130,7 +132,7 @@ reads.
 
 ## Estimated diff size
 
-Actual: five files, 2,430 added lines, and 12 removed lines. This exceeds the draft estimate because
+Actual: five files, 2,492 added lines, and 12 removed lines. This exceeds the draft estimate because
 the production security/credential boundary, protocol codecs, durable lifecycle, and two-sided
 failure probes are one reviewable transport unit; splitting its tests from the private client would
 reduce neither risk nor total surface. Runtime/UI work remains explicitly excluded.
