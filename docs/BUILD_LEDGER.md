@@ -3668,7 +3668,7 @@ release acceptance exposed issue #49
   passed 442 library tests, 3 office tests and 3 release-contract tests with the
   documented opt-in tests ignored, plus strict Clippy, Rust formatting,
   `git diff --check` and the TypeScript/Vite production build.
-- The final product-code head `7bbf862dc4ef5b4508356b52d897146b12b4be9e`
+- Product-code head `7bbf862dc4ef5b4508356b52d897146b12b4be9e`
   scopes `non` to the following recognized heading modifier, so a qualified
   heading such as `Non-material risks` establishes Risk framing while direct
   negations such as `Non-risks`, `Non-risk factors`, and `No material risks`
@@ -3676,6 +3676,15 @@ release acceptance exposed issue #49
   passed 442 library tests, 3 office tests and 3 release-contract tests with the
   documented opt-in tests ignored, plus strict Clippy, Rust formatting,
   `git diff --check` and the TypeScript/Vite production build.
+- The final product-code head `641cd6ae838a414ea90945dedbcaaeeb3c37c472`
+  treats a bounded negated category heading as a neutral section boundary, so
+  it clears inherited framing without assigning the negated category. A
+  negated category question remains interrogative, and substantive prose that
+  begins with `Non-risk factors` remains body text. The focused two-sided
+  boundary probe passed; the full gate passed 442 library tests, 3 office tests
+  and 3 release-contract tests with the documented opt-in tests ignored, plus
+  strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
+  production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
