@@ -432,8 +432,12 @@ fn possible_framing_boundary(text: &str) -> bool {
     let sentence_case_lead = matches!(
         words[0].to_ascii_lowercase().as_str(),
         "about"
+            | "advantage"
+            | "advantages"
             | "appendix"
             | "background"
+            | "benefit"
+            | "benefits"
             | "conclusion"
             | "conclusions"
             | "definitions"
@@ -468,8 +472,12 @@ fn possible_framing_boundary(text: &str) -> bool {
     let punctuated_marked_section_lead = matches!(
         words[0].to_ascii_lowercase().as_str(),
         "about"
+            | "advantage"
+            | "advantages"
             | "appendix"
             | "background"
+            | "benefit"
+            | "benefits"
             | "conclusion"
             | "conclusions"
             | "definitions"
@@ -1998,6 +2006,8 @@ fn section_question_accepts_bare_no(text: &str, active_framing: SourceFraming) -
                 word.as_str(),
                 "any"
                     | "are"
+                    | "can"
+                    | "could"
                     | "did"
                     | "do"
                     | "does"
@@ -2006,9 +2016,13 @@ fn section_question_accepts_bare_no(text: &str, active_framing: SourceFraming) -
                     | "have"
                     | "is"
                     | "known"
+                    | "may"
+                    | "might"
                     | "there"
                     | "was"
                     | "were"
+                    | "will"
+                    | "would"
             )
         })
     {
@@ -7543,6 +7557,25 @@ mod tests {
             ),
             Some(SourceFraming::Risk)
         );
+        for benefit_heading in ["Benefits and outcomes", "Advantages"] {
+            let block =
+                format!("Key Risks\n{benefit_heading}\nThe change saves time.\nOverview follows.");
+            for unframed in ["The change saves time.", "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "{benefit_heading} should reset Risk framing",
+                );
+            }
+        }
+        let benefit_body = "Key Risks\nBenefits may be limited.\nFraud may occur.";
+        for framed in ["Benefits may be limited.", "Fraud may occur."] {
+            assert_eq!(
+                source_framing_for_segment(benefit_body, framed, None),
+                Some(SourceFraming::Risk),
+                "sentence-shaped benefit prose should retain Risk framing",
+            );
+        }
         let title_case_body = "Key Risks\nWorkers May Fall.\nInjuries can be fatal.";
         for framed in ["Workers May Fall.", "Injuries can be fatal."] {
             assert_eq!(
@@ -8252,6 +8285,12 @@ mod tests {
             "Did Risks Emerge? No.",
             "Have Risks Emerged? No.",
             "Do Risks Occur? No.",
+            "Can any risks occur? No.",
+            "Could risks emerge? No.",
+            "May risks exist? No.",
+            "Might risks remain? No.",
+            "Will risks occur? No.",
+            "Would risks exist? No.",
         ] {
             let block = format!("Key Risks\n{bare_answer}\nOverview follows.");
             for unframed in ["No.", "No!", "Overview follows."] {
@@ -8271,6 +8310,10 @@ mod tests {
             "Did the risk control fail? No.",
             "Did the control fail? Answer: No.",
             "What risks remain? No.",
+            "Can risks be reported? No.",
+            "Could risks cause harm? No.",
+            "Can risk controls fail? No.",
+            "Can any problems occur? No.",
         ] {
             let block = format!("Key Risks\n{retained_bare_answer}\nOverview follows.");
             assert_eq!(
