@@ -329,7 +329,18 @@ impl GatewayClient {
             Ok(completion) => completion,
             Err(error) => return self.reconcile_or_propagate(conn, key, error),
         };
-        let persisted = persist_completion(conn, key, &request_hash, &completion, (self.clock)())?;
+        let persisted =
+            match persist_completion(conn, key, &request_hash, &completion, (self.clock)()) {
+                Ok(persisted) => persisted,
+                Err(error) => {
+                    let current =
+                        load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
+                    if current.completion.as_ref() != Some(&completion) {
+                        return Err(error.into());
+                    }
+                    current
+                }
+            };
         self.resolve_local_record(conn, key, &persisted, (self.clock)())?
             .ok_or(GatewayClientError::Protocol(
                 "persisted completion state is invalid",
@@ -1823,6 +1834,63 @@ mod tests {
             load_request(&conn, &key(0)).unwrap().unwrap().state,
             GatewayRequestState::Acknowledged
         );
+    }
+
+    #[test]
+    fn concurrent_completion_wins_over_local_persistence_lock_failure() {
+        let (context, mut conn) = TestContext::new();
+        conn.busy_timeout(Duration::ZERO).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let transport = Arc::new(FakeTransport::default());
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayClientError::Transport));
+        let client = client_at(&context, transport.clone(), now);
+        assert!(matches!(
+            client.execute(&mut conn, &key(0), &request(), now),
+            Err(GatewayClientError::Transport)
+        ));
+        let record = load_request(&conn, &key(0)).unwrap().unwrap();
+        let database = context.database.clone();
+        let request_hash = record.gateway_request_hash.clone().unwrap();
+        let held_lock = Arc::new(Mutex::new(None));
+        let callback_lock = held_lock.clone();
+        transport
+            .before_response
+            .lock()
+            .unwrap()
+            .replace(Box::new(move || {
+                let mut concurrent = Connection::open(database).unwrap();
+                let completion = GatewayCompletion::new(
+                    "application/json",
+                    r#"{"summary":"done"}"#,
+                    "office-gateway",
+                    1,
+                )
+                .unwrap();
+                persist_completion(&mut concurrent, &key(0), &request_hash, &completion, now)
+                    .unwrap();
+                concurrent.execute_batch("BEGIN IMMEDIATE").unwrap();
+                callback_lock.lock().unwrap().replace(concurrent);
+            }));
+        transport.responses.lock().unwrap().extend([
+            response(200, completed(&record.request_id)),
+            response(200, acknowledged(&record.request_id)),
+        ]);
+
+        let result = client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        held_lock.lock().unwrap().take();
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Completed
+        );
+        assert_eq!(transport.calls.lock().unwrap().len(), 3);
     }
 
     #[test]
