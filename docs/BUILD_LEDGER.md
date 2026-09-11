@@ -3271,3 +3271,583 @@ release acceptance exposed issue #49
   synthetic corpus run. It does not turn model output into deterministic quality
   evidence, and a green mechanical result remains insufficient without semantic
   review.
+
+## Slice 34 — General Source-Context Framing (2026-09-09)
+
+**Status**: implementation and live-model acceptance complete
+
+**Verified root cause and implemented behavior**:
+- The public DOL source retained `Common Problems` in the same normalized block
+  and exact quotation as the minimum-wage statements. Analysis, synthesis and
+  semantic verification each dropped that governing heading, so the final cited
+  prose presented the statements neutrally even though its source did not.
+- General synthesis now derives a small, application-owned `source_framing`
+  label only from a bounded heading ending in problem, risk, warning, exception
+  or limitation and carrying an observable heading signal: casing, a valid
+  marker or an explicit colon label. Lowercase wrapped prose does not create a
+  framing label. Bounded source segments inherit the
+  nearest reliable section heading in canonical document order, including later
+  segments and fully available continuation pages that no longer contain it.
+  Empty or visual-processing pages reset inherited state before and after the
+  page because their complete governing text is unavailable. The resolver scans
+  each extracted line so a subsequent bounded heading-shaped line, including
+  a decimal, uppercase/lowercase Roman or uppercase/lowercase letter-marked
+  heading, including a fully parenthesized outline marker, or a sentence-case
+  heading with an explicit heading signal, resets the label. A recognized
+  marker supplies the casing signal for a lowercase recognized section lead,
+  while marked lowercase prose still does not qualify. An unmarked
+  title-case, all-caps or sentence-case line ending in a period, exclamation
+  point or semicolon remains body text unless it has a valid outline marker;
+  numbering alone
+  does not turn a punctuated sentence-case body line into a heading. A
+  reliable heading followed by a colon and body on the same line changes state
+  at the body boundary, including when the heading ends a preceding body line
+  and its own body begins on the next line. Generic colon-ended resets require a
+  marked heading or an explicit section lead. A conventional standalone
+  title-case colon heading resets prior state; the exact introductory labels
+  `Example:`, `Examples Include:`, `Note:`, `Important Note:` and `Supporting
+  Example:` remain prose in either layout. An explicit inline prefix ending in a framing noun or one of the
+  bounded compound terms resets prior state when negation, uncertainty or
+  unsupported modifiers prevent assigning a new label. An interrogative
+  heading can end prior state but cannot assign an
+  affirmative framing label, including when its answer or another label follows
+  on the same line. Direct framing/section phrases and the bounded `How to avoid
+  ...` form qualify; ordinary substantive wh-questions do not create that reset,
+  even when their prose mentions a framing noun. A
+  recognized framing heading replaces the
+  prior label. Inline transitions
+  are applied in byte order and retain byte positions, so the last textual
+  delimiter controls following content; a source after one inherits its state,
+  while a source crossing one remains unframed. A standalone colon heading
+  transitions at the heading start so a quote containing that heading and its next-line body keeps
+  the relationship; a genuinely inline heading transitions at its body. The
+  final transition controls following text. A candidate containing only a
+  recognized framing heading remains unframed, while the heading's state still
+  governs later source blocks.
+  A bounded denial such as `None reported`, `None have been identified`, `No
+  limitations were identified`, `No risks exist`, `No risks remain`, `No
+  exceptions apply`, `No risks have yet been identified`, `No risks are
+  currently present`, `No risks to report`, `Not applicable`, `N/A`, `N.A.` or
+  `There are no known risks at this time` clears an active label. An implicit
+  `None` denial or bounded not-applicable form can
+  clear any label; an
+  explicit denial must name a noun in the active framing category.
+  Explicit denial noun phrases may use the same conservative framing modifiers
+  as headings and the same three bounded compound families; uncertainty
+  modifiers remain outside the grammar.
+  Direct `No`/`Neither`, copular existential, and perfect existential denials
+  must consist of a framing-noun phrase plus a bounded absence or reporting
+  predicate; only the leading complete sentence is inspected so later prose on
+  the extracted line does not hide the reset, unless the next sentence begins
+  with a bounded contrast marker and either explicitly reintroduces the active
+  framing category or states a bounded unresolved Problem/Risk condition, or
+  explicitly reintroduces the category through a bounded affirmative noun-first
+  predicate, optionally preceded by one article, conservative heading modifiers
+  or `new`. A noun-first `remain` predicate followed by a bounded absence
+  complement such as `eliminated` or `resolved` preserves the cleared state;
+  `unresolved` reintroduces the active category.
+  Negation in a subordinate proposition and a negated
+  elimination do not erase that reintroduction. A repeated absence or a
+  different framing category still clears state. Repeated determiners after noun
+  conjunctions remain within that grammar, while
+  interrogative clauses cannot reset it. A recognized outline marker may
+  precede the bounded denial; invalid markers and marked negative rules cannot
+  clear state. Negative rules and residual-risk propositions such as `No worker
+  may be paid below minimum wage`, `No control eliminates every fraud risk` and
+  `None of ...` retain their governing context.
+  A bounded source segment
+  that crosses either transition remains unframed because one relationship does
+  not govern all of its text. General
+  synthesis and verification use the same section-scope resolver. Story,
+  Contract and source-selection prompts do not receive that context.
+- An extracted drafting claim is omitted when its source carries a framing label,
+  avoiding a lossy intermediate paraphrase. When General synthesis selects such
+  a source, Rust adds the application-owned relationship to the final claim text
+  before the existing source-aware semantic verifier runs. Distinct framing
+  labels cannot govern one generated unit. Exact source evidence, source order,
+  citation rendering and persisted schemas remain unchanged. A model response
+  that mixes framing in one unit receives one bounded repair instruction to
+  split only invalid units; the repair must preserve every individually valid
+  sibling's rendered text and ordered evidence IDs, and a repeated violation,
+  omission or rewrite fails closed. The repair request includes the rejected
+  response as explicitly untrusted draft data so the model can preserve those
+  siblings instead of regenerating them without seeing their prior wording.
+  Those exact repair requirements are consumed
+  after that repaired response passes, allowing a later validator repair to
+  correct independently invalid wording. The initial
+  General prompt and schema use the larger of the base unit budget and total
+  compatibility-group count. Only a framing repair expands the prompt and
+  schema ceiling to that initial limit times the greatest number of distinct
+  framing groups in any one selection window, capped by the existing global
+  maximum. The initial response therefore cannot consume the reserved split
+  capacity. Story and Contract retain their prior generation ceiling.
+  Profile-neutral persisted-content validation enforces the same global
+  eight-unit cap as generation. It does not recompute a smaller ceiling from
+  the full catalog after transient long-document selection windows have been
+  discarded, so a valid selected-window result reaches verification.
+- Synthesis, verification and final-summary versions advance for the changed
+  output contract. Completed version-7 summaries remain readable; in-progress
+  coherent version-7 checkpoints retry, while version-7 claim-ledger fallbacks
+  remain continuable.
+
+**Acceptance evidence**:
+- Before the deterministic repair, a GPU DOL run passed mechanically but emitted
+  a page-21 paragraph beginning `Employees paid a piece rate may fall below the
+  minimum wage` while its cited exact quote began `Common Problems`.
+- The live run before the final compatibility and denial-boundary fixes used
+  `qwen3-30b-a3b:latest` at 100% GPU and passed in 117.81 seconds after 187 model
+  requests. Its delivered page-21
+  paragraph begins `The
+  document presents the following as a problem`, retains the minimum-wage details and
+  page citation, and its unchanged exact quote begins `Common Problems`.
+- The preceding product-code head `1a3c90425ab0c4eed2dea58eda09b6dfff938f38`
+  reran the full 111-page public DOL acceptance through
+  `qwen3-30b-a3b:latest`. Ollama reported 100% GPU and NVIDIA reported 18,210
+  MiB for the Ollama process. The evidence-traced test passed in 120.48 seconds
+  after 186 model requests and produced 81 claims with 97 persisted evidence
+  items. The delivered
+  page-21 paragraph reads `The document presents the following as a problem:
+  Common problems include employees paid a piece rate falling below the minimum
+  wage ... [p. 21]`; its persisted exact quote still begins `Common Problems`.
+  The run recorded summary integrity hash
+  `c8b988ef0694f299139162439718316472520a7e55102d33d9b54b8d927efca3` and
+  citation integrity hash
+  `e6500ab1141ca63c570f0eaafc206e92b97a08827721121e062fa1dc555c19df`.
+  An immediately preceding exact-head run failed closed with
+  `SYNTHESIS_REPAIR_INPUT_TOO_LARGE` after the model combined neutral and
+  Problem sources in one unusually long unit. The unchanged retry passed; this
+  proves one acceptable exact-head execution, not deterministic live-model
+  reliability.
+- Product-code head `eb6a17b58cd049b67508105d29f64b01ff9682c9`
+  also clears an active section after a bounded bare `No` answer to a section
+  question and after a bounded denial that follows an earlier declarative
+  sentence on the same normalized line. A bare `No` is accepted only in an
+  answer context; interrogative, qualified and substantive `No ...` text keeps
+  the active framing. The full deterministic gate passed on this head. Two
+  unchanged-head live DOL runs used `qwen3-30b-a3b:latest` with an 8192-token
+  context at 100% GPU, but both failed closed with
+  `MODEL_SUMMARY_RESPONSE_WINDOW_MIXED` after 102.88 and 106.30 seconds when the
+  model combined `s19`, `s20` and Problem-framed `s22` in one unit. No summary
+  was persisted. The preceding exact product head therefore supplies this
+  slice's representative live output; these final-head runs prove rejection,
+  not successful live completion. Follow-up is tracked in issue #53.
+- Product-code head `4cfaa383db21314f626f32371f60ac5b497af947`
+  admits bounded `No risks were discovered` as an empty-section predicate and
+  restores Risk for `Risks are unresolved` after a prior denial. Qualified
+  discovery statements, `Risks are resolved`, and `Risks are not unresolved`
+  remain on the opposite side of those boundaries. The focused classifier test
+  and full deterministic gate passed. No further DOL model run was made because
+  issue #53 already reproduces the independent cross-window failure twice and
+  neither added predicate occurs in the affected DOL source text.
+- Product-code head `c815b2bfd94e0b39dc78836f07bc699255547ae8`
+  recognizes a leading bounded `N/A` or `N.A` before splitting its same-line
+  continuation. `N/A. Overview follows.` therefore clears prior framing before
+  the overview, while an interrogative, qualified, or attached path-like form
+  retains it and an explicit adverse continuation can restore framing. The
+  focused classifier test and full deterministic gate passed.
+- Product-code head `d9dc80d48c4cd720b364e5be7c7a7a9728c2e030`
+  resets prior framing at bounded mitigation questions such as `How can risks be
+  reduced?` and `What are the solutions?` before their answers. Equivalent
+  mitigation verbs and solution/control nouns share that bounded grammar, while
+  failure-qualified questions and substantive questions about remaining risks
+  retain their active framing. The focused classifier test and full
+  deterministic gate passed.
+- Product-code head `d93c604537cef762b3193050c2fd03288aba0e4e`
+  admits bare `No` only after a bounded question about the presence or existence
+  of the active framing category. Substantive questions about control failure do
+  not clear the category, including through a labeled `Answer: No`; an explicit
+  bounded denial such as `No risks were identified` still clears it. The focused
+  classifier test and full deterministic gate passed.
+- Product-code head `1226db8bb714ab5fb0d828e5f7c9ae1791c8251e`
+  restores Problem or Risk framing when a later sentence says the condition has
+  not been, was not, or cannot be ruled out. The predicate requires the bounded
+  `ruled out` complement; affirmative `ruled out` and `ruled in` controls remain
+  unframed. The focused classifier test and full deterministic gate passed.
+- Product-code head `4bb76df9709d410837d9ae4dde43a0d9b1bab86f`
+  admits modal `no longer be ruled out`, splits UTF-8 en/em-dash continuations
+  only when a bounded coordinator follows, and rejects unmarked framing phrases
+  that end as declarative sentences. Wrong complements, qualified dash clauses,
+  and marked or colon-signaled heading controls preserve their prior behavior.
+  The focused classifier test and full deterministic gate passed.
+- Product-code head `e9ea756744309abfb2c5b4866a46344d2a7ae00a`
+  retains a denied category as non-governing parser state, allowing a bounded
+  adverse continuation on a later line or normalized block to restore it. The
+  suspended category does not label neutral text and clears at a recognized
+  section boundary or unavailable visual gap. Blank-line, cross-block,
+  explicit-boundary and synthesis/verification parity controls pass. The
+  focused classifier test and full deterministic gate passed.
+- Product-code head `ee020922153d4dd9b507e8a2159d565036465367`
+  recognizes bounded comma-separated framing denials before clause splitting
+  and uses the shared declarative-terminal predicate when deciding whether a
+  sentence-shaped line can reset active framing. ASCII, full-width and Arabic
+  comma forms pass; missing and misplaced commas, mixed noun categories,
+  compound-noun splits and question terminals fail closed. Supported Unicode
+  declarative terminals preserve active framing. The focused boundary probe and
+  full deterministic gate passed.
+- Product-code head `3880c825ed8b51bbe6cb281f70a5a53c63f0e31f`
+  resets framing for bounded auxiliary-led solution and control questions, and
+  parses bounded expanded or apostrophe-contracted negated existential denials.
+  Risk questions, control-failure questions, extra qualifiers, missing
+  determiners, mismatched categories and interrogative denials retain framing.
+  The focused two-sided classifier probe and full deterministic gate passed.
+- Product-code head `a289dc20c02d4752f88441d9d99a24f8ea9cec93`
+  admits bounded modal-led mitigation-action questions and supported temporal
+  adverb positions around expanded negation. Modal failure and residual-state
+  questions, noun uses of `control`, repeated negation, mismatched categories
+  and qualified denials retain framing. The focused two-sided propagation probe
+  and full deterministic gate passed.
+- Product-code head `c4985e22eae058649e879473e522397db371dbee`
+  uses the apostrophe-preserving bounded tokenizer for framing reintroductions,
+  normalizes contracted auxiliaries into the existing polarity checks, and
+  recognizes full-width and Arabic commas as byte-safe coordinated-denial
+  delimiters. Wrong complements, repeated negation and qualified continuations
+  remain unframed. The focused two-sided propagation probe and full
+  deterministic gate passed.
+- Product-code head `8c9aeacf33d7e45976d4ae6761c54df000a43606`
+  admits `discovered` in the existing affirmative copular and perfect
+  reintroduction predicates. Explicitly negated discovery remains neutral. The
+  focused two-sided propagation probe and full deterministic gate passed.
+- Product-code head `9c38c1c62c0d053cac9883c84c270de7819aecbc`
+  requires a declarative first sentence terminal before a suspended framing
+  category can be restored by either noun-based or residual predicates. ASCII,
+  full-width and Arabic questions remain neutral; declarative controls restore
+  framing. The focused two-sided propagation probe and full deterministic gate
+  passed.
+- Product-code head `87770baa08c0eb5a27f2eb67830bad52f2c91438`
+  scans bounded coordinated suffixes for a denial that follows an affirmative
+  clause and recognizes full-width inline colons using their UTF-8 byte length.
+  ASCII, full-width and Arabic comma coordinators, semicolon clauses and an
+  em-dash coordinator clear the active category at the denial; qualification,
+  comma-splice and negative-rule controls retain it. Full-width framing, reset
+  and labeled-answer colons transition at the body without labeling a source
+  that crosses the transition. The focused two-sided propagation probe and full
+  deterministic gate passed.
+- Product-code head `99585de5bb4a736b70c1d486e608b12b964673d7`
+  retains an active category through a title-case question about that category's
+  presence, while a bounded negative answer still clears it. Coordinated `it`
+  and `they` continuations reuse the existing adverse-predicate grammar to
+  restore a denied Problem or Risk category. Affirmative answers and bounded
+  occurrence questions retain framing; negative answers clear it; affirmative
+  resolution, wrong-complement and double-negation anaphoric controls remain
+  neutral. The focused two-sided propagation probe and full deterministic gate
+  passed.
+- Product-code head `7e38aea2fe222e40901611234d4bd36cff1f978b`
+  uses the shared Unicode sentence-terminal, coordination-delimiter and inline-
+  colon predicates when scanning a suspended category for an adverse residual
+  clause, and records the exact byte offset where framing resumes. A neutral
+  clause before that adverse clause remains unframed, while a leading
+  coordinator and same-sentence condition stay attached to the adverse clause.
+  ASCII, full-width and Arabic questions do not restore framing. The focused
+  two-sided boundary probe passed; the full gate passed 442 library tests, 3
+  office tests and 3 release-contract tests with the documented opt-in tests
+  ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
+- Product-code head `459028bca503e580008d6a94e0080b052916a263`
+  restores a denied Problem or Risk category for bounded adverse copular
+  residuals such as `Fraud is possible`, without requiring `still`, and adds
+  the Arabic semicolon to the shared coordinated-clause delimiter family.
+  Negated, interrogative, non-adverse and protective copular controls remain
+  neutral. Arabic-semicolon neutral, adverse, trailing-denial, qualification
+  and mixed-source controls match the existing ASCII-semicolon behavior. The
+  focused two-sided boundary probe passed; the full gate passed 442 library
+  tests, 3 office tests and 3 release-contract tests with the documented opt-in
+  tests ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
+- Product-code head `96a40208ae50e92cd10a79dd71c859e2fb33b45a`
+  treats bounded `No ... remain outstanding` and singular `No ... remains
+  outstanding` statements as empty-section denials. The complement remains
+  scoped to those two predicates and the existing bounded denial tail;
+  questions, qualified statements and category mismatches retain framing, while
+  a later adverse clause restores it only at that clause. The focused two-sided
+  boundary probe passed; the full gate passed 442 library tests, 3 office tests
+  and 3 release-contract tests with the documented opt-in tests ignored, plus
+  strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
+  production build.
+- Product-code head `019c7a5597a8109437bff3c8a1deb8ed26fc69a9`
+  requires a predicate before an explicit framing noun can restore suspended
+  state, so a punctuated noun fragment such as `Risks.` leaves later text
+  neutral. It also accepts bounded copular outstanding denials only after an
+  observed `are`, `is`, `was`, `were` or `been` auxiliary. Missing-copula,
+  interrogative, qualified and category-mismatch controls retain framing. The
+  focused two-sided boundary probe passed; the full gate passed 442 library
+  tests, 3 office tests and 3 release-contract tests with the documented opt-in
+  tests ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
+- Product-code head `236693234155b40d3f310a42dfd81dd3d154a6cd`
+  carries the already-validated existential copula state through noun parsing,
+  so bounded direct, contracted and perfect forms such as `There are no risks
+  outstanding` clear their matching section framing. Questions, qualified
+  tails, category mismatches and a missing copula retain framing. The focused
+  two-sided boundary probe passed; the full gate passed 442 library tests, 3
+  office tests and 3 release-contract tests with the documented opt-in tests
+  ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
+- Product-code head `435fb1308388dbc49bf02c217eee9dfa8af505c0`
+  restores a suspended Problem or Risk category for bounded affirmative modal
+  occurrence clauses with an adverse subject, while preserving polarity,
+  declarative-clause and same-clause checks. It also inspects each immediate
+  declarative sentence suffix for an explicit framing reintroduction, allowing
+  neutral prose before a later adverse sentence without labeling a source that
+  crosses the transition. Negated, interrogative, non-adverse, protective and
+  cross-sentence pseudo-predicates remain neutral. The focused two-sided
+  boundary probe passed; the full gate passed 442 library tests, 3 office tests
+  and 3 release-contract tests with the documented opt-in tests ignored, plus
+  strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
+  production build.
+- Product-code head `9448f6e8c72a6a2aa043fcb7d567223ff132d57a`
+  bounds modal occurrence parsing to the current sentence and checks the
+  complement of `remain` and `continue` before restoring a suspended Problem
+  or Risk category. Resolving complements such as `impossible`, `resolved` and
+  `eliminated` remain neutral, while `possible`, `unresolved`, continuing
+  existence and double-negative forms restore framing. The same bounded
+  predicate contract now governs explicit framing nouns and adverse residual
+  subjects. The focused two-sided boundary probe passed; the full gate passed
+  442 library tests, 3 office tests and 3 release-contract tests with the
+  documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
+- Product-code head `0a65c09df1b4985a1f2189d7e4fd46b1df06190d`
+  routes direct `continue` predicates through the shared occurrence-complement
+  check and consumes bounded `to`, `be`, `been` and `being` links before
+  classifying the complement. Direct and modal resolving forms such as
+  `continue resolved` and `continue to be eliminated` stay neutral, while
+  `continue unresolved` and `continue to exist` restore framing. The focused
+  two-sided boundary probe passed; the full gate passed 442 library tests, 3
+  office tests and 3 release-contract tests with the documented opt-in tests
+  ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
+- Product-code head `cc665da46659d990b043080ea716d30b9604389e`
+  recognizes a bounded framing or reset heading before an en or em dash and
+  transitions at the following body, while keeping a source that spans the
+  heading/body boundary unframed. It also routes direct and modal appearance
+  predicates through the shared complement check, so resolved or eliminated
+  appearance stays neutral while bare, possible or unresolved appearance
+  restores framing. The focused two-sided boundary probe passed; the full gate
+  passed 442 library tests, 3 office tests and 3 release-contract tests with
+  the documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
+- Product-code head `eadd494b79d77dc24963124bc472f34e64db9f7f`
+  treats bounded sentence-case benefit and advantage headings as neutral
+  section boundaries while retaining terminal-punctuated benefit prose inside
+  its governing section. It also admits bounded `can`, `could`, `may`, `might`,
+  `will` and `would` questions about the active category's presence or
+  occurrence before a bare denial; reporting, causation, control-failure and
+  category-mismatch questions remain ineligible. The focused two-sided boundary
+  probe passed; the full gate passed 442 library tests, 3 office tests and 3
+  release-contract tests with the documented opt-in tests ignored, plus strict
+  Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
+  build.
+- Product-code head `783deaffe10270b9f76bbfc3d1a0690dfff49462`
+  admits `may` and `might` through the existing bounded mitigation-question
+  action grammar. Recommendation text following questions such as `Might these
+  risks be mitigated?` is neutral, while failure-qualified questions remain in
+  their governing Problem or Risk section. The focused two-sided boundary probe
+  passed; the full gate passed 442 library tests, 3 office tests and 3
+  release-contract tests with the documented opt-in tests ignored, plus strict
+  Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
+  build.
+- Product-code head `574707b4291584a4f4554a6b93c2f0a325712bd4`
+  resets framing for bounded inline `Benefit(s):` and `Advantage(s):` sections
+  and recognizes a spaced ASCII hyphen as an inline heading separator. Unspaced
+  word hyphens and spaced hyphens without a bounded heading prefix retain the
+  active category. The focused two-sided boundary probe passed; the full gate
+  passed 442 library tests, 3 office tests and 3 release-contract tests with the
+  documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
+- Product-code head `864ca63404b707f729ae7d910dcd9fa15bd5dc90`
+  carries an eligible presence-question context into only the immediately
+  following normalized line, allowing a split bare `No.` answer to clear the
+  active category. A blank line, intervening content, or non-presence question
+  consumes or never creates that context. The focused two-sided boundary probe
+  passed; the full gate passed 442 library tests, 3 office tests and 3
+  release-contract tests with the documented opt-in tests ignored, plus strict
+  Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
+  build.
+- Product-code head `786e1688bb0cd76930a6ec144f673487fc357178`
+  recognizes singular inline `Remedy:` as the same bounded neutral section
+  transition as `Remedies:`. The focused boundary probe passed; the full gate
+  passed 442 library tests, 3 office tests and 3 release-contract tests with the
+  documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
+- Product-code head `7bbf862dc4ef5b4508356b52d897146b12b4be9e`
+  scopes `non` to the following recognized heading modifier, so a qualified
+  heading such as `Non-material risks` establishes Risk framing while direct
+  negations such as `Non-risks`, `Non-risk factors`, and `No material risks`
+  remain unframed. The focused two-sided boundary probe passed; the full gate
+  passed 442 library tests, 3 office tests and 3 release-contract tests with the
+  documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
+- Product-code head `641cd6ae838a414ea90945dedbcaaeeb3c37c472`
+  treats a bounded negated category heading as a neutral section boundary, so
+  it clears inherited framing without assigning the negated category. A
+  negated category question remains interrogative, and substantive prose that
+  begins with `Non-risk factors` remains body text. The focused two-sided
+  boundary probe passed; the full gate passed 442 library tests, 3 office tests
+  and 3 release-contract tests with the documented opt-in tests ignored, plus
+  strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
+  production build.
+- Product-code head `f67def36d688480963e7688f8d35fbc19b08cc31`
+  restricts that neutral reset to a noun-phrase heading with one leading
+  negator, optional recognized modifiers, and a terminal framing noun or
+  compound. Substantive residual-risk prose therefore retains its governing
+  category, and the question-terminal guard covers both negated and
+  uncertainty-qualified candidates. The focused two-sided boundary probe
+  passed; the full gate passed 442 library tests, 3 office tests and 3
+  release-contract tests with the documented opt-in tests ignored, plus strict
+  Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
+  build.
+- Product-code head `7da286063c8d22de81cc7f4607004f23cb811880`
+  applies the same negated noun-phrase validation to inline colon prefixes and
+  admits that validated boundary through the existing marked, punctuated
+  heading path. Substantive residual-risk prefixes and marked sentences retain
+  their governing category. The focused two-sided boundary probe passed; the
+  full gate passed 442 library tests, 3 office tests and 3 release-contract
+  tests with the documented opt-in tests ignored, plus strict Clippy, Rust
+  formatting, `git diff --check` and the TypeScript/Vite production build.
+- The final product-code head `27502f5ccf1bac5ad324d53fe837f4a9d2da934a`
+  admits bounded `or` and `nor` coordination in negated category headings only
+  when every conjunct is a recognized framing noun or compound with approved
+  modifiers. Standalone, inline and marked coordinated headings reset inherited
+  framing, while coordinated residual-risk prose retains its governing
+  category. The focused two-sided boundary probe passed; the full gate passed
+  442 library tests, 3 office tests and 3 release-contract tests with the
+  documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
+- Boundary tests admit the five bounded heading classes and reject missing-body,
+  multi-line heading candidates, overlong, negated, uncertainty-qualified,
+  solution-oriented and unrelated headings. Tests
+  also prove application-owned framing of neutral General units, propagation to
+  later segments and page blocks of a split section, reset at a later
+  sentence-case or punctuated marked title-case solution section, retention
+  across short capitalized, numbered-list and numbered sentence-case body
+  paragraphs, reset across empty and
+  visual-processing pages, retention across an introductory colon, single- and
+  excess-newline framing and reset headings, decimal/uppercase/lowercase Roman,
+  uppercase/lowercase-letter and fully parenthesized outline framing
+  headings, a lowercase recognized section lead after a valid marker with
+  marked lowercase and title-case prose retention, inline framing and reset headings,
+  bounded mitigation/control neutral headings in standalone, marked and inline
+  forms with ordinary mitigation sentences retained as body text,
+  bounded benefit/advantage sentence-case resets with substantive prose
+  retention,
+  bounded mitigation questions with failure-qualified and substantive-question
+  controls, including `may` and `might` action questions,
+  rejection of standalone and
+  bounded compound `Risk Factors`, `Warning Signs` and `Problem Areas`
+  headings with the existing conservative modifiers, rejection of unrelated
+  or uncertainty-qualified compound headings,
+  inline interrogative framing headings, same-line and trailing interrogative
+  reset before answer text with substantive-question retention, full-width and
+  Arabic question terminals in standalone and inline headings with UTF-8-safe
+  answer offsets, byte-ordered
+  colon/question precedence in both directions, fail-closed
+  transition-spanning sources, whole standalone-colon heading/body candidates,
+  inline transition
+  isolation, heading-only candidate neutrality with state propagation, marked
+  standalone-colon transition at the full marker, reset at uncertain and
+  negated inline simple or compound framing headings, retention
+  across inline and standalone introductory labels,
+  trailing inline headings, rejection of lowercase wrapped framing nouns,
+  denial clearing in following-line and inline bodies with trailing prose and
+  repeated determiners, conservative modifiers, compound framing nouns,
+  recognized outline markers on
+  bounded denials, rejection of invalid markers and marked negative rules,
+  bounded copular presence and perfect existential predicates,
+  bounded `to report` and bounded `Not applicable`, active-category noun
+  matching, rejection of uncertainty modifiers, retention through
+  interrogative denials, affirmative and unrelated post-denial contrast
+  sentences, explicit same-line
+  framing reintroduction with predicate-bound negation, bounded leading
+  determiners and modal predicates, rejection of adjectival framing compounds,
+  repeated-absence and category-mismatch rejection, modified reintroduction
+  with uncertainty modifiers still excluded,
+  explanatory `Not applicable because ...` and `No risks to report because ...`
+  text and negative-rule, residual-risk, qualified-denial and `None of ...`
+  retention,
+  retention across punctuated title-case, all-caps and sentence-case body text,
+  bounded mixed-framing repair grounded in the rejected untrusted draft, with
+  exact valid-sibling preservation, exact per-invalid-unit source
+  coverage, omission/rewrite/partial-source and repeated-response failure, distinct
+  initial and expanded repair contracts, worst-permitted compatibility-group
+  split capacity with Story isolation, and
+  zero/exact/over-limit persisted-count boundaries and selected-window capacity
+  after the transient selection labels are unavailable,
+  same-line `N/A.` and marked `N.A.` clearing with interrogative, qualified,
+  attached-text and explicit-reintroduction controls,
+  neutral reset at uncertainty-qualified sentence-case framing headings,
+  bounded `detected`, `discovered`, `remain` and `apply` denials, one bounded `currently` or
+  `yet` inside an auxiliary denial predicate or around an existential auxiliary
+  and `no`,
+  with category-mismatch and substantive-tail rejection,
+  resolved/eliminated absence continuations with `remain` and copular unresolved-risk
+  reintroduction, punctuation-scoped residual-predicate negation with
+  conditional-clause and same-clause controls, adverse-subject gating for
+  residual possibilities with positive, recovery and protective-compound
+  rejection, comma- and semicolon-coordinated denial continuations with
+  additive, contrast, bare-independent-clause, noun-list and qualification
+  controls, complement-aware `remain not possible` versus `remain not
+  eliminated` polarity including double-negative `not impossible` inversion,
+  modal and non-modal `remain` or `continue` occurrence complements bounded to
+  the current sentence for both explicit framing nouns and residual subjects,
+  including direct and modal `to`/copula-linked complements,
+  resolved, eliminated, possible, unresolved and bare appearance complements,
+  matching copular polarity for `are impossible`, `are not possible`, and
+  `are not`, `were never`, or `are no longer impossible`,
+  bounded residual-risk forms using `has`, `have`, `had`, copular, `cannot`, or
+  modal `not be ruled out` predicates with affirmative and wrong-complement
+  controls,
+  modal `no longer be ruled out` predicates with wrong-complement controls,
+  coordinated en/em-dash denial continuations with neutral, adverse and
+  qualification controls, bounded en/em-dash inline framing transitions with
+  transition-spanning rejection, and unmarked punctuated framing-phrase
+  rejection with marked and colon-signaled controls,
+  non-governing denied-category suspension across blank lines and normalized
+  blocks, bounded next-line reintroduction, explicit section-boundary and visual
+  reset, and shared synthesis/verification state reconstruction,
+  and disjunctive continuations admitted only when their second disjunct is an
+  independent declarative bounded denial, with ASCII, full-width and Arabic
+  interrogative second disjuncts rejected, and denial/continuation splitting
+  across the same supported ASCII, CJK, Arabic, Urdu, Armenian and Devanagari
+  sentence-terminal family, bounded `Answer` and `Response` denial bodies, exact
+  neutral and affirmative
+  transitions within one denial/reintroduction line and its colon-body form,
+  post-question denial answers including bounded bare `No` with interrogative,
+  qualified-tail, active-category section-question, substantive-question and
+  labeled-answer controls, modal-led active-category presence questions with
+  reporting, causation, control-failure and category-mismatch controls,
+  declarative sentence-suffix
+  denials after ASCII and CJK terminals with non-denial and explicit
+  reintroduction controls,
+  and fail-closed
+  rejection of a source candidate spanning those transitions,
+  framing-repair integrity release before a subsequent modal repair,
+  mixed verification context, Story isolation, and rejection of a short source
+  segment spanning both problem and solution sections,
+  lossy drafting-claim suppression and exact version-pair retry
+  behavior. A focused live GPU probe accepted a final framed claim whose exact
+  segment omitted the heading and rejected framing applied to an invented
+  resolution. The full Rust library suite passed 442 tests with 13 intentional
+  ignores.
+- `cargo test --all-targets` passed those 442 library tests, 3 office tests and
+  all 3 release-contract tests; 13 opt-in library tests and 3 opt-in office
+  tests remained ignored. Strict all-target/all-feature Clippy, Rust formatting,
+  the TypeScript/Vite production build and `git diff --check` passed.
+
+**Non-scope and remaining limits**:
+- This is a conservative repair for explicit leading headings in source quotes,
+  not a general discourse parser. Semantic review remains necessary for framing
+  expressed indirectly or across separate blocks.
+- A coordinated heading that names distinct framing categories, such as `Risks
+  and Limitations`, remains unframed. The source-framing contract stores one
+  application-owned relationship, so selecting either category for every later
+  segment would overstate the source; combined relationships require a separate
+  contract and compatibility design.
+- A model response whose invalid mixed-framing unit is too large to include in
+  the bounded repair context still fails the run closed with
+  `SYNTHESIS_REPAIR_INPUT_TOO_LARGE`; this slice does not add an automatic
+  whole-run retry policy. Follow-up is tracked in issue #52.
+- A long-document General response that combines sources from distinct selection
+  windows still fails closed with `MODEL_SUMMARY_RESPONSE_WINDOW_MIXED`; this
+  slice does not add a model retry or redesign selection windows. Follow-up is
+  tracked in issue #53.
+- This slice does not change Story or Contract behavior, routing, UI, persistence
+  schemas, source selection, ingestion, OCR or model configuration.

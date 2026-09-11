@@ -324,6 +324,7 @@ fn conservative_verification_claim_fits(
     let (user_prompt, _) = identifiers::verification_prompt(&[PromptVerificationClaim {
         claim_id: format!("claim-{}", "0".repeat(64)),
         text: "x".repeat(MAX_CLAIM_CHARACTERS),
+        source_framing: None,
         evidence: evidence
             .iter()
             .map(|item| PromptVerificationEvidence {
