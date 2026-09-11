@@ -3636,7 +3636,7 @@ release acceptance exposed issue #49
   release-contract tests with the documented opt-in tests ignored, plus strict
   Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
   build.
-- The final product-code head `783deaffe10270b9f76bbfc3d1a0690dfff49462`
+- Product-code head `783deaffe10270b9f76bbfc3d1a0690dfff49462`
   admits `may` and `might` through the existing bounded mitigation-question
   action grammar. Recommendation text following questions such as `Might these
   risks be mitigated?` is neutral, while failure-qualified questions remain in
@@ -3645,6 +3645,14 @@ release acceptance exposed issue #49
   release-contract tests with the documented opt-in tests ignored, plus strict
   Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
   build.
+- The final product-code head `574707b4291584a4f4554a6b93c2f0a325712bd4`
+  resets framing for bounded inline `Benefit(s):` and `Advantage(s):` sections
+  and recognizes a spaced ASCII hyphen as an inline heading separator. Unspaced
+  word hyphens and spaced hyphens without a bounded heading prefix retain the
+  active category. The focused two-sided boundary probe passed; the full gate
+  passed 442 library tests, 3 office tests and 3 release-contract tests with the
+  documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
