@@ -3695,7 +3695,7 @@ release acceptance exposed issue #49
   release-contract tests with the documented opt-in tests ignored, plus strict
   Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
   build.
-- The final product-code head `7da286063c8d22de81cc7f4607004f23cb811880`
+- Product-code head `7da286063c8d22de81cc7f4607004f23cb811880`
   applies the same negated noun-phrase validation to inline colon prefixes and
   admits that validated boundary through the existing marked, punctuated
   heading path. Substantive residual-risk prefixes and marked sentences retain
@@ -3703,6 +3703,15 @@ release acceptance exposed issue #49
   full gate passed 442 library tests, 3 office tests and 3 release-contract
   tests with the documented opt-in tests ignored, plus strict Clippy, Rust
   formatting, `git diff --check` and the TypeScript/Vite production build.
+- The final product-code head `27502f5ccf1bac5ad324d53fe837f4a9d2da934a`
+  admits bounded `or` and `nor` coordination in negated category headings only
+  when every conjunct is a recognized framing noun or compound with approved
+  modifiers. Standalone, inline and marked coordinated headings reset inherited
+  framing, while coordinated residual-risk prose retains its governing
+  category. The focused two-sided boundary probe passed; the full gate passed
+  442 library tests, 3 office tests and 3 release-contract tests with the
+  documented opt-in tests ignored, plus strict Clippy, Rust formatting,
+  `git diff --check` and the TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
