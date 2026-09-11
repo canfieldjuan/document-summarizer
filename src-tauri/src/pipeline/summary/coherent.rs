@@ -242,13 +242,32 @@ fn source_framing_term_at(words: &[String], cursor: usize) -> Option<(SourceFram
 }
 
 fn ends_with_source_framing_term(words: &[String]) -> bool {
-    [1_usize, 2].into_iter().any(|term_length| {
-        words
-            .len()
-            .checked_sub(term_length)
-            .and_then(|cursor| source_framing_term_at(words, cursor))
+    source_framing_term_start(words).is_some()
+}
+
+fn source_framing_term_start(words: &[String]) -> Option<usize> {
+    [1_usize, 2].into_iter().find_map(|term_length| {
+        let cursor = words.len().checked_sub(term_length)?;
+        source_framing_term_at(words, cursor)
             .is_some_and(|(_, after_term)| after_term == words.len())
+            .then_some(cursor)
     })
+}
+
+fn negated_source_framing_heading(words: &[String]) -> bool {
+    if !heading_negates_framing(words) {
+        return false;
+    }
+    let Some(noun_start) = source_framing_term_start(words) else {
+        return false;
+    };
+    let Some((negation, modifiers)) = words[..noun_start].split_first() else {
+        return false;
+    };
+    matches!(
+        negation.as_str(),
+        "neither" | "no" | "non" | "not" | "without"
+    ) && has_only_source_framing_modifiers(modifiers)
 }
 
 fn framing_from_heading_candidate(
@@ -471,9 +490,9 @@ fn possible_framing_boundary(text: &str) -> bool {
         .iter()
         .map(|word| word.to_ascii_lowercase())
         .collect::<Vec<_>>();
-    let nonaffirmative_framing_boundary = ends_with_source_framing_term(&normalized_words)
-        && (!heading.chars().any(is_source_question_terminal)
-            && heading_negates_framing(&normalized_words)
+    let nonaffirmative_framing_boundary = !heading.chars().any(is_source_question_terminal)
+        && ends_with_source_framing_term(&normalized_words)
+        && (negated_source_framing_heading(&normalized_words)
             || normalized_words
                 .iter()
                 .any(|word| matches!(word.as_str(), "possible" | "potential")));
@@ -7002,6 +7021,8 @@ mod tests {
             "Mitigation strategies reduce risk.",
             "Controls fail when passwords are reused",
             "Non-risk factors affect costs",
+            "No controls eliminate all risks",
+            "No potential risks?",
         ] {
             assert!(!possible_framing_boundary(ordinary_prose));
         }
@@ -8265,6 +8286,16 @@ mod tests {
             source_framing_for_segment(interrogative_denial, "Workers may fall.", None),
             Some(SourceFraming::Risk)
         );
+        for retained_risk_source in [
+            "Key Risks\nNo controls eliminate all risks\nFraud remains possible.",
+            "Key Risks\nNo potential risks?\nFraud remains possible.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(retained_risk_source, "Fraud remains possible.", None),
+                Some(SourceFraming::Risk),
+                "substantive or interrogative text must retain Risk framing",
+            );
+        }
         let lowercase_marker = "Key Risks\na. Exceptions\nThe deadline does not apply.";
         assert_eq!(
             source_framing_for_segment(lowercase_marker, "The deadline does not apply.", None,),
