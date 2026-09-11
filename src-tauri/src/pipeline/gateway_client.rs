@@ -261,6 +261,12 @@ impl GatewayClient {
         let record = reserve_request(conn, key, &semantic_hash, request_expires_at, now)?;
         if matches!(record.state, GatewayRequestState::Completed) {
             let result = result_from_record(&record)?;
+            let expires_at = DateTime::parse_from_rfc3339(&record.request_expires_at)
+                .map_err(|_| GatewayStoreError::InvalidRecord("expiry is invalid"))?
+                .with_timezone(&Utc);
+            if expires_at <= now {
+                return Ok(result);
+            }
             self.acknowledge(conn, key, &record.request_id, now)?;
             return Ok(result);
         }
@@ -370,6 +376,7 @@ struct GenerationMessage<'a> {
 struct Generation<'a> {
     messages: [GenerationMessage<'a>; 2],
     temperature: f64,
+    seed: u64,
     response_schema: &'a Value,
 }
 
@@ -467,6 +474,7 @@ fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClient
         || request.user_prompt.is_empty()
         || request.system_prompt.chars().count() > MAX_MESSAGE_CHARS
         || request.user_prompt.chars().count() > MAX_MESSAGE_CHARS
+        || request.seed > i64::MAX as u64
         || request.max_output_tokens == 0
         || request.max_output_tokens > MAX_OUTPUT_TOKENS
     {
@@ -510,6 +518,7 @@ fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClient
                 },
             ],
             temperature: 0.0,
+            seed: request.seed,
             response_schema: schema,
         },
     })
@@ -543,6 +552,7 @@ fn preflight_request_size(core: &RequestCore<'_>) -> Result<(), GatewayClientErr
                     },
                 ],
                 temperature: core.generation.temperature,
+                seed: core.generation.seed,
                 response_schema: core.generation.response_schema,
             },
         },
@@ -1026,6 +1036,8 @@ mod tests {
             ("POST", "/v1/inference")
         );
         assert_eq!(calls[0].token, "t".repeat(MIN_TOKEN_BYTES));
+        let submitted: Value = serde_json::from_slice(calls[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(submitted["generation"]["seed"], 7);
         let observed = transport
             .observed_submission
             .lock()
@@ -1089,6 +1101,50 @@ mod tests {
                 .filter(|call| call.path.ends_with("/ack"))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn expired_local_completion_returns_without_remote_acknowledgement() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let transport = Arc::new(FakeTransport::default());
+        let client = client(&context, transport.clone());
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayClientError::Transport));
+        assert!(matches!(
+            client.execute(&mut conn, &key(0), &request(), now),
+            Err(GatewayClientError::Transport)
+        ));
+        let record = load_request(&conn, &key(0)).unwrap().unwrap();
+        transport.responses.lock().unwrap().extend([
+            response(200, completed(&record.request_id)),
+            Err(GatewayClientError::Transport),
+        ]);
+        assert!(matches!(
+            client.execute(&mut conn, &key(0), &request(), now),
+            Err(GatewayClientError::Transport)
+        ));
+
+        let result = client
+            .execute(
+                &mut conn,
+                &key(0),
+                &request(),
+                now + ChronoDuration::minutes(11),
+            )
+            .unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert_eq!(transport.calls.lock().unwrap().len(), 3);
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Completed
         );
     }
 
@@ -1210,6 +1266,20 @@ mod tests {
         assert!(preflight_request_size(&request_core(&invalid).unwrap()).is_err());
         invalid = request();
         invalid.system_prompt.clear();
+        assert!(request_core(&invalid).is_err());
+        invalid = request();
+        invalid.seed = i64::MAX as u64;
+        assert_eq!(
+            request_core(&invalid).unwrap().generation.seed,
+            i64::MAX as u64
+        );
+        let maximum_hash = sha256_hex(&encode_json(&request_core(&invalid).unwrap()).unwrap());
+        invalid.seed = 0;
+        assert_ne!(
+            maximum_hash,
+            sha256_hex(&encode_json(&request_core(&invalid).unwrap()).unwrap())
+        );
+        invalid.seed = (i64::MAX as u64) + 1;
         assert!(request_core(&invalid).is_err());
         invalid = request();
         invalid.max_output_tokens = MAX_OUTPUT_TOKENS;

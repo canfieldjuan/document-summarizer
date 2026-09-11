@@ -24,8 +24,11 @@ and the gateway. A correct transport must:
 5. persist validated output and producing deployment/task-policy provenance locally before sending
    `persisted` acknowledgement;
 6. retry a lost acknowledgement from the local completed row without repeating inference, and
-   return acknowledged local output without network access; and
-7. expose an authenticated health check that recognizes only the authorized
+   return completed local output after the remote retention window or acknowledged local output
+   without network access;
+7. bind the admitted generation seed into both semantic identity and the exact outbound request;
+   and
+8. expose an authenticated health check that recognizes only the authorized
    `document.summary.step@1` task and discloses no model/runtime identity.
 
 This slice must not change runtime selection, model profiles, prompts, pipeline state transitions,
@@ -45,8 +48,12 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 - First submission writes the exact request-body SHA-256 before the transport observes the POST.
 - A transport failure leaves one submitted identity; retry sends byte-identical JSON with that ID.
 - A valid response is integrity-checked and durable with deployment/policy provenance before ACK.
-- If ACK fails after local persistence, retry sends only ACK and returns the same local output.
+- If ACK fails after local persistence, retry sends only ACK while the request remains remotely
+  retained; after expiry it returns the same completed local output without network access or a
+  false acknowledgement transition.
 - An acknowledged request returns its local output without another transport call.
+- Seeds from zero through signed 64-bit maximum are transmitted and bind semantic identity;
+  larger values fail before reservation or transport.
 - Wrong IDs, versions, media types, statuses, provenance, retry directives, oversized bodies,
   redirects, unsafe Unix token/CA files, and non-HTTPS origins fail closed without secret
   disclosure.
@@ -80,10 +87,10 @@ redirect refusal, identity encoding, and bounded reads.
 
 ## Verification
 
-- `cargo test gateway_client -q` — 7 passed.
-- `cargo test gateway -q` — 12 passed.
+- `cargo test gateway_client -q` — 8 passed.
+- `cargo test gateway -q` — 13 passed.
 - `cargo test --all-targets -- --skip connect::provider::tests::entitlement_gates_manifest_jobs_and_status_while_registration_stays_owned`
-  — 453 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
+  — 454 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
   release-contract tests passed.
 - Exact isolated execution of the pre-existing skipped Connect test — 1 passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
@@ -92,7 +99,7 @@ redirect refusal, identity encoding, and bounded reads.
 
 ## Estimated diff size
 
-Actual: three files and 1,466 added lines. This exceeds the draft estimate because
+Actual: three files and 1,543 added lines. This exceeds the draft estimate because
 the production security/credential boundary, protocol codecs, durable lifecycle, and two-sided
 failure probes are one reviewable transport unit; splitting its tests from the private client would
 reduce neither risk nor total surface. Runtime/UI work remains explicitly excluded.
