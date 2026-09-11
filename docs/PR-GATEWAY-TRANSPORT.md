@@ -59,6 +59,9 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 - If ACK fails after local persistence, retry sends only ACK while the request remains remotely
   retained; after expiry it returns the same completed local output without network access or a
   false acknowledgement transition.
+- If ACK transport or protocol handling fails while another caller acknowledges the row, or while
+  the immutable retention window expires, a ledger reload returns the authoritative durable result
+  instead of reporting a stale acknowledgement failure.
 - An acknowledged request returns its local output without another transport call.
 - If another caller completes or acknowledges the row between reservation and submission, the
   reloaded transition state returns that local output without another inference POST.
@@ -104,10 +107,10 @@ reads.
 
 ## Verification
 
-- `cargo test gateway_client -q` — 13 passed.
-- `cargo test gateway -q` — 18 passed.
+- `cargo test gateway_client -q` — 15 passed.
+- `cargo test gateway -q` — 20 passed.
 - `cargo test --all-targets -- --skip connect::provider::tests::entitlement_gates_manifest_jobs_and_status_while_registration_stays_owned`
-  — 459 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
+  — 461 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
   release-contract tests passed.
 - Exact isolated execution of the pre-existing skipped Connect test — 1 passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
@@ -118,7 +121,7 @@ reads.
 
 ## Estimated diff size
 
-Actual: five files, 2,045 added lines, and 12 removed lines. This exceeds the draft estimate because
+Actual: five files, 2,158 added lines, and 12 removed lines. This exceeds the draft estimate because
 the production security/credential boundary, protocol codecs, durable lifecycle, and two-sided
 failure probes are one reviewable transport unit; splitting its tests from the private client would
 reduce neither risk nor total surface. Runtime/UI work remains explicitly excluded.

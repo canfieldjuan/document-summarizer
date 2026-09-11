@@ -345,8 +345,24 @@ impl GatewayClient {
                 if request_expired(record, now)? {
                     return Ok(Some(result));
                 }
-                self.acknowledge(conn, key, &record.request_id, now)?;
-                Ok(Some(result))
+                match self.acknowledge(conn, key, &record.request_id, now) {
+                    Ok(()) => Ok(Some(result)),
+                    Err(error) => {
+                        let current =
+                            load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
+                        match current.state {
+                            GatewayRequestState::Acknowledged => {
+                                result_from_record(&current).map(Some)
+                            }
+                            GatewayRequestState::Completed
+                                if request_expired(&current, (self.clock)())? =>
+                            {
+                                result_from_record(&current).map(Some)
+                            }
+                            _ => Err(error),
+                        }
+                    }
+                }
             }
             GatewayRequestState::Submitted if request_expired(record, now)? => {
                 Err(GatewayClientError::Expired)
@@ -972,6 +988,7 @@ mod tests {
         inspect_database: Option<PathBuf>,
         observed_submission: Mutex<Option<(String, String)>>,
         before_response: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        before_ack_response: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl GatewayTransport for FakeTransport {
@@ -997,6 +1014,11 @@ mod tests {
                 }
                 if let Some(before_response) = self.before_response.lock().unwrap().take() {
                     before_response();
+                }
+            }
+            if path.ends_with("/ack") {
+                if let Some(before_ack_response) = self.before_ack_response.lock().unwrap().take() {
+                    before_ack_response();
                 }
             }
             self.calls.lock().unwrap().push(Call {
@@ -1520,6 +1542,94 @@ mod tests {
             load_request(&conn, &key(0)).unwrap().unwrap().state,
             GatewayRequestState::Completed
         );
+    }
+
+    #[test]
+    fn concurrent_acknowledgement_wins_over_ack_transport_failure() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let transport = Arc::new(FakeTransport::default());
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayClientError::Transport));
+        let client = client_at(&context, transport.clone(), now);
+        assert!(matches!(
+            client.execute(&mut conn, &key(0), &request(), now),
+            Err(GatewayClientError::Transport)
+        ));
+        let record = load_request(&conn, &key(0)).unwrap().unwrap();
+        let database = context.database.clone();
+        transport
+            .before_ack_response
+            .lock()
+            .unwrap()
+            .replace(Box::new(move || {
+                let mut concurrent = Connection::open(database).unwrap();
+                mark_acknowledged(&mut concurrent, &key(0), now).unwrap();
+            }));
+        transport.responses.lock().unwrap().extend([
+            response(200, completed(&record.request_id)),
+            Err(GatewayClientError::Transport),
+        ]);
+
+        let result = client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Acknowledged
+        );
+        assert_eq!(transport.calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn acknowledgement_failure_crossing_expiry_returns_durable_completion() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expiry = now + ChronoDuration::seconds(1);
+        let current_time = Arc::new(Mutex::new(now));
+        let transport = Arc::new(FakeTransport::default());
+        let reserved = reserve_request(
+            &mut conn,
+            &key(0),
+            &sha256_hex(&encode_json(&request_core(&request()).unwrap()).unwrap()),
+            expiry,
+            now,
+        )
+        .unwrap();
+        let response_time = current_time.clone();
+        transport
+            .before_ack_response
+            .lock()
+            .unwrap()
+            .replace(Box::new(move || *response_time.lock().unwrap() = expiry));
+        transport.responses.lock().unwrap().extend([
+            response(200, completed(&reserved.request_id)),
+            Err(GatewayClientError::Transport),
+        ]);
+        let clock_time = current_time.clone();
+        let client = GatewayClient::with_transport(
+            context.token.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            transport.clone(),
+            Arc::new(move || *clock_time.lock().unwrap()),
+        );
+
+        let result = client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Completed
+        );
+        assert_eq!(transport.calls.lock().unwrap().len(), 2);
     }
 
     #[test]
