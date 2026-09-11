@@ -851,7 +851,7 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
     };
     let mut cursor = skip_adverbs(noun_end);
     let Some(raw_predicate) = words.get(cursor).map(String::as_str) else {
-        return true;
+        return false;
     };
     let (predicate, contracted_negative) = normalize_contracted_auxiliary(raw_predicate);
     if matches!(
@@ -1697,6 +1697,7 @@ fn bounded_section_denial_predicate(
     }
 
     let mut consumed_temporal_adverb = false;
+    let mut consumed_copular_auxiliary = false;
     loop {
         if words.get(cursor).is_some_and(|word| {
             matches!(
@@ -1704,6 +1705,9 @@ fn bounded_section_denial_predicate(
                 "are" | "been" | "had" | "has" | "have" | "is" | "was" | "were"
             )
         }) {
+            consumed_copular_auxiliary |= words.get(cursor).is_some_and(|word| {
+                matches!(word.as_str(), "are" | "been" | "is" | "was" | "were")
+            });
             cursor += 1;
             continue;
         }
@@ -1717,6 +1721,9 @@ fn bounded_section_denial_predicate(
             continue;
         }
         break;
+    }
+    if words.get(cursor).is_some_and(|word| word == "outstanding") {
+        return consumed_copular_auxiliary && section_denial_tail(&words[cursor + 1..]);
     }
     let Some(predicate) = words.get(cursor).map(String::as_str) else {
         return false;
@@ -7091,6 +7098,20 @@ mod tests {
             "No risk remains outstanding at this time.",
             SourceFraming::Risk,
         ));
+        for copular_outstanding in [
+            "No risks are outstanding.",
+            "No risk is outstanding.",
+            "No problems have been outstanding to date.",
+        ] {
+            assert!(begins_with_section_denial(
+                copular_outstanding,
+                if copular_outstanding.starts_with("No problems") {
+                    SourceFraming::Problem
+                } else {
+                    SourceFraming::Risk
+                },
+            ));
+        }
         assert!(begins_with_section_denial(
             "No exceptions apply.",
             SourceFraming::Exception,
@@ -7229,6 +7250,8 @@ mod tests {
             "No risks and no control eliminates every fraud risk.",
             "No risks remain possible.",
             "No risks remain outstanding in this review.",
+            "No risks outstanding.",
+            "No risks are outstanding in this review.",
             "No exceptions apply to every worker.",
             "No risks have yet been identified because the review is incomplete.",
             "No risks are currently present in this area.",
@@ -7665,10 +7688,21 @@ mod tests {
                 None
             );
         }
+        let copular_outstanding_denial =
+            "Key Risks\nNo risks are outstanding.\nLater unrelated text.";
+        for unframed in ["No risks are outstanding.", "Later unrelated text."] {
+            assert_eq!(
+                source_framing_for_segment(copular_outstanding_denial, unframed, None),
+                None
+            );
+        }
         for retained_outstanding in [
             "No risks remain outstanding? Verify the record.",
             "No risks remain outstanding in this review.",
             "No limitations remain outstanding.",
+            "No risks are outstanding? Verify the record.",
+            "No risks are outstanding in this review.",
+            "No limitations are outstanding.",
         ] {
             let block = format!("Key Risks\n{retained_outstanding}\nOverview follows.");
             for framed in [retained_outstanding, "Overview follows."] {
@@ -7693,6 +7727,14 @@ mod tests {
             assert_eq!(
                 source_framing_for_segment(outstanding_reintroduction, framed, None),
                 Some(SourceFraming::Risk)
+            );
+        }
+        let noun_fragment_after_denial =
+            "Key Risks\nNo risks were identified.\nRisks.\nOverview follows.";
+        for unframed in ["Risks.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(noun_fragment_after_denial, unframed, None),
+                None
             );
         }
         let applying_denial = "Exceptions\nNo exceptions apply.\nLater unrelated text.";
