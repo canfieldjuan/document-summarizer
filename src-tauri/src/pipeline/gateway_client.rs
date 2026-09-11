@@ -6,7 +6,7 @@
 use crate::pipeline::contracts::{ModelOutputFormat, ModelRequest};
 use crate::pipeline::gateway_store::{
     mark_acknowledged, mark_submitted, persist_completion, reserve_request, GatewayCompletion,
-    GatewayRequestKey, GatewayRequestState, GatewayStoreError,
+    GatewayRequestKey, GatewayRequestRecord, GatewayRequestState, GatewayStoreError,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use reqwest::blocking::Client;
@@ -68,6 +68,8 @@ pub(crate) enum GatewayClientError {
     Credential,
     #[error("Inference gateway transport failed")]
     Transport,
+    #[error("Inference gateway request expired before its outcome could be reconciled")]
+    Expired,
     #[error("Inference gateway response violated the protocol: {0}")]
     Protocol(&'static str),
     #[error("Inference gateway rejected the request: {code}")]
@@ -83,7 +85,11 @@ impl GatewayClientError {
         match self {
             Self::Transport => true,
             Self::Rejected { retryable, .. } => *retryable,
-            Self::Store(_) | Self::Configuration(_) | Self::Credential | Self::Protocol(_) => false,
+            Self::Store(_)
+            | Self::Configuration(_)
+            | Self::Credential
+            | Self::Expired
+            | Self::Protocol(_) => false,
         }
     }
 }
@@ -259,19 +265,19 @@ impl GatewayClient {
                 "request expiry overflowed",
             ))?;
         let record = reserve_request(conn, key, &semantic_hash, request_expires_at, now)?;
-        if matches!(record.state, GatewayRequestState::Completed) {
-            let result = result_from_record(&record)?;
-            let expires_at = DateTime::parse_from_rfc3339(&record.request_expires_at)
-                .map_err(|_| GatewayStoreError::InvalidRecord("expiry is invalid"))?
-                .with_timezone(&Utc);
-            if expires_at <= now {
-                return Ok(result);
-            }
-            self.acknowledge(conn, key, &record.request_id, now)?;
+        self.execute_reserved(conn, key, record, core, now)
+    }
+
+    fn execute_reserved(
+        &self,
+        conn: &mut Connection,
+        key: &GatewayRequestKey,
+        record: GatewayRequestRecord,
+        core: RequestCore<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<GatewayResult, GatewayClientError> {
+        if let Some(result) = self.resolve_local_record(conn, key, &record, now)? {
             return Ok(result);
-        }
-        if matches!(record.state, GatewayRequestState::Acknowledged) {
-            return result_from_record(&record);
         }
 
         let payload = InferenceEnvelope {
@@ -285,13 +291,45 @@ impl GatewayClient {
             return Err(GatewayClientError::Protocol("request exceeds byte limit"));
         }
         let request_hash = sha256_hex(&request_body);
-        mark_submitted(conn, key, &request_hash, now)?;
+        let submitted = mark_submitted(conn, key, &request_hash, now)?;
+        if let Some(result) = self.resolve_local_record(conn, key, &submitted, now)? {
+            return Ok(result);
+        }
+        if !matches!(submitted.state, GatewayRequestState::Submitted) {
+            return Err(GatewayClientError::Protocol(
+                "local request state is invalid before submission",
+            ));
+        }
         let response = self.send("POST", "/v1/inference", Some(&request_body), self.timeout)?;
         let completion = parse_inference_response(&response, &record.request_id)?;
         let persisted = persist_completion(conn, key, &request_hash, &completion, Utc::now())?;
         let result = result_from_record(&persisted)?;
         self.acknowledge(conn, key, &record.request_id, Utc::now())?;
         Ok(result)
+    }
+
+    fn resolve_local_record(
+        &self,
+        conn: &mut Connection,
+        key: &GatewayRequestKey,
+        record: &GatewayRequestRecord,
+        now: DateTime<Utc>,
+    ) -> Result<Option<GatewayResult>, GatewayClientError> {
+        match record.state {
+            GatewayRequestState::Acknowledged => result_from_record(record).map(Some),
+            GatewayRequestState::Completed => {
+                let result = result_from_record(record)?;
+                if request_expired(record, now)? {
+                    return Ok(Some(result));
+                }
+                self.acknowledge(conn, key, &record.request_id, now)?;
+                Ok(Some(result))
+            }
+            GatewayRequestState::Submitted if request_expired(record, now)? => {
+                Err(GatewayClientError::Expired)
+            }
+            GatewayRequestState::Reserved | GatewayRequestState::Submitted => Ok(None),
+        }
     }
 
     fn acknowledge(
@@ -652,6 +690,16 @@ fn result_from_record(
         deployment_id: completion.deployment_id.clone(),
         task_policy_version: completion.task_policy_version,
     })
+}
+
+fn request_expired(
+    record: &GatewayRequestRecord,
+    now: DateTime<Utc>,
+) -> Result<bool, GatewayClientError> {
+    let expires_at = DateTime::parse_from_rfc3339(&record.request_expires_at)
+        .map_err(|_| GatewayStoreError::InvalidRecord("expiry is invalid"))?
+        .with_timezone(&Utc);
+    Ok(expires_at <= now)
 }
 
 fn decode_response<T: for<'de> Deserialize<'de>>(
@@ -1146,6 +1194,106 @@ mod tests {
             load_request(&conn, &key(0)).unwrap().unwrap().state,
             GatewayRequestState::Completed
         );
+    }
+
+    #[test]
+    fn submitted_request_stops_at_expiry_without_another_transport_call() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let transport = Arc::new(FakeTransport::default());
+        let client = client(&context, transport.clone());
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayClientError::Transport));
+        assert!(matches!(
+            client.execute(&mut conn, &key(0), &request(), now),
+            Err(GatewayClientError::Transport)
+        ));
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayClientError::Transport));
+        assert!(matches!(
+            client.execute(
+                &mut conn,
+                &key(0),
+                &request(),
+                now + ChronoDuration::minutes(10) - ChronoDuration::seconds(1),
+            ),
+            Err(GatewayClientError::Transport)
+        ));
+
+        assert!(matches!(
+            client.execute(
+                &mut conn,
+                &key(0),
+                &request(),
+                now + ChronoDuration::minutes(10),
+            ),
+            Err(GatewayClientError::Expired)
+        ));
+        assert_eq!(transport.calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Submitted
+        );
+    }
+
+    #[test]
+    fn state_advance_between_reserve_and_mark_uses_local_completion() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let model_request = request();
+        let core = request_core(&model_request).unwrap();
+        let semantic_hash = sha256_hex(&encode_json(&core).unwrap());
+        let stale = reserve_request(
+            &mut conn,
+            &key(0),
+            &semantic_hash,
+            now + ChronoDuration::minutes(10),
+            now,
+        )
+        .unwrap();
+        let request_body = encode_json(&InferenceEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: &stale.request_id,
+            request_expires_at: &stale.request_expires_at,
+            core,
+        })
+        .unwrap();
+        let request_hash = sha256_hex(&request_body);
+        let mut concurrent = Connection::open(&context.database).unwrap();
+        mark_submitted(&mut concurrent, &key(0), &request_hash, now).unwrap();
+        let completion = GatewayCompletion::new(
+            "application/json",
+            r#"{"summary":"done"}"#,
+            "office-gateway",
+            1,
+        )
+        .unwrap();
+        persist_completion(&mut concurrent, &key(0), &request_hash, &completion, now).unwrap();
+        mark_acknowledged(&mut concurrent, &key(0), now).unwrap();
+
+        let transport = Arc::new(FakeTransport::default());
+        let result = client(&context, transport.clone())
+            .execute_reserved(
+                &mut conn,
+                &key(0),
+                stale,
+                request_core(&model_request).unwrap(),
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert!(transport.calls.lock().unwrap().is_empty());
     }
 
     #[test]
