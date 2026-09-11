@@ -623,8 +623,12 @@ fn possible_inline_framing_boundary(text: &str) -> bool {
         || words.first().is_some_and(|word| {
             matches!(
                 word.to_ascii_lowercase().as_str(),
-                "appendix"
+                "advantage"
+                    | "advantages"
+                    | "appendix"
                     | "background"
+                    | "benefit"
+                    | "benefits"
                     | "conclusion"
                     | "conclusions"
                     | "definitions"
@@ -1463,6 +1467,19 @@ fn is_source_coordination_delimiter(character: char) -> bool {
     matches!(character, ',' | '،' | '，' | ';' | '؛' | '–' | '—')
 }
 
+fn is_spaced_ascii_heading_hyphen(text: &str, index: usize) -> bool {
+    let bytes = text.as_bytes();
+    index > 0
+        && bytes.get(index) == Some(&b'-')
+        && bytes
+            .get(index - 1)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        && index
+            .checked_add(1)
+            .and_then(|next| bytes.get(next))
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+}
+
 fn begins_with_declarative_section_denial(text: &str, active_framing: SourceFraming) -> bool {
     begins_with_declarative_source_clause(text)
         && bounded_section_denial_clause(text, active_framing)
@@ -2196,6 +2213,7 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
         is_source_inline_colon(character)
             || is_source_sentence_terminal(character)
             || is_source_coordination_delimiter(character)
+            || character == '-'
     }) {
         let delimiter_len = delimiter.len();
         let delimiter_character = delimiter.chars().next();
@@ -2246,12 +2264,24 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
             bare_no_answer_allowed = false;
             continue;
         }
-        if delimiter_character.is_some_and(is_source_coordination_delimiter) {
+        if delimiter_character == Some('-')
+            && !is_spaced_ascii_heading_hyphen(line, delimiter_index)
+        {
+            bare_no_answer_allowed = false;
+            continue;
+        }
+        if delimiter_character.is_some_and(|character| {
+            is_source_coordination_delimiter(character) || character == '-'
+        }) {
             let suffix_start = delimiter_index.saturating_add(delimiter_len);
             let suffix = &line[suffix_start..];
-            if matches!(delimiter_character, Some('–' | '—')) {
+            if matches!(delimiter_character, Some('-' | '–' | '—')) {
                 let (heading_candidate, heading_offset) =
                     inline_heading_prefix(line, delimiter_index);
+                if delimiter_character == Some('-') && heading_candidate.contains('-') {
+                    bare_no_answer_allowed = false;
+                    continue;
+                }
                 let (next, changed) = apply_inline_heading_candidate(framing, heading_candidate);
                 if changed {
                     framing = next;
@@ -2273,6 +2303,10 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
                     bare_no_answer_allowed = false;
                     continue;
                 }
+            }
+            if delimiter_character == Some('-') {
+                bare_no_answer_allowed = false;
+                continue;
             }
             let denial = if coordinated_continuation_lead(suffix) {
                 continuation_after_coordinator(suffix)
@@ -7572,6 +7606,17 @@ mod tests {
                 );
             }
         }
+        for benefit_heading in ["Benefit", "Benefits", "Advantage", "Advantages"] {
+            let block =
+                format!("Key Risks\n{benefit_heading}: The change saves time.\nOverview follows.");
+            for unframed in ["The change saves time.", "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "inline {benefit_heading} should reset Risk framing",
+                );
+            }
+        }
         let benefit_body = "Key Risks\nBenefits may be limited.\nFraud may occur.";
         for framed in ["Benefits may be limited.", "Fraud may occur."] {
             assert_eq!(
@@ -7691,7 +7736,7 @@ mod tests {
             ),
             None
         );
-        for dash in ['—', '–'] {
+        for dash in ['-', '—', '–'] {
             let dash_inline_sections =
                 format!("Common Problems\nKey Risks {dash} Injury may occur.\nOverview follows.");
             for framed in ["Injury may occur.", "Overview follows."] {
@@ -7717,6 +7762,30 @@ mod tests {
             assert_eq!(
                 source_framing_for_segment(fullwidth_inline_reset, unframed, None),
                 None
+            );
+        }
+        let hyphenated_body =
+            "Common Problems\nRisk-based controls reduce harm.\nLate payments remain common.";
+        for framed in [
+            "Risk-based controls reduce harm.",
+            "Late payments remain common.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(hyphenated_body, framed, None),
+                Some(SourceFraming::Problem),
+                "an unspaced word hyphen must not act as an inline heading separator",
+            );
+        }
+        let spaced_hyphen_body =
+            "Common Problems\nThese controls - not risks - reduce harm.\nLate payments remain common.";
+        for framed in [
+            "These controls - not risks - reduce harm.",
+            "Late payments remain common.",
+        ] {
+            assert_eq!(
+                source_framing_for_segment(spaced_hyphen_body, framed, None),
+                Some(SourceFraming::Problem),
+                "a spaced hyphen without a bounded heading prefix must retain framing",
             );
         }
         let fullwidth_labeled_answer =
