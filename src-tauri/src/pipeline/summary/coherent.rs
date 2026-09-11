@@ -1245,7 +1245,10 @@ fn source_framing_reintroduction_offset(
                 && predicate_begins_declarative_clause(index)
                 && matches!(
                     (window[0].as_str(), window[1].as_str()),
-                    ("remain" | "remained" | "remains", "possible")
+                    (
+                        "are" | "is" | "remain" | "remained" | "remains" | "was" | "were",
+                        "possible"
+                    )
                 ))
             .then_some(index)
         })
@@ -1340,7 +1343,7 @@ fn is_source_inline_colon(character: char) -> bool {
 }
 
 fn is_source_coordination_delimiter(character: char) -> bool {
-    matches!(character, ',' | '،' | '，' | ';' | '–' | '—')
+    matches!(character, ',' | '،' | '，' | ';' | '؛' | '–' | '—')
 }
 
 fn begins_with_declarative_section_denial(text: &str, active_framing: SourceFraming) -> bool {
@@ -1385,7 +1388,7 @@ fn coordinated_clause_boundary(
     {
         return None;
     }
-    text.match_indices([',', '،', '，', ';', '–', '—'])
+    text.match_indices(is_source_coordination_delimiter)
         .find_map(|(index, delimiter)| {
             let continuation_start = index.saturating_add(delimiter.len());
             let continuation = &text[continuation_start..];
@@ -1397,7 +1400,7 @@ fn coordinated_clause_boundary(
                         active_framing,
                     )
             } else {
-                delimiter == ";" && !denial_qualification_lead(continuation)
+                matches!(delimiter, ";" | "؛") && !denial_qualification_lead(continuation)
             };
             (index < limit
                 && continuation_starts_boundary
@@ -2056,7 +2059,7 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
             let suffix = &line[suffix_start..];
             let denial = if coordinated_continuation_lead(suffix) {
                 continuation_after_coordinator(suffix)
-            } else if delimiter_character == Some(';') {
+            } else if matches!(delimiter_character, Some(';' | '؛')) {
                 suffix
             } else {
                 bare_no_answer_allowed = false;
@@ -6812,10 +6815,12 @@ mod tests {
         ));
         for nonadverse_possibility in [
             "No risks were identified. However, success remains possible.",
+            "No risks were identified. However, success is possible.",
             "No risks were identified. However, recovery is still possible.",
             "No risks were identified. However, if controls are not applied, success remains possible.",
             "No risks were identified. However, risk reduction remains possible.",
             "No risks were identified. However, fraud prevention is still possible.",
+            "No risks were identified. However, fraud prevention is possible.",
             "No risks were identified. However, worker injury prevention remains possible.",
         ] {
             assert!(begins_with_section_denial(
@@ -6852,6 +6857,10 @@ mod tests {
             SourceFraming::Risk,
         ));
         assert!(begins_with_section_denial(
+            "No risks were identified؛ monitoring will continue.",
+            SourceFraming::Risk,
+        ));
+        assert!(begins_with_section_denial(
             "No risks were identified, while monitoring will continue.",
             SourceFraming::Risk,
         ));
@@ -6883,6 +6892,7 @@ mod tests {
         }
         for qualified_semicolon in [
             "No risks were identified; because the review is incomplete.",
+            "No risks were identified؛ because the review is incomplete.",
             "No risks were identified; if the preliminary record is accurate.",
         ] {
             assert!(!begins_with_section_denial(
@@ -6901,6 +6911,8 @@ mod tests {
         );
         for adverse_possibility in [
             "No risks were identified. However, financial loss remains possible.",
+            "No risks were identified. Fraud is possible.",
+            "No risks were identified. Financial losses were possible.",
             "No risks were identified. However, worker injury is still possible.",
             "No problems were identified. However, underpayment remains possible.",
         ] {
@@ -8126,6 +8138,52 @@ mod tests {
                 Some(SourceFraming::Risk)
             );
         }
+        for copular_residual in [
+            "Fraud is possible.",
+            "Financial losses were possible.",
+            "Worker injuries are possible.",
+            "Underpayment was possible.",
+        ] {
+            let block = format!(
+                "Key Risks\nNo risks were identified. {copular_residual}\nOverview follows."
+            );
+            assert_eq!(
+                source_framing_for_segment(&block, "No risks were identified.", None),
+                None
+            );
+            assert_eq!(
+                source_framing_for_segment(
+                    &block,
+                    &format!("No risks were identified. {copular_residual}"),
+                    None,
+                ),
+                None
+            );
+            for framed in [copular_residual, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{copular_residual} should restore Risk",
+                );
+            }
+        }
+        for neutral_copular_residual in [
+            "Fraud is not possible.",
+            "Fraud is possible?",
+            "Success is possible.",
+            "Fraud prevention is possible.",
+        ] {
+            let block = format!(
+                "Key Risks\nNo risks were identified. {neutral_copular_residual}\nOverview follows."
+            );
+            for unframed in [neutral_copular_residual, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "{neutral_copular_residual} should stay unframed",
+                );
+            }
+        }
         let conditional_post_denial_contrast = "Key Risks\nNo risks were identified. However, if controls are not applied, fraud remains possible.\nLater text.";
         for framed in [
             "However, if controls are not applied, fraud remains possible.",
@@ -8181,6 +8239,8 @@ mod tests {
             "Key Risks\nNo risks were identified، however, monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified; however, monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified; monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified؛ however, monitoring will continue.\nOverview follows.",
+            "Key Risks\nNo risks were identified؛ monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified, while monitoring will continue.\nOverview follows.",
             "Key Risks\nNo risks were identified, nor were limitations found.\nOverview follows.",
             "Key Risks\nNo risks were identified — however, monitoring will continue.\nOverview follows.",
@@ -8201,6 +8261,8 @@ mod tests {
             "Key Risks\nNo risks were identified، however, fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified; however, fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified; fraud remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified؛ however, fraud remains possible.\nOverview follows.",
+            "Key Risks\nNo risks were identified؛ fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified, while fraud remains possible.\nOverview follows.",
             "Key Risks\nNo risks were identified — however, fraud remains possible.\nOverview follows.",
         ] {
@@ -8232,6 +8294,7 @@ mod tests {
             "Key Risks\nRisks emerged， however, no risks remain.\nOverview follows.",
             "Key Risks\nRisks emerged، yet no risks remain.\nOverview follows.",
             "Key Risks\nRisks emerged; no risks remain.\nOverview follows.",
+            "Key Risks\nRisks emerged؛ no risks remain.\nOverview follows.",
             "Key Risks\nRisks emerged — but no risks remain.\nOverview follows.",
         ] {
             assert_eq!(
@@ -8262,6 +8325,7 @@ mod tests {
         }
         for qualified_semicolon in [
             "Key Risks\nNo risks were identified; because the review is incomplete.\nOverview follows.",
+            "Key Risks\nNo risks were identified؛ because the review is incomplete.\nOverview follows.",
             "Key Risks\nNo risks were identified; if the preliminary record is accurate.\nOverview follows.",
             "Key Risks\nNo risks were identified， because the review is incomplete.\nOverview follows.",
             "Key Risks\nNo risks were identified، because the review is incomplete.\nOverview follows.",
