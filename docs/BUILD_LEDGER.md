@@ -3685,7 +3685,7 @@ release acceptance exposed issue #49
   and 3 release-contract tests with the documented opt-in tests ignored, plus
   strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
   production build.
-- The final product-code head `f67def36d688480963e7688f8d35fbc19b08cc31`
+- Product-code head `f67def36d688480963e7688f8d35fbc19b08cc31`
   restricts that neutral reset to a noun-phrase heading with one leading
   negator, optional recognized modifiers, and a terminal framing noun or
   compound. Substantive residual-risk prose therefore retains its governing
@@ -3695,6 +3695,14 @@ release acceptance exposed issue #49
   release-contract tests with the documented opt-in tests ignored, plus strict
   Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
   build.
+- The final product-code head `7da286063c8d22de81cc7f4607004f23cb811880`
+  applies the same negated noun-phrase validation to inline colon prefixes and
+  admits that validated boundary through the existing marked, punctuated
+  heading path. Substantive residual-risk prefixes and marked sentences retain
+  their governing category. The focused two-sided boundary probe passed; the
+  full gate passed 442 library tests, 3 office tests and 3 release-contract
+  tests with the documented opt-in tests ignored, plus strict Clippy, Rust
+  formatting, `git diff --check` and the TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
