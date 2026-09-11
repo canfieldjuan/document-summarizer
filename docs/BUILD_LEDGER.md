@@ -3625,7 +3625,7 @@ release acceptance exposed issue #49
   passed 442 library tests, 3 office tests and 3 release-contract tests with
   the documented opt-in tests ignored, plus strict Clippy, Rust formatting,
   `git diff --check` and the TypeScript/Vite production build.
-- The final product-code head `eadd494b79d77dc24963124bc472f34e64db9f7f`
+- Product-code head `eadd494b79d77dc24963124bc472f34e64db9f7f`
   treats bounded sentence-case benefit and advantage headings as neutral
   section boundaries while retaining terminal-punctuated benefit prose inside
   its governing section. It also admits bounded `can`, `could`, `may`, `might`,
@@ -3633,6 +3633,15 @@ release acceptance exposed issue #49
   occurrence before a bare denial; reporting, causation, control-failure and
   category-mismatch questions remain ineligible. The focused two-sided boundary
   probe passed; the full gate passed 442 library tests, 3 office tests and 3
+  release-contract tests with the documented opt-in tests ignored, plus strict
+  Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
+  build.
+- The final product-code head `783deaffe10270b9f76bbfc3d1a0690dfff49462`
+  admits `may` and `might` through the existing bounded mitigation-question
+  action grammar. Recommendation text following questions such as `Might these
+  risks be mitigated?` is neutral, while failure-qualified questions remain in
+  their governing Problem or Risk section. The focused two-sided boundary probe
+  passed; the full gate passed 442 library tests, 3 office tests and 3
   release-contract tests with the documented opt-in tests ignored, plus strict
   Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
   build.
@@ -3654,7 +3663,7 @@ release acceptance exposed issue #49
   bounded benefit/advantage sentence-case resets with substantive prose
   retention,
   bounded mitigation questions with failure-qualified and substantive-question
-  controls,
+  controls, including `may` and `might` action questions,
   rejection of standalone and
   bounded compound `Risk Factors`, `Warning Signs` and `Problem Areas`
   headings with the existing conservative modifiers, rejection of unrelated
