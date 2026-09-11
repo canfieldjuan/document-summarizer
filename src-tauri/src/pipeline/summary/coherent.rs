@@ -641,6 +641,7 @@ fn possible_inline_framing_boundary(text: &str) -> bool {
                     | "recommendations"
                     | "references"
                     | "remedies"
+                    | "remedy"
                     | "resources"
                     | "scope"
                     | "solution"
@@ -7628,6 +7629,14 @@ mod tests {
                     "inline {benefit_heading} should reset Risk framing",
                 );
             }
+        }
+        let inline_remedy = "Key Risks\nRemedy: Enable MFA.\nOverview follows.";
+        for unframed in ["Enable MFA.", "Overview follows."] {
+            assert_eq!(
+                source_framing_for_segment(inline_remedy, unframed, None),
+                None,
+                "singular inline Remedy should reset Risk framing",
+            );
         }
         let benefit_body = "Key Risks\nBenefits may be limited.\nFraud may occur.";
         for framed in ["Benefits may be limited.", "Fraud may occur."] {
