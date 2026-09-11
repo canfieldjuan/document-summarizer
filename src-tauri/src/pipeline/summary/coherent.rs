@@ -862,6 +862,20 @@ fn occurrence_complement_is_closed(words: &[String], cursor: usize) -> bool {
             .is_some_and(|word| matches!(word.as_str(), "none" | "unidentified" | "unreported"))
 }
 
+fn skip_occurrence_linking_words(words: &[String], mut cursor: usize) -> usize {
+    cursor = skip_source_state_adverbs(words, cursor);
+    if words.get(cursor).is_some_and(|word| word == "to") {
+        cursor = skip_source_state_adverbs(words, cursor + 1);
+    }
+    if words
+        .get(cursor)
+        .is_some_and(|word| matches!(word.as_str(), "be" | "been" | "being"))
+    {
+        cursor = skip_source_state_adverbs(words, cursor + 1);
+    }
+    cursor
+}
+
 fn occurrence_predicate_reintroduces(words: &[String], predicate_start: usize) -> bool {
     let Some(predicate) = words.get(predicate_start).map(String::as_str) else {
         return false;
@@ -879,20 +893,39 @@ fn occurrence_predicate_reintroduces(words: &[String], predicate_start: usize) -
         return false;
     }
     let mut cursor = skip_source_state_adverbs(words, predicate_start + 1);
+    let mut negated = false;
     if words
         .get(cursor)
         .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
     {
-        cursor = skip_source_state_adverbs(words, cursor + 1);
-        return resolution_complement_is_closed(words, cursor);
-    }
-    if words.get(cursor).is_some_and(|word| word == "no")
+        negated = true;
+        cursor += 1;
+    } else if words.get(cursor).is_some_and(|word| word == "no")
         && words.get(cursor + 1).is_some_and(|word| word == "longer")
     {
-        cursor = skip_source_state_adverbs(words, cursor + 2);
-        return resolution_complement_is_closed(words, cursor);
+        negated = true;
+        cursor += 2;
     }
-    !occurrence_complement_is_closed(words, cursor)
+    cursor = skip_occurrence_linking_words(words, cursor);
+    if !negated
+        && words
+            .get(cursor)
+            .is_some_and(|word| matches!(word.as_str(), "never" | "not"))
+    {
+        negated = true;
+        cursor = skip_occurrence_linking_words(words, cursor + 1);
+    } else if !negated
+        && words.get(cursor).is_some_and(|word| word == "no")
+        && words.get(cursor + 1).is_some_and(|word| word == "longer")
+    {
+        negated = true;
+        cursor = skip_occurrence_linking_words(words, cursor + 2);
+    }
+    if negated {
+        resolution_complement_is_closed(words, cursor)
+    } else {
+        !occurrence_complement_is_closed(words, cursor)
+    }
 }
 
 fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> bool {
@@ -919,10 +952,6 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
             | "arises"
             | "arising"
             | "arose"
-            | "continue"
-            | "continued"
-            | "continues"
-            | "continuing"
             | "emerge"
             | "emerged"
             | "emerges"
@@ -993,7 +1022,10 @@ fn framing_noun_predicate_reintroduces(words: &[String], noun_end: usize) -> boo
         }
         return occurrence_predicate_reintroduces(words, cursor);
     }
-    if matches!(predicate, "remain" | "remained" | "remains") {
+    if matches!(
+        predicate,
+        "continue" | "continued" | "continues" | "continuing" | "remain" | "remained" | "remains"
+    ) {
         return occurrence_predicate_reintroduces(words, cursor);
     }
     if matches!(predicate, "do" | "does" | "did") {
@@ -9039,6 +9071,9 @@ mod tests {
             "Risks may remain resolved.",
             "Risks may remain eliminated.",
             "Risks may continue resolved.",
+            "Risks may continue to be resolved.",
+            "Risks continue resolved.",
+            "Risks continue to be eliminated.",
         ] {
             let block = format!(
                 "Key Risks\nNo risks were identified. {neutral_modal_complement}\nOverview follows."
@@ -9056,6 +9091,9 @@ mod tests {
             "Risks may remain unresolved.",
             "Risks may remain not impossible.",
             "Risks may continue to exist.",
+            "Risks may continue to be unresolved.",
+            "Risks continue unresolved.",
+            "Risks continue to exist.",
         ] {
             let block = format!(
                 "Key Risks\nNo risks were identified. {adverse_modal_complement}\nOverview follows."
