@@ -512,6 +512,7 @@ fn possible_framing_boundary(text: &str) -> bool {
 struct SourceFramingState {
     active: Option<SourceFraming>,
     suspended: Option<SourceFraming>,
+    pending_bare_no_answer: Option<SourceFraming>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2186,6 +2187,10 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
     let mut framing = current.active;
     let mut suspended = current.suspended;
     let mut transitions = Vec::new();
+    let prior_line_allows_bare_no = current
+        .pending_bare_no_answer
+        .is_some_and(|category| framing == Some(category));
+    let mut pending_bare_no_answer = None;
     let mut bare_no_answer_allowed = false;
     if framing.is_none() {
         if let Some(reintroduction_offset) = suspended.and_then(|category| {
@@ -2202,12 +2207,13 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
             ));
         }
     }
-    apply_section_denial_update(
+    apply_section_answer_denial_update(
         &mut framing,
         &mut suspended,
         &mut transitions,
         leading_whitespace,
         line,
+        prior_line_allows_bare_no,
     );
     for (delimiter_index, delimiter) in line.match_indices(|character: char| {
         is_source_inline_colon(character)
@@ -2229,6 +2235,9 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
                 transitions.push((leading_whitespace.saturating_add(heading_offset), framing));
             }
             let answer = &line[delimiter_index + delimiter_len..];
+            if bare_no_answer_allowed && answer.trim().is_empty() {
+                pending_bare_no_answer = framing;
+            }
             let answer_offset = leading_whitespace
                 .saturating_add(delimiter_index)
                 .saturating_add(delimiter_len);
@@ -2387,6 +2396,7 @@ fn source_framing_line_update(current: SourceFramingState, line: &str) -> Source
         state: SourceFramingState {
             active: framing,
             suspended,
+            pending_bare_no_answer,
         },
         transitions,
     }
@@ -2415,6 +2425,7 @@ fn source_framing_after_block(
         SourceFramingState {
             active: inherited,
             suspended: None,
+            pending_bare_no_answer: None,
         },
     )
     .active
@@ -2452,6 +2463,7 @@ fn source_framing_for_segment(
         SourceFramingState {
             active: inherited,
             suspended: None,
+            pending_bare_no_answer: None,
         },
     )
 }
@@ -8375,6 +8387,32 @@ mod tests {
                     );
                 }
             }
+        }
+        for split_bare_answer in [
+            "Any known risks?\nNo.",
+            "Are there risks?\nNo.",
+            "May risks exist?\nNo.",
+        ] {
+            let block = format!("Key Risks\n{split_bare_answer}\nOverview follows.");
+            for unframed in ["No.", "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "{split_bare_answer} should clear framing across one line boundary",
+                );
+            }
+        }
+        for split_bare_answer_control in [
+            "Did the control fail?\nNo.",
+            "Are there risks?\n\nNo.",
+            "Are there risks?\nReview pending.\nNo.",
+        ] {
+            let block = format!("Key Risks\n{split_bare_answer_control}\nOverview follows.");
+            assert_eq!(
+                source_framing_for_segment(&block, "Overview follows.", None),
+                Some(SourceFraming::Risk),
+                "{split_bare_answer_control} must not authorize a later bare denial",
+            );
         }
         for retained_bare_answer in [
             "Any known risks? No? Verify the record.",
