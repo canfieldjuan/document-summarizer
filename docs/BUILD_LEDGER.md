@@ -3615,7 +3615,7 @@ release acceptance exposed issue #49
   office tests and 3 release-contract tests with the documented opt-in tests
   ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
-- The final product-code head `cc665da46659d990b043080ea716d30b9604389e`
+- Product-code head `cc665da46659d990b043080ea716d30b9604389e`
   recognizes a bounded framing or reset heading before an en or em dash and
   transitions at the following body, while keeping a source that spans the
   heading/body boundary unframed. It also routes direct and modal appearance
@@ -3625,6 +3625,17 @@ release acceptance exposed issue #49
   passed 442 library tests, 3 office tests and 3 release-contract tests with
   the documented opt-in tests ignored, plus strict Clippy, Rust formatting,
   `git diff --check` and the TypeScript/Vite production build.
+- The final product-code head `eadd494b79d77dc24963124bc472f34e64db9f7f`
+  treats bounded sentence-case benefit and advantage headings as neutral
+  section boundaries while retaining terminal-punctuated benefit prose inside
+  its governing section. It also admits bounded `can`, `could`, `may`, `might`,
+  `will` and `would` questions about the active category's presence or
+  occurrence before a bare denial; reporting, causation, control-failure and
+  category-mismatch questions remain ineligible. The focused two-sided boundary
+  probe passed; the full gate passed 442 library tests, 3 office tests and 3
+  release-contract tests with the documented opt-in tests ignored, plus strict
+  Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
+  build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
@@ -3640,6 +3651,8 @@ release acceptance exposed issue #49
   marked lowercase and title-case prose retention, inline framing and reset headings,
   bounded mitigation/control neutral headings in standalone, marked and inline
   forms with ordinary mitigation sentences retained as body text,
+  bounded benefit/advantage sentence-case resets with substantive prose
+  retention,
   bounded mitigation questions with failure-qualified and substantive-question
   controls,
   rejection of standalone and
@@ -3723,7 +3736,9 @@ release acceptance exposed issue #49
   transitions within one denial/reintroduction line and its colon-body form,
   post-question denial answers including bounded bare `No` with interrogative,
   qualified-tail, active-category section-question, substantive-question and
-  labeled-answer controls, declarative sentence-suffix
+  labeled-answer controls, modal-led active-category presence questions with
+  reporting, causation, control-failure and category-mismatch controls,
+  declarative sentence-suffix
   denials after ASCII and CJK terminals with non-denial and explicit
   reintroduction controls,
   and fail-closed
