@@ -3531,7 +3531,7 @@ release acceptance exposed issue #49
   resolution, wrong-complement and double-negation anaphoric controls remain
   neutral. The focused two-sided propagation probe and full deterministic gate
   passed.
-- The final product-code head `7e38aea2fe222e40901611234d4bd36cff1f978b`
+- Product-code head `7e38aea2fe222e40901611234d4bd36cff1f978b`
   uses the shared Unicode sentence-terminal, coordination-delimiter and inline-
   colon predicates when scanning a suspended category for an adverse residual
   clause, and records the exact byte offset where framing resumes. A neutral
@@ -3541,6 +3541,17 @@ release acceptance exposed issue #49
   two-sided boundary probe passed; the full gate passed 442 library tests, 3
   office tests and 3 release-contract tests with the documented opt-in tests
   ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
+- The final product-code head `459028bca503e580008d6a94e0080b052916a263`
+  restores a denied Problem or Risk category for bounded adverse copular
+  residuals such as `Fraud is possible`, without requiring `still`, and adds
+  the Arabic semicolon to the shared coordinated-clause delimiter family.
+  Negated, interrogative, non-adverse and protective copular controls remain
+  neutral. Arabic-semicolon neutral, adverse, trailing-denial, qualification
+  and mixed-source controls match the existing ASCII-semicolon behavior. The
+  focused two-sided boundary probe passed; the full gate passed 442 library
+  tests, 3 office tests and 3 release-contract tests with the documented opt-in
+  tests ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
