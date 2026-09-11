@@ -1528,17 +1528,18 @@ fn bounded_section_denial_clause(text: &str, active_framing: SourceFraming) -> b
     if first == "not" {
         words.get(1).is_some_and(|word| word == "applicable") && section_denial_tail(&words[2..])
     } else if first == "none" {
-        words.len() == 1 || bounded_section_denial_predicate(&words, &comma_before, 1, None)
+        words.len() == 1 || bounded_section_denial_predicate(&words, &comma_before, 1, None, false)
     } else if matches!(first, "no" | "neither") {
-        bounded_section_denial_predicate(&words, &comma_before, 1, Some(active_framing))
+        bounded_section_denial_predicate(&words, &comma_before, 1, Some(active_framing), false)
     } else {
-        let existential_noun_start = existential_denial_noun_start(&words);
-        existential_noun_start.is_some_and(|noun_start| {
+        let existential_prefix = existential_denial_prefix(&words);
+        existential_prefix.is_some_and(|prefix| {
             bounded_section_denial_predicate(
                 &words,
                 &comma_before,
-                noun_start,
+                prefix.noun_start,
                 Some(active_framing),
+                prefix.consumed_copular_auxiliary,
             )
         })
     }
@@ -1581,7 +1582,12 @@ fn section_denial_words(text: &str) -> (Vec<String>, Vec<bool>) {
     (words, comma_before)
 }
 
-fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
+struct ExistentialDenialPrefix {
+    noun_start: usize,
+    consumed_copular_auxiliary: bool,
+}
+
+fn existential_denial_prefix(words: &[String]) -> Option<ExistentialDenialPrefix> {
     if words.first().map(String::as_str) != Some("there") {
         return None;
     }
@@ -1594,17 +1600,19 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
         consumed_temporal_adverb = true;
         cursor += 1;
     }
-    let (perfect, contracted_negative) = match words.get(cursor).map(String::as_str) {
-        Some("had" | "has" | "have") => (true, false),
-        Some("hadn't" | "hadn’t" | "hasn't" | "hasn’t" | "haven't" | "haven’t") => {
-            (true, true)
-        }
-        Some("are" | "is" | "was" | "were") => (false, false),
-        Some(
-            "aren't" | "aren’t" | "isn't" | "isn’t" | "wasn't" | "wasn’t" | "weren't" | "weren’t",
-        ) => (false, true),
-        _ => return None,
-    };
+    let (perfect, contracted_negative, mut consumed_copular_auxiliary) =
+        match words.get(cursor).map(String::as_str) {
+            Some("had" | "has" | "have") => (true, false, false),
+            Some("hadn't" | "hadn’t" | "hasn't" | "hasn’t" | "haven't" | "haven’t") => {
+                (true, true, false)
+            }
+            Some("are" | "is" | "was" | "were") => (false, false, true),
+            Some(
+                "aren't" | "aren’t" | "isn't" | "isn’t" | "wasn't" | "wasn’t" | "weren't"
+                | "weren’t",
+            ) => (false, true, true),
+            _ => return None,
+        };
     cursor += 1;
 
     let mut expanded_negative = words.get(cursor).is_some_and(|word| word == "not");
@@ -1634,6 +1642,7 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
         if words.get(cursor).map(String::as_str) != Some("been") {
             return None;
         }
+        consumed_copular_auxiliary = true;
         cursor += 1;
     }
     if !consumed_temporal_adverb
@@ -1654,12 +1663,18 @@ fn existential_denial_noun_start(words: &[String]) -> Option<usize> {
         return words
             .get(cursor)
             .is_some_and(|word| word == "any")
-            .then_some(cursor + 1);
+            .then_some(ExistentialDenialPrefix {
+                noun_start: cursor + 1,
+                consumed_copular_auxiliary,
+            });
     }
     words
         .get(cursor)
         .is_some_and(|word| word == "no")
-        .then_some(cursor + 1)
+        .then_some(ExistentialDenialPrefix {
+            noun_start: cursor + 1,
+            consumed_copular_auxiliary,
+        })
 }
 
 fn is_section_temporal_adverb(word: &str) -> bool {
@@ -1677,6 +1692,7 @@ fn bounded_section_denial_predicate(
     comma_before: &[bool],
     mut cursor: usize,
     required_framing: Option<SourceFraming>,
+    mut consumed_copular_auxiliary: bool,
 ) -> bool {
     if let Some(required_framing) = required_framing {
         let Some(after_nouns) =
@@ -1697,7 +1713,6 @@ fn bounded_section_denial_predicate(
     }
 
     let mut consumed_temporal_adverb = false;
-    let mut consumed_copular_auxiliary = false;
     loop {
         if words.get(cursor).is_some_and(|word| {
             matches!(
@@ -7695,6 +7710,38 @@ mod tests {
                 source_framing_for_segment(copular_outstanding_denial, unframed, None),
                 None
             );
+        }
+        for existential_outstanding_denial in [
+            "There are no risks outstanding.",
+            "There is no risk outstanding.",
+            "There aren't any risks outstanding.",
+            "There have been no risks outstanding to date.",
+            "There haven't been any risks outstanding.",
+        ] {
+            let block =
+                format!("Key Risks\n{existential_outstanding_denial}\nLater unrelated text.");
+            for unframed in [existential_outstanding_denial, "Later unrelated text."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, unframed, None),
+                    None,
+                    "{existential_outstanding_denial} should clear Risk",
+                );
+            }
+        }
+        for retained_existential_outstanding in [
+            "There are no risks outstanding? Verify the record.",
+            "There are no risks outstanding in this review.",
+            "There are no limitations outstanding.",
+            "There no risks outstanding.",
+        ] {
+            let block = format!("Key Risks\n{retained_existential_outstanding}\nOverview follows.");
+            for framed in [retained_existential_outstanding, "Overview follows."] {
+                assert_eq!(
+                    source_framing_for_segment(&block, framed, None),
+                    Some(SourceFraming::Risk),
+                    "{retained_existential_outstanding} should retain Risk",
+                );
+            }
         }
         for retained_outstanding in [
             "No risks remain outstanding? Verify the record.",
