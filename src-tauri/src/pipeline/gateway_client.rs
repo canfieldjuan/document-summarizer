@@ -5,8 +5,9 @@
 
 use crate::pipeline::contracts::{ModelOutputFormat, ModelRequest};
 use crate::pipeline::gateway_store::{
-    mark_acknowledged, mark_submitted, persist_completion, reserve_request, GatewayCompletion,
-    GatewayRequestKey, GatewayRequestRecord, GatewayRequestState, GatewayStoreError,
+    load_request, mark_acknowledged, mark_submitted, persist_completion, reserve_request,
+    GatewayCompletion, GatewayRequestKey, GatewayRequestRecord, GatewayRequestState,
+    GatewayStoreError,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use reqwest::blocking::Client;
@@ -166,6 +167,7 @@ pub(crate) struct GatewayClient {
     token_file: PathBuf,
     timeout: Duration,
     request_lifetime: ChronoDuration,
+    clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     transport: Arc<dyn GatewayTransport>,
 }
 
@@ -199,6 +201,7 @@ impl GatewayClient {
             request_lifetime: ChronoDuration::from_std(request_lifetime).map_err(|_| {
                 GatewayClientError::Configuration("request lifetime is outside its bounds")
             })?,
+            clock: Arc::new(Utc::now),
             transport: Arc::new(ReqwestGatewayTransport { base_url, client }),
         })
     }
@@ -209,11 +212,13 @@ impl GatewayClient {
         timeout: Duration,
         request_lifetime: Duration,
         transport: Arc<dyn GatewayTransport>,
+        clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     ) -> Self {
         Self {
             token_file,
             timeout,
             request_lifetime: ChronoDuration::from_std(request_lifetime).unwrap(),
+            clock,
             transport,
         }
     }
@@ -286,8 +291,8 @@ impl GatewayClient {
             return Err(GatewayClientError::Protocol("request exceeds byte limit"));
         }
         let request_hash = sha256_hex(&request_body);
-        let submitted = mark_submitted(conn, key, &request_hash, now)?;
-        if let Some(result) = self.resolve_local_record(conn, key, &submitted, now)? {
+        let submitted = mark_submitted(conn, key, &request_hash, (self.clock)())?;
+        if let Some(result) = self.resolve_local_record(conn, key, &submitted, (self.clock)())? {
             return Ok(result);
         }
         if !matches!(submitted.state, GatewayRequestState::Submitted) {
@@ -295,8 +300,30 @@ impl GatewayClient {
                 "local request state is invalid before submission",
             ));
         }
-        let response = self.send("POST", "/v1/inference", Some(&request_body), self.timeout)?;
-        let completion = parse_inference_response(&response, &record.request_id)?;
+        let token = self.read_token()?;
+        let current = load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
+        if let Some(result) = self.resolve_local_record(conn, key, &current, (self.clock)())? {
+            return Ok(result);
+        }
+        if !matches!(current.state, GatewayRequestState::Submitted) {
+            return Err(GatewayClientError::Protocol(
+                "local request state is invalid before transport",
+            ));
+        }
+        let response = match self.transport.request(
+            "POST",
+            "/v1/inference",
+            &token,
+            Some(&request_body),
+            self.timeout,
+        ) {
+            Ok(response) => response,
+            Err(error) => return self.reconcile_or_propagate(conn, key, error),
+        };
+        let completion = match parse_inference_response(&response, &record.request_id) {
+            Ok(completion) => completion,
+            Err(error) => return self.reconcile_or_propagate(conn, key, error),
+        };
         let persisted = persist_completion(conn, key, &request_hash, &completion, Utc::now())?;
         let result = result_from_record(&persisted)?;
         self.acknowledge(conn, key, &record.request_id, Utc::now())?;
@@ -359,6 +386,19 @@ impl GatewayClient {
         Ok(())
     }
 
+    fn reconcile_or_propagate(
+        &self,
+        conn: &mut Connection,
+        key: &GatewayRequestKey,
+        error: GatewayClientError,
+    ) -> Result<GatewayResult, GatewayClientError> {
+        let current = load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
+        match self.resolve_local_record(conn, key, &current, (self.clock)())? {
+            Some(result) => Ok(result),
+            None => Err(error),
+        }
+    }
+
     fn send(
         &self,
         method: &str,
@@ -366,6 +406,11 @@ impl GatewayClient {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<RawResponse, GatewayClientError> {
+        let token = self.read_token()?;
+        self.transport.request(method, path, &token, body, timeout)
+    }
+
+    fn read_token(&self) -> Result<String, GatewayClientError> {
         let token_bytes =
             read_bounded_regular(&self.token_file, MAX_TOKEN_BYTES, FilePolicy::Token)
                 .map_err(|_| GatewayClientError::Credential)?;
@@ -381,7 +426,7 @@ impl GatewayClient {
         {
             return Err(GatewayClientError::Credential);
         }
-        self.transport.request(method, path, token, body, timeout)
+        Ok(token.to_string())
     }
 }
 
@@ -888,7 +933,6 @@ mod tests {
     use super::*;
     use crate::pipeline::contracts::PipelineStage;
     use crate::pipeline::db;
-    use crate::pipeline::gateway_store::load_request;
     use std::collections::VecDeque;
     use std::fs;
     use std::sync::Mutex;
@@ -908,6 +952,7 @@ mod tests {
         calls: Mutex<Vec<Call>>,
         inspect_database: Option<PathBuf>,
         observed_submission: Mutex<Option<(String, String)>>,
+        before_response: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl GatewayTransport for FakeTransport {
@@ -930,6 +975,9 @@ mod tests {
                         )
                         .unwrap();
                     *self.observed_submission.lock().unwrap() = Some(observed);
+                }
+                if let Some(before_response) = self.before_response.lock().unwrap().take() {
+                    before_response();
                 }
             }
             self.calls.lock().unwrap().push(Call {
@@ -1058,11 +1106,20 @@ mod tests {
     }
 
     fn client(context: &TestContext, transport: Arc<dyn GatewayTransport>) -> GatewayClient {
+        client_at(context, transport, Utc::now())
+    }
+
+    fn client_at(
+        context: &TestContext,
+        transport: Arc<dyn GatewayTransport>,
+        now: DateTime<Utc>,
+    ) -> GatewayClient {
         GatewayClient::with_transport(
             context.token.clone(),
             Duration::from_secs(30),
             Duration::from_secs(600),
             transport,
+            Arc::new(move || now),
         )
     }
 
@@ -1089,7 +1146,7 @@ mod tests {
             response(200, acknowledged(&reserved.request_id)),
         ]);
 
-        let result = client(&context, transport.clone())
+        let result = client_at(&context, transport.clone(), now)
             .execute(&mut conn, &key(0), &request(), now)
             .unwrap();
 
@@ -1176,7 +1233,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let transport = Arc::new(FakeTransport::default());
-        let client = client(&context, transport.clone());
+        let client = client_at(&context, transport.clone(), now);
         transport
             .responses
             .lock()
@@ -1220,7 +1277,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let transport = Arc::new(FakeTransport::default());
-        let client = client(&context, transport.clone());
+        let client = client_at(&context, transport.clone(), now);
         transport
             .responses
             .lock()
@@ -1311,6 +1368,92 @@ mod tests {
 
         assert_eq!(result.content, r#"{"summary":"done"}"#);
         assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn expiry_crossed_after_submission_stops_before_transport() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00.250Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expiry = request_expiry(now, ChronoDuration::seconds(1)).unwrap();
+        let times = Arc::new(Mutex::new(VecDeque::from([
+            expiry - ChronoDuration::milliseconds(1),
+            expiry - ChronoDuration::milliseconds(1),
+            expiry,
+        ])));
+        let clock_times = times.clone();
+        let transport = Arc::new(FakeTransport::default());
+        let client = GatewayClient::with_transport(
+            context.token.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            transport.clone(),
+            Arc::new(move || clock_times.lock().unwrap().pop_front().unwrap()),
+        );
+
+        assert!(matches!(
+            client.execute(&mut conn, &key(0), &request(), now),
+            Err(GatewayClientError::Expired)
+        ));
+        assert!(transport.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Submitted
+        );
+    }
+
+    #[test]
+    fn replay_failure_returns_completion_won_by_concurrent_caller() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let transport = Arc::new(FakeTransport::default());
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayClientError::Transport));
+        let client = client_at(&context, transport.clone(), now);
+        assert!(matches!(
+            client.execute(&mut conn, &key(0), &request(), now),
+            Err(GatewayClientError::Transport)
+        ));
+        let record = load_request(&conn, &key(0)).unwrap().unwrap();
+        let database = context.database.clone();
+        let request_hash = record.gateway_request_hash.clone().unwrap();
+        transport
+            .before_response
+            .lock()
+            .unwrap()
+            .replace(Box::new(move || {
+                let mut concurrent = Connection::open(database).unwrap();
+                let completion = GatewayCompletion::new(
+                    "application/json",
+                    r#"{"summary":"done"}"#,
+                    "office-gateway",
+                    1,
+                )
+                .unwrap();
+                persist_completion(&mut concurrent, &key(0), &request_hash, &completion, now)
+                    .unwrap();
+                mark_acknowledged(&mut concurrent, &key(0), now).unwrap();
+            }));
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayClientError::Transport));
+
+        let result = client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert_eq!(transport.calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Acknowledged
+        );
     }
 
     #[test]
@@ -1429,7 +1572,8 @@ mod tests {
                 link,
                 Duration::from_secs(30),
                 Duration::from_secs(600),
-                transport
+                transport,
+                Arc::new(Utc::now)
             )
             .execute(&mut conn, &key(1), &request(), Utc::now()),
             Err(GatewayClientError::Credential)

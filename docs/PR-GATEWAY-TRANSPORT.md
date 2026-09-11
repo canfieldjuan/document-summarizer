@@ -16,7 +16,8 @@ and the gateway. A correct transport must:
    `ModelRequest`;
 2. reserve/reload the stable request identity, persist the exact outbound JSON digest before any
    POST, reuse the same identity/body after transport ambiguity only while its immutable expiry
-   remains open, and fail terminally rather than dispatching an expired unresolved identity;
+   remains open, refresh the clock at submission and immediately before the transport effect, and
+   fail terminally rather than dispatching an expired unresolved identity;
 3. require a direct HTTPS origin, disable redirects and environment proxies, trust only system
    roots plus an explicitly configured bounded CA bundle, and read the bearer token from a bounded
    owner-private regular file on Unix without logging or persisting it;
@@ -58,6 +59,8 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 - An acknowledged request returns its local output without another transport call.
 - If another caller completes or acknowledges the row between reservation and submission, the
   reloaded transition state returns that local output without another inference POST.
+- If another caller completes or acknowledges the row while a replay is in flight, a failed replay
+  reloads and returns that durable local output instead of propagating the stale remote failure.
 - Seeds from zero through signed 64-bit maximum are transmitted and bind semantic identity;
   larger values fail before reservation or transport.
 - Wrong IDs, versions, media types, statuses, provenance, retry directives, oversized bodies,
@@ -96,10 +99,10 @@ reads.
 
 ## Verification
 
-- `cargo test gateway_client -q` — 10 passed.
-- `cargo test gateway -q` — 15 passed.
+- `cargo test gateway_client -q` — 12 passed.
+- `cargo test gateway -q` — 17 passed.
 - `cargo test --all-targets -- --skip connect::provider::tests::entitlement_gates_manifest_jobs_and_status_while_registration_stays_owned`
-  — 456 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
+  — 458 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
   release-contract tests passed.
 - Exact isolated execution of the pre-existing skipped Connect test — 1 passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
@@ -110,7 +113,7 @@ reads.
 
 ## Estimated diff size
 
-Actual: five files, 1,804 added lines, and 12 removed lines. This exceeds the draft estimate because
+Actual: five files, 1,951 added lines, and 12 removed lines. This exceeds the draft estimate because
 the production security/credential boundary, protocol codecs, durable lifecycle, and two-sided
 failure probes are one reviewable transport unit; splitting its tests from the private client would
 reduce neither risk nor total surface. Runtime/UI work remains explicitly excluded.
