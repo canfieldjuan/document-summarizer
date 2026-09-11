@@ -3553,7 +3553,7 @@ release acceptance exposed issue #49
   tests, 3 office tests and 3 release-contract tests with the documented opt-in
   tests ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
-- The final product-code head `96a40208ae50e92cd10a79dd71c859e2fb33b45a`
+- Product-code head `96a40208ae50e92cd10a79dd71c859e2fb33b45a`
   treats bounded `No ... remain outstanding` and singular `No ... remains
   outstanding` statements as empty-section denials. The complement remains
   scoped to those two predicates and the existing bounded denial tail;
@@ -3563,6 +3563,16 @@ release acceptance exposed issue #49
   and 3 release-contract tests with the documented opt-in tests ignored, plus
   strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
   production build.
+- The final product-code head `019c7a5597a8109437bff3c8a1deb8ed26fc69a9`
+  requires a predicate before an explicit framing noun can restore suspended
+  state, so a punctuated noun fragment such as `Risks.` leaves later text
+  neutral. It also accepts bounded copular outstanding denials only after an
+  observed `are`, `is`, `was`, `were` or `been` auxiliary. Missing-copula,
+  interrogative, qualified and category-mismatch controls retain framing. The
+  focused two-sided boundary probe passed; the full gate passed 442 library
+  tests, 3 office tests and 3 release-contract tests with the documented opt-in
+  tests ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
+  TypeScript/Vite production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
