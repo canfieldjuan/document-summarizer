@@ -347,10 +347,11 @@ impl GatewayClient {
             GatewayRequestState::Acknowledged => result_from_record(record).map(Some),
             GatewayRequestState::Completed => {
                 let result = result_from_record(record)?;
-                if request_expired(record, now)? {
+                let acknowledgement_started_at = (self.clock)();
+                if request_expired(record, acknowledgement_started_at)? {
                     return Ok(Some(result));
                 }
-                match self.acknowledge(conn, key, &record.request_id, now) {
+                match self.acknowledge(conn, key, &record.request_id) {
                     Ok(()) => Ok(Some(result)),
                     Err(error) => {
                         let current =
@@ -381,7 +382,6 @@ impl GatewayClient {
         conn: &mut Connection,
         key: &GatewayRequestKey,
         request_id: &str,
-        now: DateTime<Utc>,
     ) -> Result<(), GatewayClientError> {
         let body = encode_json(&AcknowledgementEnvelope {
             protocol_version: PROTOCOL_VERSION,
@@ -404,7 +404,7 @@ impl GatewayClient {
                 "acknowledgement envelope is invalid",
             ));
         }
-        mark_acknowledged(conn, key, now)?;
+        mark_acknowledged(conn, key, (self.clock)())?;
         Ok(())
     }
 
@@ -1325,14 +1325,18 @@ mod tests {
             Err(GatewayClientError::Transport)
         ));
 
-        let result = client
-            .execute(
-                &mut conn,
-                &key(0),
-                &request(),
-                now + ChronoDuration::minutes(11),
-            )
-            .unwrap();
+        let result = client_at(
+            &context,
+            transport.clone(),
+            now + ChronoDuration::minutes(11),
+        )
+        .execute(
+            &mut conn,
+            &key(0),
+            &request(),
+            now + ChronoDuration::minutes(11),
+        )
+        .unwrap();
 
         assert_eq!(result.content, r#"{"summary":"done"}"#);
         assert_eq!(transport.calls.lock().unwrap().len(), 3);
@@ -1661,6 +1665,105 @@ mod tests {
             GatewayRequestState::Completed
         );
         assert_eq!(transport.calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn stale_entry_time_does_not_ack_an_expired_concurrent_completion() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expiry = now + ChronoDuration::seconds(1);
+        let semantic_hash = sha256_hex(&encode_json(&request_core(&request()).unwrap()).unwrap());
+        reserve_request(&mut conn, &key(0), &semantic_hash, expiry, now).unwrap();
+        let request_hash = "a".repeat(64);
+        mark_submitted(&mut conn, &key(0), &request_hash, now).unwrap();
+        let completion = GatewayCompletion::new(
+            "application/json",
+            r#"{"summary":"done"}"#,
+            "office-gateway",
+            1,
+        )
+        .unwrap();
+        persist_completion(
+            &mut conn,
+            &key(0),
+            &request_hash,
+            &completion,
+            now + ChronoDuration::milliseconds(500),
+        )
+        .unwrap();
+        let transport = Arc::new(FakeTransport::default());
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(response(200, acknowledged("unused")));
+        let client = client_at(&context, transport.clone(), expiry);
+
+        let result = client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert!(transport.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Completed
+        );
+    }
+
+    #[test]
+    fn successful_acknowledgement_uses_post_response_time() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let acknowledged_at = now + ChronoDuration::seconds(1);
+        let current_time = Arc::new(Mutex::new(now));
+        let transport = Arc::new(FakeTransport::default());
+        let reserved = reserve_request(
+            &mut conn,
+            &key(0),
+            &sha256_hex(&encode_json(&request_core(&request()).unwrap()).unwrap()),
+            now + ChronoDuration::seconds(2),
+            now,
+        )
+        .unwrap();
+        let response_time = current_time.clone();
+        transport
+            .before_ack_response
+            .lock()
+            .unwrap()
+            .replace(Box::new(move || {
+                *response_time.lock().unwrap() = acknowledged_at
+            }));
+        transport.responses.lock().unwrap().extend([
+            response(200, completed(&reserved.request_id)),
+            response(200, acknowledged(&reserved.request_id)),
+        ]);
+        let clock_time = current_time.clone();
+        let client = GatewayClient::with_transport(
+            context.token.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(2),
+            transport,
+            Arc::new(move || *clock_time.lock().unwrap()),
+        );
+
+        client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+        let (completed, acknowledged): (String, String) = conn
+            .query_row(
+                "SELECT completed_at, acknowledged_at FROM model_gateway_requests
+                 WHERE run_id = ?1 AND stage = ?2 AND request_ordinal = ?3",
+                rusqlite::params!["run-1", "Analyze", 0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            acknowledged,
+            acknowledged_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+        assert!(acknowledged >= completed);
     }
 
     #[test]
