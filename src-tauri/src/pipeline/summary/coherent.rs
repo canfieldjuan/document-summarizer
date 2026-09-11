@@ -526,7 +526,9 @@ fn possible_framing_boundary(text: &str) -> bool {
     let sentence_case_has_heading_shape = !heading_ends_with_declarative_terminal(heading);
     (sentence_case_has_heading_shape
         || marked_title.is_some()
-            && (punctuated_marked_section_lead || mitigation_control_section_heading))
+            && (punctuated_marked_section_lead
+                || mitigation_control_section_heading
+                || nonaffirmative_framing_boundary))
         && (starts_uppercase || marked_title.is_some())
         && (all_uppercase
             || title_case
@@ -633,7 +635,9 @@ fn possible_inline_framing_boundary(text: &str) -> bool {
         && heading.chars().count() <= 80
         && !inline_words.is_empty()
         && inline_words.len() <= 8
-        && ends_with_source_framing_term(&inline_words);
+        && ends_with_source_framing_term(&inline_words)
+        && (!heading_negates_framing(&inline_words)
+            || negated_source_framing_heading(&inline_words));
     if bounded_framing_reference {
         return true;
     }
@@ -7003,6 +7007,16 @@ mod tests {
                 "{negated_risk_heading} must clear inherited framing",
             );
         }
+        let marked_negated_heading = "Common Problems\n2. No material risks.\nOverview follows.";
+        assert_eq!(
+            source_framing_for_segment(marked_negated_heading, "Overview follows.", None),
+            None,
+        );
+        let inline_negated_heading = "Common Problems\nNo material risks: Overview follows.";
+        assert_eq!(
+            source_framing_for_segment(inline_negated_heading, "Overview follows.", None),
+            None,
+        );
 
         for heading in [
             "Solutions",
@@ -8289,6 +8303,8 @@ mod tests {
         for retained_risk_source in [
             "Key Risks\nNo controls eliminate all risks\nFraud remains possible.",
             "Key Risks\nNo potential risks?\nFraud remains possible.",
+            "Key Risks\n2. No controls eliminate all risks.\nFraud remains possible.",
+            "Key Risks\nNo controls eliminate all risks: Fraud remains possible.",
         ] {
             assert_eq!(
                 source_framing_for_segment(retained_risk_source, "Fraud remains possible.", None),
