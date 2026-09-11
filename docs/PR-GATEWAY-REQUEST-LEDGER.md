@@ -38,6 +38,8 @@ route profile suggestion, or replace the existing Ollama/llama.cpp runtimes.
 - A different semantic digest for an existing key fails without changing the stored identity.
 - A gateway request digest is persisted before a request may become submitted and cannot later be
   replaced by a different digest.
+- A reserved request cannot cross its exact expiry boundary on first submission; an already
+  submitted identity remains reusable after expiry so reconciliation never invents another ID.
 - Completion stores media type, content, SHA-256 integrity, deployment ID, and task-policy version;
   reload verifies the content hash.
 - Acknowledgement is idempotent, retains the completed response, and cannot skip the completed
@@ -50,7 +52,9 @@ route profile suggestion, or replace the existing Ollama/llama.cpp runtimes.
 The reservation function uses an immediate SQLite transaction and `INSERT ... ON CONFLICT DO
 NOTHING`, then reloads the canonical row and compares its semantic digest. Competing callers thus
 converge on the first persisted UUID rather than creating separate identities. Submission,
-completion, and acknowledgement use guarded `UPDATE` statements and reload-after-write checks.
+completion, and acknowledgement use guarded `UPDATE` statements and reload-after-write checks. The
+first reserved-to-submitted transition checks the persisted expiry, while replay of an already
+submitted identity remains available for reconciliation.
 
 The ledger stores hashes and generated model output but not prompts, source documents, gateway
 tokens, or model credentials. Model output is already private application data and must be durable
@@ -89,7 +93,7 @@ part of this storage slice.
 
 ## Estimated diff size
 
-The final diff is four files with 1,023 additions: one schema migration, one private
+The final diff is four files with 1,074 additions: one schema migration, one private
 store module, module registration, and this contract. The integrity, migration, concurrency, and
 two-sided boundary proofs make the overage indivisible; transport and product behavior remain
 excluded.

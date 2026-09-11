@@ -80,6 +80,8 @@ pub(crate) enum GatewayStoreError {
     InvalidInput(&'static str),
     #[error("Gateway request is missing")]
     RequestNotFound,
+    #[error("Gateway request expired before its first submission")]
+    RequestExpired,
     #[error("Gateway request key already belongs to different semantic input")]
     SemanticIdentityConflict,
     #[error("Gateway request was already submitted with a different canonical digest")]
@@ -157,6 +159,12 @@ pub(crate) fn mark_submitted(
         return Err(GatewayStoreError::SubmissionIdentityConflict);
     }
     if record.state == GatewayRequestState::Reserved {
+        let expires_at = DateTime::parse_from_rfc3339(&record.request_expires_at)
+            .map_err(|_| invalid_record("expiry is invalid"))?
+            .with_timezone(&Utc);
+        if expires_at <= now {
+            return Err(GatewayStoreError::RequestExpired);
+        }
         tx.execute(
             "UPDATE model_gateway_requests
              SET gateway_request_hash = ?1, state = 'submitted', updated_at = ?2
@@ -660,5 +668,44 @@ mod tests {
         assert!(GatewayCompletion::new("application/json", "{}", "", 1).is_err());
         assert!(GatewayCompletion::new("application/json", "{}", &"h".repeat(129), 1).is_err());
         assert!(GatewayCompletion::new("application/json", "{}", "host-1", 0).is_err());
+    }
+
+    #[test]
+    fn first_submission_obeys_expiry_while_reconciliation_remains_reusable() {
+        let (_database, mut conn) = TestDatabase::new();
+        let expires_at = now() + chrono::Duration::minutes(5);
+        reserve_request(&mut conn, &key(), &digest('a'), expires_at, now()).unwrap();
+        assert!(matches!(
+            mark_submitted(&mut conn, &key(), &digest('b'), expires_at),
+            Err(GatewayStoreError::RequestExpired)
+        ));
+        assert_eq!(
+            load_request(&conn, &key()).unwrap().unwrap().state,
+            GatewayRequestState::Reserved
+        );
+
+        let reusable_key = GatewayRequestKey {
+            ordinal: 1,
+            ..key()
+        };
+        reserve_request(&mut conn, &reusable_key, &digest('a'), expires_at, now()).unwrap();
+        let submitted = mark_submitted(
+            &mut conn,
+            &reusable_key,
+            &digest('b'),
+            expires_at - chrono::Duration::seconds(1),
+        )
+        .unwrap();
+        assert_eq!(submitted.state, GatewayRequestState::Submitted);
+        assert_eq!(
+            mark_submitted(
+                &mut conn,
+                &reusable_key,
+                &digest('b'),
+                expires_at + chrono::Duration::minutes(1),
+            )
+            .unwrap(),
+            submitted
+        );
     }
 }
