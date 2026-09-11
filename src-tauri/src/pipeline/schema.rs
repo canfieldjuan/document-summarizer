@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 16;
+pub const CURRENT_SCHEMA_VERSION: u32 = 17;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -392,6 +392,117 @@ BEGIN
 END;
 "#;
 
+const V16_TO_V17: &str = r#"
+CREATE TABLE model_gateway_requests (
+    run_id TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK (stage IN ('Analyze', 'Synthesize', 'Verify')),
+    request_ordinal INTEGER NOT NULL CHECK (request_ordinal BETWEEN 0 AND 4294967295),
+    request_id TEXT NOT NULL UNIQUE CHECK (
+        length(request_id) = 36
+        AND request_id = lower(request_id)
+        AND request_id NOT GLOB '*[^0-9a-f-]*'
+        AND substr(request_id, 9, 1) = '-'
+        AND substr(request_id, 14, 1) = '-'
+        AND substr(request_id, 15, 1) = '4'
+        AND substr(request_id, 19, 1) = '-'
+        AND substr(request_id, 20, 1) IN ('8', '9', 'a', 'b')
+        AND substr(request_id, 24, 1) = '-'
+        AND substr(request_id, 1, 8) NOT GLOB '*[^0-9a-f]*'
+        AND substr(request_id, 10, 4) NOT GLOB '*[^0-9a-f]*'
+        AND substr(request_id, 15, 4) NOT GLOB '*[^0-9a-f]*'
+        AND substr(request_id, 20, 4) NOT GLOB '*[^0-9a-f]*'
+        AND substr(request_id, 25, 12) NOT GLOB '*[^0-9a-f]*'
+    ),
+    request_expires_at TEXT NOT NULL,
+    semantic_request_hash TEXT NOT NULL CHECK (
+        length(semantic_request_hash) = 64
+        AND semantic_request_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    gateway_request_hash TEXT CHECK (
+        gateway_request_hash IS NULL OR (
+            length(gateway_request_hash) = 64
+            AND gateway_request_hash NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    state TEXT NOT NULL CHECK (state IN ('reserved', 'submitted', 'completed', 'acknowledged')),
+    completion_json TEXT,
+    completion_sha256 TEXT CHECK (
+        completion_sha256 IS NULL OR (
+            length(completion_sha256) = 64
+            AND completion_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    acknowledgement_disposition TEXT CHECK (
+        acknowledgement_disposition IS NULL OR acknowledgement_disposition = 'persisted'
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    acknowledged_at TEXT,
+    PRIMARY KEY(run_id, stage, request_ordinal),
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    CHECK (
+        (state = 'reserved'
+            AND gateway_request_hash IS NULL
+            AND completion_json IS NULL
+            AND completion_sha256 IS NULL
+            AND acknowledgement_disposition IS NULL
+            AND completed_at IS NULL
+            AND acknowledged_at IS NULL)
+        OR (state = 'submitted'
+            AND gateway_request_hash IS NOT NULL
+            AND completion_json IS NULL
+            AND completion_sha256 IS NULL
+            AND acknowledgement_disposition IS NULL
+            AND completed_at IS NULL
+            AND acknowledged_at IS NULL)
+        OR (state = 'completed'
+            AND gateway_request_hash IS NOT NULL
+            AND completion_json IS NOT NULL
+            AND completion_sha256 IS NOT NULL
+            AND acknowledgement_disposition IS NULL
+            AND completed_at IS NOT NULL
+            AND acknowledged_at IS NULL)
+        OR (state = 'acknowledged'
+            AND gateway_request_hash IS NOT NULL
+            AND completion_json IS NOT NULL
+            AND completion_sha256 IS NOT NULL
+            AND acknowledgement_disposition = 'persisted'
+            AND completed_at IS NOT NULL
+            AND acknowledged_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX model_gateway_requests_state_idx
+ON model_gateway_requests(state, updated_at);
+
+CREATE TRIGGER model_gateway_requests_identity_immutable
+BEFORE UPDATE ON model_gateway_requests
+WHEN OLD.run_id IS NOT NEW.run_id
+    OR OLD.stage IS NOT NEW.stage
+    OR OLD.request_ordinal IS NOT NEW.request_ordinal
+    OR OLD.request_id IS NOT NEW.request_id
+    OR OLD.request_expires_at IS NOT NEW.request_expires_at
+    OR OLD.semantic_request_hash IS NOT NEW.semantic_request_hash
+    OR (OLD.gateway_request_hash IS NOT NULL
+        AND OLD.gateway_request_hash IS NOT NEW.gateway_request_hash)
+BEGIN
+    SELECT RAISE(ABORT, 'model gateway request identity is immutable');
+END;
+
+CREATE TRIGGER model_gateway_requests_state_monotonic
+BEFORE UPDATE ON model_gateway_requests
+WHEN NOT (
+    OLD.state = NEW.state
+    OR (OLD.state = 'reserved' AND NEW.state = 'submitted')
+    OR (OLD.state = 'submitted' AND NEW.state = 'completed')
+    OR (OLD.state = 'completed' AND NEW.state = 'acknowledged')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'model gateway request state transition is invalid');
+END;
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -578,6 +689,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V13_TO_V14)?;
         tx.execute_batch(V14_TO_V15)?;
         tx.execute_batch(V15_TO_V16)?;
+        tx.execute_batch(V16_TO_V17)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -641,6 +753,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 15 {
         migrate_v15_to_v16(conn)?;
+        current_version = 16;
+    }
+    if current_version == 16 {
+        migrate_v16_to_v17(conn)?;
     }
     validate(conn)
 }
@@ -732,6 +848,10 @@ fn migrate_v14_to_v15(conn: &mut Connection) -> Result<(), MigrationError> {
 
 fn migrate_v15_to_v16(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V15_TO_V16, 16)
+}
+
+fn migrate_v16_to_v17(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V16_TO_V17, 17)
 }
 
 fn migrate_additive(
@@ -1038,6 +1158,51 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         )?;
         if present != 1 {
             return Err(MigrationError::Invariant(format!("{trigger} is missing")));
+        }
+    }
+
+    for column in [
+        "run_id",
+        "stage",
+        "request_ordinal",
+        "request_id",
+        "request_expires_at",
+        "semantic_request_hash",
+        "gateway_request_hash",
+        "state",
+        "completion_json",
+        "completion_sha256",
+        "acknowledgement_disposition",
+        "created_at",
+        "updated_at",
+        "completed_at",
+        "acknowledged_at",
+    ] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('model_gateway_requests') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!(
+                "model_gateway_requests.{column} is missing"
+            )));
+        }
+    }
+    for (object_type, name) in [
+        ("index", "model_gateway_requests_state_idx"),
+        ("trigger", "model_gateway_requests_identity_immutable"),
+        ("trigger", "model_gateway_requests_state_monotonic"),
+    ] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            [object_type, name],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!(
+                "{object_type} {name} is missing"
+            )));
         }
     }
 
@@ -1817,5 +1982,102 @@ mod tests {
                 .expect("legacy Connect job should survive reopen"),
             1
         );
+    }
+
+    #[test]
+    fn schema_v16_adds_gateway_request_ledger_without_rewriting_runs() {
+        let database = TestDatabase::new();
+        let mut conn = Connection::open(&database.0).expect("v16 database should open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        for migration in [
+            SCHEMA_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5, V5_TO_V6, V6_TO_V7, V7_TO_V8, V8_TO_V9,
+            V9_TO_V10, V10_TO_V11, V11_TO_V12, V12_TO_V13, V13_TO_V14, V14_TO_V15, V15_TO_V16,
+        ] {
+            conn.execute_batch(migration)
+                .expect("schema through v16 should initialize");
+        }
+        conn.pragma_update(None, "user_version", 16)
+            .expect("v16 version should persist");
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents VALUES (
+                'gateway-document', 'gateway.pdf', 'pdf', 12, 'gateway-hash',
+                '/gateway.pdf', '2026-09-11T18:00:00Z'
+            );
+            INSERT INTO pipeline_runs VALUES (
+                'gateway-run', 'gateway-document', '"Chunked"', 9, '1.0',
+                '2026-09-11T18:00:00Z', '2026-09-11T18:00:01Z',
+                '2026-09-11T18:00:02Z', NULL, '"Chunk"',
+                '{"total_units":0,"completed_units":0,"failed_units":0}',
+                '[]', NULL, 0, 1
+            );
+            INSERT INTO pipeline_run_summary_profiles VALUES (
+                'gateway-run', '"general"', '2026-09-11T18:00:00Z'
+            );
+            "#,
+        )
+        .expect("v16 run should persist");
+
+        migrate(&mut conn).expect("v16 schema should migrate");
+
+        assert_eq!(version(&conn).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM pipeline_runs WHERE run_id = 'gateway-run'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "\"Chunked\""
+        );
+        conn.execute(
+            "INSERT INTO model_gateway_requests (
+                run_id, stage, request_ordinal, request_id, request_expires_at,
+                semantic_request_hash, state, created_at, updated_at
+             ) VALUES (
+                'gateway-run', 'Analyze', 0, '12345678-1234-4234-8234-123456789abc',
+                '2026-09-11T18:05:00Z',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'reserved', '2026-09-11T18:00:00Z', '2026-09-11T18:00:00Z'
+             )",
+            [],
+        )
+        .expect("valid gateway reservation should persist");
+        assert!(conn
+            .execute(
+                "UPDATE model_gateway_requests SET state = 'completed'
+                 WHERE run_id = 'gateway-run'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO model_gateway_requests (
+                    run_id, stage, request_ordinal, request_id, request_expires_at,
+                    semantic_request_hash, state, created_at, updated_at
+                 ) VALUES (
+                    'gateway-run', 'Chunk', 1, '22345678-1234-4234-8234-123456789abc',
+                    '2026-09-11T18:05:00Z',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'reserved', '2026-09-11T18:00:00Z', '2026-09-11T18:00:00Z'
+                 )",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO model_gateway_requests (
+                    run_id, stage, request_ordinal, request_id, request_expires_at,
+                    semantic_request_hash, state, created_at, updated_at
+                 ) VALUES (
+                    'gateway-run', 'Analyze', 1, '-2345678-1234-4234-8234-123456789abc',
+                    '2026-09-11T18:05:00Z',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'reserved', '2026-09-11T18:00:00Z', '2026-09-11T18:00:00Z'
+                 )",
+                [],
+            )
+            .is_err());
     }
 }
