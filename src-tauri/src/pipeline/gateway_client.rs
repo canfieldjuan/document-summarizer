@@ -271,18 +271,7 @@ impl GatewayClient {
         let request_expires_at = request_expiry(now, self.request_lifetime)?;
         let record = match reserve_request(conn, key, &semantic_hash, request_expires_at, now) {
             Ok(record) => record,
-            Err(error) => {
-                let current = load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
-                if current.semantic_request_hash != semantic_hash
-                    || !matches!(
-                        current.state,
-                        GatewayRequestState::Completed | GatewayRequestState::Acknowledged
-                    )
-                {
-                    return Err(error.into());
-                }
-                current
-            }
+            Err(error) => matching_terminal_after_store_error(conn, key, &semantic_hash, error)?,
         };
         self.execute_reserved(conn, key, record, core, now)
     }
@@ -310,7 +299,15 @@ impl GatewayClient {
             return Err(GatewayClientError::Protocol("request exceeds byte limit"));
         }
         let request_hash = sha256_hex(&request_body);
-        let submitted = mark_submitted(conn, key, &request_hash, (self.clock)())?;
+        let submitted = match mark_submitted(conn, key, &request_hash, (self.clock)()) {
+            Ok(submitted) => submitted,
+            Err(error) => matching_terminal_after_store_error(
+                conn,
+                key,
+                &record.semantic_request_hash,
+                error,
+            )?,
+        };
         if let Some(result) = self.resolve_local_record(conn, key, &submitted, (self.clock)())? {
             return Ok(result);
         }
@@ -475,6 +472,24 @@ impl GatewayClient {
         }
         Ok(token.to_string())
     }
+}
+
+fn matching_terminal_after_store_error(
+    conn: &Connection,
+    key: &GatewayRequestKey,
+    semantic_hash: &str,
+    error: GatewayStoreError,
+) -> Result<GatewayRequestRecord, GatewayClientError> {
+    let current = load_request(conn, key)?.ok_or(GatewayStoreError::RequestNotFound)?;
+    if current.semantic_request_hash != semantic_hash
+        || !matches!(
+            current.state,
+            GatewayRequestState::Completed | GatewayRequestState::Acknowledged
+        )
+    {
+        return Err(error.into());
+    }
+    Ok(current)
 }
 
 #[derive(Serialize)]
@@ -1951,6 +1966,58 @@ mod tests {
             );
             drop(lock);
         }
+    }
+
+    #[test]
+    fn terminal_row_wins_when_submission_transition_is_write_blocked() {
+        let (context, mut conn) = TestContext::new();
+        conn.busy_timeout(Duration::ZERO).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expiry = now + ChronoDuration::seconds(1);
+        let model_request = request();
+        let core = request_core(&model_request).unwrap();
+        let semantic_hash = sha256_hex(&encode_json(&core).unwrap());
+        let stale = reserve_request(&mut conn, &key(0), &semantic_hash, expiry, now).unwrap();
+        let payload = InferenceEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: &stale.request_id,
+            request_expires_at: &stale.request_expires_at,
+            core,
+        };
+        let request_hash = sha256_hex(&encode_json(&payload).unwrap());
+        mark_submitted(&mut conn, &key(0), &request_hash, now).unwrap();
+        let completion = GatewayCompletion::new(
+            "application/json",
+            r#"{"summary":"done"}"#,
+            "office-gateway",
+            1,
+        )
+        .unwrap();
+        persist_completion(&mut conn, &key(0), &request_hash, &completion, now).unwrap();
+        let lock = Connection::open(&context.database).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let transport = Arc::new(FakeTransport::default());
+        let client = client_at(&context, transport.clone(), expiry);
+
+        let result = client
+            .execute_reserved(
+                &mut conn,
+                &key(0),
+                stale,
+                request_core(&model_request).unwrap(),
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert!(transport.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Completed
+        );
+        drop(lock);
     }
 
     #[test]
