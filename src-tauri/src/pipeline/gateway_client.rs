@@ -369,11 +369,14 @@ impl GatewayClient {
             GatewayRequestState::Acknowledged => result_from_record(record).map(Some),
             GatewayRequestState::Completed => {
                 let result = result_from_record(record)?;
-                let acknowledgement_started_at = (self.clock)();
-                if request_expired(record, acknowledgement_started_at)? {
+                if request_expired(record, (self.clock)())? {
                     return Ok(Some(result));
                 }
-                match self.acknowledge(&record.request_id) {
+                let token = self.read_token()?;
+                if request_expired(record, (self.clock)())? {
+                    return Ok(Some(result));
+                }
+                match self.acknowledge(&record.request_id, &token) {
                     Ok(()) => {
                         // The completion is already durable and the gateway has accepted the ACK.
                         // A transient local write failure must not turn that success into a failed
@@ -405,15 +408,16 @@ impl GatewayClient {
         }
     }
 
-    fn acknowledge(&self, request_id: &str) -> Result<(), GatewayClientError> {
+    fn acknowledge(&self, request_id: &str, token: &str) -> Result<(), GatewayClientError> {
         let body = encode_json(&AcknowledgementEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id,
             disposition: "persisted",
         })?;
-        let response = self.send(
+        let response = self.transport.request(
             "POST",
             &format!("/v1/inference/{request_id}/ack"),
+            token,
             Some(&body),
             self.timeout,
         )?;
@@ -1742,6 +1746,55 @@ mod tests {
         let client = client_at(&context, transport.clone(), expiry);
 
         let result = client.execute(&mut conn, &key(0), &request(), now).unwrap();
+
+        assert_eq!(result.content, r#"{"summary":"done"}"#);
+        assert!(transport.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Completed
+        );
+    }
+
+    #[test]
+    fn token_loading_precedes_the_final_acknowledgement_expiry_check() {
+        let (context, mut conn) = TestContext::new();
+        let now = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expiry = now + ChronoDuration::seconds(1);
+        let semantic_hash = sha256_hex(&encode_json(&request_core(&request()).unwrap()).unwrap());
+        let reserved = reserve_request(&mut conn, &key(0), &semantic_hash, expiry, now).unwrap();
+        let request_hash = "a".repeat(64);
+        mark_submitted(&mut conn, &key(0), &request_hash, now).unwrap();
+        let completion = GatewayCompletion::new(
+            "application/json",
+            r#"{"summary":"done"}"#,
+            "office-gateway",
+            1,
+        )
+        .unwrap();
+        let completed =
+            persist_completion(&mut conn, &key(0), &request_hash, &completion, now).unwrap();
+        let times = Arc::new(Mutex::new(VecDeque::from([now, expiry])));
+        let clock_times = times.clone();
+        let transport = Arc::new(FakeTransport::default());
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(response(200, acknowledged(&reserved.request_id)));
+        let client = GatewayClient::with_transport(
+            context.token.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            transport.clone(),
+            Arc::new(move || clock_times.lock().unwrap().pop_front().unwrap()),
+        );
+
+        let result = client
+            .resolve_local_record(&mut conn, &key(0), &completed, now)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(result.content, r#"{"summary":"done"}"#);
         assert!(transport.calls.lock().unwrap().is_empty());

@@ -64,9 +64,9 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 - If ACK transport or protocol handling fails while another caller acknowledges the row, or while
   the immutable retention window expires, a ledger reload returns the authoritative durable result
   instead of reporting a stale acknowledgement failure.
-- ACK eligibility uses a freshly sampled pre-dispatch time, and a successful acknowledgement is
-  timestamped only after its response, so stale entry time cannot ACK expired work or backdate the
-  durable transition.
+- ACK eligibility is checked before credential I/O and rechecked immediately after token loading;
+  a successful acknowledgement is timestamped only after its response, so stale entry time or slow
+  credential I/O cannot ACK expired work or backdate the durable transition.
 - Once the remote ACK succeeds, a transient failure to mark the already-durable local completion
   does not fail the pipeline; the Completed row remains eligible for later idempotent reconciliation.
 - A local persistence error reloads and accepts only the same concurrent durable completion; a
@@ -119,10 +119,10 @@ reads.
 
 ## Verification
 
-- `cargo test gateway_client -q` — 22 passed.
-- `cargo test gateway -q` — 27 passed.
+- `cargo test gateway_client -q` — 23 passed.
+- `cargo test gateway -q` — 28 passed.
 - `cargo test --all-targets -- --skip connect::provider::tests::entitlement_gates_manifest_jobs_and_status_while_registration_stays_owned`
-  — 468 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
+  — 469 library tests passed, 13 ignored, 1 filtered; 3 office tests passed and 3 ignored; 3
   release-contract tests passed.
 - Exact isolated execution of the pre-existing skipped Connect test — 1 passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
@@ -133,7 +133,7 @@ reads.
 
 ## Estimated diff size
 
-Actual: five files, 2,560 added lines, and 12 removed lines. This exceeds the draft estimate because
+Actual: five files, 2,613 added lines, and 12 removed lines. This exceeds the draft estimate because
 the production security/credential boundary, protocol codecs, durable lifecycle, and two-sided
 failure probes are one reviewable transport unit; splitting its tests from the private client would
 reduce neither risk nor total surface. Runtime/UI work remains explicitly excluded.
