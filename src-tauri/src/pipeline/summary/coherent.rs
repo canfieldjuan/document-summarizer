@@ -186,18 +186,27 @@ impl SourceFraming {
 }
 
 fn heading_negates_framing(words: &[String]) -> bool {
-    words.iter().any(|word| {
-        matches!(
-            word.as_str(),
-            "free" | "neither" | "no" | "non" | "not" | "without"
-        )
+    words.iter().enumerate().any(|(index, word)| {
+        matches!(word.as_str(), "free" | "neither" | "no" | "not" | "without")
+            || (word == "non"
+                && !words
+                    .get(index + 1)
+                    .is_some_and(|next| is_source_framing_modifier(next)))
     })
 }
 
 fn heading_has_only_framing_modifiers(words: &[String]) -> bool {
-    words[..words.len().saturating_sub(1)]
-        .iter()
-        .all(|word| is_source_framing_modifier(word))
+    has_only_source_framing_modifiers(&words[..words.len().saturating_sub(1)])
+}
+
+fn has_only_source_framing_modifiers(words: &[String]) -> bool {
+    words.iter().enumerate().all(|(index, word)| {
+        is_source_framing_modifier(word)
+            || (word == "non"
+                && words
+                    .get(index + 1)
+                    .is_some_and(|next| is_source_framing_modifier(next)))
+    })
 }
 
 fn is_source_framing_modifier(word: &str) -> bool {
@@ -210,10 +219,7 @@ fn is_source_framing_modifier(word: &str) -> bool {
 fn source_framing_from_compound_heading(words: &[String]) -> Option<SourceFraming> {
     let noun_start = words.len().checked_sub(2)?;
     let modifiers = &words[..noun_start];
-    if !modifiers
-        .iter()
-        .all(|word| is_source_framing_modifier(word))
-    {
+    if !has_only_source_framing_modifiers(modifiers) {
         return None;
     }
     let (framing, after_noun) = source_framing_term_at(words, noun_start)?;
@@ -6946,6 +6952,23 @@ mod tests {
             assert_eq!(
                 source_framing_after_block(heading_only, None),
                 Some(SourceFraming::Problem)
+            );
+        }
+        let nonmaterial_risk_heading = "Common Problems\nNon-material risks\nFraud may occur.";
+        assert_eq!(
+            source_framing_for_segment(nonmaterial_risk_heading, "Fraud may occur.", None),
+            Some(SourceFraming::Risk),
+            "non-material qualifies materiality rather than negating the Risk category",
+        );
+        assert_eq!(
+            required_source_framing("Non-material risks\nFraud may occur."),
+            Some(SourceFraming::Risk),
+        );
+        for negated_risk_heading in ["Non-risks", "Non-risk factors", "No material risks"] {
+            assert_eq!(
+                required_source_framing(&format!("{negated_risk_heading}\nFraud may occur.")),
+                None,
+                "{negated_risk_heading} must remain unframed",
             );
         }
 
