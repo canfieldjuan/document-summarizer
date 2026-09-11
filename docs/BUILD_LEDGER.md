@@ -3573,7 +3573,7 @@ release acceptance exposed issue #49
   tests, 3 office tests and 3 release-contract tests with the documented opt-in
   tests ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
-- The final product-code head `236693234155b40d3f310a42dfd81dd3d154a6cd`
+- Product-code head `236693234155b40d3f310a42dfd81dd3d154a6cd`
   carries the already-validated existential copula state through noun parsing,
   so bounded direct, contracted and perfect forms such as `There are no risks
   outstanding` clear their matching section framing. Questions, qualified
@@ -3582,6 +3582,18 @@ release acceptance exposed issue #49
   office tests and 3 release-contract tests with the documented opt-in tests
   ignored, plus strict Clippy, Rust formatting, `git diff --check` and the
   TypeScript/Vite production build.
+- The final product-code head `435fb1308388dbc49bf02c217eee9dfa8af505c0`
+  restores a suspended Problem or Risk category for bounded affirmative modal
+  occurrence clauses with an adverse subject, while preserving polarity,
+  declarative-clause and same-clause checks. It also inspects each immediate
+  declarative sentence suffix for an explicit framing reintroduction, allowing
+  neutral prose before a later adverse sentence without labeling a source that
+  crosses the transition. Negated, interrogative, non-adverse, protective and
+  cross-sentence pseudo-predicates remain neutral. The focused two-sided
+  boundary probe passed; the full gate passed 442 library tests, 3 office tests
+  and 3 release-contract tests with the documented opt-in tests ignored, plus
+  strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
+  production build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
