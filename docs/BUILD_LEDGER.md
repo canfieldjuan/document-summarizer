@@ -3645,7 +3645,7 @@ release acceptance exposed issue #49
   release-contract tests with the documented opt-in tests ignored, plus strict
   Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
   build.
-- The final product-code head `574707b4291584a4f4554a6b93c2f0a325712bd4`
+- Product-code head `574707b4291584a4f4554a6b93c2f0a325712bd4`
   resets framing for bounded inline `Benefit(s):` and `Advantage(s):` sections
   and recognizes a spaced ASCII hyphen as an inline heading separator. Unspaced
   word hyphens and spaced hyphens without a bounded heading prefix retain the
@@ -3653,6 +3653,15 @@ release acceptance exposed issue #49
   passed 442 library tests, 3 office tests and 3 release-contract tests with the
   documented opt-in tests ignored, plus strict Clippy, Rust formatting,
   `git diff --check` and the TypeScript/Vite production build.
+- The final product-code head `864ca63404b707f729ae7d910dcd9fa15bd5dc90`
+  carries an eligible presence-question context into only the immediately
+  following normalized line, allowing a split bare `No.` answer to clear the
+  active category. A blank line, intervening content, or non-presence question
+  consumes or never creates that context. The focused two-sided boundary probe
+  passed; the full gate passed 442 library tests, 3 office tests and 3
+  release-contract tests with the documented opt-in tests ignored, plus strict
+  Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
+  build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
