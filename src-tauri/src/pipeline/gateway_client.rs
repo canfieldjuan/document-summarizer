@@ -258,12 +258,7 @@ impl GatewayClient {
         let core = request_core(request)?;
         let semantic_hash = sha256_hex(&encode_json(&core)?);
         preflight_request_size(&core)?;
-        let request_expires_at = now
-            .checked_add_signed(self.request_lifetime)
-            .and_then(|expires_at| expires_at.with_nanosecond(0))
-            .ok_or(GatewayClientError::Configuration(
-                "request expiry overflowed",
-            ))?;
+        let request_expires_at = request_expiry(now, self.request_lifetime)?;
         let record = reserve_request(conn, key, &semantic_hash, request_expires_at, now)?;
         self.execute_reserved(conn, key, record, core, now)
     }
@@ -655,9 +650,11 @@ fn parse_failure(
     let failure: FailureEnvelope = decode_response(response)?;
     let ownerless_auth_failure =
         failure.request_id.is_none() && failure.error.code == "unauthenticated";
+    let retryable_auth_failure = failure.error.code == "unauthenticated" && failure.error.retryable;
     if failure.protocol_version != PROTOCOL_VERSION
         || failure.status != "failed"
         || failure.request_id.as_deref() != Some(expected_request_id) && !ownerless_auth_failure
+        || retryable_auth_failure
         || failure.error.code.is_empty()
         || failure.error.code.len() > 64
         || !failure
@@ -700,6 +697,26 @@ fn request_expired(
         .map_err(|_| GatewayStoreError::InvalidRecord("expiry is invalid"))?
         .with_timezone(&Utc);
     Ok(expires_at <= now)
+}
+
+fn request_expiry(
+    now: DateTime<Utc>,
+    request_lifetime: ChronoDuration,
+) -> Result<DateTime<Utc>, GatewayClientError> {
+    let expires_at =
+        now.checked_add_signed(request_lifetime)
+            .ok_or(GatewayClientError::Configuration(
+                "request expiry overflowed",
+            ))?;
+    if expires_at.nanosecond() == 0 {
+        return Ok(expires_at);
+    }
+    expires_at
+        .with_nanosecond(0)
+        .and_then(|whole_second| whole_second.checked_add_signed(ChronoDuration::seconds(1)))
+        .ok_or(GatewayClientError::Configuration(
+            "request expiry overflowed",
+        ))
 }
 
 fn decode_response<T: for<'de> Deserialize<'de>>(
@@ -1365,6 +1382,22 @@ mod tests {
         assert!(validate_duration(Duration::from_secs(1), "invalid").is_ok());
         assert!(validate_duration(Duration::from_secs(900), "invalid").is_ok());
         assert!(validate_duration(Duration::from_secs(901), "invalid").is_err());
+        let fractional = DateTime::parse_from_rfc3339("2026-09-11T20:00:00.999Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            request_expiry(fractional, ChronoDuration::seconds(1)).unwrap(),
+            DateTime::parse_from_rfc3339("2026-09-11T20:00:02Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        let exact = DateTime::parse_from_rfc3339("2026-09-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            request_expiry(exact, ChronoDuration::seconds(1)).unwrap(),
+            exact + ChronoDuration::seconds(1)
+        );
 
         let (context, mut conn) = TestContext::new();
         fs::write(&context.token, b"private token\n").unwrap();
@@ -1560,6 +1593,22 @@ mod tests {
                 ..
             }
         ));
+        let retryable_unauthenticated = parse_inference_response(
+            &raw_response(
+                401,
+                serde_json::json!({
+                    "protocol_version": 1, "status": "failed",
+                    "error": {"code": "unauthenticated", "retryable": true}
+                }),
+            ),
+            request_id,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            retryable_unauthenticated,
+            GatewayClientError::Protocol("error envelope is invalid")
+        ));
+        assert!(!retryable_unauthenticated.recoverable());
 
         assert!(matches!(
             parse_acknowledgement(&raw_response(201, acknowledged(request_id))),

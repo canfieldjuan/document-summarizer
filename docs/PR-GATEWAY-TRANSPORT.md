@@ -40,13 +40,15 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 - Add one private `gateway_client` module over the merged gateway ledger.
 - Add strict request/response/error/health codecs for gateway protocol v1.
 - Add production reqwest transport with HTTPS, no proxy, no redirects, bounded response reads,
-  explicit CA trust, and Unix-owner-private token loading.
+  operating-system roots plus explicit CA trust, and Unix-owner-private token loading.
 - Add deterministic fake-transport tests for completed replay, ambiguity, acknowledgement recovery,
   credential/config boundaries, and malformed envelopes.
 
 ### Acceptance criteria
 
 - First submission writes the exact request-body SHA-256 before the transport observes the POST.
+- Fractional creation times round expiry upward to the next whole second, so even the minimum
+  accepted lifetime remains fully available.
 - A transport failure leaves one submitted identity; retry sends byte-identical JSON with that ID.
 - An unresolved submitted request stops before transport at its exact expiry boundary.
 - A valid response is integrity-checked and durable with deployment/policy provenance before ACK.
@@ -61,6 +63,8 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 - Wrong IDs, versions, media types, statuses, provenance, retry directives, oversized bodies,
   redirects, unsafe Unix token/CA files, and non-HTTPS origins fail closed without secret
   disclosure.
+- An authentication failure is always non-retryable, including an ownerless failure before the
+  gateway can bind a request identity.
 - Health succeeds only for an available or degraded `document.summary.step@1` declaration.
 
 ## Mechanism
@@ -68,8 +72,9 @@ settings/UI, or the existing Ollama/llama.cpp runtime behavior.
 `GatewayClient::execute` validates and deterministically serializes the task envelope, then uses the
 schema-v17 store for reserve, submitted, completed, and acknowledged transitions. The HTTP adapter
 is behind a small private trait so lifecycle tests can observe the exact call order without opening
-a weaker production URL. The production adapter is always direct HTTPS with rustls, explicit
-redirect refusal, identity encoding, and bounded reads.
+a weaker production URL. The production adapter is always direct HTTPS with rustls, operating-system
+roots plus the configured private CA, explicit redirect refusal, identity encoding, and bounded
+reads.
 
 ## Intentional
 
@@ -98,12 +103,14 @@ redirect refusal, identity encoding, and bounded reads.
   release-contract tests passed.
 - Exact isolated execution of the pre-existing skipped Connect test — 1 passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- `cargo tree -e features -i reqwest@0.12.28` — confirms
+  `rustls-tls-native-roots` and no reqwest WebPKI-root feature.
 - `cargo fmt --check` — passed.
 - `git diff --check` — passed.
 
 ## Estimated diff size
 
-Actual: three files and 1,695 added lines. This exceeds the draft estimate because
+Actual: five files, 1,804 added lines, and 12 removed lines. This exceeds the draft estimate because
 the production security/credential boundary, protocol codecs, durable lifecycle, and two-sided
 failure probes are one reviewable transport unit; splitting its tests from the private client would
 reduce neither risk nor total surface. Runtime/UI work remains explicitly excluded.
