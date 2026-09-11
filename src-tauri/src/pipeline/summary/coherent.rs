@@ -467,14 +467,16 @@ fn possible_framing_boundary(text: &str) -> bool {
             | "who"
             | "why"
     );
-    let nonaffirmative_framing_boundary = ends_with_source_framing_term(
-        &words
-            .iter()
-            .map(|word| word.to_ascii_lowercase())
-            .collect::<Vec<_>>(),
-    ) && words
+    let normalized_words = words
         .iter()
-        .any(|word| matches!(word.to_ascii_lowercase().as_str(), "possible" | "potential"));
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let nonaffirmative_framing_boundary = ends_with_source_framing_term(&normalized_words)
+        && (!heading.chars().any(is_source_question_terminal)
+            && heading_negates_framing(&normalized_words)
+            || normalized_words
+                .iter()
+                .any(|word| matches!(word.as_str(), "possible" | "potential")));
     let punctuated_marked_section_lead = matches!(
         words[0].to_ascii_lowercase().as_str(),
         "about"
@@ -682,6 +684,9 @@ fn possible_interrogative_framing_boundary(text: &str) -> bool {
         .filter(|word| !word.is_empty())
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
+    if heading_negates_framing(&words) {
+        return false;
+    }
     let mitigation_question = interrogative_mitigation_boundary(&words);
     if !possible_framing_boundary(text) && !mitigation_question {
         return false;
@@ -6970,6 +6975,14 @@ mod tests {
                 None,
                 "{negated_risk_heading} must remain unframed",
             );
+            let reset_source = format!(
+                "Common Problems\nEarlier problem.\n{negated_risk_heading}\nOverview follows."
+            );
+            assert_eq!(
+                source_framing_for_segment(&reset_source, "Overview follows.", None),
+                None,
+                "{negated_risk_heading} must clear inherited framing",
+            );
         }
 
         for heading in [
@@ -6988,6 +7001,7 @@ mod tests {
         for ordinary_prose in [
             "Mitigation strategies reduce risk.",
             "Controls fail when passwords are reused",
+            "Non-risk factors affect costs",
         ] {
             assert!(!possible_framing_boundary(ordinary_prose));
         }
