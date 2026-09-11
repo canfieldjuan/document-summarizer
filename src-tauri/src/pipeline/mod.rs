@@ -2,6 +2,7 @@ pub mod chunk;
 pub mod contracts;
 pub mod control;
 pub mod db;
+pub(crate) mod gateway_client;
 pub(crate) mod gateway_store;
 pub mod ingest;
 pub mod llama_cpp;
