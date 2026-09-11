@@ -3676,7 +3676,7 @@ release acceptance exposed issue #49
   passed 442 library tests, 3 office tests and 3 release-contract tests with the
   documented opt-in tests ignored, plus strict Clippy, Rust formatting,
   `git diff --check` and the TypeScript/Vite production build.
-- The final product-code head `641cd6ae838a414ea90945dedbcaaeeb3c37c472`
+- Product-code head `641cd6ae838a414ea90945dedbcaaeeb3c37c472`
   treats a bounded negated category heading as a neutral section boundary, so
   it clears inherited framing without assigning the negated category. A
   negated category question remains interrogative, and substantive prose that
@@ -3685,6 +3685,16 @@ release acceptance exposed issue #49
   and 3 release-contract tests with the documented opt-in tests ignored, plus
   strict Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite
   production build.
+- The final product-code head `f67def36d688480963e7688f8d35fbc19b08cc31`
+  restricts that neutral reset to a noun-phrase heading with one leading
+  negator, optional recognized modifiers, and a terminal framing noun or
+  compound. Substantive residual-risk prose therefore retains its governing
+  category, and the question-terminal guard covers both negated and
+  uncertainty-qualified candidates. The focused two-sided boundary probe
+  passed; the full gate passed 442 library tests, 3 office tests and 3
+  release-contract tests with the documented opt-in tests ignored, plus strict
+  Clippy, Rust formatting, `git diff --check` and the TypeScript/Vite production
+  build.
 - Boundary tests admit the five bounded heading classes and reject missing-body,
   multi-line heading candidates, overlong, negated, uncertainty-qualified,
   solution-oriented and unrelated headings. Tests
