@@ -203,6 +203,8 @@ const runtimeDot = element<HTMLSpanElement>("#runtime-dot");
 const runtimeTitle = element<HTMLParagraphElement>("#runtime-title");
 const runtimeDetail = element<HTMLParagraphElement>("#runtime-detail");
 const runtimeRetry = element<HTMLButtonElement>("#runtime-retry");
+const inferencePrivacy = element<HTMLParagraphElement>("#inference-privacy");
+const processingKicker = element<HTMLParagraphElement>("#processing-kicker");
 const modelPreset = element<HTMLSelectElement>("#model-preset");
 const gatewayEdit = element<HTMLButtonElement>("#gateway-edit");
 const gatewaySetup = element<HTMLDivElement>("#gateway-setup");
@@ -307,13 +309,15 @@ function syncPrimaryAction(): void {
 
   if (processing) {
     label.textContent = "Processing…";
-    actionHint.textContent = "The source is being processed locally.";
+    actionHint.textContent = activeInferenceSelection === "__gateway__"
+      ? "Extracted content is being processed by your configured on-prem gateway."
+      : "The source is being processed on this computer.";
   } else if (runtimeReady) {
     label.textContent = "Choose a PDF";
     actionHint.textContent = "Native-text PDFs are supported in this release.";
   } else {
-    label.textContent = "Local model unavailable";
-    actionHint.textContent = "Check the selected local model runtime, then try again.";
+    label.textContent = "Inference unavailable";
+    actionHint.textContent = "Check the selected inference source, then try again.";
   }
 
   if (retrySourceRun) {
@@ -447,6 +451,7 @@ async function refreshModelCatalog(): Promise<void> {
       ? "__gateway__"
       : catalog.selectedPresetId;
     modelPreset.value = activeInferenceSelection;
+    syncInferencePrivacyCopy();
     const selectedPreset = catalog.presets.find(
       (preset) => preset.presetId === catalog.selectedPresetId,
     );
@@ -505,6 +510,16 @@ async function refreshModelCatalog(): Promise<void> {
     option.textContent = commandError.message;
     modelPreset.append(option);
   }
+}
+
+function syncInferencePrivacyCopy(): void {
+  const usingGateway = activeInferenceSelection === "__gateway__";
+  inferencePrivacy.textContent = usingGateway
+    ? "Gateway mode sends extracted document content to your configured on-prem inference server."
+    : "Direct mode processes extracted document content on this computer.";
+  processingKicker.textContent = usingGateway
+    ? "Processing through your on-prem gateway"
+    : "Processing on this computer";
 }
 
 async function selectAndRegisterGguf(): Promise<void> {

@@ -81,8 +81,8 @@
             <div>
               <p class="utility-label">Native-text PDF workflow</p>
               <h2 id="workbench-title">Bring one document into focus.</h2>
-              <p class="intro-copy">
-                Choose a PDF to create a local summary. Your source stays on this computer.
+              <p id="inference-privacy" class="intro-copy">
+                Choose a PDF to create a private summary. The selected inference source determines where extracted content is processed.
               </p>
               <div class="summary-profile-control">
                 <label for="summary-profile">Summary profile</label>
@@ -100,7 +100,7 @@
                 <span>Choose a PDF</span>
                 <span aria-hidden="true">＋</span>
               </button>
-              <p id="action-hint" class="action-hint">Waiting for local model readiness.</p>
+              <p id="action-hint" class="action-hint">Waiting for inference readiness.</p>
             </div>
           </div>
 
@@ -121,7 +121,7 @@
 
             <div id="processing-view" class="stage-view processing-view" hidden>
               <div class="processing-mark" aria-hidden="true"><span></span></div>
-              <p class="stage-kicker">Processing locally</p>
+              <p id="processing-kicker" class="stage-kicker">Processing</p>
               <h3 id="processing-filename">Preparing document…</h3>
               <p id="processing-status">Preparing the durable pipeline run…</p>
               <div class="progress-track" aria-hidden="true"><span></span></div>

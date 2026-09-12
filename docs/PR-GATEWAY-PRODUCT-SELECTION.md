@@ -130,12 +130,12 @@ fallback remains Local Qwen.
   acceptance tests with 3 ignored, and 3 release-contract tests).
 - `cargo clippy --all-targets --all-features -- -D warnings` - passed.
 - `cargo fmt --check` - passed.
-- `npm run build` - passed after the selector-truth and retained-gateway edit-path fixes.
+- `npm run build` - passed after the source-aware locality disclosure fix.
 - `git diff --check` - passed.
 
 ## Estimated diff size
 
-Actual after review reconciliation: thirteen files, 915 additions, and 81 deletions. This exceeds
+Actual after review reconciliation: thirteen files, 937 additions, and 88 deletions. This exceeds
 400 because one useful product slice must carry the persisted selection through every real runtime entrypoint,
 immutable reconstruction, truthful Health, and the UI; splitting after persistence or factory
 dispatch would leave an unreachable or misleading configuration surface.
