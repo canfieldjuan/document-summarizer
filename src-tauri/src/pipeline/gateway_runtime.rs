@@ -251,7 +251,7 @@ fn diagnostic(
     ModelRequestAttemptDiagnostic {
         stage: request.stage.clone(),
         request_ordinal: request.ordinal,
-        attempt_ordinal: 1,
+        attempt_ordinal: 0,
         transport_attempt: ModelTransportAttempt::Primary,
         elapsed_milliseconds: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         configured_output_tokens: request.max_output_tokens,
@@ -411,6 +411,7 @@ mod tests {
         assert_eq!(response.runtime_id, RUNTIME_ID);
         assert_eq!(response.model_id, TASK_ID);
         assert_eq!(response.request_attempts.len(), 1);
+        assert_eq!(response.request_attempts[0].attempt_ordinal, 0);
         assert!(response.request_attempts[0].succeeded);
         assert_eq!(
             state.lock().unwrap().keys,
@@ -435,6 +436,7 @@ mod tests {
         assert!(error.recoverable);
         assert!(!error.message.contains("PRIVATE_PROVIDER_DETAIL"));
         assert_eq!(error.request_attempts.len(), 1);
+        assert_eq!(error.request_attempts[0].attempt_ordinal, 0);
         assert!(!error.request_attempts[0].succeeded);
     }
 

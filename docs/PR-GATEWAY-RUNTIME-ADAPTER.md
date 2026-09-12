@@ -119,7 +119,7 @@ request profile, not an assertion about whichever private worker/model the appli
 
 ## Estimated diff size
 
-Actual: eight files, 793 additions, and 15 deletions. The over-400 budget is justified by one
+Actual: eight files, 795 additions, and 15 deletions. The over-400 budget is justified by one
 indivisible cross-entrypoint seam: the trait hook, both authoritative worker owners, the private
 adapter, snapshot compatibility, and deterministic proofs for all four admission paths must land
 together or the adapter would be either unreachable or unsafe.
