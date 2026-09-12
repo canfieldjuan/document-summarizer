@@ -264,6 +264,7 @@ let modelSelectionAvailable = false;
 let modelSelectionInFlight = false;
 let selectedGatewayTokenPath: string | null = null;
 let selectedGatewayCaPath: string | null = null;
+let activeInferenceSelection: string | null = null;
 let gatewayConfigured = false;
 let gatewayPlatformSupported = false;
 let connectInstalling = false;
@@ -442,9 +443,10 @@ async function refreshModelCatalog(): Promise<void> {
       unavailable.append(option);
     }
     if (unavailable.children.length > 0) modelPreset.append(unavailable);
-    modelPreset.value = catalog.selectedSource === "gateway"
+    activeInferenceSelection = catalog.selectedSource === "gateway"
       ? "__gateway__"
       : catalog.selectedPresetId;
+    modelPreset.value = activeInferenceSelection;
     const selectedPreset = catalog.presets.find(
       (preset) => preset.presetId === catalog.selectedPresetId,
     );
@@ -534,6 +536,7 @@ async function selectInferenceSource(): Promise<void> {
   const selection = modelPreset.value;
   if (!selection || processing) return;
   if (selection === "__gateway__" && !gatewayConfigured) {
+    if (activeInferenceSelection) modelPreset.value = activeInferenceSelection;
     showGatewaySetup();
     return;
   }

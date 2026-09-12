@@ -125,17 +125,17 @@ fallback remains Local Qwen.
 - `cargo test connect_runtime_is_selected_before_job_acceptance` - passed.
 - `cargo test new_desktop_worker_binds_the_admitted_run` - passed.
 - `cargo test automatic_profile_owner_is_stable_and_bound_before_inference` - passed.
-- `cargo test retained_direct_preset_is_not_a_noop_while_gateway_is_selected -- --nocapture` - passed.
+- The retained-direct regression and `gateway_selection_validates_before_atomic_source_switch` - passed.
 - `cargo test --all-targets` - passed (489 library tests with 13 ignored, 3 office
   acceptance tests with 3 ignored, and 3 release-contract tests).
 - `cargo clippy --all-targets --all-features -- -D warnings` - passed.
 - `cargo fmt --check` - passed.
-- `npm run build` - passed after the retained-gateway edit-path review fix.
+- `npm run build` - passed after the selector-truth and retained-gateway edit-path fixes.
 - `git diff --check` - passed.
 
 ## Estimated diff size
 
-Actual after review reconciliation: thirteen files, 908 additions, and 79 deletions. This exceeds
+Actual after review reconciliation: thirteen files, 915 additions, and 81 deletions. This exceeds
 400 because one useful product slice must carry the persisted selection through every real runtime entrypoint,
 immutable reconstruction, truthful Health, and the UI; splitting after persistence or factory
 dispatch would leave an unreachable or misleading configuration surface.

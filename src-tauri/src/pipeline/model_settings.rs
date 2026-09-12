@@ -7,8 +7,8 @@ use crate::pipeline::gateway_client::GatewayClientConfig;
 use crate::pipeline::gateway_runtime::GatewayRuntime;
 use crate::pipeline::llama_cpp::{
     current_regular_file_identity, inspect_regular_file, prepare_for_ollama_runtime,
-    qualified_runtime_available, FileIdentity, GgufRuntimeConfig, LlamaCppRuntime,
-    QualifiedRuntimeFile,
+    prune_idle_managed_runtimes, qualified_runtime_available, FileIdentity, GgufRuntimeConfig,
+    LlamaCppRuntime, QualifiedRuntimeFile,
 };
 use crate::pipeline::model::{InstalledModelDescriptor, OllamaRuntime, QwenTokenizerFamily};
 use crate::pipeline::qwen_tokenizer::{
@@ -360,6 +360,7 @@ fn configure_gateway_with(
     };
     validate_gateway_metadata(&gateway)?;
     validate(&gateway)?;
+    prune_idle_managed_runtimes()?;
     let _writer = settings_writer()?;
     let mut settings = load_settings(path)?;
     settings.selected_source = InferenceSource::Gateway;
@@ -386,6 +387,7 @@ fn select_gateway_with(
         .clone()
         .ok_or_else(|| config_failure("Inference gateway is not configured"))?;
     validate(&gateway)?;
+    prune_idle_managed_runtimes()?;
     let _writer = settings_writer()?;
     let mut settings = load_settings(path)?;
     if settings.gateway.as_ref() != Some(&gateway) {
