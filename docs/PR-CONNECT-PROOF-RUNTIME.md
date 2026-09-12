@@ -23,8 +23,8 @@ in a normal production build.
 ## Scope
 
 - Add an opt-in Cargo feature used only to build the external proof binary.
-- Require an exact proof-mode value plus a canonical digest before selecting the
-  proof runtime in a feature-enabled binary.
+- Require an exact proof-mode value, explicit exact-loopback model URL, and canonical
+  digest before selecting the proof runtime in a feature-enabled binary.
 - Build the proof runtime through the existing loopback-only model client and its
   execution-digest check, with a conservative UTF-8 byte token bound and fixed
   context profile snapshot.
@@ -42,9 +42,9 @@ in a normal production build.
 always resolves to persisted settings. A binary compiled with
 `connect-proof-runtime` resolves to the proof source only for the exact versioned
 mode. The proof constructor validates its model name and lowercase 64-character
-digest, creates two loopback `OllamaRuntime` stage clients with conservative
-UTF-8 byte token admission and digest verification, and emits one immutable
-versioned snapshot.
+digest, requires an explicit exact-loopback URL, creates two `OllamaRuntime` stage
+clients with conservative UTF-8 byte token admission and digest verification, and
+emits one immutable versioned snapshot.
 
 ## Intentional
 
@@ -70,7 +70,8 @@ versioned snapshot.
 
 - `npm ci` and `npm run build` passed.
 - `cargo fmt --all -- --check` passed in `src-tauri`.
-- Focused runtime-selection, proof-profile, and Unicode byte-counter tests passed.
+- Focused runtime-selection, proof-profile, required-endpoint, and Unicode
+  byte-counter tests passed.
 - The runtime-selection test also passed in the default, proof-feature-disabled
   build, exercising the ordinary persisted-settings decision.
 - `cargo test --locked --all-targets --all-features` passed in `src-tauri`: 488

@@ -108,11 +108,49 @@ impl OllamaRuntime {
         expected_digest: &str,
         context_tokens: u32,
     ) -> Result<Self, ModelRuntimeFailure> {
-        let runtime = Self::from_environment_profile(
+        let base_url = std::env::var("DOC_SUM_MODEL_BASE_URL").ok();
+        let timeout = model_timeout_seconds(
+            std::env::var("DOC_SUM_MODEL_TIMEOUT_SECONDS")
+                .ok()
+                .as_deref(),
+        )?;
+        let token = std::env::var_os("DOC_SUM_MODEL_API_TOKEN_FILE")
+            .map(|value| read_token(Path::new(&value)))
+            .transpose()?;
+        Self::from_connect_proof_config(
+            base_url.as_deref(),
+            model_id,
+            expected_digest,
+            context_tokens,
+            Duration::from_secs(timeout),
+            token,
+        )
+    }
+
+    #[cfg(feature = "connect-proof-runtime")]
+    fn from_connect_proof_config(
+        base_url: Option<&str>,
+        model_id: &str,
+        expected_digest: &str,
+        context_tokens: u32,
+        timeout: Duration,
+        api_token: Option<String>,
+    ) -> Result<Self, ModelRuntimeFailure> {
+        let base_url = base_url.ok_or_else(|| {
+            runtime_failure(
+                "MODEL_CONFIG_INVALID",
+                "Connect proof model base URL is missing",
+                false,
+            )
+        })?;
+        let runtime = Self::new_with_profile(
+            base_url,
             model_id,
             Some(expected_digest),
             Some(QwenTokenizerFamily::Qwen3),
             context_tokens,
+            timeout,
+            api_token,
         )?;
         let tokenizer = QwenPromptTokenizer::conservative_byte_counter()
             .map_err(|message| runtime_failure("MODEL_TOKENIZER_INVALID", message, false))?;
@@ -2071,6 +2109,46 @@ mod tests {
             OllamaRuntime::new("http://127.0.0.1:11434/v1", "model", Duration::ZERO, None,)
                 .is_err()
         );
+    }
+
+    #[cfg(feature = "connect-proof-runtime")]
+    #[test]
+    fn connect_proof_runtime_requires_an_explicit_safe_loopback_endpoint() {
+        let build = |base_url| {
+            OllamaRuntime::from_connect_proof_config(
+                base_url,
+                "connect-proof-model",
+                &"a".repeat(64),
+                131_072,
+                Duration::from_secs(1),
+                None,
+            )
+        };
+
+        assert_eq!(
+            build(None)
+                .err()
+                .expect("missing proof endpoint must fail")
+                .code,
+            "MODEL_CONFIG_INVALID"
+        );
+        for unsafe_url in [
+            "",
+            "http://localhost:11434/",
+            "http://127.0.0.2:11434/",
+            "https://127.0.0.1:11434/",
+        ] {
+            assert_eq!(
+                build(Some(unsafe_url))
+                    .err()
+                    .expect("unsafe proof endpoint must fail")
+                    .code,
+                "MODEL_CONFIG_INVALID"
+            );
+        }
+        for loopback_url in ["http://127.0.0.1:11434/", "http://[::1]:11434/"] {
+            assert!(build(Some(loopback_url)).is_ok());
+        }
     }
 
     #[test]

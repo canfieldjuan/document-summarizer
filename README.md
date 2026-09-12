@@ -136,6 +136,7 @@ npm run desktop:build:connect-proof
 That command compiles the `connect-proof-runtime` feature. The proof runtime is
 selected only when the process also receives
 `DOC_SUM_CONNECT_PROOF_MODE=local-fixture-v1`,
+an explicit exact-loopback `DOC_SUM_MODEL_BASE_URL`,
 `DOC_SUM_MODEL_NAME=connect-proof-model`, and a lowercase 64-character
 `DOC_SUM_CONNECT_PROOF_MODEL_DIGEST` reported by the fixture's `/api/ps`
 endpoint. The ordinary production commands do not compile the proof runtime and
