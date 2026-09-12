@@ -203,8 +203,6 @@ const runtimeDot = element<HTMLSpanElement>("#runtime-dot");
 const runtimeTitle = element<HTMLParagraphElement>("#runtime-title");
 const runtimeDetail = element<HTMLParagraphElement>("#runtime-detail");
 const runtimeRetry = element<HTMLButtonElement>("#runtime-retry");
-const inferencePrivacy = element<HTMLParagraphElement>("#inference-privacy");
-const processingKicker = element<HTMLParagraphElement>("#processing-kicker");
 const modelPreset = element<HTMLSelectElement>("#model-preset");
 const gatewayEdit = element<HTMLButtonElement>("#gateway-edit");
 const gatewaySetup = element<HTMLDivElement>("#gateway-setup");
@@ -309,9 +307,7 @@ function syncPrimaryAction(): void {
 
   if (processing) {
     label.textContent = "Processing…";
-    actionHint.textContent = activeInferenceSelection === "__gateway__"
-      ? "Extracted content is being processed by your configured on-prem gateway."
-      : "The source is being processed on this computer.";
+    actionHint.textContent = "Extracted content is being processed by the run's saved inference profile.";
   } else if (runtimeReady) {
     label.textContent = "Choose a PDF";
     actionHint.textContent = "Native-text PDFs are supported in this release.";
@@ -451,7 +447,6 @@ async function refreshModelCatalog(): Promise<void> {
       ? "__gateway__"
       : catalog.selectedPresetId;
     modelPreset.value = activeInferenceSelection;
-    syncInferencePrivacyCopy();
     const selectedPreset = catalog.presets.find(
       (preset) => preset.presetId === catalog.selectedPresetId,
     );
@@ -486,7 +481,6 @@ async function refreshModelCatalog(): Promise<void> {
         ?? "The token stays in its private file. The app stores only the file path.";
     gatewayEdit.hidden = !catalog.gateway.platformSupported || !catalog.gateway.configured;
     gatewaySetup.hidden = catalog.selectedSource !== "gateway";
-    registerGguf.hidden = catalog.selectedSource === "gateway";
     modelSelectionAvailable = catalog.gateway.platformSupported || catalog.presets.length > 0;
     modelPreset.disabled = !modelSelectionAvailable || modelSelectionInFlight || processing;
     if (
@@ -510,16 +504,6 @@ async function refreshModelCatalog(): Promise<void> {
     option.textContent = commandError.message;
     modelPreset.append(option);
   }
-}
-
-function syncInferencePrivacyCopy(): void {
-  const usingGateway = activeInferenceSelection === "__gateway__";
-  inferencePrivacy.textContent = usingGateway
-    ? "Gateway mode sends extracted document content to your configured on-prem inference server."
-    : "Direct mode processes extracted document content on this computer.";
-  processingKicker.textContent = usingGateway
-    ? "Processing through your on-prem gateway"
-    : "Processing on this computer";
 }
 
 async function selectAndRegisterGguf(): Promise<void> {
@@ -580,7 +564,6 @@ async function selectInferenceSource(): Promise<void> {
 function showGatewaySetup(): void {
   if (processing || modelSelectionInFlight || !gatewayPlatformSupported) return;
   gatewaySetup.hidden = false;
-  registerGguf.hidden = true;
   gatewayUrl.focus();
 }
 
