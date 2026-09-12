@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 17;
+pub const CURRENT_SCHEMA_VERSION: u32 = 18;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -503,6 +503,226 @@ BEGIN
 END;
 "#;
 
+const V17_TO_V18: &str = r#"
+CREATE TABLE model_request_owners (
+    owner_id TEXT PRIMARY KEY,
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('pipeline_run', 'profile_suggestion')),
+    pipeline_run_id TEXT UNIQUE,
+    created_at TEXT NOT NULL,
+    CHECK (
+        (owner_kind = 'pipeline_run'
+            AND pipeline_run_id IS NOT NULL
+            AND owner_id = pipeline_run_id)
+        OR (owner_kind = 'profile_suggestion' AND pipeline_run_id IS NULL)
+    ),
+    FOREIGN KEY(pipeline_run_id) REFERENCES pipeline_runs(run_id)
+);
+
+INSERT INTO model_request_owners (owner_id, owner_kind, pipeline_run_id, created_at)
+SELECT run_id, 'pipeline_run', run_id, created_at
+FROM pipeline_runs;
+
+CREATE TRIGGER pipeline_runs_create_request_owner
+AFTER INSERT ON pipeline_runs
+BEGIN
+    INSERT INTO model_request_owners (owner_id, owner_kind, pipeline_run_id, created_at)
+    VALUES (NEW.run_id, 'pipeline_run', NEW.run_id, NEW.created_at);
+END;
+
+CREATE TRIGGER model_request_owners_no_update
+BEFORE UPDATE ON model_request_owners
+BEGIN
+    SELECT RAISE(ABORT, 'model request owners are immutable');
+END;
+
+CREATE TRIGGER model_request_owners_no_delete
+BEFORE DELETE ON model_request_owners
+BEGIN
+    SELECT RAISE(ABORT, 'model request owners are immutable');
+END;
+
+CREATE TABLE profile_suggestion_requests (
+    source_content_hash TEXT NOT NULL CHECK (
+        length(source_content_hash) = 64
+        AND source_content_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    task_contract_version TEXT NOT NULL CHECK (
+        length(task_contract_version) BETWEEN 1 AND 128
+        AND task_contract_version NOT GLOB '*[^0-9A-Za-z._@-]*'
+    ),
+    owner_id TEXT NOT NULL UNIQUE CHECK (
+        length(owner_id) = 36
+        AND owner_id = lower(owner_id)
+        AND owner_id NOT GLOB '*[^0-9a-f-]*'
+        AND substr(owner_id, 9, 1) = '-'
+        AND substr(owner_id, 14, 1) = '-'
+        AND substr(owner_id, 15, 1) = '4'
+        AND substr(owner_id, 19, 1) = '-'
+        AND substr(owner_id, 20, 1) IN ('8', '9', 'a', 'b')
+        AND substr(owner_id, 24, 1) = '-'
+        AND substr(owner_id, 1, 8) NOT GLOB '*[^0-9a-f]*'
+        AND substr(owner_id, 10, 4) NOT GLOB '*[^0-9a-f]*'
+        AND substr(owner_id, 15, 4) NOT GLOB '*[^0-9a-f]*'
+        AND substr(owner_id, 20, 4) NOT GLOB '*[^0-9a-f]*'
+        AND substr(owner_id, 25, 12) NOT GLOB '*[^0-9a-f]*'
+    ),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(source_content_hash, task_contract_version),
+    FOREIGN KEY(owner_id) REFERENCES model_request_owners(owner_id)
+);
+
+CREATE TRIGGER profile_suggestion_requests_owner_kind
+BEFORE INSERT ON profile_suggestion_requests
+WHEN NOT EXISTS (
+    SELECT 1 FROM model_request_owners
+    WHERE owner_id = NEW.owner_id AND owner_kind = 'profile_suggestion'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'profile suggestion request owner kind is invalid');
+END;
+
+CREATE TRIGGER profile_suggestion_requests_no_update
+BEFORE UPDATE ON profile_suggestion_requests
+BEGIN
+    SELECT RAISE(ABORT, 'profile suggestion request identity is immutable');
+END;
+
+CREATE TRIGGER profile_suggestion_requests_no_delete
+BEFORE DELETE ON profile_suggestion_requests
+BEGIN
+    SELECT RAISE(ABORT, 'profile suggestion request identity is immutable');
+END;
+
+DROP INDEX model_gateway_requests_state_idx;
+DROP TRIGGER model_gateway_requests_identity_immutable;
+DROP TRIGGER model_gateway_requests_state_monotonic;
+ALTER TABLE model_gateway_requests RENAME TO model_gateway_requests_v17;
+
+CREATE TABLE model_gateway_requests (
+    owner_id TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK (stage IN ('Analyze', 'Synthesize', 'Verify')),
+    request_ordinal INTEGER NOT NULL CHECK (request_ordinal BETWEEN 0 AND 4294967295),
+    request_id TEXT NOT NULL UNIQUE CHECK (
+        length(request_id) = 36
+        AND request_id = lower(request_id)
+        AND request_id NOT GLOB '*[^0-9a-f-]*'
+        AND substr(request_id, 9, 1) = '-'
+        AND substr(request_id, 14, 1) = '-'
+        AND substr(request_id, 15, 1) = '4'
+        AND substr(request_id, 19, 1) = '-'
+        AND substr(request_id, 20, 1) IN ('8', '9', 'a', 'b')
+        AND substr(request_id, 24, 1) = '-'
+        AND substr(request_id, 1, 8) NOT GLOB '*[^0-9a-f]*'
+        AND substr(request_id, 10, 4) NOT GLOB '*[^0-9a-f]*'
+        AND substr(request_id, 15, 4) NOT GLOB '*[^0-9a-f]*'
+        AND substr(request_id, 20, 4) NOT GLOB '*[^0-9a-f]*'
+        AND substr(request_id, 25, 12) NOT GLOB '*[^0-9a-f]*'
+    ),
+    request_expires_at TEXT NOT NULL,
+    semantic_request_hash TEXT NOT NULL CHECK (
+        length(semantic_request_hash) = 64
+        AND semantic_request_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    gateway_request_hash TEXT CHECK (
+        gateway_request_hash IS NULL OR (
+            length(gateway_request_hash) = 64
+            AND gateway_request_hash NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    state TEXT NOT NULL CHECK (state IN ('reserved', 'submitted', 'completed', 'acknowledged')),
+    completion_json TEXT,
+    completion_sha256 TEXT CHECK (
+        completion_sha256 IS NULL OR (
+            length(completion_sha256) = 64
+            AND completion_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    acknowledgement_disposition TEXT CHECK (
+        acknowledgement_disposition IS NULL OR acknowledgement_disposition = 'persisted'
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    acknowledged_at TEXT,
+    PRIMARY KEY(owner_id, stage, request_ordinal),
+    FOREIGN KEY(owner_id) REFERENCES model_request_owners(owner_id),
+    CHECK (
+        (state = 'reserved'
+            AND gateway_request_hash IS NULL
+            AND completion_json IS NULL
+            AND completion_sha256 IS NULL
+            AND acknowledgement_disposition IS NULL
+            AND completed_at IS NULL
+            AND acknowledged_at IS NULL)
+        OR (state = 'submitted'
+            AND gateway_request_hash IS NOT NULL
+            AND completion_json IS NULL
+            AND completion_sha256 IS NULL
+            AND acknowledgement_disposition IS NULL
+            AND completed_at IS NULL
+            AND acknowledged_at IS NULL)
+        OR (state = 'completed'
+            AND gateway_request_hash IS NOT NULL
+            AND completion_json IS NOT NULL
+            AND completion_sha256 IS NOT NULL
+            AND acknowledgement_disposition IS NULL
+            AND completed_at IS NOT NULL
+            AND acknowledged_at IS NULL)
+        OR (state = 'acknowledged'
+            AND gateway_request_hash IS NOT NULL
+            AND completion_json IS NOT NULL
+            AND completion_sha256 IS NOT NULL
+            AND acknowledgement_disposition = 'persisted'
+            AND completed_at IS NOT NULL
+            AND acknowledged_at IS NOT NULL)
+    )
+);
+
+INSERT INTO model_gateway_requests (
+    owner_id, stage, request_ordinal, request_id, request_expires_at,
+    semantic_request_hash, gateway_request_hash, state, completion_json,
+    completion_sha256, acknowledgement_disposition, created_at, updated_at,
+    completed_at, acknowledged_at
+)
+SELECT
+    run_id, stage, request_ordinal, request_id, request_expires_at,
+    semantic_request_hash, gateway_request_hash, state, completion_json,
+    completion_sha256, acknowledgement_disposition, created_at, updated_at,
+    completed_at, acknowledged_at
+FROM model_gateway_requests_v17;
+
+DROP TABLE model_gateway_requests_v17;
+
+CREATE INDEX model_gateway_requests_state_idx
+ON model_gateway_requests(state, updated_at);
+
+CREATE TRIGGER model_gateway_requests_identity_immutable
+BEFORE UPDATE ON model_gateway_requests
+WHEN OLD.owner_id IS NOT NEW.owner_id
+    OR OLD.stage IS NOT NEW.stage
+    OR OLD.request_ordinal IS NOT NEW.request_ordinal
+    OR OLD.request_id IS NOT NEW.request_id
+    OR OLD.request_expires_at IS NOT NEW.request_expires_at
+    OR OLD.semantic_request_hash IS NOT NEW.semantic_request_hash
+    OR (OLD.gateway_request_hash IS NOT NULL
+        AND OLD.gateway_request_hash IS NOT NEW.gateway_request_hash)
+BEGIN
+    SELECT RAISE(ABORT, 'model gateway request identity is immutable');
+END;
+
+CREATE TRIGGER model_gateway_requests_state_monotonic
+BEFORE UPDATE ON model_gateway_requests
+WHEN NOT (
+    OLD.state = NEW.state
+    OR (OLD.state = 'reserved' AND NEW.state = 'submitted')
+    OR (OLD.state = 'submitted' AND NEW.state = 'completed')
+    OR (OLD.state = 'completed' AND NEW.state = 'acknowledged')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'model gateway request state transition is invalid');
+END;
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -690,6 +910,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V14_TO_V15)?;
         tx.execute_batch(V15_TO_V16)?;
         tx.execute_batch(V16_TO_V17)?;
+        tx.execute_batch(V17_TO_V18)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -757,6 +978,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 16 {
         migrate_v16_to_v17(conn)?;
+        current_version = 17;
+    }
+    if current_version == 17 {
+        migrate_v17_to_v18(conn)?;
     }
     validate(conn)
 }
@@ -852,6 +1077,10 @@ fn migrate_v15_to_v16(conn: &mut Connection) -> Result<(), MigrationError> {
 
 fn migrate_v16_to_v17(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V16_TO_V17, 17)
+}
+
+fn migrate_v17_to_v18(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V17_TO_V18, 18)
 }
 
 fn migrate_additive(
@@ -1108,6 +1337,79 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
 
     for (table, columns) in [
         (
+            "model_request_owners",
+            ["owner_id", "owner_kind", "pipeline_run_id", "created_at"],
+        ),
+        (
+            "profile_suggestion_requests",
+            [
+                "source_content_hash",
+                "task_contract_version",
+                "owner_id",
+                "created_at",
+            ],
+        ),
+    ] {
+        for column in columns {
+            let present: u32 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                [table, column],
+                |row| row.get(0),
+            )?;
+            if present != 1 {
+                return Err(MigrationError::Invariant(format!(
+                    "{table}.{column} is missing"
+                )));
+            }
+        }
+    }
+    for trigger in [
+        "pipeline_runs_create_request_owner",
+        "model_request_owners_no_update",
+        "model_request_owners_no_delete",
+        "profile_suggestion_requests_owner_kind",
+        "profile_suggestion_requests_no_update",
+        "profile_suggestion_requests_no_delete",
+    ] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [trigger],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!("{trigger} is missing")));
+        }
+    }
+    let runs_without_request_owner: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM pipeline_runs AS run
+         LEFT JOIN model_request_owners AS owner
+           ON owner.owner_id = run.run_id
+          AND owner.owner_kind = 'pipeline_run'
+          AND owner.pipeline_run_id = run.run_id
+         WHERE owner.owner_id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if runs_without_request_owner != 0 {
+        return Err(MigrationError::Invariant(
+            "every pipeline run must have an immutable model request owner".to_string(),
+        ));
+    }
+    let profile_owners_without_request: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM model_request_owners AS owner
+         LEFT JOIN profile_suggestion_requests AS request USING (owner_id)
+         WHERE owner.owner_kind = 'profile_suggestion' AND request.owner_id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if profile_owners_without_request != 0 {
+        return Err(MigrationError::Invariant(
+            "every profile suggestion owner must have immutable request provenance".to_string(),
+        ));
+    }
+
+    for (table, columns) in [
+        (
             "summary_synthesis_attempts",
             [
                 "run_id",
@@ -1162,7 +1464,7 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
     }
 
     for column in [
-        "run_id",
+        "owner_id",
         "stage",
         "request_ordinal",
         "request_id",
@@ -1229,6 +1531,8 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool, MigrationError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
+    use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -2033,7 +2337,7 @@ mod tests {
         );
         conn.execute(
             "INSERT INTO model_gateway_requests (
-                run_id, stage, request_ordinal, request_id, request_expires_at,
+                owner_id, stage, request_ordinal, request_id, request_expires_at,
                 semantic_request_hash, state, created_at, updated_at
              ) VALUES (
                 'gateway-run', 'Analyze', 0, '12345678-1234-4234-8234-123456789abc',
@@ -2047,14 +2351,14 @@ mod tests {
         assert!(conn
             .execute(
                 "UPDATE model_gateway_requests SET state = 'completed'
-                 WHERE run_id = 'gateway-run'",
+                 WHERE owner_id = 'gateway-run'",
                 [],
             )
             .is_err());
         assert!(conn
             .execute(
                 "INSERT INTO model_gateway_requests (
-                    run_id, stage, request_ordinal, request_id, request_expires_at,
+                    owner_id, stage, request_ordinal, request_id, request_expires_at,
                     semantic_request_hash, state, created_at, updated_at
                  ) VALUES (
                     'gateway-run', 'Chunk', 1, '22345678-1234-4234-8234-123456789abc',
@@ -2068,7 +2372,7 @@ mod tests {
         assert!(conn
             .execute(
                 "INSERT INTO model_gateway_requests (
-                    run_id, stage, request_ordinal, request_id, request_expires_at,
+                    owner_id, stage, request_ordinal, request_id, request_expires_at,
                     semantic_request_hash, state, created_at, updated_at
                  ) VALUES (
                     'gateway-run', 'Analyze', 1, '-2345678-1234-4234-8234-123456789abc',
@@ -2079,5 +2383,184 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn schema_v17_migrates_gateway_rows_to_immutable_request_owners() {
+        let database = TestDatabase::new();
+        let mut conn = Connection::open(&database.0).expect("v17 database should open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        for migration in [
+            SCHEMA_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5, V5_TO_V6, V6_TO_V7, V7_TO_V8, V8_TO_V9,
+            V9_TO_V10, V10_TO_V11, V11_TO_V12, V12_TO_V13, V13_TO_V14, V14_TO_V15, V15_TO_V16,
+            V16_TO_V17,
+        ] {
+            conn.execute_batch(migration)
+                .expect("schema through v17 should initialize");
+        }
+        conn.pragma_update(None, "user_version", 17)
+            .expect("v17 version should persist");
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents VALUES (
+                'owner-document', 'owner.pdf', 'pdf', 12, 'owner-hash',
+                '/owner.pdf', '2026-09-11T18:00:00Z'
+            );
+            INSERT INTO pipeline_runs VALUES (
+                'owner-run', 'owner-document', '"Chunked"', 9, '1.0',
+                '2026-09-11T18:00:00Z', '2026-09-11T18:00:01Z',
+                '2026-09-11T18:00:02Z', NULL, '"Chunk"',
+                '{"total_units":0,"completed_units":0,"failed_units":0}',
+                '[]', NULL, 0, 1
+            );
+            INSERT INTO pipeline_run_summary_profiles VALUES (
+                'owner-run', '"general"', '2026-09-11T18:00:00Z'
+            );
+            "#,
+        )
+        .expect("v17 run should persist");
+        let content_sha256 = format!("{:x}", Sha256::digest(b"{}"));
+        let completion_json = format!(
+            "{{\"media_type\":\"application/json\",\"content\":\"{{}}\",\"content_sha256\":\"{}\",\"deployment_id\":\"gateway-test\",\"task_policy_version\":1}}",
+            content_sha256
+        );
+        let completion_sha256 = format!("{:x}", Sha256::digest(completion_json.as_bytes()));
+        conn.execute(
+            "INSERT INTO model_gateway_requests (
+                run_id, stage, request_ordinal, request_id, request_expires_at,
+                semantic_request_hash, gateway_request_hash, state, completion_json,
+                completion_sha256, acknowledgement_disposition, created_at, updated_at,
+                completed_at, acknowledged_at
+             ) VALUES (
+                'owner-run', 'Analyze', 1, '12345678-1234-4234-8234-123456789abc',
+                '2026-09-11T18:05:00Z', ?1, ?2, 'acknowledged', ?3, ?4, 'persisted',
+                '2026-09-11T18:00:00Z', '2026-09-11T18:04:00Z',
+                '2026-09-11T18:03:00Z', '2026-09-11T18:04:00Z'
+             )",
+            params![
+                "a".repeat(64),
+                "b".repeat(64),
+                completion_json,
+                completion_sha256
+            ],
+        )
+        .expect("v17 gateway row should persist");
+
+        migrate(&mut conn).expect("v17 schema should migrate");
+
+        assert_eq!(version(&conn).unwrap(), CURRENT_SCHEMA_VERSION);
+        let migrated = conn
+            .query_row(
+                "SELECT owner_id, stage, request_ordinal, request_id, request_expires_at,
+                        semantic_request_hash, gateway_request_hash, state, completion_json,
+                        completion_sha256, acknowledgement_disposition, created_at, updated_at,
+                        completed_at, acknowledged_at
+                 FROM model_gateway_requests",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, String>(12)?,
+                        row.get::<_, String>(13)?,
+                        row.get::<_, String>(14)?,
+                    ))
+                },
+            )
+            .expect("migrated gateway row should load");
+        assert_eq!(migrated.0, "owner-run");
+        assert_eq!(migrated.1, "Analyze");
+        assert_eq!(migrated.2, 1);
+        assert_eq!(migrated.3, "12345678-1234-4234-8234-123456789abc");
+        assert_eq!(migrated.4, "2026-09-11T18:05:00Z");
+        assert_eq!(migrated.5, "a".repeat(64));
+        assert_eq!(migrated.6, "b".repeat(64));
+        assert_eq!(migrated.7, "acknowledged");
+        assert_eq!(migrated.8, completion_json);
+        assert_eq!(migrated.9, completion_sha256);
+        assert_eq!(migrated.10, "persisted");
+        assert_eq!(migrated.11, "2026-09-11T18:00:00Z");
+        assert_eq!(migrated.12, "2026-09-11T18:04:00Z");
+        assert_eq!(migrated.13, "2026-09-11T18:03:00Z");
+        assert_eq!(migrated.14, "2026-09-11T18:04:00Z");
+        assert_eq!(
+            conn.query_row(
+                "SELECT owner_kind FROM model_request_owners WHERE owner_id = 'owner-run'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "pipeline_run"
+        );
+        assert!(conn
+            .execute(
+                "UPDATE model_request_owners SET created_at = 'changed' WHERE owner_id = 'owner-run'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO model_gateway_requests (
+                    owner_id, stage, request_ordinal, request_id, request_expires_at,
+                    semantic_request_hash, state, created_at, updated_at
+                 ) VALUES (
+                    'missing-owner', 'Analyze', 0,
+                    '22345678-1234-4234-8234-123456789abc',
+                    '2026-09-11T18:05:00Z', ?1, 'reserved',
+                    '2026-09-11T18:00:00Z', '2026-09-11T18:00:00Z'
+                 )",
+                ["c".repeat(64)],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn schema_validation_rejects_a_pipeline_run_without_its_request_owner() {
+        let mut conn = Connection::open_in_memory().expect("database should open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        migrate(&mut conn).expect("current schema should initialize");
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents VALUES (
+                'missing-owner-document', 'missing-owner.pdf', 'pdf', 12, 'hash',
+                '/missing-owner.pdf', '2026-09-11T18:00:00Z'
+            );
+            INSERT INTO pipeline_runs VALUES (
+                'missing-owner-run', 'missing-owner-document', '"Ingested"', 1, '1.0',
+                '2026-09-11T18:00:00Z', NULL, '2026-09-11T18:00:00Z', NULL,
+                '"Ingest"', '{"total_units":0,"completed_units":0,"failed_units":0}',
+                '[]', NULL, 0, 1
+            );
+            INSERT INTO pipeline_run_summary_profiles VALUES (
+                'missing-owner-run', '"general"', '2026-09-11T18:00:00Z'
+            );
+            DROP TRIGGER model_request_owners_no_delete;
+            DELETE FROM model_request_owners WHERE owner_id = 'missing-owner-run';
+            CREATE TRIGGER model_request_owners_no_delete
+            BEFORE DELETE ON model_request_owners
+            BEGIN
+                SELECT RAISE(ABORT, 'model request owners are immutable');
+            END;
+            "#,
+        )
+        .expect("corrupt owner fixture should be constructible");
+
+        assert!(matches!(
+            validate(&conn),
+            Err(MigrationError::Invariant(message))
+                if message == "every pipeline run must have an immutable model request owner"
+        ));
     }
 }

@@ -44,6 +44,8 @@ pub enum StoreError {
     ChunkedArtifactNotFound(String),
     #[error("Invalid new ingestion: {0}")]
     InvalidIngestion(String),
+    #[error("Invalid model request owner: {0}")]
+    InvalidRequestOwner(String),
     #[error("Parsed artifact document {artifact_document_id} does not match run document {run_document_id}")]
     ArtifactDocumentMismatch {
         artifact_document_id: String,
@@ -177,6 +179,86 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, StoreError> {
 
 pub fn schema_version(conn: &Connection) -> Result<u32, StoreError> {
     Ok(schema::version(conn)?)
+}
+
+pub(crate) fn get_or_create_profile_suggestion_owner(
+    conn: &mut Connection,
+    source_content_hash: &str,
+    task_contract_version: &str,
+) -> Result<String, StoreError> {
+    validate_request_owner_key(source_content_hash, task_contract_version)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let existing = tx
+        .query_row(
+            "SELECT owner_id FROM profile_suggestion_requests
+             WHERE source_content_hash = ?1 AND task_contract_version = ?2",
+            params![source_content_hash, task_contract_version],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(owner_id) = existing {
+        let kind: Option<String> = tx
+            .query_row(
+                "SELECT owner_kind FROM model_request_owners WHERE owner_id = ?1",
+                [&owner_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if kind.as_deref() != Some("profile_suggestion") {
+            return Err(StoreError::InvalidRequestOwner(
+                "persisted profile suggestion owner kind is invalid".to_string(),
+            ));
+        }
+        tx.commit()?;
+        return Ok(owner_id);
+    }
+
+    let owner_id = Uuid::new_v4().hyphenated().to_string();
+    let created_at = Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO model_request_owners (owner_id, owner_kind, pipeline_run_id, created_at)
+         VALUES (?1, 'profile_suggestion', NULL, ?2)",
+        params![owner_id, created_at],
+    )?;
+    tx.execute(
+        "INSERT INTO profile_suggestion_requests (
+            source_content_hash, task_contract_version, owner_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            source_content_hash,
+            task_contract_version,
+            owner_id,
+            created_at
+        ],
+    )?;
+    tx.commit()?;
+    Ok(owner_id)
+}
+
+fn validate_request_owner_key(
+    source_content_hash: &str,
+    task_contract_version: &str,
+) -> Result<(), StoreError> {
+    let valid_hash = source_content_hash.len() == 64
+        && source_content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !valid_hash {
+        return Err(StoreError::InvalidRequestOwner(
+            "source content hash must be a lowercase SHA-256 digest".to_string(),
+        ));
+    }
+    let valid_version = !task_contract_version.is_empty()
+        && task_contract_version.len() <= 128
+        && task_contract_version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'@'));
+    if !valid_version {
+        return Err(StoreError::InvalidRequestOwner(
+            "task contract version is invalid".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn ensure_run_model_profile(
@@ -2717,6 +2799,8 @@ mod tests {
     use crate::pipeline::ingest::{ingest_pdf, ingest_pdf_with_profiles};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     struct TestFile(PathBuf);
 
@@ -2759,6 +2843,124 @@ mod tests {
                 tokenizer_version: "qwen-test-v1".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn profile_suggestion_request_owners_converge_across_reopen_and_concurrency() {
+        let database = TestFile::empty("db");
+        let conn = init_db(&database.0).expect("schema should initialize");
+        drop(conn);
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let path = database.0.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let mut conn = init_db(path).expect("database should open");
+                    barrier.wait();
+                    get_or_create_profile_suggestion_owner(
+                        &mut conn,
+                        &"a".repeat(64),
+                        "document.summary.profile-suggestion@1",
+                    )
+                    .expect("owner should persist")
+                })
+            })
+            .collect::<Vec<_>>();
+        let owners = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("worker should finish"))
+            .collect::<Vec<_>>();
+        assert_eq!(owners[0], owners[1]);
+
+        let mut reopened = init_db(&database.0).expect("database should reopen");
+        assert_eq!(
+            get_or_create_profile_suggestion_owner(
+                &mut reopened,
+                &"a".repeat(64),
+                "document.summary.profile-suggestion@1",
+            )
+            .unwrap(),
+            owners[0]
+        );
+        let changed_content = get_or_create_profile_suggestion_owner(
+            &mut reopened,
+            &"b".repeat(64),
+            "document.summary.profile-suggestion@1",
+        )
+        .unwrap();
+        let changed_contract = get_or_create_profile_suggestion_owner(
+            &mut reopened,
+            &"a".repeat(64),
+            "document.summary.profile-suggestion@2",
+        )
+        .unwrap();
+        assert_ne!(changed_content, owners[0]);
+        assert_ne!(changed_contract, owners[0]);
+        assert_ne!(changed_content, changed_contract);
+        assert_eq!(
+            reopened
+                .query_row(
+                    "SELECT COUNT(*) FROM model_request_owners
+                     WHERE owner_kind = 'profile_suggestion'",
+                    [],
+                    |row| row.get::<_, u32>(0),
+                )
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn profile_suggestion_request_owner_boundary_fails_closed() {
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        for (hash, version) in [
+            ("a".repeat(63), "contract@1".to_string()),
+            ("a".repeat(65), "contract@1".to_string()),
+            ("A".repeat(64), "contract@1".to_string()),
+            ("a".repeat(64), String::new()),
+            ("a".repeat(64), "contract/1".to_string()),
+            ("a".repeat(64), "x".repeat(129)),
+        ] {
+            assert!(matches!(
+                get_or_create_profile_suggestion_owner(&mut conn, &hash, &version),
+                Err(StoreError::InvalidRequestOwner(_))
+            ));
+        }
+        get_or_create_profile_suggestion_owner(&mut conn, &"e".repeat(64), &"x".repeat(128))
+            .expect("maximum task contract length should persist");
+
+        let source = TestFile::new("pdf", b"%PDF-1.4\nREQUEST_OWNER_KIND");
+        let (_, run) = ingest_pdf(&mut conn, source.0.to_str().expect("UTF-8 path"))
+            .expect("candidate should ingest");
+        assert_eq!(
+            conn.query_row(
+                "SELECT owner_kind FROM model_request_owners WHERE owner_id = ?1",
+                [&run.run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "pipeline_run"
+        );
+        assert!(conn
+            .execute(
+                "INSERT INTO profile_suggestion_requests (
+                    source_content_hash, task_contract_version, owner_id, created_at
+                 ) VALUES (?1, 'contract@1', ?2, '2026-09-11T18:00:00Z')",
+                params!["c".repeat(64), run.run_id],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO profile_suggestion_requests (
+                    source_content_hash, task_contract_version, owner_id, created_at
+                 ) VALUES (
+                    ?1, 'contract@1', '12345678-1234-4234-8234-123456789abc',
+                    '2026-09-11T18:00:00Z'
+                 )",
+                ["d".repeat(64)],
+            )
+            .is_err());
     }
 
     #[test]

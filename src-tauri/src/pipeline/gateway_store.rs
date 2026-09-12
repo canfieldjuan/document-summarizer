@@ -53,7 +53,7 @@ impl GatewayCompletion {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GatewayRequestKey {
-    pub run_id: String,
+    pub owner_id: String,
     pub stage: PipelineStage,
     pub ordinal: u32,
 }
@@ -148,8 +148,10 @@ fn validate_reservation_identity(
 ) -> Result<&'static str, GatewayStoreError> {
     let stage = stage_name(&key.stage)?;
     validate_digest(semantic_request_hash)?;
-    if key.run_id.is_empty() {
-        return Err(GatewayStoreError::InvalidInput("run identity is empty"));
+    if key.owner_id.is_empty() {
+        return Err(GatewayStoreError::InvalidInput(
+            "request owner identity is empty",
+        ));
     }
     Ok(stage)
 }
@@ -177,12 +179,12 @@ fn insert_reservation(
     let timestamp = timestamp_text(now);
     tx.execute(
         "INSERT INTO model_gateway_requests (
-            run_id, stage, request_ordinal, request_id, request_expires_at,
+            owner_id, stage, request_ordinal, request_id, request_expires_at,
             semantic_request_hash, state, created_at, updated_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'reserved', ?7, ?7)
-         ON CONFLICT(run_id, stage, request_ordinal) DO NOTHING",
+         ON CONFLICT(owner_id, stage, request_ordinal) DO NOTHING",
         params![
-            key.run_id,
+            key.owner_id,
             stage,
             key.ordinal,
             Uuid::new_v4().hyphenated().to_string(),
@@ -225,11 +227,11 @@ pub(crate) fn mark_submitted(
         tx.execute(
             "UPDATE model_gateway_requests
              SET gateway_request_hash = ?1, state = 'submitted', updated_at = ?2
-             WHERE run_id = ?3 AND stage = ?4 AND request_ordinal = ?5",
+             WHERE owner_id = ?3 AND stage = ?4 AND request_ordinal = ?5",
             params![
                 gateway_request_hash,
                 timestamp_text(now),
-                key.run_id,
+                key.owner_id,
                 stage_name(&key.stage)?,
                 key.ordinal,
             ],
@@ -262,12 +264,12 @@ pub(crate) fn persist_completion(
                 "UPDATE model_gateway_requests
                  SET state = 'completed', completion_json = ?1, completion_sha256 = ?2,
                      completed_at = ?3, updated_at = ?3
-                 WHERE run_id = ?4 AND stage = ?5 AND request_ordinal = ?6",
+                 WHERE owner_id = ?4 AND stage = ?5 AND request_ordinal = ?6",
                 params![
                     completion_json,
                     sha256_hex(completion_json.as_bytes()),
                     timestamp,
-                    key.run_id,
+                    key.owner_id,
                     stage_name(&key.stage)?,
                     key.ordinal,
                 ],
@@ -304,8 +306,13 @@ pub(crate) fn mark_acknowledged(
                 "UPDATE model_gateway_requests
                  SET state = 'acknowledged', acknowledgement_disposition = 'persisted',
                      acknowledged_at = ?1, updated_at = ?1
-                 WHERE run_id = ?2 AND stage = ?3 AND request_ordinal = ?4",
-                params![timestamp, key.run_id, stage_name(&key.stage)?, key.ordinal,],
+                 WHERE owner_id = ?2 AND stage = ?3 AND request_ordinal = ?4",
+                params![
+                    timestamp,
+                    key.owner_id,
+                    stage_name(&key.stage)?,
+                    key.ordinal,
+                ],
             )?;
         }
         GatewayRequestState::Acknowledged => {}
@@ -327,12 +334,12 @@ pub(crate) fn load_request(
 ) -> Result<Option<GatewayRequestRecord>, GatewayStoreError> {
     let raw = conn
         .query_row(
-            "SELECT run_id, stage, request_ordinal, request_id, request_expires_at,
+            "SELECT owner_id, stage, request_ordinal, request_id, request_expires_at,
                     semantic_request_hash, gateway_request_hash, state, completion_json,
                     completion_sha256, acknowledgement_disposition
              FROM model_gateway_requests
-             WHERE run_id = ?1 AND stage = ?2 AND request_ordinal = ?3",
-            params![key.run_id, stage_name(&key.stage)?, key.ordinal],
+             WHERE owner_id = ?1 AND stage = ?2 AND request_ordinal = ?3",
+            params![key.owner_id, stage_name(&key.stage)?, key.ordinal],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -376,7 +383,7 @@ type RawRecord = (
 
 fn parse_record(raw: RawRecord) -> Result<GatewayRequestRecord, GatewayStoreError> {
     let (
-        run_id,
+        owner_id,
         stage,
         ordinal,
         request_id,
@@ -410,7 +417,7 @@ fn parse_record(raw: RawRecord) -> Result<GatewayRequestRecord, GatewayStoreErro
     };
     Ok(GatewayRequestRecord {
         key: GatewayRequestKey {
-            run_id,
+            owner_id,
             stage: parse_stage(&stage)?,
             ordinal: u32::try_from(ordinal).map_err(|_| invalid_record("ordinal is invalid"))?,
         },
@@ -545,7 +552,7 @@ mod tests {
 
     fn key() -> GatewayRequestKey {
         GatewayRequestKey {
-            run_id: "run-1".into(),
+            owner_id: "run-1".into(),
             stage: PipelineStage::Analyze,
             ordinal: 0,
         }
@@ -658,14 +665,14 @@ mod tests {
         );
         assert!(conn
             .execute(
-                "UPDATE model_gateway_requests SET state = 'submitted' WHERE run_id = 'run-1'",
+                "UPDATE model_gateway_requests SET state = 'submitted' WHERE owner_id = 'run-1'",
                 [],
             )
             .is_err());
 
         conn.execute(
             "UPDATE model_gateway_requests SET completion_json = '{\"tampered\":true}'
-             WHERE run_id = 'run-1'",
+             WHERE owner_id = 'run-1'",
             [],
         )
         .unwrap();

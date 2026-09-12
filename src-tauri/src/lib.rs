@@ -15,7 +15,7 @@ use pipeline::contracts::{
     ModelRuntimeFailure, NormalizedDocument, ParsedDocument, PipelineFailure, PipelineRun,
     StructureInterpreter, StructuredDocument, SummaryProfile,
 };
-use pipeline::db::{init_db, StoreError};
+use pipeline::db::{get_or_create_profile_suggestion_owner, init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion, IngestError};
 use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
 use pipeline::model_settings::{
@@ -30,6 +30,7 @@ use pipeline::parser::{
 };
 use pipeline::profile_suggestion::{
     suggest_summary_profile as suggest_profile_from_document, SummaryProfileSuggestion,
+    PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
 };
 use pipeline::recovery::reconcile_interrupted_runs;
 use pipeline::service::DocumentServiceError;
@@ -237,12 +238,29 @@ fn chunk_document(
         .map_err(CommandError::from)
 }
 
+fn bind_profile_suggestion_request_owner(
+    runtime: &mut dyn ModelRuntime,
+    db_path: &Path,
+    source_content_hash: &str,
+) -> Result<String, CommandError> {
+    let mut conn = init_db(db_path).map_err(CommandError::from)?;
+    let owner_id = get_or_create_profile_suggestion_owner(
+        &mut conn,
+        source_content_hash,
+        PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
+    )
+    .map_err(CommandError::from)?;
+    runtime.bind_request_owner(&owner_id);
+    Ok(owner_id)
+}
+
 #[tauri::command]
 async fn suggest_summary_profile(
     state: State<'_, AppState>,
     file_path: String,
 ) -> Result<SummaryProfileSuggestion, CommandError> {
     let settings_path = state.model_settings_path.clone();
+    let db_path = state.jobs.db_path().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
         let (document, _) = prepare_pdf_ingestion(&file_path, None).map_err(CommandError::from)?;
         let parsed = PdfExtractParser::new()
@@ -254,7 +272,8 @@ async fn suggest_summary_profile(
         let structured = DeterministicStructureInterpreter::new()
             .interpret(&normalized)
             .map_err(CommandError::from)?;
-        let runtime = runtime_from_settings(&settings_path).map_err(CommandError::from)?;
+        let mut runtime = runtime_from_settings(&settings_path).map_err(CommandError::from)?;
+        bind_profile_suggestion_request_owner(&mut runtime, &db_path, &document.content_hash)?;
         runtime.health().map_err(CommandError::from)?;
         suggest_profile_from_document(&runtime, &normalized, &structured, &document.content_hash)
             .map_err(CommandError::from)
@@ -528,7 +547,54 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod capability_tests {
+    use crate::pipeline::contracts::{
+        ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
+    };
     use serde_json::Value;
+
+    #[derive(Default)]
+    struct OwnerRecordingRuntime {
+        owner_id: Option<String>,
+    }
+
+    impl ModelRuntime for OwnerRecordingRuntime {
+        fn bind_request_owner(&mut self, owner_id: &str) {
+            self.owner_id = Some(owner_id.to_string());
+        }
+
+        fn generate(&self, _request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            unreachable!("owner-binding proof does not generate")
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "owner-recording-runtime"
+        }
+
+        fn model_id(&self) -> &str {
+            "owner-recording-model"
+        }
+    }
+
+    #[test]
+    fn automatic_profile_owner_is_stable_and_bound_before_inference() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("summarizer.db");
+        let hash = "a".repeat(64);
+        let mut first = OwnerRecordingRuntime::default();
+        let first_owner =
+            super::bind_profile_suggestion_request_owner(&mut first, &database, &hash).unwrap();
+        assert_eq!(first.owner_id.as_deref(), Some(first_owner.as_str()));
+
+        let mut reopened = OwnerRecordingRuntime::default();
+        let reopened_owner =
+            super::bind_profile_suggestion_request_owner(&mut reopened, &database, &hash).unwrap();
+        assert_eq!(reopened_owner, first_owner);
+        assert_eq!(reopened.owner_id.as_deref(), Some(first_owner.as_str()));
+    }
 
     #[cfg(unix)]
     #[test]

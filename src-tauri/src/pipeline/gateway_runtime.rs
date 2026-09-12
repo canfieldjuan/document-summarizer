@@ -68,7 +68,7 @@ impl GatewayExecutor for GatewayClient {
 pub(crate) struct GatewayRuntime {
     db_path: PathBuf,
     executor: Arc<dyn GatewayExecutor>,
-    bound_run_id: Option<String>,
+    bound_owner_id: Option<String>,
     snapshot: ModelProfileSnapshot,
 }
 
@@ -94,22 +94,22 @@ impl GatewayRuntime {
         Self {
             db_path,
             executor,
-            bound_run_id: None,
+            bound_owner_id: None,
             snapshot: canonical_snapshot(),
         }
     }
 }
 
 impl ModelRuntime for GatewayRuntime {
-    fn bind_run(&mut self, run_id: &str) {
-        self.bound_run_id = Some(run_id.to_string());
+    fn bind_request_owner(&mut self, owner_id: &str) {
+        self.bound_owner_id = Some(owner_id.to_string());
     }
 
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
-        let run_id = self.bound_run_id.as_deref().ok_or_else(|| {
+        let owner_id = self.bound_owner_id.as_deref().ok_or_else(|| {
             failure(
                 "MODEL_CONFIG_INVALID",
-                "Inference gateway runtime is not bound to a durable pipeline run",
+                "Inference gateway runtime is not bound to a durable request owner",
                 false,
                 Vec::new(),
             )
@@ -124,7 +124,7 @@ impl ModelRuntime for GatewayRuntime {
             )
         })?;
         let key = GatewayRequestKey {
-            run_id: run_id.to_string(),
+            owner_id: owner_id.to_string(),
             stage: request.stage.clone(),
             ordinal: request.ordinal,
         };
@@ -416,10 +416,41 @@ mod tests {
         assert_eq!(
             state.lock().unwrap().keys,
             vec![GatewayRequestKey {
-                run_id: "durable-run".to_string(),
+                owner_id: "durable-run".to_string(),
                 stage: PipelineStage::Analyze,
                 ordinal: 4,
             }]
+        );
+    }
+
+    #[test]
+    fn profile_suggestion_attempts_share_the_bound_request_owner() {
+        let root = TestDirectory::new();
+        let state = Arc::new(Mutex::new(ExecutorState::default()));
+        let mut runtime = runtime(&root, Arc::clone(&state), false, true);
+        runtime.bind_request_owner("profile-suggestion-owner");
+        let mut primary = request();
+        primary.ordinal = 0;
+        let mut expanded = request();
+        expanded.ordinal = 1;
+
+        runtime.generate(&primary).unwrap();
+        runtime.generate(&expanded).unwrap();
+
+        assert_eq!(
+            state.lock().unwrap().keys,
+            vec![
+                GatewayRequestKey {
+                    owner_id: "profile-suggestion-owner".to_string(),
+                    stage: PipelineStage::Analyze,
+                    ordinal: 0,
+                },
+                GatewayRequestKey {
+                    owner_id: "profile-suggestion-owner".to_string(),
+                    stage: PipelineStage::Analyze,
+                    ordinal: 1,
+                },
+            ]
         );
     }
 
