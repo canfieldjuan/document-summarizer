@@ -19,8 +19,9 @@ use pipeline::db::{get_or_create_profile_suggestion_owner, init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion, IngestError};
 use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
 use pipeline::model_settings::{
-    catalog as load_model_catalog, register_gguf, runtime_from_settings, save_selected_preset,
-    settings_path as model_settings_path, ModelCatalog,
+    catalog as load_model_catalog, configure_gateway, register_gguf, runtime_from_settings,
+    save_selected_preset, select_gateway, settings_path as model_settings_path, InferenceSource,
+    ModelCatalog,
 };
 use pipeline::normalize::{
     normalize_document as normalize_pipeline_document, CanonicalNormalizer, NormalizePipelineError,
@@ -39,9 +40,9 @@ use pipeline::structure::{
     StructurePipelineError,
 };
 use pipeline::workspace::{
-    get_persisted_summary as load_persisted_summary, get_run as load_run,
-    list_recent_runs as load_recent_runs, ollama_runtime_status, PersistedSummary, RunHistoryItem,
-    RuntimeStatus, WorkspaceError,
+    get_persisted_summary as load_persisted_summary, get_run as load_run, inference_runtime_status,
+    list_recent_runs as load_recent_runs, PersistedSummary, RunHistoryItem, RuntimeStatus,
+    WorkspaceError,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -272,11 +273,17 @@ async fn suggest_summary_profile(
         let structured = DeterministicStructureInterpreter::new()
             .interpret(&normalized)
             .map_err(CommandError::from)?;
-        let mut runtime = runtime_from_settings(&settings_path).map_err(CommandError::from)?;
-        bind_profile_suggestion_request_owner(&mut runtime, &db_path, &document.content_hash)?;
+        let mut runtime =
+            runtime_from_settings(&settings_path, &db_path).map_err(CommandError::from)?;
+        bind_profile_suggestion_request_owner(runtime.as_mut(), &db_path, &document.content_hash)?;
         runtime.health().map_err(CommandError::from)?;
-        suggest_profile_from_document(&runtime, &normalized, &structured, &document.content_hash)
-            .map_err(CommandError::from)
+        suggest_profile_from_document(
+            runtime.as_ref(),
+            &normalized,
+            &structured,
+            &document.content_hash,
+        )
+        .map_err(CommandError::from)
     })
     .await
     .map_err(|_| {
@@ -343,9 +350,58 @@ fn cancel_document(
 #[tauri::command]
 async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, CommandError> {
     let settings_path = state.model_settings_path.clone();
-    tauri::async_runtime::spawn_blocking(move || ollama_runtime_status(&settings_path))
+    let db_path = state.jobs.db_path().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || inference_runtime_status(&settings_path, &db_path))
         .await
         .map_err(|_| CommandError::new("MODEL_RUNTIME_STATUS_FAILED", "Runtime check stopped"))
+}
+
+#[tauri::command]
+async fn configure_inference_gateway(
+    state: State<'_, AppState>,
+    base_url: String,
+    token_file: String,
+    ca_file: String,
+) -> Result<ModelCatalog, CommandError> {
+    let settings_path = state.model_settings_path.clone();
+    let db_path = state.jobs.db_path().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        configure_gateway(
+            &settings_path,
+            &db_path,
+            &base_url,
+            Path::new(&token_file),
+            Path::new(&ca_file),
+        )
+        .map_err(CommandError::from)?;
+        load_model_catalog(&settings_path).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| {
+        CommandError::new(
+            "MODEL_GATEWAY_CONFIGURATION_FAILED",
+            "Gateway configuration stopped",
+        )
+    })?
+}
+
+#[tauri::command]
+async fn select_inference_gateway(
+    state: State<'_, AppState>,
+) -> Result<ModelCatalog, CommandError> {
+    let settings_path = state.model_settings_path.clone();
+    let db_path = state.jobs.db_path().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        select_gateway(&settings_path, &db_path).map_err(CommandError::from)?;
+        load_model_catalog(&settings_path).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| {
+        CommandError::new(
+            "MODEL_GATEWAY_SELECTION_FAILED",
+            "Gateway selection stopped",
+        )
+    })?
 }
 
 #[tauri::command]
@@ -376,7 +432,11 @@ async fn select_model_preset(
                 "Selected model preset is not installed and qualified",
             ));
         }
-        if current.selected_preset_id == preset_id {
+        if direct_preset_selection_is_noop(
+            current.selected_source,
+            &current.selected_preset_id,
+            &preset_id,
+        ) {
             return Ok(current);
         }
         prune_idle_managed_runtimes().map_err(CommandError::from)?;
@@ -385,6 +445,14 @@ async fn select_model_preset(
     })
     .await
     .map_err(|_| CommandError::new("MODEL_SELECTION_FAILED", "Model selection stopped"))?
+}
+
+fn direct_preset_selection_is_noop(
+    selected_source: InferenceSource,
+    selected_preset_id: &str,
+    requested_preset_id: &str,
+) -> bool {
+    selected_source == InferenceSource::Direct && selected_preset_id == requested_preset_id
 }
 
 #[tauri::command]
@@ -525,6 +593,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             cancel_document,
             get_runtime_status,
             get_model_catalog,
+            configure_inference_gateway,
+            select_inference_gateway,
             select_model_preset,
             register_gguf_model,
             get_connect_entitlement_status,
@@ -551,6 +621,20 @@ mod capability_tests {
         ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
     };
     use serde_json::Value;
+
+    #[test]
+    fn retained_direct_preset_is_not_a_noop_while_gateway_is_selected() {
+        assert!(!super::direct_preset_selection_is_noop(
+            crate::pipeline::model_settings::InferenceSource::Gateway,
+            "retained-direct",
+            "retained-direct",
+        ));
+        assert!(super::direct_preset_selection_is_noop(
+            crate::pipeline::model_settings::InferenceSource::Direct,
+            "retained-direct",
+            "retained-direct",
+        ));
+    }
 
     #[derive(Default)]
     struct OwnerRecordingRuntime {

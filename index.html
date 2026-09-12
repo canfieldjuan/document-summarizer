@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Summarize native-text PDF documents with a local Qwen model."
+      content="Summarize native-text PDF documents with private local or on-prem inference."
     />
     <title>Document Summarizer</title>
     <script type="module" src="/src/main.ts" defer></script>
@@ -27,12 +27,27 @@
           <section class="runtime-card" aria-labelledby="runtime-title" aria-live="polite">
             <span id="runtime-dot" class="runtime-dot is-checking" aria-hidden="true"></span>
             <div class="runtime-copy">
-              <p id="runtime-title" class="runtime-title">Checking local Qwen</p>
-              <p id="runtime-detail" class="runtime-detail">Looking for the local model…</p>
-              <label class="model-preset-label" for="model-preset">Model preset</label>
+              <p id="runtime-title" class="runtime-title">Checking inference</p>
+              <p id="runtime-detail" class="runtime-detail">Looking for the selected inference source…</p>
+              <label class="model-preset-label" for="model-preset">Inference source</label>
               <select id="model-preset" class="model-preset-select" disabled>
-                <option>Discovering qualified models…</option>
+                <option>Discovering inference options…</option>
               </select>
+              <button id="gateway-edit" class="quiet-button model-register-button" type="button" hidden>
+                Edit gateway connection
+              </button>
+              <div id="gateway-setup" class="gateway-setup" hidden>
+                <label for="gateway-url">Gateway HTTPS origin</label>
+                <input id="gateway-url" type="url" inputmode="url" autocomplete="off" placeholder="https://inference.local:8787" maxlength="2048" />
+                <div class="gateway-files">
+                  <button id="gateway-token" class="quiet-button" type="button">Choose token file</button>
+                  <span id="gateway-token-name">No token selected</span>
+                  <button id="gateway-ca" class="quiet-button" type="button">Choose CA file</button>
+                  <span id="gateway-ca-name">No CA selected</span>
+                </div>
+                <button id="gateway-connect" class="quiet-button" type="button">Verify and use gateway</button>
+                <p id="gateway-detail" class="runtime-detail">The token stays in its private file. The app stores only the file path.</p>
+              </div>
               <button id="register-gguf" class="quiet-button model-register-button" type="button">
                 Add GGUF file
               </button>
@@ -67,7 +82,7 @@
               <p class="utility-label">Native-text PDF workflow</p>
               <h2 id="workbench-title">Bring one document into focus.</h2>
               <p class="intro-copy">
-                Choose a PDF to create a local summary. Your source stays on this computer.
+                Extracted document content is processed on this computer or sent to your configured on-prem gateway, according to the run's inference profile.
               </p>
               <div class="summary-profile-control">
                 <label for="summary-profile">Summary profile</label>
@@ -85,7 +100,7 @@
                 <span>Choose a PDF</span>
                 <span aria-hidden="true">＋</span>
               </button>
-              <p id="action-hint" class="action-hint">Waiting for local model readiness.</p>
+              <p id="action-hint" class="action-hint">Waiting for inference readiness.</p>
             </div>
           </div>
 
@@ -106,7 +121,7 @@
 
             <div id="processing-view" class="stage-view processing-view" hidden>
               <div class="processing-mark" aria-hidden="true"><span></span></div>
-              <p class="stage-kicker">Processing locally</p>
+              <p class="stage-kicker">Processing with the run's inference profile</p>
               <h3 id="processing-filename">Preparing document…</h3>
               <p id="processing-status">Preparing the durable pipeline run…</p>
               <div class="progress-track" aria-hidden="true"><span></span></div>

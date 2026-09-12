@@ -64,11 +64,22 @@ interface ModelPreset {
 }
 
 interface ModelCatalog {
+  selectedSource: "direct" | "gateway";
   selectedPresetId: string;
   selectedPresetAvailable: boolean;
+  gateway: GatewayConnectionView;
   installedModels: ModelOption[];
   presets: ModelPreset[];
   discoveryWarnings: string[];
+}
+
+interface GatewayConnectionView {
+  platformSupported: boolean;
+  configured: boolean;
+  baseUrl: string | null;
+  tokenFileName: string | null;
+  caFileName: string | null;
+  unavailableReason: string | null;
 }
 
 interface ModelOption {
@@ -193,6 +204,15 @@ const runtimeTitle = element<HTMLParagraphElement>("#runtime-title");
 const runtimeDetail = element<HTMLParagraphElement>("#runtime-detail");
 const runtimeRetry = element<HTMLButtonElement>("#runtime-retry");
 const modelPreset = element<HTMLSelectElement>("#model-preset");
+const gatewayEdit = element<HTMLButtonElement>("#gateway-edit");
+const gatewaySetup = element<HTMLDivElement>("#gateway-setup");
+const gatewayUrl = element<HTMLInputElement>("#gateway-url");
+const gatewayToken = element<HTMLButtonElement>("#gateway-token");
+const gatewayTokenName = element<HTMLSpanElement>("#gateway-token-name");
+const gatewayCa = element<HTMLButtonElement>("#gateway-ca");
+const gatewayCaName = element<HTMLSpanElement>("#gateway-ca-name");
+const gatewayConnect = element<HTMLButtonElement>("#gateway-connect");
+const gatewayDetail = element<HTMLParagraphElement>("#gateway-detail");
 const summaryProfile = element<HTMLSelectElement>("#summary-profile");
 const registerGguf = element<HTMLButtonElement>("#register-gguf");
 const connectMark = element<HTMLSpanElement>("#connect-mark");
@@ -242,6 +262,11 @@ let runtimeReady = false;
 let selectedModelLabel: string | null = null;
 let modelSelectionAvailable = false;
 let modelSelectionInFlight = false;
+let selectedGatewayTokenPath: string | null = null;
+let selectedGatewayCaPath: string | null = null;
+let activeInferenceSelection: string | null = null;
+let gatewayConfigured = false;
+let gatewayPlatformSupported = false;
 let connectInstalling = false;
 let connectStatusRefreshInFlight = false;
 let processing = false;
@@ -272,18 +297,23 @@ function syncPrimaryAction(): void {
   modelPreset.disabled = !modelSelectionAvailable || modelSelectionInFlight || processing;
   summaryProfile.disabled = processing;
   registerGguf.disabled = modelSelectionInFlight || processing;
+  gatewayUrl.disabled = modelSelectionInFlight || processing;
+  gatewayEdit.disabled = modelSelectionInFlight || processing;
+  gatewayToken.disabled = modelSelectionInFlight || processing;
+  gatewayCa.disabled = modelSelectionInFlight || processing;
+  gatewayConnect.disabled = modelSelectionInFlight || processing;
   const label = selectButton.querySelector<HTMLSpanElement>("span");
   if (!label) return;
 
   if (processing) {
     label.textContent = "Processing…";
-    actionHint.textContent = "The source is being processed locally.";
+    actionHint.textContent = "Extracted content is being processed by the run's saved inference profile.";
   } else if (runtimeReady) {
     label.textContent = "Choose a PDF";
     actionHint.textContent = "Native-text PDFs are supported in this release.";
   } else {
-    label.textContent = "Local model unavailable";
-    actionHint.textContent = "Check the selected local model runtime, then try again.";
+    label.textContent = "Inference unavailable";
+    actionHint.textContent = "Check the selected inference source, then try again.";
   }
 
   if (retrySourceRun) {
@@ -319,8 +349,8 @@ function syncPrimaryAction(): void {
 async function refreshRuntimeStatus(): Promise<void> {
   runtimeReady = false;
   runtimeDot.className = "runtime-dot is-checking";
-  runtimeTitle.textContent = "Checking local Qwen";
-  runtimeDetail.textContent = "Looking for the local model…";
+  runtimeTitle.textContent = "Checking inference";
+  runtimeDetail.textContent = "Looking for the selected inference source…";
   runtimeRetry.hidden = true;
   syncPrimaryAction();
 
@@ -356,8 +386,22 @@ async function refreshModelCatalog(): Promise<void> {
   try {
     const catalog = await invoke<ModelCatalog>("get_model_catalog");
     modelPreset.replaceChildren();
+    gatewayConfigured = catalog.gateway.configured;
+    gatewayPlatformSupported = catalog.gateway.platformSupported;
+    const gatewayOptions = document.createElement("optgroup");
+    gatewayOptions.label = "Shared inference";
+    const gatewayOption = document.createElement("option");
+    gatewayOption.value = "__gateway__";
+    gatewayOption.disabled = !catalog.gateway.platformSupported;
+    gatewayOption.textContent = catalog.gateway.platformSupported
+      ? catalog.gateway.configured && catalog.gateway.baseUrl
+        ? `Local Inference Gateway · ${catalog.gateway.baseUrl}`
+        : "Local Inference Gateway · configure"
+      : `Local Inference Gateway · ${catalog.gateway.unavailableReason ?? "unavailable"}`;
+    gatewayOptions.append(gatewayOption);
+    modelPreset.append(gatewayOptions);
     const qualified = document.createElement("optgroup");
-    qualified.label = "Qualified presets";
+    qualified.label = "Direct fallback presets";
     for (const preset of catalog.presets) {
       const installed = catalog.installedModels.find(
         (model) =>
@@ -399,7 +443,10 @@ async function refreshModelCatalog(): Promise<void> {
       unavailable.append(option);
     }
     if (unavailable.children.length > 0) modelPreset.append(unavailable);
-    modelPreset.value = catalog.selectedPresetId;
+    activeInferenceSelection = catalog.selectedSource === "gateway"
+      ? "__gateway__"
+      : catalog.selectedPresetId;
+    modelPreset.value = activeInferenceSelection;
     const selectedPreset = catalog.presets.find(
       (preset) => preset.presetId === catalog.selectedPresetId,
     );
@@ -410,16 +457,37 @@ async function refreshModelCatalog(): Promise<void> {
             model.runtimeKind === selectedPreset.analysisRuntimeKind,
         )
       : null;
-    selectedModelLabel = selectedPreset
+    selectedModelLabel = catalog.selectedSource === "gateway"
+      ? catalog.gateway.baseUrl
+        ? `document.summary.step@1 · ${catalog.gateway.baseUrl}`
+        : "document.summary.step@1"
+      : selectedPreset
       ? [
           selectedPreset.label,
           selectedInstalled ? formatModelSize(selectedInstalled.sizeBytes) : null,
           `${selectedPreset.analysisContextTokens.toLocaleString()} ctx`,
         ].filter(Boolean).join(" · ")
       : null;
-    modelSelectionAvailable = catalog.presets.length > 0;
+    gatewayUrl.value = catalog.gateway.baseUrl ?? gatewayUrl.value;
+    if (!selectedGatewayTokenPath) {
+      gatewayTokenName.textContent = catalog.gateway.tokenFileName ?? "No token selected";
+    }
+    if (!selectedGatewayCaPath) {
+      gatewayCaName.textContent = catalog.gateway.caFileName ?? "No CA selected";
+    }
+    gatewayDetail.textContent = catalog.gateway.configured
+      ? "Gateway connection saved. Choose new files only when replacing it."
+      : catalog.gateway.unavailableReason
+        ?? "The token stays in its private file. The app stores only the file path.";
+    gatewayEdit.hidden = !catalog.gateway.platformSupported || !catalog.gateway.configured;
+    gatewaySetup.hidden = catalog.selectedSource !== "gateway";
+    modelSelectionAvailable = catalog.gateway.platformSupported || catalog.presets.length > 0;
     modelPreset.disabled = !modelSelectionAvailable || modelSelectionInFlight || processing;
-    if (!catalog.selectedPresetAvailable && catalog.presets.length > 0) {
+    if (
+      catalog.selectedSource === "direct"
+      && !catalog.selectedPresetAvailable
+      && catalog.presets.length > 0
+    ) {
       const recovery = document.createElement("option");
       recovery.value = "";
       recovery.textContent = "Select an available qualified model";
@@ -463,17 +531,90 @@ function formatModelSize(bytes: number): string {
   return `${(bytes / (1024 ** 3)).toFixed(1)} GiB`;
 }
 
-async function selectModelPreset(): Promise<void> {
-  const presetId = modelPreset.value;
-  if (!presetId || processing) return;
+async function selectInferenceSource(): Promise<void> {
+  const selection = modelPreset.value;
+  if (!selection || processing) return;
+  if (selection === "__gateway__" && !gatewayConfigured) {
+    if (activeInferenceSelection) modelPreset.value = activeInferenceSelection;
+    showGatewaySetup();
+    return;
+  }
   modelSelectionInFlight = true;
   runtimeReady = false;
   syncPrimaryAction();
+  let selectionError: string | null = null;
   try {
-    await invoke<ModelCatalog>("select_model_preset", { presetId });
+    if (selection === "__gateway__") {
+      await invoke<ModelCatalog>("select_inference_gateway");
+    } else {
+      await invoke<ModelCatalog>("select_model_preset", { presetId: selection });
+    }
     await refreshModelCatalog();
   } catch (error) {
-    runtimeDetail.textContent = normalizeCommandError(error).message;
+    selectionError = normalizeCommandError(error).message;
+    await refreshModelCatalog();
+  } finally {
+    await refreshRuntimeStatus();
+    if (selectionError) runtimeDetail.textContent = selectionError;
+    modelSelectionInFlight = false;
+    syncPrimaryAction();
+  }
+}
+
+function showGatewaySetup(): void {
+  if (processing || modelSelectionInFlight || !gatewayPlatformSupported) return;
+  gatewaySetup.hidden = false;
+  gatewayUrl.focus();
+}
+
+async function chooseGatewayToken(): Promise<void> {
+  if (processing || modelSelectionInFlight || !gatewayPlatformSupported) return;
+  const selected = await open({ multiple: false, directory: false });
+  if (!selected) return;
+  selectedGatewayTokenPath = selected;
+  gatewayTokenName.textContent = selected.split(/[\\/]/).pop() ?? "Token selected";
+}
+
+async function chooseGatewayCa(): Promise<void> {
+  if (processing || modelSelectionInFlight || !gatewayPlatformSupported) return;
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "CA certificate", extensions: ["pem", "crt", "cer"] }],
+  });
+  if (!selected) return;
+  selectedGatewayCaPath = selected;
+  gatewayCaName.textContent = selected.split(/[\\/]/).pop() ?? "CA selected";
+}
+
+async function configureInferenceGateway(): Promise<void> {
+  const baseUrl = gatewayUrl.value.trim();
+  if (
+    processing
+    || modelSelectionInFlight
+    || !gatewayPlatformSupported
+    || !baseUrl
+    || !selectedGatewayTokenPath
+    || !selectedGatewayCaPath
+  ) {
+    gatewayDetail.textContent = "Enter the HTTPS origin and choose both private connection files.";
+    return;
+  }
+  modelSelectionInFlight = true;
+  runtimeReady = false;
+  gatewayDetail.textContent = "Verifying the authenticated gateway task…";
+  syncPrimaryAction();
+  try {
+    await invoke<ModelCatalog>("configure_inference_gateway", {
+      baseUrl,
+      tokenFile: selectedGatewayTokenPath,
+      caFile: selectedGatewayCaPath,
+    });
+    selectedGatewayTokenPath = null;
+    selectedGatewayCaPath = null;
+    await refreshModelCatalog();
+  } catch (error) {
+    gatewayDetail.textContent = normalizeCommandError(error).message;
   } finally {
     await refreshRuntimeStatus();
     modelSelectionInFlight = false;
@@ -1338,8 +1479,12 @@ async function initialize(): Promise<void> {
   runtimeRetry.addEventListener("click", () => {
     void refreshModelCatalog().then(refreshRuntimeStatus);
   });
-  modelPreset.addEventListener("change", () => void selectModelPreset());
+  modelPreset.addEventListener("change", () => void selectInferenceSource());
   registerGguf.addEventListener("click", () => void selectAndRegisterGguf());
+  gatewayEdit.addEventListener("click", showGatewaySetup);
+  gatewayToken.addEventListener("click", () => void chooseGatewayToken());
+  gatewayCa.addEventListener("click", () => void chooseGatewayCa());
+  gatewayConnect.addEventListener("click", () => void configureInferenceGateway());
   connectActivate.addEventListener("click", () => void selectAndInstallConnectEntitlement());
   continueButton.addEventListener("click", () => void continueSelectedRun());
   retryButton.addEventListener("click", () => void retrySelectedRun());

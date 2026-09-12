@@ -4,7 +4,7 @@ use crate::pipeline::contracts::{
     SummaryArtifact, SummaryPresentationMode, SummaryProfile,
 };
 use crate::pipeline::db::{self, StoreError};
-use crate::pipeline::model_settings::runtime_from_settings;
+use crate::pipeline::model_settings::{load_settings, runtime_from_settings};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -134,10 +134,16 @@ impl WorkspaceError {
     }
 }
 
-pub fn ollama_runtime_status(settings_path: &std::path::Path) -> RuntimeStatus {
-    match runtime_from_settings(settings_path) {
-        Ok(runtime) => assess_runtime(&runtime),
-        Err(failure) => unavailable_runtime_status(None, None, failure),
+pub fn inference_runtime_status(
+    settings_path: &std::path::Path,
+    db_path: &std::path::Path,
+) -> RuntimeStatus {
+    let configured_provider = load_settings(settings_path)
+        .map(|settings| settings.selected_source.provider_name())
+        .unwrap_or("Inference runtime");
+    match runtime_from_settings(settings_path, db_path) {
+        Ok(runtime) => assess_runtime(runtime.as_ref()),
+        Err(failure) => unavailable_runtime_status(configured_provider, None, None, failure),
     }
 }
 
@@ -435,17 +441,23 @@ fn source_label(page_start: u32, page_end: u32) -> String {
 }
 
 fn assess_runtime(runtime: &dyn ModelRuntime) -> RuntimeStatus {
+    let provider_name = if runtime.runtime_id() == "local-inference-gateway" {
+        "Local Inference Gateway"
+    } else {
+        "Local Qwen"
+    };
     match runtime.health() {
         Ok(()) => RuntimeStatus {
-            provider_name: "Local Qwen".to_string(),
+            provider_name: provider_name.to_string(),
             ready: true,
             runtime_id: Some(runtime.runtime_id().to_string()),
             model_id: Some(runtime.model_id().to_string()),
             code: None,
-            message: "The selected local Qwen runtime is ready.".to_string(),
+            message: format!("The selected {provider_name} runtime is ready."),
             recoverable: false,
         },
         Err(failure) => unavailable_runtime_status(
+            provider_name,
             Some(runtime.runtime_id().to_string()),
             Some(runtime.model_id().to_string()),
             failure,
@@ -454,12 +466,13 @@ fn assess_runtime(runtime: &dyn ModelRuntime) -> RuntimeStatus {
 }
 
 fn unavailable_runtime_status(
+    provider_name: &str,
     runtime_id: Option<String>,
     model_id: Option<String>,
     failure: ModelRuntimeFailure,
 ) -> RuntimeStatus {
     RuntimeStatus {
-        provider_name: "Local Qwen".to_string(),
+        provider_name: provider_name.to_string(),
         ready: false,
         runtime_id,
         model_id,
@@ -565,6 +578,29 @@ mod tests {
         }
     }
 
+    struct GatewayFixtureRuntime;
+
+    impl ModelRuntime for GatewayFixtureRuntime {
+        fn generate(
+            &self,
+            _request: &crate::pipeline::contracts::ModelRequest,
+        ) -> Result<crate::pipeline::contracts::ModelResponse, ModelRuntimeFailure> {
+            unreachable!("runtime readiness must not generate")
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            "local-inference-gateway"
+        }
+
+        fn model_id(&self) -> &str {
+            "document.summary.step@1"
+        }
+    }
+
     fn fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf")
     }
@@ -608,6 +644,12 @@ mod tests {
         assert_eq!(ready.provider_name, "Local Qwen");
         assert_eq!(ready.model_id.as_deref(), Some("workspace-fixture-model"));
         assert!(ready.code.is_none());
+
+        let gateway = assess_runtime(&GatewayFixtureRuntime);
+        assert!(gateway.ready);
+        assert_eq!(gateway.provider_name, "Local Inference Gateway");
+        assert_eq!(gateway.model_id.as_deref(), Some("document.summary.step@1"));
+        assert!(!gateway.message.contains("Qwen"));
 
         let unavailable = assess_runtime(&UnavailableRuntime);
         assert!(!unavailable.ready);

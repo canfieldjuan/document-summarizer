@@ -3,10 +3,12 @@ use crate::pipeline::contracts::{
     ModelRuntimeKind, ModelStageProfileSnapshot, PipelineStage,
 };
 use crate::pipeline::control::ExecutionControl;
+use crate::pipeline::gateway_client::GatewayClientConfig;
+use crate::pipeline::gateway_runtime::GatewayRuntime;
 use crate::pipeline::llama_cpp::{
     current_regular_file_identity, inspect_regular_file, prepare_for_ollama_runtime,
-    qualified_runtime_available, FileIdentity, GgufRuntimeConfig, LlamaCppRuntime,
-    QualifiedRuntimeFile,
+    prune_idle_managed_runtimes, qualified_runtime_available, FileIdentity, GgufRuntimeConfig,
+    LlamaCppRuntime, QualifiedRuntimeFile,
 };
 use crate::pipeline::model::{InstalledModelDescriptor, OllamaRuntime, QwenTokenizerFamily};
 use crate::pipeline::qwen_tokenizer::{
@@ -18,16 +20,20 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 use tempfile::Builder;
 #[cfg(test)]
 use uuid::Uuid;
 
-const SETTINGS_VERSION: u32 = 2;
+const SETTINGS_VERSION: u32 = 3;
 pub const SETTINGS_FILE_NAME: &str = "model-settings-v1.json";
 const DEFAULT_PRESET_ID: &str = "full-qwen3-30b-a3b-q4ks-v1";
+const GATEWAY_TIMEOUT: Duration = Duration::from_secs(900);
+const GATEWAY_REQUEST_LIFETIME: Duration = Duration::from_secs(900);
 const MAX_REGISTERED_GGUFS: usize = 32;
 const MAX_REGISTERED_PATH_BYTES: usize = 4_096;
 const MAX_REGISTERED_LABEL_BYTES: usize = 512;
+const MAX_GATEWAY_URL_BYTES: usize = 2_048;
 const JACK_GGUF_DIGEST: &str = "e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041";
 const QUALIFIED_LLAMA_SERVER_DIGEST: &str =
     "0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099";
@@ -135,19 +141,61 @@ pub struct RegisteredGguf {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelSettings {
     version: u32,
+    #[serde(default)]
+    pub selected_source: InferenceSource,
     pub selected_preset_id: String,
     #[serde(default)]
     pub registered_ggufs: Vec<RegisteredGguf>,
+    #[serde(default)]
+    gateway: Option<GatewayConnectionSettings>,
 }
 
 impl Default for ModelSettings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
+            selected_source: InferenceSource::Direct,
             selected_preset_id: DEFAULT_PRESET_ID.to_string(),
             registered_ggufs: Vec::new(),
+            gateway: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceSource {
+    #[default]
+    Direct,
+    Gateway,
+}
+
+impl InferenceSource {
+    pub fn provider_name(self) -> &'static str {
+        match self {
+            Self::Direct => "Local Qwen",
+            Self::Gateway => "Local Inference Gateway",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GatewayConnectionSettings {
+    base_url: String,
+    token_file: PathBuf,
+    ca_file: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayConnectionView {
+    pub platform_supported: bool,
+    pub configured: bool,
+    pub base_url: Option<String>,
+    pub token_file_name: Option<String>,
+    pub ca_file_name: Option<String>,
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -193,8 +241,10 @@ pub struct ModelPreset {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCatalog {
+    pub selected_source: InferenceSource,
     pub selected_preset_id: String,
     pub selected_preset_available: bool,
+    pub gateway: GatewayConnectionView,
     pub installed_models: Vec<ModelOption>,
     pub presets: Vec<ModelPreset>,
     pub discovery_warnings: Vec<String>,
@@ -230,8 +280,29 @@ pub fn load_settings(path: &Path) -> Result<ModelSettings, ModelRuntimeFailure> 
         let _ = legacy.version;
         ModelSettings {
             version: SETTINGS_VERSION,
+            selected_source: InferenceSource::Direct,
             selected_preset_id: legacy.selected_preset_id,
             registered_ggufs: Vec::new(),
+            gateway: None,
+        }
+    } else if version == 2 {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct LegacySettings {
+            version: u32,
+            selected_preset_id: String,
+            #[serde(default)]
+            registered_ggufs: Vec<RegisteredGguf>,
+        }
+        let legacy: LegacySettings = serde_json::from_value(value)
+            .map_err(|_| config_failure("Model settings are malformed"))?;
+        let _ = legacy.version;
+        ModelSettings {
+            version: SETTINGS_VERSION,
+            selected_source: InferenceSource::Direct,
+            selected_preset_id: legacy.selected_preset_id,
+            registered_ggufs: legacy.registered_ggufs,
+            gateway: None,
         }
     } else {
         serde_json::from_value(value).map_err(|_| config_failure("Model settings are malformed"))?
@@ -255,7 +326,76 @@ pub fn save_selected_preset(
     }
     let _writer = settings_writer()?;
     let mut settings = load_settings(path)?;
+    settings.selected_source = InferenceSource::Direct;
     settings.selected_preset_id = selected_preset_id.to_string();
+    persist_settings(path, &settings)?;
+    Ok(settings)
+}
+
+pub fn configure_gateway(
+    path: &Path,
+    db_path: &Path,
+    base_url: &str,
+    token_file: &Path,
+    ca_file: &Path,
+) -> Result<ModelSettings, ModelRuntimeFailure> {
+    configure_gateway_with(path, base_url, token_file, ca_file, |gateway| {
+        let runtime = GatewayRuntime::new(db_path.to_path_buf(), gateway.client_config())?;
+        runtime.health()
+    })
+}
+
+fn configure_gateway_with(
+    path: &Path,
+    base_url: &str,
+    token_file: &Path,
+    ca_file: &Path,
+    validate: impl FnOnce(&GatewayConnectionSettings) -> Result<(), ModelRuntimeFailure>,
+) -> Result<ModelSettings, ModelRuntimeFailure> {
+    ensure_gateway_platform_supported()?;
+    let gateway = GatewayConnectionSettings {
+        base_url: base_url.to_string(),
+        token_file: token_file.to_path_buf(),
+        ca_file: ca_file.to_path_buf(),
+    };
+    validate_gateway_metadata(&gateway)?;
+    validate(&gateway)?;
+    prune_idle_managed_runtimes()?;
+    let _writer = settings_writer()?;
+    let mut settings = load_settings(path)?;
+    settings.selected_source = InferenceSource::Gateway;
+    settings.gateway = Some(gateway);
+    persist_settings(path, &settings)?;
+    Ok(settings)
+}
+
+pub fn select_gateway(path: &Path, db_path: &Path) -> Result<ModelSettings, ModelRuntimeFailure> {
+    select_gateway_with(path, |gateway| {
+        let runtime = GatewayRuntime::new(db_path.to_path_buf(), gateway.client_config())?;
+        runtime.health()
+    })
+}
+
+fn select_gateway_with(
+    path: &Path,
+    validate: impl FnOnce(&GatewayConnectionSettings) -> Result<(), ModelRuntimeFailure>,
+) -> Result<ModelSettings, ModelRuntimeFailure> {
+    ensure_gateway_platform_supported()?;
+    let current = load_settings(path)?;
+    let gateway = current
+        .gateway
+        .clone()
+        .ok_or_else(|| config_failure("Inference gateway is not configured"))?;
+    validate(&gateway)?;
+    prune_idle_managed_runtimes()?;
+    let _writer = settings_writer()?;
+    let mut settings = load_settings(path)?;
+    if settings.gateway.as_ref() != Some(&gateway) {
+        return Err(config_failure(
+            "Inference gateway configuration changed during selection",
+        ));
+    }
+    settings.selected_source = InferenceSource::Gateway;
     persist_settings(path, &settings)?;
     Ok(settings)
 }
@@ -373,7 +513,60 @@ fn validate_settings(settings: &ModelSettings) -> Result<(), ModelRuntimeFailure
             return Err(config_failure("Registered GGUF metadata is invalid"));
         }
     }
+    if let Some(gateway) = &settings.gateway {
+        validate_gateway_metadata(gateway)?;
+    }
+    if settings.selected_source == InferenceSource::Gateway && settings.gateway.is_none() {
+        return Err(config_failure(
+            "Selected inference gateway is not configured",
+        ));
+    }
     Ok(())
+}
+
+impl GatewayConnectionSettings {
+    fn client_config(&self) -> GatewayClientConfig {
+        GatewayClientConfig {
+            base_url: self.base_url.clone(),
+            token_file: self.token_file.clone(),
+            ca_file: self.ca_file.clone(),
+            timeout: GATEWAY_TIMEOUT,
+            request_lifetime: GATEWAY_REQUEST_LIFETIME,
+        }
+    }
+}
+
+fn validate_gateway_metadata(
+    gateway: &GatewayConnectionSettings,
+) -> Result<(), ModelRuntimeFailure> {
+    if gateway.base_url.is_empty()
+        || gateway.base_url.len() > MAX_GATEWAY_URL_BYTES
+        || !gateway.token_file.is_absolute()
+        || !gateway.ca_file.is_absolute()
+        || path_text_len(&gateway.token_file)? > MAX_REGISTERED_PATH_BYTES
+        || path_text_len(&gateway.ca_file)? > MAX_REGISTERED_PATH_BYTES
+    {
+        return Err(config_failure(
+            "Inference gateway connection metadata is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn path_text_len(path: &Path) -> Result<usize, ModelRuntimeFailure> {
+    path.to_str()
+        .map(str::len)
+        .ok_or_else(|| config_failure("Inference gateway paths must use valid UTF-8"))
+}
+
+fn ensure_gateway_platform_supported() -> Result<(), ModelRuntimeFailure> {
+    if cfg!(unix) {
+        Ok(())
+    } else {
+        Err(config_failure(
+            "Inference gateway credential validation is not available on this platform",
+        ))
+    }
 }
 
 fn validate_selected_gguf_path(path: &Path) -> Result<(), ModelRuntimeFailure> {
@@ -541,13 +734,37 @@ fn catalog_from_descriptors(
     let selected_preset_available = presets
         .iter()
         .any(|preset| preset.preset_id == settings.selected_preset_id);
+    let gateway = gateway_connection_view(settings.gateway.as_ref());
     Ok(ModelCatalog {
+        selected_source: settings.selected_source,
         selected_preset_id: settings.selected_preset_id,
         selected_preset_available,
+        gateway,
         installed_models,
         presets,
         discovery_warnings,
     })
+}
+
+fn gateway_connection_view(gateway: Option<&GatewayConnectionSettings>) -> GatewayConnectionView {
+    let platform_supported = cfg!(unix);
+    GatewayConnectionView {
+        platform_supported,
+        configured: gateway.is_some(),
+        base_url: gateway.map(|value| value.base_url.clone()),
+        token_file_name: gateway.and_then(|value| bounded_file_name(&value.token_file)),
+        ca_file_name: gateway.and_then(|value| bounded_file_name(&value.ca_file)),
+        unavailable_reason: (!platform_supported).then(|| {
+            "Gateway credential ownership validation is not available on this platform".to_string()
+        }),
+    }
+}
+
+fn bounded_file_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty() && value.len() <= MAX_REGISTERED_LABEL_BYTES)
+        .map(ToOwned::to_owned)
 }
 
 fn profile_for_option(
@@ -624,10 +841,26 @@ fn preset(
     })
 }
 
-pub fn runtime_from_settings(path: &Path) -> Result<QwenProfileRuntime, ModelRuntimeFailure> {
+pub fn runtime_from_settings(
+    path: &Path,
+    db_path: &Path,
+) -> Result<Box<dyn ModelRuntime>, ModelRuntimeFailure> {
     let settings = load_settings(path)?;
+    if settings.selected_source == InferenceSource::Gateway {
+        ensure_gateway_platform_supported()?;
+        let gateway = settings
+            .gateway
+            .as_ref()
+            .ok_or_else(|| config_failure("Inference gateway is not configured"))?;
+        return Ok(Box::new(GatewayRuntime::new(
+            db_path.to_path_buf(),
+            gateway.client_config(),
+        )?));
+    }
     if let Some(snapshot) = selected_direct_snapshot(&settings)? {
-        return QwenProfileRuntime::from_snapshot(&snapshot, path);
+        return Ok(Box::new(QwenProfileRuntime::from_snapshot(
+            &snapshot, path,
+        )?));
     }
     let catalog = catalog(path)?;
     let preset = catalog
@@ -635,7 +868,7 @@ pub fn runtime_from_settings(path: &Path) -> Result<QwenProfileRuntime, ModelRun
         .iter()
         .find(|preset| preset.preset_id == catalog.selected_preset_id)
         .ok_or_else(|| config_failure("Selected model preset is unavailable"))?;
-    QwenProfileRuntime::new(preset, path)
+    Ok(Box::new(QwenProfileRuntime::new(preset, path)?))
 }
 
 fn selected_direct_snapshot(
@@ -671,8 +904,24 @@ fn selected_direct_snapshot(
 pub fn runtime_from_snapshot(
     snapshot: &ModelProfileSnapshot,
     settings_path: &Path,
-) -> Result<QwenProfileRuntime, ModelRuntimeFailure> {
-    QwenProfileRuntime::from_snapshot(snapshot, settings_path)
+    db_path: &Path,
+) -> Result<Box<dyn ModelRuntime>, ModelRuntimeFailure> {
+    if snapshot.version == 3 {
+        ensure_gateway_platform_supported()?;
+        let settings = load_settings(settings_path)?;
+        let gateway = settings
+            .gateway
+            .ok_or_else(|| config_failure("Inference gateway is not configured"))?;
+        return Ok(Box::new(GatewayRuntime::from_snapshot(
+            db_path.to_path_buf(),
+            gateway.client_config(),
+            snapshot,
+        )?));
+    }
+    Ok(Box::new(QwenProfileRuntime::from_snapshot(
+        snapshot,
+        settings_path,
+    )?))
 }
 
 pub struct QwenProfileRuntime {
@@ -1391,7 +1640,7 @@ mod tests {
         let settings = ModelSettings {
             version: SETTINGS_VERSION,
             selected_preset_id: "removed-profile".to_string(),
-            registered_ggufs: Vec::new(),
+            ..ModelSettings::default()
         };
         let qualified = descriptor(
             "baseline:latest",
@@ -1453,6 +1702,112 @@ mod tests {
     }
 
     #[test]
+    fn version_two_settings_preserve_direct_selection_on_upgrade() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = settings_path(directory.path());
+        fs::write(
+            &path,
+            format!(
+                "{{\"version\":2,\"selectedPresetId\":\"{DEFAULT_PRESET_ID}\",\"registeredGgufs\":[]}}"
+            ),
+        )
+        .unwrap();
+
+        let loaded = load_settings(&path).unwrap();
+        assert_eq!(loaded.version, SETTINGS_VERSION);
+        assert_eq!(loaded.selected_source, InferenceSource::Direct);
+        assert_eq!(loaded.selected_preset_id, DEFAULT_PRESET_ID);
+        assert!(loaded.gateway.is_none());
+
+        save_selected_preset(&path, DEFAULT_PRESET_ID).unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], SETTINGS_VERSION);
+        assert_eq!(persisted["selectedSource"], "direct");
+        assert_eq!(persisted["gateway"], serde_json::Value::Null);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gateway_selection_validates_before_atomic_source_switch() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = settings_path(directory.path());
+        let token = directory.path().join("document-summarizer.token");
+        let ca = directory.path().join("office-ca.pem");
+
+        let rejected =
+            configure_gateway_with(&path, "https://inference.office:8787", &token, &ca, |_| {
+                Err(config_failure("fixture gateway unavailable"))
+            })
+            .unwrap_err();
+        assert_eq!(rejected.code, "MODEL_CONFIG_INVALID");
+        assert!(!path.exists());
+
+        let configured =
+            configure_gateway_with(&path, "https://inference.office:8787", &token, &ca, |_| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(configured.selected_source, InferenceSource::Gateway);
+        assert_eq!(
+            configured.gateway.as_ref().unwrap().base_url,
+            "https://inference.office:8787"
+        );
+
+        let direct = save_selected_preset(&path, DEFAULT_PRESET_ID).unwrap();
+        assert_eq!(direct.selected_source, InferenceSource::Direct);
+        assert!(direct.gateway.is_some());
+
+        let restored = select_gateway_with(&path, |_| Ok(())).unwrap();
+        assert_eq!(restored.selected_source, InferenceSource::Gateway);
+        assert_eq!(load_settings(&path).unwrap(), restored);
+    }
+
+    #[test]
+    fn gateway_metadata_and_view_fail_closed_without_disclosing_paths() {
+        let mut settings = ModelSettings {
+            selected_source: InferenceSource::Gateway,
+            ..ModelSettings::default()
+        };
+        assert_eq!(
+            validate_settings(&settings).unwrap_err().code,
+            "MODEL_CONFIG_INVALID"
+        );
+
+        settings.gateway = Some(GatewayConnectionSettings {
+            base_url: "https://inference.office:8787".to_string(),
+            token_file: PathBuf::from("relative.token"),
+            ca_file: PathBuf::from("relative-ca.pem"),
+        });
+        assert_eq!(
+            validate_settings(&settings).unwrap_err().code,
+            "MODEL_CONFIG_INVALID"
+        );
+
+        let root = std::env::temp_dir().join("private-gateway-parent");
+        settings.gateway = Some(GatewayConnectionSettings {
+            base_url: "https://inference.office:8787".to_string(),
+            token_file: root.join("document-summarizer.token"),
+            ca_file: root.join("office-ca.pem"),
+        });
+        validate_settings(&settings).unwrap();
+        let view = gateway_connection_view(settings.gateway.as_ref());
+        assert!(view.configured);
+        assert_eq!(
+            view.base_url.as_deref(),
+            Some("https://inference.office:8787")
+        );
+        assert_eq!(
+            view.token_file_name.as_deref(),
+            Some("document-summarizer.token")
+        );
+        assert_eq!(view.ca_file_name.as_deref(), Some("office-ca.pem"));
+        assert!(!serde_json::to_string(&view)
+            .unwrap()
+            .contains("private-gateway-parent"));
+    }
+
+    #[test]
     fn selected_direct_profile_reconstructs_without_ollama_discovery() {
         let profile = QUALIFIED_PROFILES[1];
         let registration = RegisteredGguf {
@@ -1474,6 +1829,7 @@ mod tests {
             version: SETTINGS_VERSION,
             selected_preset_id: format!("full-{}", profile.profile_id),
             registered_ggufs: vec![registration],
+            ..ModelSettings::default()
         };
         let snapshot = selected_direct_snapshot(&settings)
             .unwrap()
@@ -1663,6 +2019,7 @@ mod tests {
             registered_ggufs: (0..MAX_REGISTERED_GGUFS)
                 .map(|index| registration(index, MAX_REGISTERED_LABEL_BYTES))
                 .collect(),
+            ..ModelSettings::default()
         };
         assert!(validate_settings(&maximum).is_ok());
         let mut too_many = maximum.clone();
@@ -1731,7 +2088,7 @@ mod tests {
     fn persisted_snapshot_rebuilds_its_exact_runtime_and_rejects_profile_drift() {
         let snapshot = qualified_snapshot();
         let settings = std::env::temp_dir().join(format!("missing-settings-{}", Uuid::new_v4()));
-        let runtime = runtime_from_snapshot(&snapshot, &settings)
+        let runtime = runtime_from_snapshot(&snapshot, &settings, &settings.with_extension("db"))
             .expect("an admitted immutable snapshot should rebuild its runtime");
         assert_eq!(runtime.profile_snapshot(), Some(snapshot.clone()));
         assert_eq!(
@@ -1759,7 +2116,7 @@ mod tests {
                 ..snapshot.clone()
             },
         ] {
-            let error = runtime_from_snapshot(&changed, &settings)
+            let error = runtime_from_snapshot(&changed, &settings, &settings.with_extension("db"))
                 .err()
                 .expect("profile drift must fail before inference");
             assert_eq!(error.code, "MODEL_CONFIG_INVALID");
@@ -1773,7 +2130,7 @@ mod tests {
         fs::write(&settings, b"not-json").unwrap();
         let snapshot = qualified_snapshot();
 
-        let runtime = runtime_from_snapshot(&snapshot, &settings)
+        let runtime = runtime_from_snapshot(&snapshot, &settings, &settings.with_extension("db"))
             .expect("Ollama-only snapshots must not read GGUF settings");
         assert_eq!(runtime.profile_snapshot(), Some(snapshot));
     }
@@ -1795,7 +2152,9 @@ mod tests {
             verification: qualified_snapshot().verification,
         };
         let settings = std::env::temp_dir().join(format!("missing-settings-{}", Uuid::new_v4()));
-        assert!(runtime_from_snapshot(&snapshot, &settings).is_err());
+        assert!(
+            runtime_from_snapshot(&snapshot, &settings, &settings.with_extension("db")).is_err()
+        );
         let runtime = QwenProfileRuntime::build_qualification(
             snapshot,
             QwenTokenizerFamily::Qwen35,
