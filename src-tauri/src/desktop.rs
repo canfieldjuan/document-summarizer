@@ -128,7 +128,7 @@ impl DesktopJobManager {
         summary_profile: SummaryProfile,
         expected_content_hash: Option<&str>,
     ) -> Result<BackgroundRunAccepted, DesktopJobError> {
-        let runtime = (self.runtime_factory)(None)?;
+        let mut runtime = (self.runtime_factory)(None)?;
         let profile_snapshot = runtime
             .profile_snapshot()
             .ok_or_else(|| ModelRuntimeFailure {
@@ -145,6 +145,7 @@ impl DesktopJobManager {
             summary_profile,
             expected_content_hash,
         )?;
+        runtime.bind_run(&run.run_id);
         let accepted = accepted_view(&document, &run, summary_profile);
         self.spawn(run.run_id, BackgroundWork::StartedParsing, Some(runtime))?;
         Ok(accepted)
@@ -171,10 +172,11 @@ impl DesktopJobManager {
                         .to_string(),
                 }
             })?;
-        let runtime = (self.runtime_factory)(Some(&snapshot))?;
+        let mut runtime = (self.runtime_factory)(Some(&snapshot))?;
         runtime.health()?;
         let (document, run) =
             admit_retry_for_background(&mut conn, source_run_id, expected_source_version)?;
+        runtime.bind_run(&run.run_id);
         let accepted = accepted_view(&document, &run, summary_profile);
         self.spawn(run.run_id, BackgroundWork::StartedParsing, Some(runtime))?;
         Ok(accepted)
@@ -200,8 +202,9 @@ impl DesktopJobManager {
                 plan.checkpoint,
                 db::get_run_model_profile(&conn, run_id)?,
             )?;
-            let runtime = (self.runtime_factory)(snapshot.as_ref())?;
+            let mut runtime = (self.runtime_factory)(snapshot.as_ref())?;
             runtime.health()?;
+            runtime.bind_run(&run.run_id);
             Some(runtime)
         } else {
             None
@@ -590,9 +593,20 @@ mod tests {
         }
     }
 
-    struct SnapshotFixtureRuntime(ModelProfileSnapshot);
+    struct RunBindingFixtureRuntime {
+        snapshot: ModelProfileSnapshot,
+        observed: Arc<StdMutex<Option<String>>>,
+    }
 
-    impl ModelRuntime for SnapshotFixtureRuntime {
+    impl ModelRuntime for RunBindingFixtureRuntime {
+        fn bind_run(&mut self, run_id: &str) {
+            *self
+                .observed
+                .lock()
+                .expect("binding observation lock should remain available") =
+                Some(run_id.to_string());
+        }
+
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             FixtureRuntime.generate(request)
         }
@@ -602,15 +616,15 @@ mod tests {
         }
 
         fn runtime_id(&self) -> &str {
-            "snapshot-fixture-runtime"
+            "run-binding-fixture-runtime"
         }
 
         fn model_id(&self) -> &str {
-            "snapshot-fixture-model"
+            "run-binding-fixture-model"
         }
 
         fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
-            Some(self.0.clone())
+            Some(self.snapshot.clone())
         }
     }
 
@@ -848,6 +862,33 @@ mod tests {
     }
 
     #[test]
+    fn new_desktop_worker_binds_the_admitted_run() {
+        let database = TestDatabase::new();
+        let observed = Arc::new(StdMutex::new(None));
+        let factory_observed = Arc::clone(&observed);
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |_| {
+                Ok(Box::new(RunBindingFixtureRuntime {
+                    snapshot: fixture_snapshot(),
+                    observed: Arc::clone(&factory_observed),
+                }))
+            }),
+        );
+
+        let accepted = manager
+            .start_pdf(
+                fixture_path().to_str().unwrap(),
+                SummaryProfile::General,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(*observed.lock().unwrap(), Some(accepted.run_id.clone()));
+        wait_until(|| !manager.is_active(&accepted.run_id).unwrap());
+    }
+
+    #[test]
     fn desktop_start_rejects_snapshotless_runtime_before_persistence() {
         let database = TestDatabase::new();
         let manager = DesktopJobManager::with_runtime_factory(
@@ -981,18 +1022,23 @@ mod tests {
         .expect("snapshot should persist");
         drop(conn);
 
-        let observed = Arc::new(StdMutex::new(None));
-        let factory_observed = Arc::clone(&observed);
+        let observed_snapshot = Arc::new(StdMutex::new(None));
+        let factory_observed_snapshot = Arc::clone(&observed_snapshot);
+        let observed_binding = Arc::new(StdMutex::new(None));
+        let factory_observed_binding = Arc::clone(&observed_binding);
         let manager = DesktopJobManager::with_runtime_factory(
             database.0.clone(),
             Arc::new(move |received| {
                 let received = received
                     .cloned()
                     .expect("continuation must supply its persisted snapshot");
-                *factory_observed
+                *factory_observed_snapshot
                     .lock()
                     .expect("observation lock should remain available") = Some(received.clone());
-                Ok(Box::new(SnapshotFixtureRuntime(received)))
+                Ok(Box::new(RunBindingFixtureRuntime {
+                    snapshot: received,
+                    observed: Arc::clone(&factory_observed_binding),
+                }))
             }),
         );
         let accepted = manager
@@ -1000,16 +1046,77 @@ mod tests {
             .expect("continuation should be accepted");
         assert_eq!(accepted.summary_profile, SummaryProfile::Story);
         assert_eq!(
-            *observed
+            *observed_snapshot
                 .lock()
                 .expect("observation lock should remain available"),
             Some(snapshot)
+        );
+        assert_eq!(
+            *observed_binding.lock().unwrap(),
+            Some(accepted.run_id.clone())
         );
         wait_until(|| {
             !manager
                 .is_active(&accepted.run_id)
                 .expect("registry should remain readable")
         });
+    }
+
+    #[test]
+    fn retry_desktop_worker_binds_the_new_retry_run() {
+        let database = TestDatabase::new();
+        let mut conn = db::init_db(&database.0).unwrap();
+        let (_, ingested) = crate::pipeline::ingest::ingest_pdf_with_profiles(
+            &mut conn,
+            fixture_path().to_str().unwrap(),
+            None,
+            SummaryProfile::General,
+            None,
+        )
+        .unwrap();
+        let snapshot = fixture_snapshot();
+        conn.execute(
+            "INSERT INTO pipeline_run_model_profiles (run_id, profile_snapshot, created_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                ingested.run_id,
+                serde_json::to_string(&snapshot).unwrap(),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let fixture = fixture_manager(&database);
+        fixture
+            .finalize(
+                &ingested.run_id,
+                Ok(Err(DocumentServiceError::RuntimeRequiredForBackground(
+                    ingested.run_id.clone(),
+                ))),
+            )
+            .unwrap();
+        let conn = db::init_db(&database.0).unwrap();
+        let failed = get_pipeline_run(&conn, &ingested.run_id).unwrap().unwrap();
+        drop(conn);
+
+        let observed = Arc::new(StdMutex::new(None));
+        let factory_observed = Arc::clone(&observed);
+        let manager = DesktopJobManager::with_runtime_factory(
+            database.0.clone(),
+            Arc::new(move |received| {
+                Ok(Box::new(RunBindingFixtureRuntime {
+                    snapshot: received.cloned().unwrap(),
+                    observed: Arc::clone(&factory_observed),
+                }))
+            }),
+        );
+        let accepted = manager
+            .start_retry(&failed.run_id, failed.state_version)
+            .unwrap();
+
+        assert_eq!(*observed.lock().unwrap(), Some(accepted.run_id.clone()));
+        wait_until(|| !manager.is_active(&accepted.run_id).unwrap());
     }
 
     #[test]

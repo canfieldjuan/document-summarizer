@@ -731,7 +731,7 @@ async fn create_job_for(
             false,
         ));
     }
-    let runtime = match (state.runtime_factory)() {
+    let mut runtime = match (state.runtime_factory)() {
         Ok(runtime) => runtime,
         Err(error) => {
             if let Some(response) = idempotent_response_after_admission_race(
@@ -814,6 +814,7 @@ async fn create_job_for(
             return Err(ProviderHttpError::store(error));
         }
     };
+    runtime.bind_run(&accepted.pipeline_run_id);
 
     let worker_state = state.clone();
     let worker_job_id = request.job_id.clone();
@@ -1785,6 +1786,7 @@ mod tests {
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     #[cfg(unix)]
@@ -1951,6 +1953,36 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "connect-fixture-model"
+        }
+
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(fixture_profile_snapshot())
+        }
+    }
+
+    struct BindingFixtureRuntime {
+        observed: Arc<Mutex<Option<String>>>,
+    }
+
+    impl ModelRuntime for BindingFixtureRuntime {
+        fn bind_run(&mut self, run_id: &str) {
+            *self.observed.lock().unwrap() = Some(run_id.to_string());
+        }
+
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            FixtureRuntime.runtime_id()
+        }
+
+        fn model_id(&self) -> &str {
+            FixtureRuntime.model_id()
         }
 
         fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
@@ -2948,6 +2980,8 @@ mod tests {
         let calls = Arc::clone(&factory_calls);
         let factory_db_path = db_path.clone();
         let job_id = request.job_id.clone();
+        let observed_binding = Arc::new(Mutex::new(None));
+        let factory_observed_binding = Arc::clone(&observed_binding);
         let runtime_factory: RuntimeFactory = Arc::new(move || {
             calls.fetch_add(1, Ordering::SeqCst);
             let conn = db::init_db(&factory_db_path).expect("provider database should open");
@@ -2957,7 +2991,9 @@ mod tests {
                     .is_none(),
                 Ordering::SeqCst,
             );
-            Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)
+            Ok(Box::new(BindingFixtureRuntime {
+                observed: Arc::clone(&factory_observed_binding),
+            }) as Box<dyn ModelRuntime>)
         });
         let provider = ConnectProvider::start_at(
             db_path.clone(),
@@ -2984,6 +3020,10 @@ mod tests {
         let accepted_job = store::get_job(&conn, &request.job_id)
             .expect("accepted job should be readable")
             .expect("accepted job should exist");
+        assert_eq!(
+            *observed_binding.lock().unwrap(),
+            Some(accepted_job.pipeline_run_id.clone())
+        );
         assert_eq!(
             db::get_run_model_profile(&conn, &accepted_job.pipeline_run_id)
                 .expect("accepted profile should be readable"),
