@@ -434,6 +434,7 @@ pub enum ModelRuntimeKind {
     #[default]
     OllamaNative,
     LlamaCppGguf,
+    InferenceGateway,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -725,6 +726,9 @@ pub trait DocumentChunker {
 /// Replaceable local inference boundary. Generic pipeline state and storage do
 /// not depend on a concrete server, model family, or SDK.
 pub trait ModelRuntime: Send + Sync {
+    /// Binds the durable owner of future requests to this worker-local runtime.
+    /// Direct runtimes do not require the identity and retain the inert default.
+    fn bind_run(&mut self, _run_id: &str) {}
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure>;
     /// Runs runtime-specific request admission without starting generation.
     /// Runtimes without a stricter admission boundary retain the caller's bound.

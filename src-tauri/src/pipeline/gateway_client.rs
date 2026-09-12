@@ -258,6 +258,11 @@ impl GatewayClient {
         })
     }
 
+    pub(crate) fn preflight(&self, request: &ModelRequest) -> Result<(), GatewayClientError> {
+        let core = request_core(request)?;
+        preflight_request_size(&core)
+    }
+
     pub(crate) fn execute(
         &self,
         conn: &mut Connection,

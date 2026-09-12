@@ -1051,6 +1051,9 @@ fn stage_runtime(
                 },
             )?))
         }
+        ModelRuntimeKind::InferenceGateway => Err(config_failure(
+            "Gateway task profiles cannot be constructed by the direct runtime factory",
+        )),
     }
 }
 
