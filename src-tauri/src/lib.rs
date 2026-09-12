@@ -20,7 +20,8 @@ use pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion, IngestError};
 use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
 use pipeline::model_settings::{
     catalog as load_model_catalog, configure_gateway, register_gguf, runtime_from_settings,
-    save_selected_preset, select_gateway, settings_path as model_settings_path, ModelCatalog,
+    save_selected_preset, select_gateway, settings_path as model_settings_path, InferenceSource,
+    ModelCatalog,
 };
 use pipeline::normalize::{
     normalize_document as normalize_pipeline_document, CanonicalNormalizer, NormalizePipelineError,
@@ -431,7 +432,11 @@ async fn select_model_preset(
                 "Selected model preset is not installed and qualified",
             ));
         }
-        if current.selected_preset_id == preset_id {
+        if direct_preset_selection_is_noop(
+            current.selected_source,
+            &current.selected_preset_id,
+            &preset_id,
+        ) {
             return Ok(current);
         }
         prune_idle_managed_runtimes().map_err(CommandError::from)?;
@@ -440,6 +445,14 @@ async fn select_model_preset(
     })
     .await
     .map_err(|_| CommandError::new("MODEL_SELECTION_FAILED", "Model selection stopped"))?
+}
+
+fn direct_preset_selection_is_noop(
+    selected_source: InferenceSource,
+    selected_preset_id: &str,
+    requested_preset_id: &str,
+) -> bool {
+    selected_source == InferenceSource::Direct && selected_preset_id == requested_preset_id
 }
 
 #[tauri::command]
@@ -608,6 +621,20 @@ mod capability_tests {
         ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
     };
     use serde_json::Value;
+
+    #[test]
+    fn retained_direct_preset_is_not_a_noop_while_gateway_is_selected() {
+        assert!(!super::direct_preset_selection_is_noop(
+            crate::pipeline::model_settings::InferenceSource::Gateway,
+            "retained-direct",
+            "retained-direct",
+        ));
+        assert!(super::direct_preset_selection_is_noop(
+            crate::pipeline::model_settings::InferenceSource::Direct,
+            "retained-direct",
+            "retained-direct",
+        ));
+    }
 
     #[derive(Default)]
     struct OwnerRecordingRuntime {

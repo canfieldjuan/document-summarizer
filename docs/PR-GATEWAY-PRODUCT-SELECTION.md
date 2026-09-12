@@ -125,6 +125,7 @@ fallback remains Local Qwen.
 - `cargo test connect_runtime_is_selected_before_job_acceptance` - passed.
 - `cargo test new_desktop_worker_binds_the_admitted_run` - passed.
 - `cargo test automatic_profile_owner_is_stable_and_bound_before_inference` - passed.
+- `cargo test retained_direct_preset_is_not_a_noop_while_gateway_is_selected -- --nocapture` - passed.
 - `cargo test --all-targets` - passed (489 library tests with 13 ignored, 3 office
   acceptance tests with 3 ignored, and 3 release-contract tests).
 - `cargo clippy --all-targets --all-features -- -D warnings` - passed.
@@ -134,7 +135,7 @@ fallback remains Local Qwen.
 
 ## Estimated diff size
 
-Actual before commit: thirteen files, 867 additions, and 78 deletions. This exceeds 400 because one
-useful product slice must carry the persisted selection through every real runtime entrypoint,
+Actual after review reconciliation: thirteen files, 896 additions, and 79 deletions. This exceeds
+400 because one useful product slice must carry the persisted selection through every real runtime entrypoint,
 immutable reconstruction, truthful Health, and the UI; splitting after persistence or factory
 dispatch would leave an unreachable or misleading configuration surface.
