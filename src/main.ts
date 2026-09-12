@@ -204,6 +204,7 @@ const runtimeTitle = element<HTMLParagraphElement>("#runtime-title");
 const runtimeDetail = element<HTMLParagraphElement>("#runtime-detail");
 const runtimeRetry = element<HTMLButtonElement>("#runtime-retry");
 const modelPreset = element<HTMLSelectElement>("#model-preset");
+const gatewayEdit = element<HTMLButtonElement>("#gateway-edit");
 const gatewaySetup = element<HTMLDivElement>("#gateway-setup");
 const gatewayUrl = element<HTMLInputElement>("#gateway-url");
 const gatewayToken = element<HTMLButtonElement>("#gateway-token");
@@ -296,6 +297,7 @@ function syncPrimaryAction(): void {
   summaryProfile.disabled = processing;
   registerGguf.disabled = modelSelectionInFlight || processing;
   gatewayUrl.disabled = modelSelectionInFlight || processing;
+  gatewayEdit.disabled = modelSelectionInFlight || processing;
   gatewayToken.disabled = modelSelectionInFlight || processing;
   gatewayCa.disabled = modelSelectionInFlight || processing;
   gatewayConnect.disabled = modelSelectionInFlight || processing;
@@ -475,6 +477,7 @@ async function refreshModelCatalog(): Promise<void> {
       ? "Gateway connection saved. Choose new files only when replacing it."
       : catalog.gateway.unavailableReason
         ?? "The token stays in its private file. The app stores only the file path.";
+    gatewayEdit.hidden = !catalog.gateway.platformSupported || !catalog.gateway.configured;
     gatewaySetup.hidden = catalog.selectedSource !== "gateway";
     registerGguf.hidden = catalog.selectedSource === "gateway";
     modelSelectionAvailable = catalog.gateway.platformSupported || catalog.presets.length > 0;
@@ -531,9 +534,7 @@ async function selectInferenceSource(): Promise<void> {
   const selection = modelPreset.value;
   if (!selection || processing) return;
   if (selection === "__gateway__" && !gatewayConfigured) {
-    gatewaySetup.hidden = false;
-    registerGguf.hidden = true;
-    gatewayUrl.focus();
+    showGatewaySetup();
     return;
   }
   modelSelectionInFlight = true;
@@ -556,6 +557,13 @@ async function selectInferenceSource(): Promise<void> {
     modelSelectionInFlight = false;
     syncPrimaryAction();
   }
+}
+
+function showGatewaySetup(): void {
+  if (processing || modelSelectionInFlight || !gatewayPlatformSupported) return;
+  gatewaySetup.hidden = false;
+  registerGguf.hidden = true;
+  gatewayUrl.focus();
 }
 
 async function chooseGatewayToken(): Promise<void> {
@@ -1472,6 +1480,7 @@ async function initialize(): Promise<void> {
   });
   modelPreset.addEventListener("change", () => void selectInferenceSource());
   registerGguf.addEventListener("click", () => void selectAndRegisterGguf());
+  gatewayEdit.addEventListener("click", showGatewaySetup);
   gatewayToken.addEventListener("click", () => void chooseGatewayToken());
   gatewayCa.addEventListener("click", () => void chooseGatewayCa());
   gatewayConnect.addEventListener("click", () => void configureInferenceGateway());
