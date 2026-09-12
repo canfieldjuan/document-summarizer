@@ -39,6 +39,30 @@ impl QwenPromptTokenizer {
         }
     }
 
+    #[cfg(any(test, feature = "connect-proof-runtime"))]
+    pub(crate) fn conservative_byte_counter() -> Result<Self, String> {
+        let mut alphabet: Vec<_> = ByteLevel::alphabet().into_iter().collect();
+        alphabet.sort_unstable();
+        let vocab: Vocab = alphabet
+            .into_iter()
+            .enumerate()
+            .map(|(index, token)| {
+                Ok((
+                    token.to_string(),
+                    u32::try_from(index)
+                        .map_err(|_| "Byte tokenizer vocabulary exceeds u32".to_string())?,
+                ))
+            })
+            .collect::<Result<_, String>>()?;
+        let model = BPE::builder()
+            .vocab_and_merges(vocab, Vec::new())
+            .build()
+            .map_err(|_| "Conservative byte tokenizer model could not be built".to_string())?;
+        Ok(Self {
+            tokenizer: tokenizer_from_bpe(model, QWEN3_PATTERN)?,
+        })
+    }
+
     pub fn from_model_info(
         family: QwenTokenizerFamily,
         model_info: &Map<String, Value>,
@@ -158,26 +182,8 @@ mod tests {
     use super::*;
 
     fn byte_complete_prompt_tokenizer() -> QwenPromptTokenizer {
-        let mut alphabet: Vec<_> = ByteLevel::alphabet().into_iter().collect();
-        alphabet.sort_unstable();
-        let vocab: Vocab = alphabet
-            .into_iter()
-            .enumerate()
-            .map(|(index, token)| {
-                (
-                    token.to_string(),
-                    u32::try_from(index).expect("byte alphabet should fit in u32"),
-                )
-            })
-            .collect();
-        let model = BPE::builder()
-            .vocab_and_merges(vocab, Vec::new())
-            .build()
-            .expect("byte-complete fixture model should build");
-        QwenPromptTokenizer {
-            tokenizer: tokenizer_from_bpe(model, QWEN3_PATTERN)
-                .expect("production pre-tokenizer should build"),
-        }
+        QwenPromptTokenizer::conservative_byte_counter()
+            .expect("byte-complete fixture tokenizer should build")
     }
 
     #[test]

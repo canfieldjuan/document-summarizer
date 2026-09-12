@@ -126,6 +126,26 @@ npm run desktop:build:no-bundle
 npm run desktop:build
 ```
 
+The Email Watcher cross-process acceptance uses a separate local-only release
+build:
+
+```bash
+npm run desktop:build:connect-proof
+```
+
+That command compiles the `connect-proof-runtime` feature. The proof runtime is
+selected only when the process also receives
+`DOC_SUM_CONNECT_PROOF_MODE=local-fixture-v1`,
+an explicit exact-loopback `DOC_SUM_MODEL_BASE_URL`,
+`DOC_SUM_MODEL_NAME=connect-proof-model`, and a lowercase 64-character
+`DOC_SUM_CONNECT_PROOF_MODEL_DIGEST` reported by the fixture's `/api/ps`
+endpoint. The ordinary production commands do not compile the proof runtime and
+continue to require an admitted persisted model profile. The proof client keeps
+the same exact-loopback URL admission, request bounds, and post-generation
+execution-digest verification as the product runtime. Its proof-only UTF-8 byte
+counter conservatively upper-bounds Qwen BPE tokens without making the fixture
+impersonate a qualified tokenizer vocabulary.
+
 On Linux, `desktop:build` produces the currently supported Debian package. The
 base Tauri configuration remains cross-platform, while
 `src-tauri/tauri.linux.conf.json` deliberately limits this host to the verified
