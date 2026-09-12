@@ -1183,7 +1183,7 @@ mod tests {
 
     fn key(ordinal: u32) -> GatewayRequestKey {
         GatewayRequestKey {
-            run_id: "run-1".to_string(),
+            owner_id: "run-1".to_string(),
             stage: PipelineStage::Analyze,
             ordinal,
         }
@@ -2029,7 +2029,7 @@ mod tests {
         let (completed, acknowledged): (String, String) = conn
             .query_row(
                 "SELECT completed_at, acknowledged_at FROM model_gateway_requests
-                 WHERE run_id = ?1 AND stage = ?2 AND request_ordinal = ?3",
+                 WHERE owner_id = ?1 AND stage = ?2 AND request_ordinal = ?3",
                 rusqlite::params!["run-1", "Analyze", 0],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )

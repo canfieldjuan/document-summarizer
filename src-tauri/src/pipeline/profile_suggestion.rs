@@ -13,6 +13,8 @@ use serde_json::json;
 use std::collections::HashSet;
 
 pub(crate) const PROFILE_SUGGESTION_SCHEMA_NAME: &str = "document_summary_profile_suggestion_v1";
+pub(crate) const PROFILE_SUGGESTION_TASK_CONTRACT_VERSION: &str =
+    "document.summary.profile-suggestion@1";
 const PROFILE_SUGGESTION_OUTPUT_TOKENS: u32 = 128;
 const PROFILE_SUGGESTION_SEED: u64 = 0x50_52_4f_46_49_4c_45;
 const FULL_TEXT_MAX_CHARACTERS: usize = 6_000;

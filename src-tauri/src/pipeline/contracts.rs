@@ -728,7 +728,12 @@ pub trait DocumentChunker {
 pub trait ModelRuntime: Send + Sync {
     /// Binds the durable owner of future requests to this worker-local runtime.
     /// Direct runtimes do not require the identity and retain the inert default.
-    fn bind_run(&mut self, _run_id: &str) {}
+    fn bind_request_owner(&mut self, _owner_id: &str) {}
+    /// Binds a pipeline run as the request owner while preserving existing
+    /// worker call sites and direct-runtime behavior.
+    fn bind_run(&mut self, run_id: &str) {
+        self.bind_request_owner(run_id);
+    }
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure>;
     /// Runs runtime-specific request admission without starting generation.
     /// Runtimes without a stricter admission boundary retain the caller's bound.
