@@ -9,6 +9,7 @@
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
     "desktop:build:no-bundle": "tauri build --no-bundle",
+    "desktop:build:connect-proof": "tauri build --no-bundle --features connect-proof-runtime",
     "preview": "vite preview",
     "tauri": "tauri"
   },

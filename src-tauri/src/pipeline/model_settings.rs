@@ -25,6 +25,16 @@ use uuid::Uuid;
 const SETTINGS_VERSION: u32 = 2;
 pub const SETTINGS_FILE_NAME: &str = "model-settings-v1.json";
 const DEFAULT_PRESET_ID: &str = "full-qwen3-30b-a3b-q4ks-v1";
+#[cfg(feature = "connect-proof-runtime")]
+const CONNECT_PROOF_PRESET_ID: &str = "connect-proof-local-fixture-v1";
+#[cfg(feature = "connect-proof-runtime")]
+const CONNECT_PROOF_PROFILE_ID: &str = "connect-proof-qwen3-v1";
+#[cfg(feature = "connect-proof-runtime")]
+const CONNECT_PROOF_MODEL_NAME: &str = "connect-proof-model";
+#[cfg(feature = "connect-proof-runtime")]
+const CONNECT_PROOF_CONTEXT_TOKENS: u32 = 131_072;
+#[cfg(feature = "connect-proof-runtime")]
+const CONNECT_PROOF_TOKENIZER_VERSION: &str = "connect-proof-utf8-byte-v1";
 const MAX_REGISTERED_GGUFS: usize = 32;
 const MAX_REGISTERED_PATH_BYTES: usize = 4_096;
 const MAX_REGISTERED_LABEL_BYTES: usize = 512;
@@ -638,6 +648,64 @@ pub fn runtime_from_settings(path: &Path) -> Result<QwenProfileRuntime, ModelRun
     QwenProfileRuntime::new(preset, path)
 }
 
+#[cfg(feature = "connect-proof-runtime")]
+pub fn connect_proof_runtime_from_environment() -> Result<QwenProfileRuntime, ModelRuntimeFailure> {
+    let model_name = std::env::var("DOC_SUM_MODEL_NAME")
+        .map_err(|_| config_failure("Connect proof model name is missing"))?;
+    let model_digest = std::env::var("DOC_SUM_CONNECT_PROOF_MODEL_DIGEST")
+        .map_err(|_| config_failure("Connect proof model digest is missing"))?;
+    let snapshot = connect_proof_snapshot(&model_name, &model_digest)?;
+    prepare_for_ollama_runtime()?;
+    Ok(QwenProfileRuntime {
+        preset_id: snapshot.preset_id.clone(),
+        analysis: StageRuntime::Ollama(OllamaRuntime::from_connect_proof_environment(
+            &snapshot.analysis.model_name,
+            &snapshot.analysis.model_digest,
+            snapshot.analysis.context_tokens,
+        )?),
+        verification: StageRuntime::Ollama(OllamaRuntime::from_connect_proof_environment(
+            &snapshot.verification.model_name,
+            &snapshot.verification.model_digest,
+            snapshot.verification.context_tokens,
+        )?),
+        snapshot,
+        _profile_lease: None,
+    })
+}
+
+#[cfg(feature = "connect-proof-runtime")]
+fn connect_proof_snapshot(
+    model_name: &str,
+    model_digest: &str,
+) -> Result<ModelProfileSnapshot, ModelRuntimeFailure> {
+    if model_name != CONNECT_PROOF_MODEL_NAME {
+        return Err(config_failure("Connect proof model name is not admitted"));
+    }
+    if model_digest.len() != 64
+        || !model_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(config_failure(
+            "Connect proof model digest must be lowercase SHA-256",
+        ));
+    }
+    let stage = ModelStageProfileSnapshot {
+        runtime_kind: ModelRuntimeKind::OllamaNative,
+        profile_id: CONNECT_PROOF_PROFILE_ID.to_string(),
+        model_name: model_name.to_string(),
+        model_digest: model_digest.to_string(),
+        context_tokens: CONNECT_PROOF_CONTEXT_TOKENS,
+        tokenizer_version: CONNECT_PROOF_TOKENIZER_VERSION.to_string(),
+    };
+    Ok(ModelProfileSnapshot {
+        version: 2,
+        preset_id: CONNECT_PROOF_PRESET_ID.to_string(),
+        analysis: stage.clone(),
+        verification: stage,
+    })
+}
+
 fn selected_direct_snapshot(
     settings: &ModelSettings,
 ) -> Result<Option<ModelProfileSnapshot>, ModelRuntimeFailure> {
@@ -1232,6 +1300,50 @@ mod tests {
             preset_id: DEFAULT_PRESET_ID.to_string(),
             analysis: stage.clone(),
             verification: stage,
+        }
+    }
+
+    #[cfg(feature = "connect-proof-runtime")]
+    #[test]
+    fn connect_proof_snapshot_requires_exact_fixture_identity() {
+        let digest = "a".repeat(64);
+        let snapshot = connect_proof_snapshot(CONNECT_PROOF_MODEL_NAME, &digest).unwrap();
+        assert_eq!(snapshot.version, 2);
+        assert_eq!(snapshot.preset_id, CONNECT_PROOF_PRESET_ID);
+        assert_eq!(snapshot.analysis, snapshot.verification);
+        assert_eq!(snapshot.analysis.profile_id, CONNECT_PROOF_PROFILE_ID);
+        assert_eq!(snapshot.analysis.model_name, CONNECT_PROOF_MODEL_NAME);
+        assert_eq!(snapshot.analysis.model_digest, digest);
+        assert_eq!(
+            snapshot.analysis.context_tokens,
+            CONNECT_PROOF_CONTEXT_TOKENS
+        );
+        assert_eq!(
+            snapshot.analysis.tokenizer_version,
+            CONNECT_PROOF_TOKENIZER_VERSION
+        );
+
+        for model_name in ["", "fixture-model", " connect-proof-model "] {
+            assert_eq!(
+                connect_proof_snapshot(model_name, &"a".repeat(64))
+                    .unwrap_err()
+                    .code,
+                "MODEL_CONFIG_INVALID"
+            );
+        }
+        for bad_digest in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            assert_eq!(
+                connect_proof_snapshot(CONNECT_PROOF_MODEL_NAME, &bad_digest)
+                    .unwrap_err()
+                    .code,
+                "MODEL_CONFIG_INVALID"
+            );
         }
     }
 

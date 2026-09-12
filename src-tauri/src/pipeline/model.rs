@@ -102,6 +102,30 @@ impl OllamaRuntime {
         )
     }
 
+    #[cfg(feature = "connect-proof-runtime")]
+    pub fn from_connect_proof_environment(
+        model_id: &str,
+        expected_digest: &str,
+        context_tokens: u32,
+    ) -> Result<Self, ModelRuntimeFailure> {
+        let runtime = Self::from_environment_profile(
+            model_id,
+            Some(expected_digest),
+            Some(QwenTokenizerFamily::Qwen3),
+            context_tokens,
+        )?;
+        let tokenizer = QwenPromptTokenizer::conservative_byte_counter()
+            .map_err(|message| runtime_failure("MODEL_TOKENIZER_INVALID", message, false))?;
+        *runtime.tokenizer.lock().map_err(|_| {
+            runtime_failure(
+                "MODEL_TOKENIZER_UNAVAILABLE",
+                "Connect proof tokenizer cache is unavailable",
+                false,
+            )
+        })? = Some(Arc::new(tokenizer));
+        Ok(runtime)
+    }
+
     pub fn discovery_from_environment() -> Result<Self, ModelRuntimeFailure> {
         let base_url = std::env::var("DOC_SUM_MODEL_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());

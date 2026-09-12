@@ -14,6 +14,8 @@ use crate::pipeline::contracts::{
 use crate::pipeline::contracts::{ModelProfileSnapshot, ModelStageProfileSnapshot};
 use crate::pipeline::db;
 use crate::pipeline::ingest::prepare_pdf_ingestion;
+#[cfg(feature = "connect-proof-runtime")]
+use crate::pipeline::model_settings::connect_proof_runtime_from_environment;
 use crate::pipeline::model_settings::{runtime_from_settings, settings_path};
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
@@ -34,6 +36,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -55,6 +58,67 @@ const MAX_PROBED_MANIFEST_BYTES: u64 = 64 * 1024;
 const REGISTRATION_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const REGISTRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const REGISTRATION_LOCK_RETRY: Duration = Duration::from_millis(10);
+const CONNECT_PROOF_MODE_ENV: &str = "DOC_SUM_CONNECT_PROOF_MODE";
+const CONNECT_PROOF_MODE_V1: &str = "local-fixture-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectRuntimeSource {
+    PersistedSettings,
+    ProofFixture,
+}
+
+fn select_connect_runtime_source(
+    proof_runtime_compiled: bool,
+    proof_mode: Option<&OsStr>,
+) -> Result<ConnectRuntimeSource, ModelRuntimeFailure> {
+    if !proof_runtime_compiled {
+        return Ok(ConnectRuntimeSource::PersistedSettings);
+    }
+    match proof_mode {
+        None => Ok(ConnectRuntimeSource::PersistedSettings),
+        Some(value) if value == OsStr::new(CONNECT_PROOF_MODE_V1) => {
+            Ok(ConnectRuntimeSource::ProofFixture)
+        }
+        Some(_) => Err(ModelRuntimeFailure {
+            code: "MODEL_CONFIG_INVALID".to_string(),
+            message: "Connect proof mode is not admitted".to_string(),
+            recoverable: false,
+            request_attempts: Vec::new(),
+        }),
+    }
+}
+
+fn provider_runtime_factory(model_settings_path: PathBuf) -> RuntimeFactory {
+    let source = select_connect_runtime_source(
+        cfg!(feature = "connect-proof-runtime"),
+        env::var_os(CONNECT_PROOF_MODE_ENV).as_deref(),
+    );
+    Arc::new(move || match source.as_ref() {
+        Ok(ConnectRuntimeSource::PersistedSettings) => runtime_from_settings(&model_settings_path)
+            .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>),
+        Ok(ConnectRuntimeSource::ProofFixture) => {
+            connect_proof_runtime().map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
+        }
+        Err(error) => Err(error.clone()),
+    })
+}
+
+#[cfg(feature = "connect-proof-runtime")]
+fn connect_proof_runtime(
+) -> Result<crate::pipeline::model_settings::QwenProfileRuntime, ModelRuntimeFailure> {
+    connect_proof_runtime_from_environment()
+}
+
+#[cfg(not(feature = "connect-proof-runtime"))]
+fn connect_proof_runtime(
+) -> Result<crate::pipeline::model_settings::QwenProfileRuntime, ModelRuntimeFailure> {
+    Err(ModelRuntimeFailure {
+        code: "MODEL_CONFIG_INVALID".to_string(),
+        message: "Connect proof runtime is unavailable in this build".to_string(),
+        recoverable: false,
+        request_attempts: Vec::new(),
+    })
+}
 
 #[derive(Clone)]
 struct ProviderState {
@@ -167,11 +231,7 @@ impl ConnectProvider {
                 .ok_or(ProviderStartError::InvalidMaxInputBytes)?,
             Err(_) => DEFAULT_MAX_INPUT_BYTES,
         };
-        let model_settings_path = settings_path(&app_data_dir);
-        let runtime_factory: RuntimeFactory = Arc::new(move || {
-            runtime_from_settings(&model_settings_path)
-                .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
-        });
+        let runtime_factory = provider_runtime_factory(settings_path(&app_data_dir));
         let entitlement = EntitlementGate::from_installation()?;
         Self::start_at_with_entitlement(
             db_path,
@@ -1791,6 +1851,39 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn connect_proof_runtime_requires_both_build_feature_and_exact_mode() {
+        let exact = OsStr::new(CONNECT_PROOF_MODE_V1);
+        assert_eq!(
+            select_connect_runtime_source(false, None).unwrap(),
+            ConnectRuntimeSource::PersistedSettings
+        );
+        assert_eq!(
+            select_connect_runtime_source(false, Some(exact)).unwrap(),
+            ConnectRuntimeSource::PersistedSettings
+        );
+        assert_eq!(
+            select_connect_runtime_source(false, Some(OsStr::new("invalid"))).unwrap(),
+            ConnectRuntimeSource::PersistedSettings
+        );
+        assert_eq!(
+            select_connect_runtime_source(true, None).unwrap(),
+            ConnectRuntimeSource::PersistedSettings
+        );
+        assert_eq!(
+            select_connect_runtime_source(true, Some(exact)).unwrap(),
+            ConnectRuntimeSource::ProofFixture
+        );
+        for invalid in ["", "local-fixture", "local-fixture-v2", " local-fixture-v1"] {
+            assert_eq!(
+                select_connect_runtime_source(true, Some(OsStr::new(invalid)))
+                    .unwrap_err()
+                    .code,
+                "MODEL_CONFIG_INVALID"
+            );
+        }
+    }
 
     #[test]
     fn accepted_job_ownership_preserves_only_its_shared_import() {
