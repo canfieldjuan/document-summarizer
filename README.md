@@ -7,9 +7,23 @@ application also provides the optional local Connect `document.summarize`
 capability to installations with an active Connect entitlement while remaining
 usable on its own.
 
-## Local runtime
+## Inference runtime
 
-The supported default is:
+The application can use the authenticated Local Inference Gateway for
+`document.summary.step@1`. The desktop inference selector accepts an HTTPS
+gateway origin plus an application-specific bearer-token file and issuing-CA
+file. It stores only those file paths, verifies the credential-scoped task
+before switching, and never asks the user to select the gateway's private
+worker or model. Current gateway selection is enabled on Unix hosts; Windows
+continues to use direct runtimes until owner/DACL validation lands.
+
+Existing installations stay on their selected direct runtime. Direct Ollama
+and qualified llama.cpp remain available as explicit migration fallbacks while
+gateway deployment and release acceptance are completed.
+
+## Direct runtime fallback
+
+The retained default is:
 
 ```text
 Ollama endpoint: http://127.0.0.1:11434/
@@ -41,7 +55,7 @@ Ollama runner through a mutable alias. Model-generation requests retain the
 900-second deadline; connection, health and direct-child startup keep shorter
 fail-fast deadlines.
 
-Deployment overrides remain available through `DOC_SUM_MODEL_BASE_URL`,
+Direct-runtime deployment overrides remain available through `DOC_SUM_MODEL_BASE_URL`,
 `DOC_SUM_MODEL_TIMEOUT_SECONDS`, and optional `DOC_SUM_MODEL_API_TOKEN_FILE`.
 The desktop model choice is a persisted application setting, not
 `DOC_SUM_MODEL_NAME`. The endpoint admission rule remains exact loopback HTTP

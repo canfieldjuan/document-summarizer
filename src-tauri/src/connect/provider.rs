@@ -88,14 +88,18 @@ fn select_connect_runtime_source(
     }
 }
 
-fn provider_runtime_factory(model_settings_path: PathBuf) -> RuntimeFactory {
+fn provider_runtime_factory(
+    model_settings_path: PathBuf,
+    runtime_db_path: PathBuf,
+) -> RuntimeFactory {
     let source = select_connect_runtime_source(
         cfg!(feature = "connect-proof-runtime"),
         env::var_os(CONNECT_PROOF_MODE_ENV).as_deref(),
     );
     Arc::new(move || match source.as_ref() {
-        Ok(ConnectRuntimeSource::PersistedSettings) => runtime_from_settings(&model_settings_path)
-            .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>),
+        Ok(ConnectRuntimeSource::PersistedSettings) => {
+            runtime_from_settings(&model_settings_path, &runtime_db_path)
+        }
         Ok(ConnectRuntimeSource::ProofFixture) => {
             connect_proof_runtime().map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
         }
@@ -231,7 +235,8 @@ impl ConnectProvider {
                 .ok_or(ProviderStartError::InvalidMaxInputBytes)?,
             Err(_) => DEFAULT_MAX_INPUT_BYTES,
         };
-        let runtime_factory = provider_runtime_factory(settings_path(&app_data_dir));
+        let runtime_factory =
+            provider_runtime_factory(settings_path(&app_data_dir), db_path.clone());
         let entitlement = EntitlementGate::from_installation()?;
         Self::start_at_with_entitlement(
             db_path,

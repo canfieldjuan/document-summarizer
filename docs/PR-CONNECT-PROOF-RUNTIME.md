@@ -62,9 +62,9 @@ versioned snapshot.
 - Product model qualification, selection UI, and gateway-runtime work are unchanged.
 - Email Watcher's separate configured-model mode remains on the persisted profile
   path; this slice restores only its deterministic fixture proof.
-- Open PR #59 also changes provider runtime selection and model settings. If it lands
-  first, this slice must reconcile those shared files without changing #59's product
-  selection contract.
+- Merged PR #59 also changed provider runtime selection and model settings. The
+  reconciliation preserves its database-backed gateway/local selection in the
+  persisted branch and keeps this slice's fixture route behind the proof-only gate.
 
 ## Verification
 
@@ -88,8 +88,10 @@ versioned snapshot.
 
 ## Estimated diff size
 
-The Document Summarizer diff remains below the 400-line review target. The paired
-Email Watcher proof update remains below 300 changed lines; it exceeds the initial
-estimate because the current provider requires native health, streamed generation,
-execution-identity endpoints, and the durable queue's restart-reconciliation and
-inbox metadata contracts.
+The Document Summarizer diff slightly exceeds the 400-line review target because the
+indivisible proof boundary spans compile-time admission, immutable runtime identity,
+the conservative token counter, boundary tests, and the release build contract. The
+paired Email Watcher proof update remains below 300 changed lines; it exceeds the
+initial estimate because the current provider requires native health, streamed
+generation, execution-identity endpoints, and the durable queue's
+restart-reconciliation and inbox metadata contracts.

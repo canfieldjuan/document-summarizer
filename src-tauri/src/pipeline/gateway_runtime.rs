@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "the run-bound adapter lands before persisted gateway selection"
-)]
-
 use crate::pipeline::contracts::{
     ModelProfileSnapshot, ModelRequest, ModelRequestAttemptDiagnostic, ModelResponse, ModelRuntime,
     ModelRuntimeFailure, ModelRuntimeKind, ModelStageProfileSnapshot, ModelTokenUsage,

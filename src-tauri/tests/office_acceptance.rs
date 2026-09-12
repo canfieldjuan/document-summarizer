@@ -33,12 +33,10 @@ use uuid::Uuid;
 
 struct TestDatabase(PathBuf);
 
-fn configured_live_runtime() -> Box<dyn ModelRuntime> {
+fn configured_live_runtime(db_path: &Path) -> Box<dyn ModelRuntime> {
     if let Some(settings_path) = env::var_os("DOC_SUM_MODEL_SETTINGS_PATH") {
-        return Box::new(
-            runtime_from_settings(Path::new(&settings_path))
-                .expect("selected product model settings should configure"),
-        );
+        return runtime_from_settings(Path::new(&settings_path), db_path)
+            .expect("selected product model settings should configure");
     }
     if let Ok(analysis_model) = env::var("DOC_SUM_QUALIFICATION_ANALYSIS_MODEL") {
         let verification_model = env::var("DOC_SUM_QUALIFICATION_VERIFICATION_MODEL")
@@ -750,7 +748,7 @@ fn office_pdf_live_ollama_analysis_satisfies_evidence_contract() {
     assert_eq!(paths.len(), 1, "DOC_SUM_OFFICE_PDF must contain one path");
     let source = &paths[0];
     let database = TestDatabase::new("analysis");
-    let ollama = configured_live_runtime();
+    let ollama = configured_live_runtime(&database.0);
     ollama
         .health()
         .expect("selected Ollama model should be available");
@@ -811,7 +809,7 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let source = &paths[0];
     let database = TestDatabase::new("live");
     let (source_bytes, source_hash, source_size) = file_identity(source);
-    let ollama = configured_live_runtime();
+    let ollama = configured_live_runtime(&database.0);
     ollama
         .health()
         .expect("selected Ollama model should be available");

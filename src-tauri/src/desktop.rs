@@ -98,14 +98,12 @@ pub struct DesktopJobManager {
 
 impl DesktopJobManager {
     pub fn new(db_path: PathBuf, settings_path: PathBuf) -> Self {
+        let runtime_db_path = db_path.clone();
         Self::with_runtime_factory(
             db_path,
-            Arc::new(move |snapshot| {
-                let runtime = match snapshot {
-                    Some(snapshot) => runtime_from_snapshot(snapshot, &settings_path),
-                    None => runtime_from_settings(&settings_path),
-                }?;
-                Ok(Box::new(runtime) as Box<dyn ModelRuntime>)
+            Arc::new(move |snapshot| match snapshot {
+                Some(snapshot) => runtime_from_snapshot(snapshot, &settings_path, &runtime_db_path),
+                None => runtime_from_settings(&settings_path, &runtime_db_path),
             }),
         )
     }
