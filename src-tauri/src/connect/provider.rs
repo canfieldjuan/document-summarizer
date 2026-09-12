@@ -168,10 +168,9 @@ impl ConnectProvider {
             Err(_) => DEFAULT_MAX_INPUT_BYTES,
         };
         let model_settings_path = settings_path(&app_data_dir);
-        let runtime_factory: RuntimeFactory = Arc::new(move || {
-            runtime_from_settings(&model_settings_path)
-                .map(|runtime| Box::new(runtime) as Box<dyn ModelRuntime>)
-        });
+        let runtime_db_path = db_path.clone();
+        let runtime_factory: RuntimeFactory =
+            Arc::new(move || runtime_from_settings(&model_settings_path, &runtime_db_path));
         let entitlement = EntitlementGate::from_installation()?;
         Self::start_at_with_entitlement(
             db_path,

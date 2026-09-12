@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Summarize native-text PDF documents with a local Qwen model."
+      content="Summarize native-text PDF documents with private local or on-prem inference."
     />
     <title>Document Summarizer</title>
     <script type="module" src="/src/main.ts" defer></script>
@@ -27,12 +27,24 @@
           <section class="runtime-card" aria-labelledby="runtime-title" aria-live="polite">
             <span id="runtime-dot" class="runtime-dot is-checking" aria-hidden="true"></span>
             <div class="runtime-copy">
-              <p id="runtime-title" class="runtime-title">Checking local Qwen</p>
-              <p id="runtime-detail" class="runtime-detail">Looking for the local model…</p>
-              <label class="model-preset-label" for="model-preset">Model preset</label>
+              <p id="runtime-title" class="runtime-title">Checking inference</p>
+              <p id="runtime-detail" class="runtime-detail">Looking for the selected inference source…</p>
+              <label class="model-preset-label" for="model-preset">Inference source</label>
               <select id="model-preset" class="model-preset-select" disabled>
-                <option>Discovering qualified models…</option>
+                <option>Discovering inference options…</option>
               </select>
+              <div id="gateway-setup" class="gateway-setup" hidden>
+                <label for="gateway-url">Gateway HTTPS origin</label>
+                <input id="gateway-url" type="url" inputmode="url" autocomplete="off" placeholder="https://inference.local:8787" maxlength="2048" />
+                <div class="gateway-files">
+                  <button id="gateway-token" class="quiet-button" type="button">Choose token file</button>
+                  <span id="gateway-token-name">No token selected</span>
+                  <button id="gateway-ca" class="quiet-button" type="button">Choose CA file</button>
+                  <span id="gateway-ca-name">No CA selected</span>
+                </div>
+                <button id="gateway-connect" class="quiet-button" type="button">Verify and use gateway</button>
+                <p id="gateway-detail" class="runtime-detail">The token stays in its private file. The app stores only the file path.</p>
+              </div>
               <button id="register-gguf" class="quiet-button model-register-button" type="button">
                 Add GGUF file
               </button>

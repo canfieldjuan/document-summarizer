@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "the authenticated client lands immediately before its run-bound ModelRuntime adapter"
-)]
-
 use crate::pipeline::contracts::{ModelOutputFormat, ModelRequest};
 use crate::pipeline::gateway_store::{
     load_request, mark_acknowledged, mark_submitted, persist_completion,
@@ -654,7 +649,8 @@ struct HealthTask {
     id: String,
     version: u32,
     status: String,
-    diagnostic_code: String,
+    #[serde(rename = "diagnostic_code")]
+    _diagnostic_code: String,
 }
 
 fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClientError> {
