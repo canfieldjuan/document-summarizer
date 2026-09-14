@@ -3876,6 +3876,11 @@ release acceptance exposed issue #49
 - If a later source-framing repair also violates the older window contract, the
   window contract is evaluated first so its warned safe sibling remains
   available instead of being bypassed by the newer framing-integrity error.
+- A response with mixed framing before a separate cross-window unit still
+  enters window recovery: the application collects the full window contract
+  independently of parser error order. A later framing follow-up retains the
+  larger exact window-repair ceiling rather than shrinking to the generic
+  framing allowance.
 - Story and Contract keep their existing cross-window repair behavior. This
   slice does not change source selection, persistence, result identity,
   routing, the normal synthesis prompt, or issue #52's oversized
@@ -3886,15 +3891,17 @@ release acceptance exposed issue #49
   repair and with exact-fit, one-character-over, repeated-source,
   repeated-mix, source-omission, sibling-rewrite, added-unit, independent
   framing-defect, framing-follow-up sibling loss, initial modal-defect,
-  foreign-sibling, and no-fallback controls. It made one bounded window-repair
-  request; the initial modal sibling then used the existing one modal retry,
-  while invalid repairs did not consume another window retry.
-- `cargo test --locked --all-targets --all-features` passed 493 library tests,
+  reversed invalid-unit order, eight-unit framing follow-up, foreign-sibling,
+  and no-fallback controls. It made one bounded window-repair request; the
+  initial modal sibling then used the existing one modal retry, while invalid
+  repairs did not consume another window retry.
+- `cargo test --locked --all-targets --all-features` passed 495 library tests,
   3 ordinary office tests, and 3 release-contract tests. The configured 13
   opt-in library tests and 3 opt-in office tests remained ignored.
 - Strict all-target/all-feature Clippy, Rust formatting, the TypeScript/Vite
   production build, and `git diff --check` passed.
-- The public 111-page DOL fixture passed the final live Ollama acceptance in 109.38
+- The public 111-page DOL fixture passed the captured final live Ollama
+  acceptance in 112.75
   seconds with `qwen3-30b-a3b:latest` resident at 100% GPU and an 8192-token
   context. It delivered eight coherent cited paragraphs, cited 81 of 83
   synthesized evidence items, and retained the page-21 problem framing:
@@ -3904,6 +3911,12 @@ release acceptance exposed issue #49
   verification and produced the same summary hash as the earlier run, so this
   live run proves normal-path non-regression; the deterministic boundary test
   proves the repaired path.
+- An immediately preceding run at the same product code failed closed with
+  `SYNTHESIS_REPAIR_INPUT_TOO_LARGE`. Its model response was written to stderr
+  without a retained log, so whether window or framing repair owned that failure
+  could not be inspected. The captured rerun emitted one valid General synthesis
+  response and passed without repair. Oversized repair compaction remains the
+  separate issue #52 boundary rather than expanding this integrity slice.
 
 **Remaining limits and next step**:
 - The repair remains bounded by the eight-unit product limit. A full eight-unit

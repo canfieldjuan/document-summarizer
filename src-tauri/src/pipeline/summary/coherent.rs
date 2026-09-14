@@ -3748,6 +3748,28 @@ fn generate_summary_with_validation_repair(
             catalog,
             response_maximum_units,
         );
+        let parsed_response = if profile == SummaryProfile::General
+            && window_repairs == 0
+            && parsed_response
+                .as_ref()
+                .is_err_and(|failure| failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE)
+        {
+            match parse_window_repair_requirements(
+                profile,
+                &response.text,
+                document_id,
+                catalog,
+                response_maximum_units,
+            ) {
+                Ok(requirements) => {
+                    window_repair_requirements = Some(requirements);
+                    Err(window_mixed_response())
+                }
+                Err(_) => parsed_response,
+            }
+        } else {
+            parsed_response
+        };
         if clipped_repairs == 0
             && parsed_response.as_ref().is_err_and(|failure| {
                 failure.code == UNIT_CLIPPED_RESPONSE_CODE
@@ -3823,7 +3845,12 @@ fn generate_summary_with_validation_repair(
                     &feedback,
                     &response.text,
                 )?;
-                let repair_maximum_units = maximum_summary_units_for_catalog(profile, catalog);
+                let repair_maximum_units = maximum_summary_units_for_catalog(profile, catalog).max(
+                    window_repair_requirements
+                        .as_ref()
+                        .map(WindowRepairRequirements::maximum_units)
+                        .unwrap_or_default(),
+                );
                 request_prompt = prompt_with_maximum_units(&request_prompt, repair_maximum_units)?;
                 let maximum_items = output_schema
                     .pointer_mut("/properties/units/maxItems")
@@ -3851,7 +3878,7 @@ fn generate_summary_with_validation_repair(
                 continue;
             }
             Err(failure) if failure.code == WINDOW_MIXED_RESPONSE_CODE && window_repairs == 0 => {
-                if profile == SummaryProfile::General {
+                if profile == SummaryProfile::General && window_repair_requirements.is_none() {
                     window_repair_requirements = Some(parse_window_repair_requirements(
                         profile,
                         &response.text,
@@ -6323,7 +6350,9 @@ mod tests {
         AllMixedRepeat,
         ReusedMixedSources,
         WindowWithFramingSibling,
+        FramingSiblingBeforeWindow,
         WindowWithFramingThenRewriteSafeSibling,
+        WindowThenFramingNeedsEight,
         WindowWithModalSibling,
     }
 
@@ -6534,6 +6563,16 @@ mod tests {
             } else if feedback.is_empty()
                 && matches!(
                     self.behavior,
+                    WindowRepairBehavior::FramingSiblingBeforeWindow
+                )
+            {
+                json!([
+                    {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]},
+                    {"text":"The first mixed statement is reported.","source_ids":["s1","s3"]}
+                ])
+            } else if feedback.is_empty()
+                && matches!(
+                    self.behavior,
                     WindowRepairBehavior::WindowWithFramingThenRewriteSafeSibling
                 )
             {
@@ -6547,6 +6586,17 @@ mod tests {
                 json!([
                     {"text":"The interpreter must retain the section.","source_ids":["s1"]},
                     {"text":"The document combines two statements.","source_ids":["s2","s3"]}
+                ])
+            } else if feedback.is_empty()
+                && matches!(
+                    self.behavior,
+                    WindowRepairBehavior::WindowThenFramingNeedsEight
+                )
+            {
+                json!([
+                    {"text":"First mixed statement.","source_ids":["s1","s2","s3"]},
+                    {"text":"Second mixed statement.","source_ids":["s1","s2","s3"]},
+                    {"text":"Third mixed statement.","source_ids":["s1","s3"]}
                 ])
             } else if feedback.is_empty()
                 && matches!(
@@ -6605,7 +6655,8 @@ mod tests {
                         {"text":"The second statement's first source is reported.","source_ids":["s1"]},
                         {"text":"The second statement's second source is reported.","source_ids":["s2"]}
                     ]),
-                    WindowRepairBehavior::WindowWithFramingSibling => json!([
+                    WindowRepairBehavior::WindowWithFramingSibling
+                    | WindowRepairBehavior::FramingSiblingBeforeWindow => json!([
                         {"text":"Exact source statement 1.","source_ids":["s1"]},
                         {"text":"Exact source statement 3.","source_ids":["s3"]},
                         {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]}
@@ -6614,6 +6665,14 @@ mod tests {
                         {"text":"Exact source statement 4.","source_ids":["s4"]},
                         {"text":"The first window is reported.","source_ids":["s1","s2"]},
                         {"text":"Exact source statement 3.","source_ids":["s3"]}
+                    ]),
+                    WindowRepairBehavior::WindowThenFramingNeedsEight => json!([
+                        {"text":"First first-window group.","source_ids":["s1","s2"]},
+                        {"text":"First second-window statement.","source_ids":["s3"]},
+                        {"text":"Second first-window group.","source_ids":["s1","s2"]},
+                        {"text":"Second second-window statement.","source_ids":["s3"]},
+                        {"text":"Third first-window statement.","source_ids":["s1"]},
+                        {"text":"Third second-window statement.","source_ids":["s3"]}
                     ]),
                     WindowRepairBehavior::WindowWithModalSibling => json!([
                         {"text":"The interpreter must retain the section.","source_ids":["s1"]},
@@ -6625,6 +6684,7 @@ mod tests {
                 && matches!(
                     self.behavior,
                     WindowRepairBehavior::WindowWithFramingSibling
+                        | WindowRepairBehavior::FramingSiblingBeforeWindow
                 )
             {
                 json!([
@@ -6633,6 +6693,40 @@ mod tests {
                     {"text":"The third source also supports the framed sibling.","source_ids":["s3"]},
                     {"text":"Exact source statement 4.","source_ids":["s4"]}
                 ])
+            } else if is_framing_repair
+                && matches!(
+                    self.behavior,
+                    WindowRepairBehavior::WindowThenFramingNeedsEight
+                )
+            {
+                let maximum_items = match &request.output_format {
+                    ModelOutputFormat::JsonSchema { schema, .. } => schema
+                        .pointer("/properties/units/maxItems")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
+                    _ => 0,
+                };
+                if maximum_items >= 8 {
+                    json!([
+                        {"text":"First problem statement.","source_ids":["s1"]},
+                        {"text":"First risk statement.","source_ids":["s2"]},
+                        {"text":"First second-window statement.","source_ids":["s3"]},
+                        {"text":"Second problem statement.","source_ids":["s1"]},
+                        {"text":"Second risk statement.","source_ids":["s2"]},
+                        {"text":"Second second-window statement.","source_ids":["s3"]},
+                        {"text":"Third first-window statement.","source_ids":["s1"]},
+                        {"text":"Third second-window statement.","source_ids":["s3"]}
+                    ])
+                } else {
+                    json!([
+                        {"text":"First problem statement.","source_ids":["s1"]},
+                        {"text":"First risk statement.","source_ids":["s2"]},
+                        {"text":"First second-window statement.","source_ids":["s3"]},
+                        {"text":"Second problem statement.","source_ids":["s1"]},
+                        {"text":"Second risk statement.","source_ids":["s2"]},
+                        {"text":"Second second-window statement.","source_ids":["s3"]}
+                    ])
+                }
             } else if is_framing_repair
                 && matches!(
                     self.behavior,
@@ -13704,6 +13798,98 @@ mod tests {
             Err(failure) => failure,
         };
         assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
+    }
+
+    #[test]
+    fn window_repair_precedes_framing_independent_of_unit_order() {
+        let mut candidates = vec![
+            candidate("s1", "evidence-1", 1),
+            candidate("s2", "evidence-2", 2),
+            candidate("s3", "evidence-3", 3),
+            candidate("s4", "evidence-4", 4),
+        ];
+        for (index, candidate) in candidates.iter_mut().enumerate() {
+            candidate.selection_window = Some(index / 2);
+        }
+        candidates[2].source_framing = Some(SourceFraming::Problem);
+        candidates[3].source_framing = Some(SourceFraming::Risk);
+        let catalog = SourceCatalog {
+            candidates,
+            omitted_source_units: 0,
+        };
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let runtime = WindowRepairRuntime::new(WindowRepairBehavior::FramingSiblingBeforeWindow);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &runtime,
+            "document-1",
+            &catalog,
+            prompt,
+            schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("window recovery must not depend on which invalid unit appears first");
+        assert_eq!(generated.withheld_unit_kind, None);
+        assert_eq!(generated.claims.len(), 4);
+        assert_eq!(runtime.requests().len(), 3);
+    }
+
+    #[test]
+    fn window_repair_ceiling_survives_a_framing_follow_up() {
+        let mut candidates = vec![
+            candidate("s1", "evidence-1", 1),
+            candidate("s2", "evidence-2", 2),
+            candidate("s3", "evidence-3", 3),
+        ];
+        candidates[0].selection_window = Some(0);
+        candidates[0].source_framing = Some(SourceFraming::Problem);
+        candidates[1].selection_window = Some(0);
+        candidates[1].source_framing = Some(SourceFraming::Risk);
+        candidates[2].selection_window = Some(1);
+        let catalog = SourceCatalog {
+            candidates,
+            omitted_source_units: 0,
+        };
+        assert_eq!(
+            maximum_initial_summary_units_for_catalog(SummaryProfile::General, &catalog),
+            3
+        );
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::General, &catalog),
+            6
+        );
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let runtime = WindowRepairRuntime::new(WindowRepairBehavior::WindowThenFramingNeedsEight);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &runtime,
+            "document-1",
+            &catalog,
+            prompt,
+            schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("the framing follow-up must retain the eight-unit window repair ceiling");
+        assert_eq!(generated.withheld_unit_kind, None);
+        assert_eq!(generated.claims.len(), 8);
+        let requests = runtime.requests();
+        assert_eq!(requests.len(), 3);
+        let framing_prompt = serde_json::from_str::<Value>(&requests[2].user_prompt).unwrap();
+        assert_eq!(framing_prompt["maximum_units"], 8);
+        let ModelOutputFormat::JsonSchema {
+            schema: framing_schema,
+            ..
+        } = &requests[2].output_format
+        else {
+            panic!("framing follow-up must use a JSON schema");
+        };
+        assert_eq!(framing_schema["properties"]["units"]["maxItems"], 8);
     }
 
     #[test]
