@@ -10,7 +10,7 @@ Root cause:
 Required change surface:
 - In `src-tauri/src/pipeline/summary/coherent.rs`, derive immutable window-repair requirements from the rejected response, include that untrusted response in the one repair prompt, and accept the repair only when valid siblings are unchanged and every mixed unit's original evidence set is covered exactly once by single-window replacement units.
 - Preserve the existing safe-sibling fallback with an explicit cross-window warning when a retry repeats, omits, rewrites, adds, or otherwise violates the repair contract. Continue to fail closed when no safe result exists.
-- Extend the existing window-repair regression with fail-first omission, sibling rewrite, added-unit, repeated-mix, repeated-source, independent framing/clipping/modal defects, malformed siblings, all-mixed, and valid-split boundaries. Assert the repair prompt carries the rejected response and remains one attempt.
+- Extend the existing window-repair regression with fail-first omission, sibling rewrite, added-unit, repeated-mix, repeated-source, independent framing/clipping/modal defects, later-repair fallback ordering, malformed siblings, all-mixed, and valid-split boundaries. Assert the repair prompt carries the rejected response and remains one attempt.
 - Record the verified result and current-head GPU acceptance in `docs/BUILD_LEDGER.md`.
 
 Explicit non-scope:

@@ -3873,6 +3873,9 @@ release acceptance exposed issue #49
   existing bounded repair can run after the window split. Modality-safe siblings
   remain immutable, and other invalid sibling output still fails immediately
   instead of being treated as repairable.
+- If a later source-framing repair also violates the older window contract, the
+  window contract is evaluated first so its warned safe sibling remains
+  available instead of being bypassed by the newer framing-integrity error.
 - Story and Contract keep their existing cross-window repair behavior. This
   slice does not change source selection, persistence, result identity,
   routing, the normal synthesis prompt, or issue #52's oversized
@@ -3882,16 +3885,16 @@ release acceptance exposed issue #49
 - The focused recovery boundary passed with a valid split followed by a modal
   repair and with exact-fit, one-character-over, repeated-source,
   repeated-mix, source-omission, sibling-rewrite, added-unit, independent
-  framing-defect, initial modal-defect, foreign-sibling, and no-fallback
-  controls. It made one bounded window-repair request; the initial modal sibling
-  then used the existing one modal retry, while invalid repairs did not consume
-  another window retry.
+  framing-defect, framing-follow-up sibling loss, initial modal-defect,
+  foreign-sibling, and no-fallback controls. It made one bounded window-repair
+  request; the initial modal sibling then used the existing one modal retry,
+  while invalid repairs did not consume another window retry.
 - `cargo test --locked --all-targets --all-features` passed 493 library tests,
   3 ordinary office tests, and 3 release-contract tests. The configured 13
   opt-in library tests and 3 opt-in office tests remained ignored.
 - Strict all-target/all-feature Clippy, Rust formatting, the TypeScript/Vite
   production build, and `git diff --check` passed.
-- The public 111-page DOL fixture passed the final live Ollama acceptance in 108.61
+- The public 111-page DOL fixture passed the final live Ollama acceptance in 109.38
   seconds with `qwen3-30b-a3b:latest` resident at 100% GPU and an 8192-token
   context. It delivered eight coherent cited paragraphs, cited 81 of 83
   synthesized evidence items, and retained the page-21 problem framing:

@@ -3945,11 +3945,6 @@ fn generate_summary_with_validation_repair(
                 return Err(failure);
             }
         };
-        if let Some(requirements) = framing_repair_requirements.take() {
-            if !satisfies_source_framing_repair(&parsed.0, &requirements) {
-                return Err(source_framing_repair_integrity_response());
-            }
-        }
         if let Some(requirements) = &window_repair_requirements {
             if !satisfies_window_repair(&parsed.0, requirements) {
                 if let Some(generated) = take_generated_fallback(
@@ -3960,6 +3955,11 @@ fn generate_summary_with_validation_repair(
                     return Ok(generated);
                 }
                 return Err(window_repair_integrity_response());
+            }
+        }
+        if let Some(requirements) = framing_repair_requirements.take() {
+            if !satisfies_source_framing_repair(&parsed.0, &requirements) {
+                return Err(source_framing_repair_integrity_response());
             }
         }
         let repaired_clipped_response_is_incomplete = clipped_repairs > 0
@@ -6323,6 +6323,7 @@ mod tests {
         AllMixedRepeat,
         ReusedMixedSources,
         WindowWithFramingSibling,
+        WindowWithFramingThenRewriteSafeSibling,
         WindowWithModalSibling,
     }
 
@@ -6531,6 +6532,16 @@ mod tests {
                     {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]}
                 ])
             } else if feedback.is_empty()
+                && matches!(
+                    self.behavior,
+                    WindowRepairBehavior::WindowWithFramingThenRewriteSafeSibling
+                )
+            {
+                json!([
+                    {"text":"Exact source statement 4.","source_ids":["s4"]},
+                    {"text":"The mixed statement spans windows.","source_ids":["s1","s2","s3"]}
+                ])
+            } else if feedback.is_empty()
                 && matches!(self.behavior, WindowRepairBehavior::WindowWithModalSibling)
             {
                 json!([
@@ -6599,6 +6610,11 @@ mod tests {
                         {"text":"Exact source statement 3.","source_ids":["s3"]},
                         {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]}
                     ]),
+                    WindowRepairBehavior::WindowWithFramingThenRewriteSafeSibling => json!([
+                        {"text":"Exact source statement 4.","source_ids":["s4"]},
+                        {"text":"The first window is reported.","source_ids":["s1","s2"]},
+                        {"text":"Exact source statement 3.","source_ids":["s3"]}
+                    ]),
                     WindowRepairBehavior::WindowWithModalSibling => json!([
                         {"text":"The interpreter must retain the section.","source_ids":["s1"]},
                         {"text":"Exact source statement 2.","source_ids":["s2"]},
@@ -6616,6 +6632,17 @@ mod tests {
                     {"text":"Exact source statement 3.","source_ids":["s3"]},
                     {"text":"The third source also supports the framed sibling.","source_ids":["s3"]},
                     {"text":"Exact source statement 4.","source_ids":["s4"]}
+                ])
+            } else if is_framing_repair
+                && matches!(
+                    self.behavior,
+                    WindowRepairBehavior::WindowWithFramingThenRewriteSafeSibling
+                )
+            {
+                json!([
+                    {"text":"Exact source statement 1.","source_ids":["s1"]},
+                    {"text":"Exact source statement 2.","source_ids":["s2"]},
+                    {"text":"Exact source statement 3.","source_ids":["s3"]}
                 ])
             } else {
                 json!([
@@ -13593,6 +13620,34 @@ mod tests {
             .is_some_and(|feedback| feedback.iter().any(|item| item
                 .as_str()
                 .is_some_and(|text| text.contains("source_framing")))));
+
+        let mut fallback_catalog = catalog.clone();
+        fallback_catalog.candidates[0].source_framing = Some(SourceFraming::Problem);
+        fallback_catalog.candidates[1].source_framing = Some(SourceFraming::Risk);
+        let (fallback_prompt, fallback_schema) =
+            prompt_and_schema(SummaryProfile::General, &fallback_catalog).unwrap();
+        let framing_rewrites_safe =
+            WindowRepairRuntime::new(WindowRepairBehavior::WindowWithFramingThenRewriteSafeSibling);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &framing_rewrites_safe,
+            "document-1",
+            &fallback_catalog,
+            fallback_prompt,
+            fallback_schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("a failed framing follow-up should retain the original window-safe sibling");
+        assert_eq!(
+            generated.withheld_unit_kind,
+            Some(WithheldUnitKind::CrossWindow)
+        );
+        assert_eq!(generated.claims.len(), 1);
+        assert_eq!(generated.claims[0].text, "Exact source statement 4.");
+        assert_eq!(framing_rewrites_safe.requests().len(), 3);
 
         let modal_sibling = WindowRepairRuntime::new(WindowRepairBehavior::WindowWithModalSibling);
         let generated = generate_summary_with_validation_repair(
