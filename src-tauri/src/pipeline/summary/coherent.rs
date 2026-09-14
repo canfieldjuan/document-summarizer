@@ -4175,7 +4175,7 @@ fn satisfies_window_repair(
     satisfies_split_repair(
         candidate,
         &requirements.preserved_claims,
-        &requirements.mixed_unit_evidence_ids,
+        &requirements.repairable_unit_evidence_ids,
     )
 }
 
@@ -5448,12 +5448,12 @@ struct SourceFramingRepairRequirements {
 
 struct WindowRepairRequirements {
     preserved_claims: Vec<CitedClaim>,
-    mixed_unit_evidence_ids: Vec<Vec<String>>,
+    repairable_unit_evidence_ids: Vec<Vec<String>>,
 }
 
 impl WindowRepairRequirements {
     fn maximum_units(&self) -> usize {
-        self.mixed_unit_evidence_ids
+        self.repairable_unit_evidence_ids
             .iter()
             .fold(
                 self.preserved_claims.len(),
@@ -5478,14 +5478,20 @@ fn parse_window_repair_requirements(
         return Err(invalid_response());
     }
     let mut retained = Vec::with_capacity(raw.units.len());
-    let mut mixed_unit_evidence_ids = Vec::new();
+    let mut repairable_unit_evidence_ids = Vec::new();
+    let mut has_window_mixed_unit = false;
     for unit in raw.units {
         let source_ids = unit.source_ids.clone();
         let singleton = serde_json::to_string(&RawResponse { units: vec![unit] })
             .map_err(|_| invalid_response())?;
         match parse_response_with_maximum_units(profile, &singleton, document_id, catalog, 1) {
             Ok((mut claims, _)) => retained.append(&mut claims),
-            Err(failure) if failure.code == WINDOW_MIXED_RESPONSE_CODE => {
+            Err(failure)
+                if failure.code == WINDOW_MIXED_RESPONSE_CODE
+                    || failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE
+                    || failure.code == UNIT_CLIPPED_RESPONSE_CODE =>
+            {
+                has_window_mixed_unit |= failure.code == WINDOW_MIXED_RESPONSE_CODE;
                 let mut evidence_positions = Vec::with_capacity(source_ids.len());
                 for source_id in source_ids {
                     let (position, candidate) = catalog
@@ -5497,7 +5503,7 @@ fn parse_window_repair_requirements(
                     evidence_positions.push((position, candidate.evidence.evidence_id.clone()));
                 }
                 evidence_positions.sort_by_key(|(position, _)| *position);
-                mixed_unit_evidence_ids.push(
+                repairable_unit_evidence_ids.push(
                     evidence_positions
                         .into_iter()
                         .map(|(_, evidence_id)| evidence_id)
@@ -5507,12 +5513,12 @@ fn parse_window_repair_requirements(
             Err(failure) => return Err(failure),
         }
     }
-    if mixed_unit_evidence_ids.is_empty() {
+    if !has_window_mixed_unit {
         return Err(window_mixed_response());
     }
     Ok(WindowRepairRequirements {
         preserved_claims: retained,
-        mixed_unit_evidence_ids,
+        repairable_unit_evidence_ids,
     })
 }
 
@@ -6309,6 +6315,7 @@ mod tests {
         AllMixedOmit,
         AllMixedRepeat,
         ReusedMixedSources,
+        WindowWithFramingSibling,
     }
 
     struct FramingRepairRuntime {
@@ -6495,12 +6502,25 @@ mod tests {
             let is_window_repair = feedback
                 .iter()
                 .any(|message| message.contains("selection_window"));
+            let is_framing_repair = feedback
+                .iter()
+                .any(|message| message.contains("source_framing"));
             let units = if feedback.is_empty()
                 && matches!(self.behavior, WindowRepairBehavior::ReusedMixedSources)
             {
                 json!([
                     {"text":"The first mixed statement is reported.","source_ids":["s1","s2"]},
                     {"text":"The second mixed statement is reported.","source_ids":["s1","s2"]}
+                ])
+            } else if feedback.is_empty()
+                && matches!(
+                    self.behavior,
+                    WindowRepairBehavior::WindowWithFramingSibling
+                )
+            {
+                json!([
+                    {"text":"The first mixed statement is reported.","source_ids":["s1","s3"]},
+                    {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]}
                 ])
             } else if feedback.is_empty()
                 && matches!(
@@ -6559,7 +6579,24 @@ mod tests {
                         {"text":"The second statement's first source is reported.","source_ids":["s1"]},
                         {"text":"The second statement's second source is reported.","source_ids":["s2"]}
                     ]),
+                    WindowRepairBehavior::WindowWithFramingSibling => json!([
+                        {"text":"Exact source statement 1.","source_ids":["s1"]},
+                        {"text":"Exact source statement 3.","source_ids":["s3"]},
+                        {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]}
+                    ]),
                 }
+            } else if is_framing_repair
+                && matches!(
+                    self.behavior,
+                    WindowRepairBehavior::WindowWithFramingSibling
+                )
+            {
+                json!([
+                    {"text":"Exact source statement 1.","source_ids":["s1"]},
+                    {"text":"Exact source statement 3.","source_ids":["s3"]},
+                    {"text":"The third source also supports the framed sibling.","source_ids":["s3"]},
+                    {"text":"Exact source statement 4.","source_ids":["s4"]}
+                ])
             } else {
                 json!([
                     {"text":"The interpreter should retain the section.","source_ids":["s1"]},
@@ -13497,6 +13534,64 @@ mod tests {
             panic!("repeated-source window repair must use a JSON schema");
         };
         assert_eq!(repeated_repair_schema["properties"]["units"]["maxItems"], 4);
+
+        let mut independent_catalog = catalog.clone();
+        independent_catalog.candidates[2].source_framing = Some(SourceFraming::Problem);
+        independent_catalog.candidates[3].source_framing = Some(SourceFraming::Risk);
+        let (independent_prompt, independent_schema) =
+            prompt_and_schema(SummaryProfile::General, &independent_catalog).unwrap();
+        let independent = WindowRepairRuntime::new(WindowRepairBehavior::WindowWithFramingSibling);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &independent,
+            "document-1",
+            &independent_catalog,
+            independent_prompt,
+            independent_schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("window repair should preserve an independent framing defect for its own repair");
+        assert_eq!(generated.withheld_unit_kind, None);
+        assert_eq!(generated.claims.len(), 4);
+        let independent_requests = independent.requests();
+        assert_eq!(independent_requests.len(), 3);
+        let independent_window_prompt =
+            serde_json::from_str::<Value>(&independent_requests[1].user_prompt).unwrap();
+        assert_eq!(independent_window_prompt["maximum_units"], 4);
+        assert!(independent_window_prompt["validation_feedback"]
+            .as_array()
+            .is_some_and(|feedback| feedback.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("selection_window")))));
+        let independent_framing_prompt =
+            serde_json::from_str::<Value>(&independent_requests[2].user_prompt).unwrap();
+        assert!(independent_framing_prompt["validation_feedback"]
+            .as_array()
+            .is_some_and(|feedback| feedback.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("source_framing")))));
+
+        let malformed_sibling = json!({
+            "units": [
+                {"text":"The first mixed statement is reported.","source_ids":["s1","s3"]},
+                {"text":"The malformed sibling is reported.","source_ids":["foreign"]}
+            ]
+        })
+        .to_string();
+        let failure = match parse_window_repair_requirements(
+            SummaryProfile::General,
+            &malformed_sibling,
+            "document-1",
+            &catalog,
+            maximum_initial_summary_units_for_catalog(SummaryProfile::General, &catalog),
+        ) {
+            Ok(_) => panic!("an unrelated invalid sibling must not be admitted as repairable"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
     }
 
     #[test]
