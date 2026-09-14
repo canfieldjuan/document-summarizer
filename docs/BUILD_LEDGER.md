@@ -3931,3 +3931,52 @@ release acceptance exposed issue #49
   contract.
 - Issue #52 remains the separate owner for oversized source-framing repair
   context. No further summary-profile behavior is required by this slice.
+
+## Slice 36 — State Inference Locality Truthfully for Release (2026-09-14)
+
+**Outcome**:
+- The release boundary now treats Local Inference Gateway as a service name,
+  not a network-locality guarantee. Its administrator-configured HTTPS origin
+  may be outside the workstation.
+- README, the executable contract, and both the initial and catalog-refreshed
+  Gateway setup copy disclose that selecting Gateway sends complete
+  document-derived model prompts, including selected source excerpts, to that
+  origin. They distinguish those requests from direct local runtimes and state
+  that the Gateway client does not upload the original PDF.
+- README now states the actual ingestion boundary: the application records the
+  source file's path and identity without copying the PDF. The release metadata
+  no longer makes a private on-premises-only inference promise. README also
+  instructs the user to keep the source readable until parsing completes because
+  the parser reopens that path.
+- Direct Ollama remains restricted to exact-loopback HTTP. Qualified llama.cpp
+  remains an authenticated app-managed loopback child. Ollama endpoint URLs
+  cannot contain credentials, while an optional bounded token file can supply
+  bearer authentication. This slice does not change admission, transport,
+  credentials, runtime selection, or pipeline behavior.
+- The executable contract now lists Gateway, Ollama, and qualified llama.cpp as
+  the supported inference sources and reports current synthesis 8.0.0,
+  verification 10.0.0, summary 8.0.0, and citation 4.0.0 artifacts.
+
+**Verification**:
+- The release disclosure test failed first because the required Gateway-egress
+  wording was absent, then passed after the four release surfaces were aligned.
+  Review probes then failed on the stale metadata, copied-PDF claim, and missing
+  source-retention instruction before their wording was corrected. The tests
+  require the Gateway disclosure and both direct-runtime distinctions, reject
+  on-premises-only release wording, and require the path-only ingestion boundary
+  plus its readable-through-parsing instruction.
+- All 5 release-contract tests passed. Strict all-target/all-feature Clippy,
+  Rust formatting, the TypeScript/Vite production build, and `git diff --check`
+  passed.
+- The built HTML contains the disclosure before configuration, and the compiled
+  JavaScript uses the same disclosure after catalog refresh for both configured
+  and unconfigured Gateway states.
+
+**Remaining release work**:
+- Issue #61 is complete when this slice merges and its current-head review is
+  reconciled.
+- Issue #62 remains the next Document Summarizer release blocker: implement and
+  prove the Windows Connect registration and entitlement storage boundary before
+  collecting separate Linux and Windows installed cited-summary demonstrations.
+- Issue #52 remains open but was explicitly deferred at its existing fail-closed
+  boundary while release blockers are completed.

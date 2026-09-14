@@ -490,7 +490,7 @@ mode, supported prose claims, ledger claims, their exact evidence and the canoni
 rendered text. The desktop shows coherent paragraphs first and keeps any supported
 ledger claims available as supporting detail.
 
-Current artifacts use synthesis 7.0.0, verification 9.0.0, summary 7.0.0 and
+Current artifacts use synthesis 8.0.0, verification 10.0.0, summary 8.0.0 and
 citation 4.0.0. Completed pre-disclosure coherent artifacts retain synthesis
 6.0.0 with verification 7.0.0 or 8.0.0 and summary 6.0.0 compatibility. Direct
 version-5 and older artifacts retain their original validation, rendering and
@@ -1117,16 +1117,33 @@ identity.
 
 ### Runtime, reporting and explicit limits
 
-The supported runtime is native loopback Ollama, default
-`http://127.0.0.1:11434/`, with an exact-digest qualified Qwen preset selected
-through persisted application settings. The timeout remains 900 seconds, with
-separate short connection/health limits. The adapter rejects non-loopback HTTP
-hosts, credentials in the URL, proxies and redirects; optional credentials come
-from its bounded token file. Deployment endpoint, timeout and token-file
-overrides remain available; the desktop model choice is not an environment
-variable. All source text is marked untrusted in prompts. Temperature remains
-zero and native requests set `think: false`; template/runtime behavior must be
-measured.
+The supported inference sources are the authenticated Local Inference Gateway,
+native loopback Ollama, and qualified app-managed local llama.cpp. They are
+selected through persisted application settings and never substituted during a
+run.
+
+The Gateway is an administrator-configured HTTPS origin and may be outside the
+workstation; “Local Inference Gateway” is its service name, not an enforced
+network boundary. When selected, the client sends the complete document-derived
+model prompts to that origin. These include system and user instructions,
+extracted document text selected for the request, selected source excerpts, and
+response schemas. The Gateway client does not upload the original source file.
+It requires an application-specific bearer-token file and issuing-CA file,
+disables environment proxies and redirects, and admits a credential-free HTTPS
+origin without asserting that its DNS name or address is local. Gateway
+selection remains disabled on platforms without the required credential-owner
+validation.
+
+Direct Ollama defaults to `http://127.0.0.1:11434/` with an exact-digest
+qualified Qwen preset. Its adapter rejects non-loopback HTTP hosts, credentials
+in the URL, proxies and redirects; optional credentials come from its bounded
+token file. The qualified llama.cpp runtime is an authenticated child process
+started by the application on exact loopback. Direct-runtime deployment
+endpoint, timeout and token-file overrides remain available; the desktop model
+choice is not an environment variable. The generation timeout remains 900
+seconds, with separate short connection, health, and child-startup limits. All
+source text is marked untrusted in prompts. Temperature remains zero and native
+Ollama requests set `think: false`; template/runtime behavior must be measured.
 
 Run-derived signed-range seeds remain in requests for reproducibility. A changed
 seed alone is not represented as a meaningful greedy retry. Actual paraphrase
