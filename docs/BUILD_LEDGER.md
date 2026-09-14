@@ -3860,9 +3860,10 @@ release acceptance exposed issue #49
   with identical wording and evidence, and every source from each mixed unit
   must appear exactly once across its single-window replacement units.
 - The repair prompt carries the rejected JSON as explicitly untrusted draft
-  data. Its transient unit ceiling expands only far enough to admit bounded
-  source-backed splits and remains capped by the persisted eight-unit product
-  limit.
+  data. Its transient unit ceiling counts preserved units plus every source
+  occurrence in each mixed unit, then caps that bound at the persisted
+  eight-unit product limit. Differently worded units may therefore reuse the
+  same source without making a contract-preserving repair impossible.
 - A repair that repeats the mixed-window error, drops a source, rewrites a
   valid sibling, or introduces another source returns the existing warned safe
   sibling when one exists. With no safe sibling, the repair fails closed as a
@@ -3874,9 +3875,10 @@ release acceptance exposed issue #49
 
 **Verification**:
 - The focused recovery boundary passed with a valid split followed by a modal
-  repair and with exact-fit, one-character-over, repeated-mix, source-omission,
-  sibling-rewrite, added-unit, and no-fallback controls. It made one bounded
-  window-repair request; invalid repairs did not consume another window retry.
+  repair and with exact-fit, one-character-over, repeated-source,
+  repeated-mix, source-omission, sibling-rewrite, added-unit, and no-fallback
+  controls. It made one bounded window-repair request; invalid repairs did not
+  consume another window retry.
 - `cargo test --locked --all-targets --all-features` passed 493 library tests,
   3 ordinary office tests, and 3 release-contract tests. The configured 13
   opt-in library tests and 3 opt-in office tests remained ignored.

@@ -2725,16 +2725,6 @@ fn maximum_summary_units_for_catalog(profile: SummaryProfile, catalog: &SourceCa
         .min(MAX_SUMMARY_CLAIMS)
 }
 
-fn maximum_window_repair_units_for_catalog(
-    profile: SummaryProfile,
-    catalog: &SourceCatalog,
-) -> usize {
-    if profile != SummaryProfile::General {
-        return maximum_initial_summary_units_for_catalog(profile, catalog);
-    }
-    catalog.candidates.len().clamp(1, MAX_SUMMARY_CLAIMS)
-}
-
 fn persisted_summary_claim_count_valid(claim_count: usize) -> bool {
     (1..=MAX_SUMMARY_CLAIMS).contains(&claim_count)
 }
@@ -3743,7 +3733,10 @@ fn generate_summary_with_validation_repair(
             initial_maximum_units
         };
         let window_maximum_units = if window_repairs > 0 {
-            maximum_window_repair_units_for_catalog(profile, catalog)
+            window_repair_requirements
+                .as_ref()
+                .map(WindowRepairRequirements::maximum_units)
+                .unwrap_or(initial_maximum_units)
         } else {
             initial_maximum_units
         };
@@ -3908,8 +3901,10 @@ fn generate_summary_with_validation_repair(
                 } else {
                     prompt_with_validation_feedback(&request_prompt, &feedback)?
                 };
-                let repair_maximum_units =
-                    maximum_window_repair_units_for_catalog(profile, catalog);
+                let repair_maximum_units = window_repair_requirements
+                    .as_ref()
+                    .map(WindowRepairRequirements::maximum_units)
+                    .unwrap_or(response_maximum_units);
                 request_prompt = prompt_with_maximum_units(&request_prompt, repair_maximum_units)?;
                 let maximum_items = output_schema
                     .pointer_mut("/properties/units/maxItems")
@@ -5456,6 +5451,18 @@ struct WindowRepairRequirements {
     mixed_unit_evidence_ids: Vec<Vec<String>>,
 }
 
+impl WindowRepairRequirements {
+    fn maximum_units(&self) -> usize {
+        self.mixed_unit_evidence_ids
+            .iter()
+            .fold(
+                self.preserved_claims.len(),
+                |maximum_units, evidence_ids| maximum_units.saturating_add(evidence_ids.len()),
+            )
+            .clamp(1, MAX_SUMMARY_CLAIMS)
+    }
+}
+
 fn parse_window_repair_requirements(
     profile: SummaryProfile,
     response: &str,
@@ -6301,6 +6308,7 @@ mod tests {
         AddUnit,
         AllMixedOmit,
         AllMixedRepeat,
+        ReusedMixedSources,
     }
 
     struct FramingRepairRuntime {
@@ -6488,10 +6496,18 @@ mod tests {
                 .iter()
                 .any(|message| message.contains("selection_window"));
             let units = if feedback.is_empty()
+                && matches!(self.behavior, WindowRepairBehavior::ReusedMixedSources)
+            {
+                json!([
+                    {"text":"The first mixed statement is reported.","source_ids":["s1","s2"]},
+                    {"text":"The second mixed statement is reported.","source_ids":["s1","s2"]}
+                ])
+            } else if feedback.is_empty()
                 && matches!(
                     self.behavior,
                     WindowRepairBehavior::AllMixedOmit | WindowRepairBehavior::AllMixedRepeat
-                ) {
+                )
+            {
                 json!([
                     {"text":"The document combines two statements.","source_ids":["s1","s3"]}
                 ])
@@ -6536,6 +6552,12 @@ mod tests {
                     ]),
                     WindowRepairBehavior::AllMixedRepeat => json!([
                         {"text":"The document combines two statements.","source_ids":["s1","s3"]}
+                    ]),
+                    WindowRepairBehavior::ReusedMixedSources => json!([
+                        {"text":"The first statement's first source is reported.","source_ids":["s1"]},
+                        {"text":"The first statement's second source is reported.","source_ids":["s2"]},
+                        {"text":"The second statement's first source is reported.","source_ids":["s1"]},
+                        {"text":"The second statement's second source is reported.","source_ids":["s2"]}
                     ]),
                 }
             } else {
@@ -13277,10 +13299,6 @@ mod tests {
             maximum_initial_summary_units_for_catalog(SummaryProfile::General, &catalog),
             2
         );
-        assert_eq!(
-            maximum_window_repair_units_for_catalog(SummaryProfile::General, &catalog),
-            4
-        );
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
         let runtime = WindowRepairRuntime::new(WindowRepairBehavior::CorrectThenModal);
         let GeneratedSummaryContent {
@@ -13322,7 +13340,7 @@ mod tests {
             window_prompt["previous_invalid_response"],
             original_response
         );
-        assert_eq!(window_prompt["maximum_units"], 4);
+        assert_eq!(window_prompt["maximum_units"], 3);
         let ModelOutputFormat::JsonSchema {
             schema: repair_schema,
             ..
@@ -13330,7 +13348,7 @@ mod tests {
         else {
             panic!("window repair must use a JSON schema");
         };
-        assert_eq!(repair_schema["properties"]["units"]["maxItems"], 4);
+        assert_eq!(repair_schema["properties"]["units"]["maxItems"], 3);
         let repair_request_characters = synthesis_request_characters(
             SummaryProfile::General,
             &requests[1].user_prompt,
@@ -13437,6 +13455,48 @@ mod tests {
             assert!(!failure.recoverable);
             assert_eq!(no_fallback.requests().len(), 2);
         }
+
+        let mut repeated_candidates = vec![
+            candidate("s1", "evidence-1", 1),
+            candidate("s2", "evidence-2", 2),
+        ];
+        repeated_candidates[0].selection_window = Some(0);
+        repeated_candidates[1].selection_window = Some(1);
+        let repeated_catalog = SourceCatalog {
+            candidates: repeated_candidates,
+            omitted_source_units: 0,
+        };
+        let (repeated_prompt, repeated_schema) =
+            prompt_and_schema(SummaryProfile::General, &repeated_catalog).unwrap();
+        let repeated = WindowRepairRuntime::new(WindowRepairBehavior::ReusedMixedSources);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &repeated,
+            "document-1",
+            &repeated_catalog,
+            repeated_prompt,
+            repeated_schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("each repeated mixed unit should retain its complete source set");
+        assert_eq!(generated.withheld_unit_kind, None);
+        assert_eq!(generated.claims.len(), 4);
+        let repeated_requests = repeated.requests();
+        assert_eq!(repeated_requests.len(), 2);
+        let repeated_repair_prompt =
+            serde_json::from_str::<Value>(&repeated_requests[1].user_prompt).unwrap();
+        assert_eq!(repeated_repair_prompt["maximum_units"], 4);
+        let ModelOutputFormat::JsonSchema {
+            schema: repeated_repair_schema,
+            ..
+        } = &repeated_requests[1].output_format
+        else {
+            panic!("repeated-source window repair must use a JSON schema");
+        };
+        assert_eq!(repeated_repair_schema["properties"]["units"]["maxItems"], 4);
     }
 
     #[test]
