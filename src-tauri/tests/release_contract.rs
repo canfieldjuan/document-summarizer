@@ -55,3 +55,23 @@ fn legacy_pdf_probes_cannot_be_discovered_as_release_binaries() {
     assert!(manifest_dir.join("tools/legacy/test_min_pdf.rs").is_file());
     assert!(manifest_dir.join("tools/legacy/test_pdf.rs").is_file());
 }
+
+#[test]
+fn inference_locality_disclosure_matches_runtime_boundaries() {
+    let readme = include_str!("../../README.md");
+    let contracts = include_str!("../../docs/CONTRACTS.md");
+    let initial_ui = include_str!("../../index.html");
+    let refreshed_ui = include_str!("../../src/main.ts");
+    let normalized = [readme, contracts, initial_ui, refreshed_ui]
+        .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "));
+
+    for disclosure in &normalized {
+        assert!(disclosure.contains("complete document-derived model prompts"));
+        assert!(disclosure.contains("selected source excerpts"));
+    }
+    assert!(normalized[0].contains("may be outside this workstation"));
+    assert!(normalized[1].contains("administrator-configured HTTPS origin"));
+    assert!(normalized[1].contains("native loopback Ollama"));
+    assert!(normalized[1].contains("app-managed local llama.cpp"));
+    assert!(!initial_ui.contains("configured on-prem gateway"));
+}

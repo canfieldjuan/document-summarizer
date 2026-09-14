@@ -38,7 +38,7 @@
               </button>
               <div id="gateway-setup" class="gateway-setup" hidden>
                 <label for="gateway-url">Gateway HTTPS origin</label>
-                <input id="gateway-url" type="url" inputmode="url" autocomplete="off" placeholder="https://inference.local:8787" maxlength="2048" />
+                <input id="gateway-url" type="url" inputmode="url" autocomplete="off" placeholder="https://inference.example.com" maxlength="2048" />
                 <div class="gateway-files">
                   <button id="gateway-token" class="quiet-button" type="button">Choose token file</button>
                   <span id="gateway-token-name">No token selected</span>
@@ -46,7 +46,7 @@
                   <span id="gateway-ca-name">No CA selected</span>
                 </div>
                 <button id="gateway-connect" class="quiet-button" type="button">Verify and use gateway</button>
-                <p id="gateway-detail" class="runtime-detail">The token stays in its private file. The app stores only the file path.</p>
+                <p id="gateway-detail" class="runtime-detail">The configured HTTPS gateway may be outside this workstation. When selected, it receives complete document-derived model prompts, including selected source excerpts. The token stays in its private file; the app stores only the file path.</p>
               </div>
               <button id="register-gguf" class="quiet-button model-register-button" type="button">
                 Add GGUF file
@@ -82,7 +82,7 @@
               <p class="utility-label">Native-text PDF workflow</p>
               <h2 id="workbench-title">Bring one document into focus.</h2>
               <p class="intro-copy">
-                Extracted document content is processed on this computer or sent to your configured on-prem gateway, according to the run's inference profile.
+                Extracted document content stays on this computer for direct runtimes or is included in complete document-derived model prompts sent to your configured HTTPS gateway, including selected source excerpts. The gateway may be outside this workstation.
               </p>
               <div class="summary-profile-control">
                 <label for="summary-profile">Summary profile</label>

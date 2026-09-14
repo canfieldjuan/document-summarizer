@@ -3931,3 +3931,43 @@ release acceptance exposed issue #49
   contract.
 - Issue #52 remains the separate owner for oversized source-framing repair
   context. No further summary-profile behavior is required by this slice.
+
+## Slice 36 — State Inference Locality Truthfully for Release (2026-09-14)
+
+**Outcome**:
+- The release boundary now treats Local Inference Gateway as a service name,
+  not a network-locality guarantee. Its administrator-configured HTTPS origin
+  may be outside the workstation.
+- README, the executable contract, and both the initial and catalog-refreshed
+  Gateway setup copy disclose that selecting Gateway sends complete
+  document-derived model prompts, including selected source excerpts, to that
+  origin. They distinguish those requests from direct local runtimes and state
+  that the Gateway client does not upload the original PDF.
+- Direct Ollama remains restricted to exact-loopback HTTP. Qualified llama.cpp
+  remains an authenticated app-managed loopback child. This slice does not
+  change admission, transport, credentials, runtime selection, or pipeline
+  behavior.
+- The executable contract now lists Gateway, Ollama, and qualified llama.cpp as
+  the supported inference sources and reports current synthesis 8.0.0,
+  verification 10.0.0, summary 8.0.0, and citation 4.0.0 artifacts.
+
+**Verification**:
+- The release disclosure test failed first because the required Gateway-egress
+  wording was absent, then passed after the four release surfaces were aligned.
+  It requires the Gateway disclosure and both direct-runtime distinctions, and
+  rejects the stale `configured on-prem gateway` claim.
+- All 4 release-contract tests passed. Strict all-target/all-feature Clippy,
+  Rust formatting, the TypeScript/Vite production build, and `git diff --check`
+  passed.
+- The built HTML contains the disclosure before configuration, and the compiled
+  JavaScript uses the same disclosure after catalog refresh for both configured
+  and unconfigured Gateway states.
+
+**Remaining release work**:
+- Issue #61 is complete when this slice merges and its current-head review is
+  reconciled.
+- Issue #62 remains the next Document Summarizer release blocker: implement and
+  prove the Windows Connect registration and entitlement storage boundary before
+  collecting separate Linux and Windows installed cited-summary demonstrations.
+- Issue #52 remains open but was explicitly deferred at its existing fail-closed
+  boundary while release blockers are completed.

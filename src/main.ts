@@ -267,6 +267,7 @@ let selectedGatewayCaPath: string | null = null;
 let activeInferenceSelection: string | null = null;
 let gatewayConfigured = false;
 let gatewayPlatformSupported = false;
+const gatewayDataDisclosure = "The configured HTTPS gateway may be outside this workstation. When selected, it receives complete document-derived model prompts, including selected source excerpts.";
 let connectInstalling = false;
 let connectStatusRefreshInFlight = false;
 let processing = false;
@@ -476,9 +477,9 @@ async function refreshModelCatalog(): Promise<void> {
       gatewayCaName.textContent = catalog.gateway.caFileName ?? "No CA selected";
     }
     gatewayDetail.textContent = catalog.gateway.configured
-      ? "Gateway connection saved. Choose new files only when replacing it."
+      ? `Gateway connection saved. ${gatewayDataDisclosure} Choose new files only when replacing it.`
       : catalog.gateway.unavailableReason
-        ?? "The token stays in its private file. The app stores only the file path.";
+        ?? `${gatewayDataDisclosure} The token stays in its private file; the app stores only the file path.`;
     gatewayEdit.hidden = !catalog.gateway.platformSupported || !catalog.gateway.configured;
     gatewaySetup.hidden = catalog.selectedSource !== "gateway";
     modelSelectionAvailable = catalog.gateway.platformSupported || catalog.presets.length > 0;

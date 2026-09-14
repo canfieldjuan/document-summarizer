@@ -1,21 +1,27 @@
 # Document Summarizer
 
-A local-first Tauri desktop application that ingests native-text PDFs, preserves
-page provenance through a durable processing pipeline, and produces summaries
-with page-linked exact source excerpts using a qualified local Qwen model. The
-application also provides the optional local Connect `document.summarize`
-capability to installations with an active Connect entitlement while remaining
-usable on its own.
+A local-first Tauri desktop application that stores imported native-text PDFs,
+pipeline artifacts, and results on the workstation, preserves page provenance,
+and produces summaries with page-linked exact source excerpts through the
+selected inference runtime. The application also provides the optional local
+Connect `document.summarize` capability to installations with an active Connect
+entitlement while remaining usable on its own.
 
 ## Inference runtime
 
 The application can use the authenticated Local Inference Gateway for
-`document.summary.step@1`. The desktop inference selector accepts an HTTPS
-gateway origin plus an application-specific bearer-token file and issuing-CA
-file. It stores only those file paths, verifies the credential-scoped task
-before switching, and never asks the user to select the gateway's private
-worker or model. Current gateway selection is enabled on Unix hosts; Windows
-continues to use direct runtimes until owner/DACL validation lands.
+`document.summary.step@1`. Here, “Local Inference Gateway” is the service name,
+not a network-locality guarantee: its administrator-configured HTTPS origin may
+be outside this workstation. When selected, the application sends that origin
+the complete document-derived model prompts for analysis, synthesis, and
+verification. Those prompts can contain extracted document text, selected
+source excerpts, task instructions, and response schemas; the original PDF is
+not uploaded by the Gateway client. The desktop inference selector accepts the
+origin plus an application-specific bearer-token file and issuing-CA file. It
+stores only those file paths, verifies the credential-scoped task before
+switching, and never asks the user to select the Gateway's private worker or
+model. Current Gateway selection is enabled on Unix hosts; Windows continues to
+use direct runtimes until owner/DACL validation lands.
 
 Existing installations stay on their selected direct runtime. Direct Ollama
 and qualified llama.cpp remain available as explicit migration fallbacks while
