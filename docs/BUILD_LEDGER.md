@@ -3851,3 +3851,51 @@ release acceptance exposed issue #49
   tracked in issue #53.
 - This slice does not change Story or Contract behavior, routing, UI, persistence
   schemas, source selection, ingestion, OCR or model configuration.
+
+## Slice 35 — Bound Cross-Window General Recovery (2026-09-14)
+
+**Outcome**:
+- General synthesis now binds its one `MODEL_SUMMARY_RESPONSE_WINDOW_MIXED`
+  repair to the rejected response. Valid sibling units must remain in order
+  with identical wording and evidence, and every source from each mixed unit
+  must appear exactly once across its single-window replacement units.
+- The repair prompt carries the rejected JSON as explicitly untrusted draft
+  data. Its transient unit ceiling expands only far enough to admit bounded
+  source-backed splits and remains capped by the persisted eight-unit product
+  limit.
+- A repair that repeats the mixed-window error, drops a source, rewrites a
+  valid sibling, or introduces another source returns the existing warned safe
+  sibling when one exists. With no safe sibling, the repair fails closed as a
+  nonrecoverable `MODEL_SUMMARY_RESPONSE_WINDOW_MIXED` integrity failure.
+- Story and Contract keep their existing cross-window repair behavior. This
+  slice does not change source selection, persistence, result identity,
+  routing, the normal synthesis prompt, or issue #52's oversized
+  source-framing work.
+
+**Verification**:
+- The focused recovery boundary passed with a valid split followed by a modal
+  repair and with exact-fit, one-character-over, repeated-mix, source-omission,
+  sibling-rewrite, added-unit, and no-fallback controls. It made one bounded
+  window-repair request; invalid repairs did not consume another window retry.
+- `cargo test --locked --all-targets --all-features` passed 493 library tests,
+  3 ordinary office tests, and 3 release-contract tests. The configured 13
+  opt-in library tests and 3 opt-in office tests remained ignored.
+- Strict all-target/all-feature Clippy, Rust formatting, the TypeScript/Vite
+  production build, and `git diff --check` passed.
+- The public 111-page DOL fixture passed the live Ollama acceptance in 111.85
+  seconds with `qwen3-30b-a3b:latest` resident at 100% GPU and an 8192-token
+  context. It delivered eight coherent cited paragraphs, cited 81 of 83
+  synthesized evidence items, and retained the page-21 problem framing:
+  `The document presents the following as a problem: Common problems include
+  employees paid a piece rate falling below the minimum wage... [p. 21]`.
+  The trace contained one final General synthesis request followed directly by
+  verification, so this live run proves normal-path non-regression; the
+  deterministic boundary test proves the repaired path.
+
+**Remaining limits and next step**:
+- The repair remains bounded by the eight-unit product limit. A full eight-unit
+  response that requires an additional split can still return its warned safe
+  siblings or fail closed; this slice does not expand the persisted output
+  contract.
+- Issue #52 remains the separate owner for oversized source-framing repair
+  context. No further summary-profile behavior is required by this slice.
