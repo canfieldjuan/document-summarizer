@@ -297,6 +297,8 @@ impl ConnectProvider {
         max_input_bytes: u64,
         runtime_factory: RuntimeFactory,
     ) -> Result<Self, ProviderStartError> {
+        #[cfg(windows)]
+        fs::create_dir_all(&runtime_root)?;
         Self::start_at_with_entitlement(
             db_path,
             app_data_dir,
@@ -2015,6 +2017,7 @@ fn load_or_create_v2_instance_id(
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, &path)?;
+        #[cfg(unix)]
         File::open(app_data_dir)?.sync_all()?;
         Ok(())
     })();
@@ -2046,10 +2049,20 @@ async fn set_private_file_permissions(_path: &Path) -> Result<(), io::Error> {
 }
 
 async fn sync_directory(path: &Path) -> Result<(), io::Error> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || File::open(path)?.sync_all())
-        .await
-        .map_err(|error| io::Error::other(error.to_string()))?
+    #[cfg(windows)]
+    {
+        let _ = path;
+        // Rust's standard Windows file API cannot open a directory for sync.
+        // Callers flush file contents before completing the metadata operation.
+        Ok(())
+    }
+    #[cfg(unix)]
+    {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || File::open(path)?.sync_all())
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?
+    }
 }
 
 async fn hash_file(path: &Path) -> Result<(u64, String), ProviderHttpError> {
@@ -2697,6 +2710,8 @@ mod tests {
         fs::set_permissions(&entitlement_dir, fs::Permissions::from_mode(0o700)).unwrap();
         #[cfg(windows)]
         crate::connect::windows_storage::protect_path_for_test(&entitlement_dir, true).unwrap();
+        #[cfg(windows)]
+        fs::create_dir(&runtime_root).unwrap();
         let entitlement_path = entitlement_dir.join(ENTITLEMENT_FILE_NAME);
         let key_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
         let key = Ed25519KeyPair::from_pkcs8(key_document.as_ref()).unwrap();
@@ -2850,6 +2865,8 @@ mod tests {
         fs::set_permissions(&entitlement_dir, fs::Permissions::from_mode(0o700)).unwrap();
         #[cfg(windows)]
         crate::connect::windows_storage::protect_path_for_test(&entitlement_dir, true).unwrap();
+        #[cfg(windows)]
+        fs::create_dir(&runtime_root).unwrap();
         let entitlement_path = entitlement_dir.join(ENTITLEMENT_FILE_NAME);
         let key_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
         let key = Ed25519KeyPair::from_pkcs8(key_document.as_ref()).unwrap();
