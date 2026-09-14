@@ -48,7 +48,10 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::error::Error;
 use std::path::Path;
+use std::sync::Mutex;
 use tauri::{Manager, State};
+
+type ManagedConnectProvider = Mutex<Option<ConnectProvider>>;
 
 #[cfg(unix)]
 fn ensure_private_app_data_directory(path: &Path) -> Result<(), std::io::Error> {
@@ -570,7 +573,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             });
             match ConnectProvider::start(db_path, app_data_dir) {
                 Ok(provider) => {
-                    app.manage(provider);
+                    app.manage(Mutex::new(Some(provider)));
                 }
                 Err(error) => {
                     eprintln!("Connect provider unavailable; standalone mode continues: {error}");
@@ -606,10 +609,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .build(tauri::generate_context!())?;
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
-            shutdown_managed_runtimes();
-            if let Some(provider) = app_handle.try_state::<ConnectProvider>() {
-                provider.unregister();
+            if let Some(provider) = app_handle.try_state::<ManagedConnectProvider>() {
+                let provider = provider
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                drop(provider);
             }
+            shutdown_managed_runtimes();
         }
     });
     Ok(())
