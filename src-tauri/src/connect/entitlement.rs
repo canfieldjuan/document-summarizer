@@ -364,17 +364,36 @@ impl EntitlementGate {
         if self.fail_before_replace {
             return Err(EntitlementInstallError::InstallFailed);
         }
-        windows_storage::atomic_replace_bytes(
+        #[cfg(test)]
+        let replacement = if self.fail_after_replace_once.swap(false, Ordering::SeqCst) {
+            windows_storage::atomic_replace_bytes_with_forced_post_promotion_failure(
+                destination,
+                &committed_candidate,
+                MAX_ENTITLEMENT_BYTES,
+                false,
+                private_root,
+            )
+        } else {
+            windows_storage::atomic_replace_bytes_with_outcome(
+                destination,
+                &committed_candidate,
+                MAX_ENTITLEMENT_BYTES,
+                false,
+                private_root,
+            )
+        };
+        #[cfg(not(test))]
+        let replacement = windows_storage::atomic_replace_bytes_with_outcome(
             destination,
             &committed_candidate,
             MAX_ENTITLEMENT_BYTES,
             false,
             private_root,
-        )
-        .map_err(|_| EntitlementInstallError::InstallFailed)?;
-        #[cfg(test)]
-        if self.fail_after_replace_once.swap(false, Ordering::SeqCst) {
-            self.restore_windows_entitlement(destination, previous.as_deref())?;
+        );
+        if let Err(error) = replacement {
+            if error.promoted() {
+                self.restore_windows_entitlement(destination, previous.as_deref())?;
+            }
             return Err(EntitlementInstallError::InstallFailed);
         }
         let status = self.status();
@@ -1178,6 +1197,34 @@ mod tests {
             Err(EntitlementInstallError::InstallFailed)
         );
         assert_eq!(fs::read(destination).unwrap(), previous);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_post_promotion_failure_removes_candidate_without_prior_entitlement() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let connect_root = windows_storage::prepare_local_connect_root(&root.0).unwrap();
+        let destination = connect_root.join(ENTITLEMENT_FILE_NAME);
+        let source = root.0.join("selected-license.json");
+        write_private(&source, &active_license(&key));
+        let mut keys = BTreeMap::new();
+        keys.insert("test-key".to_string(), key.public_key().as_ref().to_vec());
+        let gate = EntitlementGate::for_windows_test(
+            destination.clone(),
+            root.0.clone(),
+            keys,
+            DateTime::parse_from_rfc3339("2026-08-31T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        gate.fail_after_replace_once.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::InstallFailed)
+        );
+        assert!(!windows_storage::path_entry_exists(&destination).unwrap());
     }
 
     #[test]

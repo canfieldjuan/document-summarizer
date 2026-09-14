@@ -42,6 +42,8 @@ use std::ffi::OsStr;
 #[cfg(unix)]
 use std::fs::TryLockError;
 use std::fs::{self, File, OpenOptions};
+#[cfg(windows)]
+use std::future::IntoFuture;
 #[cfg(unix)]
 use std::io::Read;
 use std::io::{self, Write};
@@ -49,12 +51,13 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 #[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 type RuntimeFactory =
@@ -71,6 +74,15 @@ const REGISTRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const REGISTRATION_LOCK_RETRY: Duration = Duration::from_millis(10);
 const CONNECT_PROOF_MODE_ENV: &str = "DOC_SUM_CONNECT_PROOF_MODE";
 const CONNECT_PROOF_MODE_V1: &str = "local-fixture-v1";
+#[cfg(windows)]
+const WINDOWS_SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+
+async fn wait_for_shutdown(mut receiver: watch::Receiver<bool>) {
+    if *receiver.borrow() {
+        return;
+    }
+    let _ = receiver.changed().await;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectRuntimeSource {
@@ -243,7 +255,7 @@ pub struct ConnectProvider {
     instance_id_v1: String,
     instance_id_v2: String,
     token: String,
-    shutdown: Option<oneshot::Sender<()>>,
+    shutdown: Option<watch::Sender<bool>>,
     server_thread: Option<JoinHandle<()>>,
 }
 
@@ -412,7 +424,7 @@ impl ConnectProvider {
             .layer(DefaultBodyLimit::max(body_limit))
             .with_state(state);
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let server_thread = thread::Builder::new()
             .name("document-summarizer-connect".to_string())
@@ -438,11 +450,30 @@ impl ConnectProvider {
                     if ready_tx.send(Ok(())).is_err() {
                         return;
                     }
-                    let result = axum::serve(listener, app)
-                        .with_graceful_shutdown(async {
-                            let _ = shutdown_rx.await;
-                        })
-                        .await;
+                    #[cfg(windows)]
+                    let graceful_shutdown_rx = shutdown_rx.clone();
+                    #[cfg(unix)]
+                    let graceful_shutdown_rx = shutdown_rx;
+                    let server = axum::serve(listener, app)
+                        .with_graceful_shutdown(wait_for_shutdown(graceful_shutdown_rx));
+                    #[cfg(windows)]
+                    let server = server.into_future();
+                    #[cfg(windows)]
+                    let result = {
+                        tokio::pin!(server);
+                        tokio::select! {
+                            result = &mut server => result,
+                            () = async move {
+                                wait_for_shutdown(shutdown_rx).await;
+                                tokio::time::sleep(WINDOWS_SERVER_SHUTDOWN_GRACE).await;
+                            } => {
+                                eprintln!("Connect provider forced outstanding Windows connections closed after the shutdown grace period");
+                                return;
+                            }
+                        }
+                    };
+                    #[cfg(unix)]
+                    let result = server.await;
                     if let Err(error) = result {
                         eprintln!("Connect provider stopped with an error: {error}");
                     }
@@ -519,7 +550,7 @@ impl ConnectProvider {
             &registration_v1,
             publication_root,
         ) {
-            let _ = shutdown_tx.send(());
+            let _ = shutdown_tx.send(true);
             let _ = server_thread.join();
             return Err(error);
         }
@@ -533,7 +564,7 @@ impl ConnectProvider {
             let _ = fs::remove_file(&registration_path_v1);
             #[cfg(windows)]
             let _ = windows_storage::remove_private_file(&registration_path_v1, &runtime_root);
-            let _ = shutdown_tx.send(());
+            let _ = shutdown_tx.send(true);
             let _ = server_thread.join();
             return Err(error);
         }
@@ -636,7 +667,7 @@ impl Drop for ConnectProvider {
         #[cfg(windows)]
         {
             if let Some(shutdown) = self.shutdown.take() {
-                let _ = shutdown.send(());
+                let _ = shutdown.send(true);
             }
             if let Some(server_thread) = self.server_thread.take() {
                 let _ = server_thread.join();
@@ -647,7 +678,7 @@ impl Drop for ConnectProvider {
         {
             self.unregister();
             if let Some(shutdown) = self.shutdown.take() {
-                let _ = shutdown.send(());
+                let _ = shutdown.send(true);
             }
             self.server_thread.take();
         }
@@ -3233,6 +3264,49 @@ mod tests {
         assert!(!registration_v2.exists());
         assert_eq!(fs::read(v1_lock).unwrap(), [0]);
         assert_eq!(fs::read(v2_lock).unwrap(), [0]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_provider_shutdown_is_bounded_with_an_incomplete_request_body() {
+        let root = TestDirectory::new("doc-sum-connect-windows-bounded-shutdown");
+        let app_data = root.0.join("app-data");
+        fs::create_dir(&app_data).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            root.0.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let server_address = provider
+            .base_url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+        let mut stalled = std::net::TcpStream::connect(server_address).unwrap();
+        std::io::Write::write_all(
+            &mut stalled,
+            b"POST /v1/jobs HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=stalled\r\nContent-Length: 1048576\r\n\r\n--stalled\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n",
+        )
+        .unwrap();
+        std::io::Write::flush(&mut stalled).unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let shutdown = thread::spawn(move || {
+            drop(provider);
+            finished_tx.send(()).unwrap();
+        });
+        finished_rx
+            .recv_timeout(WINDOWS_SERVER_SHUTDOWN_GRACE + Duration::from_secs(2))
+            .expect("provider shutdown should force an incomplete connection closed");
+        drop(stalled);
+        shutdown.join().unwrap();
+        assert!(std::net::TcpStream::connect(server_address).is_err());
     }
 
     #[cfg(windows)]

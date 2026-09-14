@@ -279,6 +279,36 @@ pub(crate) fn path_entry_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct AtomicReplaceError {
+    error: io::Error,
+    promoted: bool,
+}
+
+impl AtomicReplaceError {
+    fn before_promotion(error: io::Error) -> Self {
+        Self {
+            error,
+            promoted: false,
+        }
+    }
+
+    fn after_promotion(error: io::Error) -> Self {
+        Self {
+            error,
+            promoted: true,
+        }
+    }
+
+    pub(crate) fn promoted(&self) -> bool {
+        self.promoted
+    }
+
+    fn into_inner(self) -> io::Error {
+        self.error
+    }
+}
+
 pub(crate) fn atomic_replace_bytes(
     destination: &Path,
     bytes: &[u8],
@@ -286,50 +316,106 @@ pub(crate) fn atomic_replace_bytes(
     allow_empty: bool,
     private_root: &Path,
 ) -> io::Result<()> {
+    atomic_replace_bytes_with_outcome(destination, bytes, maximum, allow_empty, private_root)
+        .map_err(AtomicReplaceError::into_inner)
+}
+
+pub(crate) fn atomic_replace_bytes_with_outcome(
+    destination: &Path,
+    bytes: &[u8],
+    maximum: u64,
+    allow_empty: bool,
+    private_root: &Path,
+) -> Result<(), AtomicReplaceError> {
+    atomic_replace_bytes_with_postcheck(
+        destination,
+        bytes,
+        maximum,
+        allow_empty,
+        private_root,
+        validate_private_regular_file,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn atomic_replace_bytes_with_forced_post_promotion_failure(
+    destination: &Path,
+    bytes: &[u8],
+    maximum: u64,
+    allow_empty: bool,
+    private_root: &Path,
+) -> Result<(), AtomicReplaceError> {
+    atomic_replace_bytes_with_postcheck(
+        destination,
+        bytes,
+        maximum,
+        allow_empty,
+        private_root,
+        |_, _| Err(io::Error::other("forced post-promotion validation failure")),
+    )
+}
+
+fn atomic_replace_bytes_with_postcheck(
+    destination: &Path,
+    bytes: &[u8],
+    maximum: u64,
+    allow_empty: bool,
+    private_root: &Path,
+    postcheck: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> Result<(), AtomicReplaceError> {
     if bytes.len() as u64 > maximum || (!allow_empty && bytes.is_empty()) {
-        return Err(io::Error::new(
+        return Err(AtomicReplaceError::before_promotion(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Windows replacement content is empty or oversized",
-        ));
+        )));
     }
     let parent = destination.parent().ok_or_else(|| {
-        io::Error::new(
+        AtomicReplaceError::before_promotion(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Windows replacement has no parent",
-        )
+        ))
     })?;
-    validate_private_directory(parent, private_root)?;
-    if path_entry_exists(destination)? {
-        validate_private_regular_file(destination, private_root)?;
+    validate_private_directory(parent, private_root)
+        .map_err(AtomicReplaceError::before_promotion)?;
+    if path_entry_exists(destination).map_err(AtomicReplaceError::before_promotion)? {
+        validate_private_regular_file(destination, private_root)
+            .map_err(AtomicReplaceError::before_promotion)?;
     }
     let filename = destination.file_name().ok_or_else(|| {
-        io::Error::new(
+        AtomicReplaceError::before_promotion(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Windows replacement has no filename",
-        )
+        ))
     })?;
     let mut temporary_name = OsString::from(".");
     temporary_name.push(filename);
     temporary_name.push(".tmp");
     let temporary = parent.join(temporary_name);
-    if path_entry_exists(&temporary)? {
-        validate_private_regular_file(&temporary, private_root)?;
-        retry_file_operation(|| fs::remove_file(&temporary))?;
+    if path_entry_exists(&temporary).map_err(AtomicReplaceError::before_promotion)? {
+        validate_private_regular_file(&temporary, private_root)
+            .map_err(AtomicReplaceError::before_promotion)?;
+        retry_file_operation(|| fs::remove_file(&temporary))
+            .map_err(AtomicReplaceError::before_promotion)?;
     }
 
-    let result = (|| -> io::Result<()> {
+    let result = (|| -> Result<(), AtomicReplaceError> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .share_mode(FILE_SHARE_READ)
-            .open(&temporary)?;
-        protect_path(&temporary, false)?;
-        validate_opened_handle(&file, false, true, true)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+            .open(&temporary)
+            .map_err(AtomicReplaceError::before_promotion)?;
+        protect_path(&temporary, false).map_err(AtomicReplaceError::before_promotion)?;
+        validate_opened_handle(&file, false, true, true)
+            .map_err(AtomicReplaceError::before_promotion)?;
+        file.write_all(bytes)
+            .map_err(AtomicReplaceError::before_promotion)?;
+        file.sync_all()
+            .map_err(AtomicReplaceError::before_promotion)?;
         drop(file);
-        retry_file_operation(|| move_file_replace(&temporary, destination))?;
-        validate_private_regular_file(destination, private_root)
+        retry_file_operation(|| move_file_replace(&temporary, destination))
+            .map_err(AtomicReplaceError::before_promotion)?;
+        postcheck(destination, private_root).map_err(AtomicReplaceError::after_promotion)
     })();
     if result.is_err() && path_entry_exists(&temporary).unwrap_or(false) {
         let _ = validate_private_regular_file(&temporary, private_root)
@@ -879,7 +965,10 @@ mod tests {
 
         let temporary = connect_root.join(".entitlement-v1.json.tmp");
         fs::create_dir(&temporary).unwrap();
-        assert!(atomic_replace_bytes(&destination, b"bad", 16, false, root.path()).is_err());
+        let pre_promotion_failure =
+            atomic_replace_bytes_with_outcome(&destination, b"bad", 16, false, root.path())
+                .unwrap_err();
+        assert!(!pre_promotion_failure.promoted());
         assert_eq!(fs::read(&destination).unwrap(), b"new");
         assert!(temporary.is_dir());
 
