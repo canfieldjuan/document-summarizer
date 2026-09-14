@@ -81,7 +81,7 @@ jobs:
           rustup default stable
       - name: Run native Windows Connect tests
         working-directory: src-tauri
-        run: cargo test --locked --lib connect::
+        run: 'cargo test --locked --lib connect::'
       - name: Deny native Windows warnings
         working-directory: src-tauri
-        run: cargo clippy --locked --lib --tests -- -D warnings
+        run: 'cargo clippy --locked --lib --tests -- -D warnings'
