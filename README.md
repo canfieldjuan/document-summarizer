@@ -1,11 +1,12 @@
 # Document Summarizer
 
-A local-first Tauri desktop application that stores imported native-text PDFs,
-pipeline artifacts, and results on the workstation, preserves page provenance,
-and produces summaries with page-linked exact source excerpts through the
-selected inference runtime. The application also provides the optional local
-Connect `document.summarize` capability to installations with an active Connect
-entitlement while remaining usable on its own.
+A local-first Tauri desktop application that records the source file's path and
+identity without copying the PDF, persists pipeline artifacts and results on the
+workstation, preserves page provenance, and produces summaries with page-linked
+exact source excerpts through the selected inference runtime. The application
+also provides the optional local Connect `document.summarize` capability to
+installations with an active Connect entitlement while remaining usable on its
+own.
 
 ## Inference runtime
 

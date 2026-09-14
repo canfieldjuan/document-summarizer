@@ -73,5 +73,18 @@ fn inference_locality_disclosure_matches_runtime_boundaries() {
     assert!(normalized[1].contains("administrator-configured HTTPS origin"));
     assert!(normalized[1].contains("native loopback Ollama"));
     assert!(normalized[1].contains("app-managed local llama.cpp"));
-    assert!(!initial_ui.contains("configured on-prem gateway"));
+    for release_surface in [&normalized[0], &normalized[2], &normalized[3]] {
+        assert!(!release_surface.contains("on-prem"));
+    }
+}
+
+#[test]
+fn source_retention_description_matches_path_only_ingestion() {
+    let readme = include_str!("../../README.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    assert!(readme.contains("records the source file's path and identity without copying the PDF"));
+    assert!(!readme.contains("stores imported native-text PDFs"));
 }
