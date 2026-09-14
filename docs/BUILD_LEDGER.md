@@ -3851,3 +3851,83 @@ release acceptance exposed issue #49
   tracked in issue #53.
 - This slice does not change Story or Contract behavior, routing, UI, persistence
   schemas, source selection, ingestion, OCR or model configuration.
+
+## Slice 35 — Bound Cross-Window General Recovery (2026-09-14)
+
+**Outcome**:
+- General synthesis now binds its one `MODEL_SUMMARY_RESPONSE_WINDOW_MIXED`
+  repair to the rejected response. Valid sibling units must remain in order
+  with identical wording and evidence, and every source from each mixed unit
+  must appear exactly once across its single-window replacement units.
+- The repair prompt carries the rejected JSON as explicitly untrusted draft
+  data. Its transient unit ceiling counts preserved units plus every source
+  occurrence in each mixed unit, then caps that bound at the persisted
+  eight-unit product limit. Differently worded units may therefore reuse the
+  same source without making a contract-preserving repair impossible.
+- A repair that repeats the mixed-window error, drops a source, rewrites a
+  valid sibling, or introduces another source returns the existing warned safe
+  sibling when one exists. With no safe sibling, the repair fails closed as a
+  nonrecoverable `MODEL_SUMMARY_RESPONSE_WINDOW_MIXED` integrity failure.
+- A separate source-framing, decoder-clipping, or modal-strengthening defect in
+  the rejected response is retained as an exact source-set requirement so its
+  existing bounded repair can run after the window split. Modality-safe siblings
+  remain immutable, and other invalid sibling output still fails immediately
+  instead of being treated as repairable.
+- If a later source-framing repair also violates the older window contract, the
+  window contract is evaluated first so its warned safe sibling remains
+  available instead of being bypassed by the newer framing-integrity error.
+- A response with mixed framing before a separate cross-window unit still
+  enters window recovery: the application collects the full window contract
+  independently of parser error order. A later framing follow-up retains the
+  larger exact window-repair ceiling rather than shrinking to the generic
+  framing allowance.
+- A decoder-clipped cross-window unit also enters window recovery regardless of
+  an earlier framing defect because the application derives window ownership
+  directly from validated source IDs. If the bounded window split then exposes
+  clipping, both the raw-response admission and the retained-sibling reparse
+  keep the exact expanded window ceiling.
+- Story and Contract keep their existing cross-window repair behavior. This
+  slice does not change source selection, persistence, result identity,
+  routing, the normal synthesis prompt, or issue #52's oversized
+  source-framing work.
+
+**Verification**:
+- The focused recovery boundary passed with a valid split followed by a modal
+  repair and with exact-fit, one-character-over, repeated-source,
+  repeated-mix, source-omission, sibling-rewrite, added-unit, independent
+  framing-defect, framing-follow-up sibling loss, initial modal-defect,
+  reversed invalid-unit order, later clipped cross-window unit, eight-unit
+  framing follow-up, six-unit clipping follow-up, foreign-sibling, and
+  no-fallback controls. It made one bounded window-repair request; the initial
+  modal sibling then used the existing one modal retry, while invalid repairs
+  did not consume another window retry.
+- `cargo test --locked --all-targets --all-features` passed 497 library tests,
+  3 ordinary office tests, and 3 release-contract tests. The configured 13
+  opt-in library tests and 3 opt-in office tests remained ignored.
+- Strict all-target/all-feature Clippy, Rust formatting, the TypeScript/Vite
+  production build, and `git diff --check` passed.
+- The public 111-page DOL fixture passed the captured final live Ollama
+  acceptance on the final product code in 105.97
+  seconds with `qwen3-30b-a3b:latest` resident at 100% GPU and an 8192-token
+  context. It delivered eight coherent cited paragraphs from 81 claims and 97
+  evidence items, and retained the page-21 problem framing:
+  `The document presents the following as a problem: Common problems include
+  employees paid a piece rate falling below the minimum wage... [p. 21]`.
+  The result produced summary SHA-256
+  `117700ea8a7214a66b03960ee6e8ebc366eab844205995210003655eaf5e5400`,
+  matching the earlier accepted run. This live run proves normal-path
+  non-regression; the deterministic boundary tests prove the repaired paths.
+- An earlier pre-clipping-fix run failed closed with
+  `SYNTHESIS_REPAIR_INPUT_TOO_LARGE`. Its model response was written to stderr
+  without a retained log, so whether window or framing repair owned that failure
+  could not be inspected. The captured final-code run emitted a valid General
+  summary and passed. Oversized repair compaction remains the separate issue
+  #52 boundary rather than expanding this integrity slice.
+
+**Remaining limits and next step**:
+- The repair remains bounded by the eight-unit product limit. A full eight-unit
+  response that requires an additional split can still return its warned safe
+  siblings or fail closed; this slice does not expand the persisted output
+  contract.
+- Issue #52 remains the separate owner for oversized source-framing repair
+  context. No further summary-profile behavior is required by this slice.
