@@ -9,28 +9,33 @@ use std::ptr::{null, null_mut};
 use std::thread;
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION,
-    ERROR_SHARING_VIOLATION, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE,
-    INVALID_HANDLE_VALUE,
+    CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS,
+    ERROR_FILE_EXISTS, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, GENERIC_ALL, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
+#[cfg(test)]
+use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
-    SetNamedSecurityInfoW, SE_FILE_OBJECT,
+    SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
     AclSizeInformation, GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorControl,
-    GetSecurityDescriptorDacl, GetTokenInformation, IsValidSid, TokenUser, ACL,
-    ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
-    TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, IsValidSid, TokenUser, ACL, ACL_SIZE_INFORMATION,
+    DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
+};
+#[cfg(test)]
+use windows_sys::Win32::Security::{
+    GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx, LockFileEx, MoveFileExW,
-    UnlockFileEx, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
-    LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, MOVEFILE_REPLACE_EXISTING,
+    CreateDirectoryW, CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx, LockFileEx,
+    MoveFileExW, UnlockFileEx, CREATE_NEW, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DELETE_CHILD,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
+    FILE_WRITE_EA, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -103,20 +108,23 @@ impl WindowsFileLock {
         })?;
         validate_private_directory(parent, private_root)?;
 
-        let existed = path_entry_exists(path)?;
-        if existed {
-            validate_private_regular_file(path, private_root)?;
-        }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .open(path)?;
-        if !existed {
-            protect_path(path, false)?;
-        }
+        let mut file = match create_private_file(
+            path,
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        ) {
+            Ok(file) => file,
+            Err(error) if is_already_exists(&error) => {
+                validate_private_regular_file(path, private_root)?;
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                    .open(path)?
+            }
+            Err(error) => return Err(error.into()),
+        };
         validate_opened_handle(&file, false, true, true)?;
         if file.metadata()?.len() == 0 {
             file.write_all(&[0])?;
@@ -200,8 +208,8 @@ pub(crate) fn ensure_private_directory(path: &Path, private_root: &Path) -> io::
             ));
         };
         current.push(component);
-        match fs::create_dir(&current) {
-            Ok(()) => protect_path(&current, true)?,
+        match create_private_directory(&current) {
+            Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
@@ -399,13 +407,12 @@ fn atomic_replace_bytes_with_postcheck(
     }
 
     let result = (|| -> Result<(), AtomicReplaceError> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(&temporary)
-            .map_err(AtomicReplaceError::before_promotion)?;
-        protect_path(&temporary, false).map_err(AtomicReplaceError::before_promotion)?;
+        let mut file = create_private_file(
+            &temporary,
+            GENERIC_WRITE | READ_CONTROL | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ,
+        )
+        .map_err(AtomicReplaceError::before_promotion)?;
         validate_opened_handle(&file, false, true, true)
             .map_err(AtomicReplaceError::before_promotion)?;
         file.write_all(bytes)
@@ -495,6 +502,57 @@ fn open_existing(path: &Path, directory: bool, access: u32) -> io::Result<File> 
     Ok(unsafe { File::from_raw_handle(handle as _) })
 }
 
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    let descriptor = private_security_descriptor(true)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let path = wide(path.as_os_str());
+    if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
+        let error = io::Error::last_os_error();
+        return if is_already_exists(&error) {
+            Err(io::Error::new(io::ErrorKind::AlreadyExists, error))
+        } else {
+            Err(error)
+        };
+    }
+    Ok(())
+}
+
+fn create_private_file(path: &Path, access: u32, share_mode: u32) -> io::Result<File> {
+    let descriptor = private_security_descriptor(false)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let path = wide(path.as_os_str());
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            access,
+            share_mode,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_handle(handle as _) })
+}
+
+fn is_already_exists(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error().map(|value| value as u32),
+        Some(ERROR_ALREADY_EXISTS | ERROR_FILE_EXISTS)
+    )
+}
+
 fn validate_existing_path(path: &Path, directory: bool, require_protected: bool) -> io::Result<()> {
     let file = open_existing(path, directory, READ_CONTROL | FILE_READ_ATTRIBUTES)?;
     validate_opened_handle(&file, directory, true, require_protected)
@@ -555,7 +613,7 @@ fn validate_opened_handle(
     Ok(())
 }
 
-fn protect_path(path: &Path, directory: bool) -> io::Result<()> {
+fn private_security_descriptor(directory: bool) -> io::Result<LocalAllocation> {
     let user = current_user_sid()?;
     let inheritance = if directory { "OICI" } else { "" };
     let descriptor_text = format!(
@@ -574,7 +632,13 @@ fn protect_path(path: &Path, directory: bool) -> io::Result<()> {
     if converted == 0 || descriptor.is_null() {
         return Err(io::Error::last_os_error());
     }
-    let allocation = LocalAllocation(descriptor);
+    Ok(LocalAllocation(descriptor))
+}
+
+#[cfg(test)]
+fn protect_path(path: &Path, directory: bool) -> io::Result<()> {
+    let allocation = private_security_descriptor(directory)?;
+    let descriptor = allocation.0 as PSECURITY_DESCRIPTOR;
     let mut dacl_present = 0;
     let mut dacl: *mut ACL = null_mut();
     let mut dacl_defaulted = 0;
