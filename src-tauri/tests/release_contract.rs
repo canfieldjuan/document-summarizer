@@ -89,3 +89,20 @@ fn source_retention_description_matches_path_only_ingestion() {
     assert!(readme.contains("Keep the source file readable until parsing completes."));
     assert!(!readme.contains("stores imported native-text PDFs"));
 }
+
+#[test]
+fn windows_connect_release_boundary_is_documented_and_exercised_natively() {
+    let contracts = include_str!("../../docs/CONTRACTS.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let workflow = include_str!("../../.github/workflows/rust.yml");
+
+    assert!(contracts.contains(r"%LOCALAPPDATA%\LocalConnect\runtime\v1\providers"));
+    assert!(contracts.contains("protected DACL"));
+    assert!(contracts.contains("fixed same-directory temporary file"));
+    assert!(contracts.contains("installed Windows cited-summary demonstration remains pending"));
+    assert!(workflow.contains("runs-on: windows-2022"));
+    assert!(workflow.contains("cargo test --locked --lib connect::"));
+    assert!(workflow.contains("cargo clippy --locked --lib --tests -- -D warnings"));
+}

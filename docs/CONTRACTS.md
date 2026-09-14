@@ -1879,37 +1879,58 @@ the executable contracts committed in the separate `connect-contracts`
 repository. Protocol, application, capability, and summary versions are
 separate fields.
 
-When `XDG_RUNTIME_DIR` is available, the Tauri process binds an ephemeral exact
-IPv4-loopback HTTP endpoint and atomically writes owner-only registrations under
+The Tauri process binds an ephemeral exact IPv4-loopback HTTP endpoint.
+On Unix, it atomically writes owner-only registrations under
 `$XDG_RUNTIME_DIR/local-connect/v1/providers/` and
-`$XDG_RUNTIME_DIR/local-connect/v2/providers/`. Protocol v1 uses a fresh
-instance UUID for each process. Protocol v2 reuses the provider identity stored
-in private application data so accepted jobs remain associated with the same
-provider across restart. Both registrations use a fresh bearer token and the
-same ephemeral endpoint for each process. Manifest, submission, and status
-routes require that token; browser `Origin` requests are rejected. Missing
-runtime-directory or provider startup failures are logged and do not prevent
-standalone startup.
+`$XDG_RUNTIME_DIR/local-connect/v2/providers/`. On Windows, it publishes the
+fixed v1 registration
+`%LOCALAPPDATA%\LocalConnect\runtime\v1\providers\local-connect-v1-document-summarizer.json`
+and the provider-identity-specific v2 registration under
+`%LOCALAPPDATA%\LocalConnect\runtime\v2\providers`. The Windows Local Connect
+root, version directories, provider directories, lock directories,
+registrations, and locks must be non-reparse paths owned by the current user,
+SYSTEM, or Administrators. Each Connect-owned entry has a protected DACL that
+grants sensitive access only to those principals; a null, unreadable,
+unprotected, or over-broad DACL fails the operation closed. Unsafe provider
+directories, registrations, or locks fail provider startup; an unsafe
+entitlement is unavailable to the request gate. Neither failure disables the
+standalone application.
 
-Provider startup scans only registration filenames that exactly claim the
+Protocol v1 uses a fresh instance UUID for each process. Protocol v2 reuses the
+provider identity stored in private application data so accepted jobs remain
+associated with the same provider across restart. Both registrations use a
+fresh bearer token and the same ephemeral endpoint for each process. Manifest,
+submission, and status routes require that token; browser `Origin` requests are
+rejected. Missing or unsafe platform runtime storage and provider startup
+failures are logged and do not prevent standalone startup.
+
+Unix provider startup scans only registration filenames that exactly claim the
 Document Summarizer app ID and a UUIDv4 instance. It reads bounded regular files
 and probes the declared exact-loopback manifest with the registered bearer
 token. Any matching live manifest aborts replacement; otherwise those owned
 entries are stale or malformed and are removed before new registrations are
 published. Foreign and merely similar filenames are not touched. This keeps
 cleanup local to Document Summarizer without treating a PID or file's presence
-as proof that a capability is available.
+as proof that a capability is available. Windows instead holds one persistent,
+non-blocking, one-byte ownership lock for each fixed registration for the full
+provider lifetime. An existing live owner therefore fails startup closed; a
+safe stale fixed registration may be replaced only after its ownership lock is
+held.
 
 On Tauri's final `RunEvent::Exit`, the provider unregisters both protocol files.
-Publication, startup scavenging, and removal share an owner-only lifecycle-file
-lock. While holding that lock, removal requires the on-disk protocol, instance
-ID, endpoint, and bearer token to match the exiting process. This makes cleanup
-idempotent and prevents an older process from unlinking a replacement between
-its ownership check and deletion. Lock acquisition is bounded; a timeout logs
-the cleanup failure and leaves the registration for normal next-start recovery.
-Abrupt termination or power loss cannot run exit cleanup; any files left by that
-boundary are reclaimed on the next provider startup and remain
-non-authoritative to authenticated-manifest discovery in the meantime.
+On Unix, publication, startup scavenging, and removal share an owner-only
+lifecycle-file lock. Windows publication writes a fixed same-directory
+temporary file, applies and validates its private DACL, writes and flushes the
+complete registration, then atomically replaces the destination with bounded
+sharing-violation retries while the version-specific ownership lock remains
+held. On both platforms, removal under the applicable lock requires the on-disk
+protocol, instance ID, endpoint, and bearer token to match the exiting process.
+This makes cleanup idempotent and prevents an older process from unlinking a
+replacement between its ownership check and deletion. A cleanup failure is
+logged and leaves the registration unavailable or subject to the platform's
+next-start recovery rules. Abrupt termination or power loss cannot run exit
+cleanup; a registration file alone is never proof that the authenticated
+capability is available.
 
 "Optional" in this provider lifecycle means that Connect failure or absence
 cannot disable the standalone application. It is not a user-facing toggle.
@@ -1929,10 +1950,14 @@ The v1 entitlement envelope contains exact signed payload bytes and an Ed25519
 signature. Issuer public keys are embedded from the build-time-only
 `LOCAL_CONNECT_ENTITLEMENT_KEYRING_FILE`; a build with no keys remains a working
 standalone application but fails Connect closed. Runtime environment variables
-cannot replace issuer trust. On the verified Linux boundary, the entitlement is
-read from `$XDG_CONFIG_HOME/local-connect/entitlement-v1.json` or the equivalent
-`$HOME/.config` fallback when the XDG value is unset or empty, and must be an owner-only, owner-owned, regular,
-non-symlink file beneath an owner-only directory. The interval is
+cannot replace issuer trust. On Linux, the entitlement is read from
+`$XDG_CONFIG_HOME/local-connect/entitlement-v1.json` or the equivalent
+`$HOME/.config` fallback when the XDG value is unset or empty, and must be an
+owner-only, owner-owned, regular, non-symlink file beneath an owner-only
+directory. On Windows, the destination is
+`%LOCALAPPDATA%\LocalConnect\entitlement-v1.json`; its complete path and
+persistent `.entitlement-v1.lock` use the same non-reparse, trusted-owner, and
+protected-DACL rules as registrations. The interval is
 `issued_at <= not_before <= now < expires_at`, with no grace period. Invalid signatures,
 unknown keys, malformed claims, missing features, insecure files, and absent
 authority all deny Connect without exposing private claims to callers.
@@ -1945,18 +1970,22 @@ accepts only a bounded, non-symlink regular source file that evaluates `active`
 under the compiled authority, derives the destination internally, and never
 modifies the source. Candidate, installed-entitlement, and lock opens use
 non-following, non-blocking descriptors and verify the opened file identity and
-type after open. Participating Unix applications coordinate on the
-owner-private persistent `.entitlement-v1.lock` file beneath an exact mode-`700`
-directory. Newly created private-directory entries are synced before use. Under
-the non-blocking exclusive lock, the provider snapshots any prior entitlement,
-revalidates time, writes and syncs a unique same-directory mode-`600` file,
-atomically replaces the entitlement, syncs the directory, and re-evaluates the
-installed file. Validation, lock, write, and other pre-promotion failures
+type after open. Participating applications coordinate on the persistent
+`.entitlement-v1.lock`. Unix uses an owner-private file beneath an exact
+mode-`700` directory and a unique same-directory mode-`600` candidate. Windows
+uses the protected fixed lock and fixed temporary-file contracts described
+above. Under the non-blocking exclusive lock, the provider snapshots any prior
+entitlement, revalidates the candidate bytes and time, writes and flushes the
+candidate, atomically replaces the entitlement, and re-evaluates the installed
+file. Validation, lock, write, and other pre-promotion failures
 preserve any existing entitlement byte-for-byte. A post-promotion sync or final
 validation failure durably restores the prior bytes, or removes the promoted
 candidate when no prior entitlement existed; rollback failure is reported as an
 install failure rather than success. Successful replacement affects the next
 provider request without an application restart or private-database mutation.
+Native Windows CI exercises the positive path, hostile ACL and reparse paths,
+fixed-temporary atomicity, and lock contention. The installed Windows
+cited-summary demonstration remains pending as a separate release proof.
 
 This offline bearer entitlement is not machine-bound and cannot be revoked
 before expiry without local replacement. License acquisition and production

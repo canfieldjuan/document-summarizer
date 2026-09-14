@@ -3980,3 +3980,57 @@ release acceptance exposed issue #49
   collecting separate Linux and Windows installed cited-summary demonstrations.
 - Issue #52 remains open but was explicitly deferred at its existing fail-closed
   boundary while release blockers are completed.
+
+## Slice 37 — Enforce the Windows Connect Storage Boundary (2026-09-14)
+
+**Outcome**:
+- Windows Connect derives its shared root from an absolute, validated
+  `%LOCALAPPDATA%` boundary and uses
+  `%LOCALAPPDATA%\LocalConnect\runtime\v1\providers` and the corresponding v2
+  directory. It rejects reparse components, untrusted owners, null or unreadable
+  DACLs, unprotected Connect-owned DACLs, and sensitive access granted outside
+  the current user, SYSTEM, Administrators, OWNER RIGHTS, or inherit-only
+  Creator Owner.
+- The provider uses fixed v1 and v2 registration paths and persistent one-byte
+  ownership locks. It holds both locks for its lifetime, publishes each complete
+  registration through its fixed same-directory temporary path with flush and
+  bounded sharing retries, and removes only a registration whose full identity
+  still belongs to the exiting provider.
+- Windows entitlement status and installation use the same protected storage
+  chain. Installation validates the selected bounded regular file without
+  treating its ambient directory ACL as private authority, re-reads exact bytes
+  under the activation lock, atomically replaces the private entitlement, and
+  restores the prior state if final validation fails.
+- A native `windows-2022` CI job runs the Connect test namespace and strict
+  Windows Clippy. The native tests cover a safe inherited Local AppData boundary,
+  hostile file and ancestor ACLs, unprotected and null Connect-owned DACLs,
+  live and dangling junctions, fixed-temporary collision and sharing behavior,
+  competing provider ownership without active-job mutation, entitlement rollback,
+  and activation-lock contention.
+- Existing Unix registration, scavenging, entitlement, and synchronization
+  behavior remains on its existing target-specific path.
+
+**Local verification before publication**:
+- `cargo test --locked --all-targets --all-features` passed 497 library tests,
+  3 ordinary office tests, and all 6 release-contract tests. The configured 13
+  opt-in library tests and 3 opt-in office tests remained ignored.
+- Strict all-target/all-feature Linux Clippy, Rust formatting, the
+  TypeScript/Vite production build, `git diff --check`, and strict Windows GNU
+  cross-target Clippy with all library tests compiled passed.
+- The release-contract probe failed first on the missing Windows path disclosure
+  and then passed after the executable contract documented the storage path,
+  DACL/atomicity rules, native job, and remaining installed-demonstration limit.
+- Cross-target compilation is not native Win32 execution. Issue #62 remains open
+  until the native Windows CI job passes and the exact published head is
+  reviewed and reconciled.
+
+**Non-scope and next release proof**:
+- This slice does not change Connect wire schemas, summary behavior, source
+  evidence, result identity, UI labels, app-private database storage, or
+  installer packaging.
+- It does not claim an installed app demonstration. After issue #62 is merged,
+  the remaining Document Summarizer launch proof is a cited-summary run from an
+  installed Linux bundle and a separate cited-summary run from an installed
+  Windows bundle.
+- Issue #52 remains tabled at its current fail-closed oversized mixed-framing
+  boundary.

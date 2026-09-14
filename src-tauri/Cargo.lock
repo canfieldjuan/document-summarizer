@@ -1101,6 +1101,7 @@ dependencies = [
  "unicode-properties",
  "unicode-segmentation",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
