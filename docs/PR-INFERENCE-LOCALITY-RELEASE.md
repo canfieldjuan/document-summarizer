@@ -4,7 +4,7 @@
 
 ### Verified root cause
 
-- Direct Ollama accepts only unauthenticated exact-loopback HTTP and disables proxies and redirects.
+- Direct Ollama accepts only exact-loopback HTTP endpoints without URL credentials and disables proxies and redirects. It separately supports optional bearer authentication from a bounded token file.
 - The separately selected Local Inference Gateway accepts an administrator-configured HTTPS origin with no network-locality restriction. Its authenticated requests contain the complete system and user prompts used for document analysis, synthesis, and verification, including selected source excerpts.
 - Current README, runtime-contract, and setup copy describe inference as local or on-premises without disclosing that a configured Gateway may be remote. The runtime contract also lists only Ollama and reports superseded artifact versions.
 - The README also says the application stores imported PDFs, while ingestion stores their canonical path and identity and the parser reopens the source file in place.

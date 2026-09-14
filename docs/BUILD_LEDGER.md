@@ -3949,9 +3949,10 @@ release acceptance exposed issue #49
   instructs the user to keep the source readable until parsing completes because
   the parser reopens that path.
 - Direct Ollama remains restricted to exact-loopback HTTP. Qualified llama.cpp
-  remains an authenticated app-managed loopback child. This slice does not
-  change admission, transport, credentials, runtime selection, or pipeline
-  behavior.
+  remains an authenticated app-managed loopback child. Ollama endpoint URLs
+  cannot contain credentials, while an optional bounded token file can supply
+  bearer authentication. This slice does not change admission, transport,
+  credentials, runtime selection, or pipeline behavior.
 - The executable contract now lists Gateway, Ollama, and qualified llama.cpp as
   the supported inference sources and reports current synthesis 8.0.0,
   verification 10.0.0, summary 8.0.0, and citation 4.0.0 artifacts.
