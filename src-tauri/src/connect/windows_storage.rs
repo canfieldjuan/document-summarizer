@@ -172,19 +172,19 @@ pub(crate) fn local_app_data_root(value: Option<OsString>) -> io::Result<PathBuf
             "LOCALAPPDATA must be absolute",
         ));
     }
-    validate_existing_path(&root, true, false)?;
+    validate_ambient_directory_root(&root)?;
     Ok(root)
 }
 
 pub(crate) fn prepare_local_connect_root(local_app_data: &Path) -> io::Result<PathBuf> {
-    validate_existing_path(local_app_data, true, false)?;
+    validate_ambient_directory_root(local_app_data)?;
     let root = local_app_data.join(LOCAL_CONNECT_DIRECTORY);
     ensure_private_directory(&root, local_app_data)?;
     Ok(root)
 }
 
 pub(crate) fn ensure_private_directory(path: &Path, private_root: &Path) -> io::Result<()> {
-    validate_existing_path(private_root, true, false)?;
+    validate_ambient_directory_root(private_root)?;
     let relative = path.strip_prefix(private_root).map_err(|_| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -211,7 +211,7 @@ pub(crate) fn ensure_private_directory(path: &Path, private_root: &Path) -> io::
 }
 
 pub(crate) fn validate_private_directory(path: &Path, private_root: &Path) -> io::Result<()> {
-    validate_existing_path(private_root, true, false)?;
+    validate_ambient_directory_root(private_root)?;
     let relative = path.strip_prefix(private_root).map_err(|_| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -498,6 +498,25 @@ fn open_existing(path: &Path, directory: bool, access: u32) -> io::Result<File> 
 fn validate_existing_path(path: &Path, directory: bool, require_protected: bool) -> io::Result<()> {
     let file = open_existing(path, directory, READ_CONTROL | FILE_READ_ATTRIBUTES)?;
     validate_opened_handle(&file, directory, true, require_protected)
+}
+
+fn validate_ambient_directory_root(path: &Path) -> io::Result<()> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows storage root must be absolute",
+        ));
+    }
+    let mut ancestors: Vec<&Path> = path
+        .ancestors()
+        .filter(|ancestor| ancestor.has_root())
+        .collect();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        let file = open_existing(ancestor, true, FILE_READ_ATTRIBUTES)?;
+        validate_opened_handle(&file, true, false, false)?;
+    }
+    validate_existing_path(path, true, false)
 }
 
 fn validate_opened_handle(
@@ -919,6 +938,30 @@ mod tests {
     fn private_chain_rejects_reparse_ancestor_and_relative_root() {
         assert!(local_app_data_root(Some(OsString::from("relative"))).is_err());
         let root = PrivateRoot::new();
+        let redirected_target = root.path().join("redirected-target");
+        fs::create_dir(&redirected_target).unwrap();
+        let redirected_local_app_data = redirected_target.join("Local");
+        fs::create_dir(&redirected_local_app_data).unwrap();
+        protect_path(&redirected_local_app_data, true).unwrap();
+        let intermediate_junction = root.path().join("redirect");
+        let output = Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&intermediate_junction)
+            .arg(&redirected_target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let local_app_data_through_junction = intermediate_junction.join("Local");
+        assert!(local_app_data_root(Some(
+            local_app_data_through_junction.as_os_str().to_os_string()
+        ))
+        .is_err());
+        assert!(prepare_local_connect_root(&local_app_data_through_junction).is_err());
+
         let target = root.path().join("target");
         ensure_private_directory(&target, root.path()).unwrap();
         let junction = root.path().join(LOCAL_CONNECT_DIRECTORY);
