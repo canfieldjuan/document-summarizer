@@ -8,6 +8,10 @@ also provides the optional local Connect `document.summarize` capability to
 installations with an active Connect entitlement while remaining usable on its
 own.
 
+Keep the source file readable until parsing completes. Moving, deleting, or
+disconnecting it during that interval stops the run because the application
+reopens the recorded path instead of maintaining a private PDF copy.
+
 ## Inference runtime
 
 The application can use the authenticated Local Inference Gateway for

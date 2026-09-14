@@ -86,5 +86,6 @@ fn source_retention_description_matches_path_only_ingestion() {
         .join(" ");
 
     assert!(readme.contains("records the source file's path and identity without copying the PDF"));
+    assert!(readme.contains("Keep the source file readable until parsing completes."));
     assert!(!readme.contains("stores imported native-text PDFs"));
 }

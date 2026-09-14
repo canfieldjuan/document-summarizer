@@ -3945,7 +3945,9 @@ release acceptance exposed issue #49
   that the Gateway client does not upload the original PDF.
 - README now states the actual ingestion boundary: the application records the
   source file's path and identity without copying the PDF. The release metadata
-  no longer makes a private on-premises-only inference promise.
+  no longer makes a private on-premises-only inference promise. README also
+  instructs the user to keep the source readable until parsing completes because
+  the parser reopens that path.
 - Direct Ollama remains restricted to exact-loopback HTTP. Qualified llama.cpp
   remains an authenticated app-managed loopback child. This slice does not
   change admission, transport, credentials, runtime selection, or pipeline
@@ -3957,10 +3959,11 @@ release acceptance exposed issue #49
 **Verification**:
 - The release disclosure test failed first because the required Gateway-egress
   wording was absent, then passed after the four release surfaces were aligned.
-  Review probes then failed on the stale metadata and copied-PDF claim before
-  their wording was corrected. The tests require the Gateway disclosure and
-  both direct-runtime distinctions, reject on-premises-only release wording,
-  and require the path-only ingestion boundary.
+  Review probes then failed on the stale metadata, copied-PDF claim, and missing
+  source-retention instruction before their wording was corrected. The tests
+  require the Gateway disclosure and both direct-runtime distinctions, reject
+  on-premises-only release wording, and require the path-only ingestion boundary
+  plus its readable-through-parsing instruction.
 - All 5 release-contract tests passed. Strict all-target/all-feature Clippy,
   Rust formatting, the TypeScript/Vite production build, and `git diff --check`
   passed.
