@@ -3776,12 +3776,15 @@ fn generate_summary_with_validation_repair(
                     || failure.code == WINDOW_MIXED_RESPONSE_CODE
             })
         {
-            clipped_fallback =
-                parse_response_without_clipped_units(profile, &response.text, document_id, catalog)
-                    .ok()
-                    .and_then(|fallback| {
-                        retain_individually_modal_safe_claims(fallback, document_id)
-                    });
+            clipped_fallback = parse_response_without_clipped_units_with_maximum(
+                profile,
+                &response.text,
+                document_id,
+                catalog,
+                response_maximum_units,
+            )
+            .ok()
+            .and_then(|fallback| retain_individually_modal_safe_claims(fallback, document_id));
             if let (Some(window), Some(fallback)) =
                 (window_fallback.as_mut(), clipped_fallback.as_ref())
             {
@@ -5509,23 +5512,40 @@ fn parse_window_repair_requirements(
     let mut has_window_mixed_unit = false;
     for unit in raw.units {
         let source_ids = unit.source_ids.clone();
-        let repairable_evidence_ids = || {
-            let mut evidence_positions = Vec::with_capacity(source_ids.len());
-            for source_id in &source_ids {
-                let (position, candidate) = catalog
-                    .candidates
-                    .iter()
-                    .enumerate()
-                    .find(|(_, candidate)| candidate.request_id == *source_id)
-                    .ok_or_else(invalid_response)?;
-                evidence_positions.push((position, candidate.evidence.evidence_id.clone()));
+        let unique_source_ids = source_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        if source_ids.is_empty()
+            || source_ids.len() > MAX_SOURCES_PER_UNIT
+            || unique_source_ids.len() != source_ids.len()
+        {
+            return Err(invalid_response());
+        }
+        let mut evidence_positions = Vec::with_capacity(source_ids.len());
+        let mut selection_windows = HashSet::new();
+        let mut has_unwindowed_source = false;
+        for source_id in &source_ids {
+            let (position, candidate) = catalog
+                .candidates
+                .iter()
+                .enumerate()
+                .find(|(_, candidate)| candidate.request_id == *source_id)
+                .ok_or_else(invalid_response)?;
+            evidence_positions.push((position, candidate.evidence.evidence_id.clone()));
+            if let Some(window) = candidate.selection_window {
+                selection_windows.insert(window);
+            } else {
+                has_unwindowed_source = true;
             }
-            evidence_positions.sort_by_key(|(position, _)| *position);
-            Ok(evidence_positions
-                .into_iter()
-                .map(|(_, evidence_id)| evidence_id)
-                .collect::<Vec<_>>())
-        };
+        }
+        evidence_positions.sort_by_key(|(position, _)| *position);
+        let repairable_evidence_ids = evidence_positions
+            .into_iter()
+            .map(|(_, evidence_id)| evidence_id)
+            .collect::<Vec<_>>();
+        has_window_mixed_unit |= !selection_windows.is_empty()
+            && (selection_windows.len() != 1 || has_unwindowed_source);
         let singleton = serde_json::to_string(&RawResponse { units: vec![unit] })
             .map_err(|_| invalid_response())?;
         match parse_response_with_maximum_units(profile, &singleton, document_id, catalog, 1) {
@@ -5533,7 +5553,7 @@ fn parse_window_repair_requirements(
                 if modal_strengthening_feedback(&claims, &evidence)?.is_empty() {
                     retained.append(&mut claims);
                 } else {
-                    repairable_unit_evidence_ids.push(repairable_evidence_ids()?);
+                    repairable_unit_evidence_ids.push(repairable_evidence_ids);
                 }
             }
             Err(failure)
@@ -5541,8 +5561,7 @@ fn parse_window_repair_requirements(
                     || failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE
                     || failure.code == UNIT_CLIPPED_RESPONSE_CODE =>
             {
-                has_window_mixed_unit |= failure.code == WINDOW_MIXED_RESPONSE_CODE;
-                repairable_unit_evidence_ids.push(repairable_evidence_ids()?);
+                repairable_unit_evidence_ids.push(repairable_evidence_ids);
             }
             Err(failure) => return Err(failure),
         }
@@ -5664,18 +5683,34 @@ fn parse_response_without_mixed_windows(
     parse_response(profile, &retained, document_id, catalog)
 }
 
+#[cfg(test)]
 fn parse_response_without_clipped_units(
     profile: SummaryProfile,
     response: &str,
     document_id: &str,
     catalog: &SourceCatalog,
 ) -> Result<SafeSiblingFallback, PipelineFailure> {
+    parse_response_without_clipped_units_with_maximum(
+        profile,
+        response,
+        document_id,
+        catalog,
+        maximum_summary_units_for_catalog(profile, catalog),
+    )
+}
+
+fn parse_response_without_clipped_units_with_maximum(
+    profile: SummaryProfile,
+    response: &str,
+    document_id: &str,
+    catalog: &SourceCatalog,
+    maximum_units: usize,
+) -> Result<SafeSiblingFallback, PipelineFailure> {
     if !is_windowed_general_catalog(profile, catalog) {
         return Err(clipped_unit_response());
     }
     let raw: RawResponse = serde_json::from_str(response).map_err(|_| invalid_response())?;
-    if raw.units.is_empty() || raw.units.len() > maximum_summary_units_for_catalog(profile, catalog)
-    {
+    if raw.units.is_empty() || raw.units.len() > maximum_units {
         return Err(invalid_response());
     }
     let known_sources = catalog
@@ -5748,7 +5783,7 @@ fn parse_response_without_clipped_units(
     } else {
         let retained = serde_json::to_string(&RawResponse { units: retained })
             .map_err(|_| invalid_response())?;
-        parse_response(profile, &retained, document_id, catalog)?
+        parse_response_with_maximum_units(profile, &retained, document_id, catalog, maximum_units)?
     };
     Ok(SafeSiblingFallback {
         claims,
@@ -6351,8 +6386,10 @@ mod tests {
         ReusedMixedSources,
         WindowWithFramingSibling,
         FramingSiblingBeforeWindow,
+        FramingBeforeClippedWindow,
         WindowWithFramingThenRewriteSafeSibling,
         WindowThenFramingNeedsEight,
+        WindowThenClipNeedsSix,
         WindowWithModalSibling,
     }
 
@@ -6543,6 +6580,9 @@ mod tests {
             let is_framing_repair = feedback
                 .iter()
                 .any(|message| message.contains("source_framing"));
+            let is_clipped_repair = feedback
+                .iter()
+                .any(|message| message.contains("decoder limit"));
             let units = if feedback.is_empty()
                 && matches!(self.behavior, WindowRepairBehavior::ReusedMixedSources)
             {
@@ -6573,6 +6613,16 @@ mod tests {
             } else if feedback.is_empty()
                 && matches!(
                     self.behavior,
+                    WindowRepairBehavior::FramingBeforeClippedWindow
+                )
+            {
+                json!([
+                    {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]},
+                    {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s1","s3"]}
+                ])
+            } else if feedback.is_empty()
+                && matches!(
+                    self.behavior,
                     WindowRepairBehavior::WindowWithFramingThenRewriteSafeSibling
                 )
             {
@@ -6599,6 +6649,13 @@ mod tests {
                     {"text":"Third mixed statement.","source_ids":["s1","s3"]}
                 ])
             } else if feedback.is_empty()
+                && matches!(self.behavior, WindowRepairBehavior::WindowThenClipNeedsSix)
+            {
+                json!([
+                    {"text":"First mixed statement.","source_ids":["s1","s2","s3"]},
+                    {"text":"Second mixed statement.","source_ids":["s1","s2","s3"]}
+                ])
+            } else if feedback.is_empty()
                 && matches!(
                     self.behavior,
                     WindowRepairBehavior::AllMixedOmit | WindowRepairBehavior::AllMixedRepeat
@@ -6611,6 +6668,17 @@ mod tests {
                 json!([
                     {"text":"Exact source statement 2.","source_ids":["s2"]},
                     {"text":"The document combines two statements.","source_ids":["s1","s3"]}
+                ])
+            } else if is_clipped_repair
+                && matches!(self.behavior, WindowRepairBehavior::WindowThenClipNeedsSix)
+            {
+                json!([
+                    {"text":"First source from the first unit.","source_ids":["s1"]},
+                    {"text":"Second source from the first unit.","source_ids":["s2"]},
+                    {"text":"Third source from the first unit.","source_ids":["s3"]},
+                    {"text":"First source from the second unit.","source_ids":["s1"]},
+                    {"text":"Second source from the second unit.","source_ids":["s2"]},
+                    {"text":"Third source from the second unit.","source_ids":["s3"]}
                 ])
             } else if is_window_repair {
                 match self.behavior {
@@ -6661,6 +6729,12 @@ mod tests {
                         {"text":"Exact source statement 3.","source_ids":["s3"]},
                         {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]}
                     ]),
+                    WindowRepairBehavior::FramingBeforeClippedWindow => json!([
+                        {"text":"Exact source statement 1.","source_ids":["s1"]},
+                        {"text":"First framed source statement.","source_ids":["s3"]},
+                        {"text":"Second framed source statement.","source_ids":["s3"]},
+                        {"text":"Exact source statement 4.","source_ids":["s4"]}
+                    ]),
                     WindowRepairBehavior::WindowWithFramingThenRewriteSafeSibling => json!([
                         {"text":"Exact source statement 4.","source_ids":["s4"]},
                         {"text":"The first window is reported.","source_ids":["s1","s2"]},
@@ -6673,6 +6747,14 @@ mod tests {
                         {"text":"Second second-window statement.","source_ids":["s3"]},
                         {"text":"Third first-window statement.","source_ids":["s1"]},
                         {"text":"Third second-window statement.","source_ids":["s3"]}
+                    ]),
+                    WindowRepairBehavior::WindowThenClipNeedsSix => json!([
+                        {"text":"x".repeat(MAX_UNIT_CHARACTERS),"source_ids":["s1"]},
+                        {"text":"Second source from the first unit.","source_ids":["s2"]},
+                        {"text":"Third source from the first unit.","source_ids":["s3"]},
+                        {"text":"First source from the second unit.","source_ids":["s1"]},
+                        {"text":"Second source from the second unit.","source_ids":["s2"]},
+                        {"text":"Third source from the second unit.","source_ids":["s3"]}
                     ]),
                     WindowRepairBehavior::WindowWithModalSibling => json!([
                         {"text":"The interpreter must retain the section.","source_ids":["s1"]},
@@ -13890,6 +13972,81 @@ mod tests {
             panic!("framing follow-up must use a JSON schema");
         };
         assert_eq!(framing_schema["properties"]["units"]["maxItems"], 8);
+    }
+
+    #[test]
+    fn window_repair_detects_a_later_clipped_cross_window_unit() {
+        let mut candidates = vec![
+            candidate("s1", "evidence-1", 1),
+            candidate("s2", "evidence-2", 2),
+            candidate("s3", "evidence-3", 3),
+            candidate("s4", "evidence-4", 4),
+        ];
+        for (index, candidate) in candidates.iter_mut().enumerate() {
+            candidate.selection_window = Some(index / 2);
+        }
+        candidates[2].source_framing = Some(SourceFraming::Problem);
+        candidates[3].source_framing = Some(SourceFraming::Risk);
+        let catalog = SourceCatalog {
+            candidates,
+            omitted_source_units: 0,
+        };
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let runtime = WindowRepairRuntime::new(WindowRepairBehavior::FramingBeforeClippedWindow);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &runtime,
+            "document-1",
+            &catalog,
+            prompt,
+            schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("clipping must not hide the later unit's validated cross-window sources");
+        assert_eq!(generated.withheld_unit_kind, None);
+        assert_eq!(generated.claims.len(), 4);
+        assert_eq!(runtime.requests().len(), 2);
+    }
+
+    #[test]
+    fn window_repair_ceiling_survives_a_clipped_follow_up() {
+        let mut candidates = vec![
+            candidate("s1", "evidence-1", 1),
+            candidate("s2", "evidence-2", 2),
+            candidate("s3", "evidence-3", 3),
+        ];
+        candidates[0].selection_window = Some(0);
+        candidates[1].selection_window = Some(0);
+        candidates[2].selection_window = Some(1);
+        let catalog = SourceCatalog {
+            candidates,
+            omitted_source_units: 0,
+        };
+        assert_eq!(
+            maximum_summary_units_for_catalog(SummaryProfile::General, &catalog),
+            2
+        );
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let runtime = WindowRepairRuntime::new(WindowRepairBehavior::WindowThenClipNeedsSix);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &runtime,
+            "document-1",
+            &catalog,
+            prompt,
+            schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("the clipped follow-up must retain the six-unit window repair ceiling");
+        assert_eq!(generated.withheld_unit_kind, None);
+        assert_eq!(generated.claims.len(), 6);
+        assert_eq!(runtime.requests().len(), 3);
     }
 
     #[test]
