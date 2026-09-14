@@ -5482,33 +5482,40 @@ fn parse_window_repair_requirements(
     let mut has_window_mixed_unit = false;
     for unit in raw.units {
         let source_ids = unit.source_ids.clone();
+        let repairable_evidence_ids = || {
+            let mut evidence_positions = Vec::with_capacity(source_ids.len());
+            for source_id in &source_ids {
+                let (position, candidate) = catalog
+                    .candidates
+                    .iter()
+                    .enumerate()
+                    .find(|(_, candidate)| candidate.request_id == *source_id)
+                    .ok_or_else(invalid_response)?;
+                evidence_positions.push((position, candidate.evidence.evidence_id.clone()));
+            }
+            evidence_positions.sort_by_key(|(position, _)| *position);
+            Ok(evidence_positions
+                .into_iter()
+                .map(|(_, evidence_id)| evidence_id)
+                .collect::<Vec<_>>())
+        };
         let singleton = serde_json::to_string(&RawResponse { units: vec![unit] })
             .map_err(|_| invalid_response())?;
         match parse_response_with_maximum_units(profile, &singleton, document_id, catalog, 1) {
-            Ok((mut claims, _)) => retained.append(&mut claims),
+            Ok((mut claims, evidence)) => {
+                if modal_strengthening_feedback(&claims, &evidence)?.is_empty() {
+                    retained.append(&mut claims);
+                } else {
+                    repairable_unit_evidence_ids.push(repairable_evidence_ids()?);
+                }
+            }
             Err(failure)
                 if failure.code == WINDOW_MIXED_RESPONSE_CODE
                     || failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE
                     || failure.code == UNIT_CLIPPED_RESPONSE_CODE =>
             {
                 has_window_mixed_unit |= failure.code == WINDOW_MIXED_RESPONSE_CODE;
-                let mut evidence_positions = Vec::with_capacity(source_ids.len());
-                for source_id in source_ids {
-                    let (position, candidate) = catalog
-                        .candidates
-                        .iter()
-                        .enumerate()
-                        .find(|(_, candidate)| candidate.request_id == source_id)
-                        .ok_or_else(invalid_response)?;
-                    evidence_positions.push((position, candidate.evidence.evidence_id.clone()));
-                }
-                evidence_positions.sort_by_key(|(position, _)| *position);
-                repairable_unit_evidence_ids.push(
-                    evidence_positions
-                        .into_iter()
-                        .map(|(_, evidence_id)| evidence_id)
-                        .collect(),
-                );
+                repairable_unit_evidence_ids.push(repairable_evidence_ids()?);
             }
             Err(failure) => return Err(failure),
         }
@@ -6316,6 +6323,7 @@ mod tests {
         AllMixedRepeat,
         ReusedMixedSources,
         WindowWithFramingSibling,
+        WindowWithModalSibling,
     }
 
     struct FramingRepairRuntime {
@@ -6523,6 +6531,13 @@ mod tests {
                     {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]}
                 ])
             } else if feedback.is_empty()
+                && matches!(self.behavior, WindowRepairBehavior::WindowWithModalSibling)
+            {
+                json!([
+                    {"text":"The interpreter must retain the section.","source_ids":["s1"]},
+                    {"text":"The document combines two statements.","source_ids":["s2","s3"]}
+                ])
+            } else if feedback.is_empty()
                 && matches!(
                     self.behavior,
                     WindowRepairBehavior::AllMixedOmit | WindowRepairBehavior::AllMixedRepeat
@@ -6583,6 +6598,11 @@ mod tests {
                         {"text":"Exact source statement 1.","source_ids":["s1"]},
                         {"text":"Exact source statement 3.","source_ids":["s3"]},
                         {"text":"The independent framed statement is reported.","source_ids":["s3","s4"]}
+                    ]),
+                    WindowRepairBehavior::WindowWithModalSibling => json!([
+                        {"text":"The interpreter must retain the section.","source_ids":["s1"]},
+                        {"text":"Exact source statement 2.","source_ids":["s2"]},
+                        {"text":"Exact source statement 3.","source_ids":["s3"]}
                     ]),
                 }
             } else if is_framing_repair
@@ -13573,6 +13593,43 @@ mod tests {
             .is_some_and(|feedback| feedback.iter().any(|item| item
                 .as_str()
                 .is_some_and(|text| text.contains("source_framing")))));
+
+        let modal_sibling = WindowRepairRuntime::new(WindowRepairBehavior::WindowWithModalSibling);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &modal_sibling,
+            "document-1",
+            &catalog,
+            prompt.clone(),
+            schema.clone(),
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("window repair should preserve an independent modal defect for its own repair");
+        assert_eq!(generated.withheld_unit_kind, None);
+        assert_eq!(generated.claims.len(), 3);
+        assert_eq!(
+            generated.claims[0].text,
+            "The interpreter should retain the section."
+        );
+        let modal_sibling_requests = modal_sibling.requests();
+        assert_eq!(modal_sibling_requests.len(), 3);
+        let modal_sibling_window_prompt =
+            serde_json::from_str::<Value>(&modal_sibling_requests[1].user_prompt).unwrap();
+        assert!(modal_sibling_window_prompt["validation_feedback"]
+            .as_array()
+            .is_some_and(|feedback| feedback.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("selection_window")))));
+        let modal_sibling_modal_prompt =
+            serde_json::from_str::<Value>(&modal_sibling_requests[2].user_prompt).unwrap();
+        assert!(modal_sibling_modal_prompt["validation_feedback"]
+            .as_array()
+            .is_some_and(|feedback| feedback.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("strengthens")))));
 
         let malformed_sibling = json!({
             "units": [
