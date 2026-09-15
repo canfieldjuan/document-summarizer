@@ -106,3 +106,22 @@ fn windows_connect_release_boundary_is_documented_and_exercised_natively() {
     assert!(workflow.contains("cargo test --locked --lib connect::"));
     assert!(workflow.contains("cargo clippy --locked --lib --tests -- -D warnings"));
 }
+
+#[test]
+fn installed_linux_cited_summary_release_proof_is_recorded() {
+    let contracts = include_str!("../../docs/CONTRACTS.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let ledger = include_str!("../../docs/BUILD_LEDGER.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    assert!(ledger.contains("Slice 38 — Installed Linux Cited-Summary Demonstration"));
+    assert!(ledger.contains("39274d7e70788489d014c3c48437a65a88a4168d8169600ad5fce4c605f7b8c8"));
+    assert!(ledger.contains("Package-manager-installed Linux cited-summary"));
+    assert!(ledger.contains("Windows demonstration remains pending"));
+    assert!(contracts.contains("installed Linux cited-summary demonstration is complete"));
+    assert!(contracts.contains("installed Windows cited-summary demonstration remains pending"));
+}

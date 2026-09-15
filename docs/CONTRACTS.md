@@ -1986,6 +1986,12 @@ provider request without an application restart or private-database mutation.
 Native Windows CI exercises the positive path, hostile ACL and reparse paths,
 fixed-temporary atomicity, and lock contention. The installed Windows
 cited-summary demonstration remains pending as a separate release proof.
+The installed Linux cited-summary demonstration is complete from the supported
+Debian bundle built at revision
+`7b6defd34a1e51a9692603bbce9d28bf1b738663`; the package-manager-installed
+binary produced and reopened a coherent summary with page-linked exact source
+excerpts. This Linux proof does not satisfy the separate installed Windows
+release requirement.
 
 This offline bearer entitlement is not machine-bound and cannot be revoked
 before expiry without local replacement. License acquisition and production
