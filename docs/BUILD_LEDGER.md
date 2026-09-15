@@ -4020,17 +4020,104 @@ release acceptance exposed issue #49
 - The release-contract probe failed first on the missing Windows path disclosure
   and then passed after the executable contract documented the storage path,
   DACL/atomicity rules, native job, and remaining installed-demonstration limit.
-- Cross-target compilation is not native Win32 execution. Issue #62 remains open
-  until the native Windows CI job passes and the exact published head is
-  reviewed and reconciled.
+- Cross-target compilation was not treated as native Win32 execution. The
+  native Windows job later passed on PR #65 head
+  `238a55030a16a74841b872d93af6242f78a8d59e`, all review threads were
+  reconciled, PR #65 merged as
+  `7b6defd34a1e51a9692603bbce9d28bf1b738663`, and issue #62 closed.
 
 **Non-scope and next release proof**:
 - This slice does not change Connect wire schemas, summary behavior, source
   evidence, result identity, UI labels, app-private database storage, or
   installer packaging.
-- It does not claim an installed app demonstration. After issue #62 is merged,
-  the remaining Document Summarizer launch proof is a cited-summary run from an
-  installed Linux bundle and a separate cited-summary run from an installed
+- It does not claim an installed app demonstration. With issue #62 merged, the
+  remaining Document Summarizer launch proof moved to a cited-summary run from
+  an installed Linux bundle and a separate cited-summary run from an installed
   Windows bundle.
 - Issue #52 remains tabled at its current fail-closed oversized mixed-framing
   boundary.
+
+## Slice 38 — Installed Linux Cited-Summary Demonstration (2026-09-14)
+
+**Status**: Package-manager-installed Linux cited-summary and process-restart
+persistence proof complete; the separate installed Windows demonstration
+remains pending
+
+**Exact package and installation evidence**:
+- A clean worktree at merged `main` revision
+  `7b6defd34a1e51a9692603bbce9d28bf1b738663`, equal to `origin/main`, supplied
+  the source. `npm ci` installed the lockfile dependency set, and
+  `npm run desktop:build` built the production frontend, release executable,
+  and supported Debian bundle.
+- `Document Summarizer_0.1.0_amd64.deb` was 10,660,308 bytes with SHA-256
+  `39274d7e70788489d014c3c48437a65a88a4168d8169600ad5fce4c605f7b8c8`.
+  Its inventory contained only the production `document-summarizer`
+  executable, desktop entry, and configured icon sizes.
+- `dpkg -i` installed that exact package over the previously installed 0.1.0.
+  The package manager reported `install ok installed`, `dpkg --verify` emitted
+  no drift, and the installed `/usr/bin/document-summarizer` SHA-256 exactly
+  matched the packaged executable at
+  `2b05860deafbc184052095f1f9a3d131cd67aa898f8033efcd8e9f3ac87da858`.
+
+**Installed cited-summary proof**:
+- `/usr/bin/document-summarizer` launched under isolated owner-private XDG data,
+  config, cache, and runtime roots. This exercised the installed production
+  binary rather than a Cargo, Tauri-dev, or Vite process. Its accessibility
+  tree reported `Local Qwen ready` and exposed the qualified Qwen 3 30B-A3B
+  Ollama preset at 8,192 safe context tokens.
+- Immediately before the run, `ollama ps` reported
+  `qwen3-30b-a3b:latest` at 100% GPU, context 8,192, and `Forever` residency.
+  The immutable run snapshot recorded the exact model digest
+  `1eda56426671cdf365913097543c2253a73c57e35b12741306689968d7f70292`,
+  native Ollama runtime, 8,192-token context, and the qualified Qwen tokenizer.
+- The installed native file picker selected the repository's non-sensitive
+  six-page `structured_report.pdf` fixture. Run
+  `67b2908c-01d0-4bc3-81eb-e3c64719e9b1` completed with the expected
+  `NO_NATIVE_TEXT` warning for its empty fifth page. The installed UI rendered
+  coherent presentation with one overview paragraph, source controls for pages
+  1, 2, 3, 4, and 6, and a five-entry cited-claim disclosure.
+- Representative installed output was:
+
+  > The 2027 OPERATIONS REPORT serves as a realistic fixture for deterministic
+  > structure testing and documents the operating context for the 2027 planning
+  > cycle, with the source text remaining authoritative and structural nodes
+  > referencing it by block ID; the interpreter must retain the operating
+  > context under Section 1 across page boundaries, using the active numbered
+  > section as the anchor, and the fixture verifies nested hierarchy, stable
+  > IDs, and exact source provenance, with subsections accepted only after their
+  > complete parent numbering prefix exists, while the deterministic hierarchy
+  > should close Section 1 before opening Section 2, the visual-only fifth page
+  > is represented through page routing metadata, and all native-text blocks
+  > must be owned exactly once in canonical source order. [p. 1; p. 2; p. 3;
+  > p. 4; p. 6]
+
+**Support, usefulness, and persistence review**:
+- Mechanical checks confirmed coherent presentation, valid persisted artifact
+  hashes, the five cited page spans, exact source excerpts, supported verifier
+  verdicts, and SQLite `quick_check = ok`. Those properties prove artifact and
+  reference integrity; they do not by themselves prove semantic support.
+- Direct comparison with the fixture found that the overview preserves the
+  document's purpose, 2027 planning context, source-authority qualification,
+  cross-page Section 1 relationship, nested-prefix rule, Section 2 transition,
+  visual-only page qualification, and canonical source-order requirement. Each
+  clause is supported by the cited exact excerpt, and no invented fact was
+  observed. The result is a coherent overview rather than a claim list, though
+  its single sentence is dense.
+- After the process was stopped, a second launch of the same installed binary
+  against the same isolated profile removed two stale Connect registrations.
+  The Recent Work action reopened `structured_report.pdf` as Complete with
+  notes and restored the same overview, five page controls, five-claim ledger,
+  and warning. GNOME policy denied programmatic screenshots, window
+  introspection, and application focus, so a compositor-driven graceful
+  GUI-close was not proven; this is installed process-restart persistence.
+- Each app model request sets a bounded 30-second Ollama keep-alive, which
+  replaces an externally pinned residency value. The operator model was
+  therefore re-pinned after the run and remained at 100% GPU, context 8,192,
+  and `Forever`; changing runtime keep-alive behavior is outside this proof.
+
+**Non-scope and next release proof**:
+- No prompt, summary-profile, routing, citation, result-identity, schema,
+  Connect, UI, or installer behavior changed in this slice.
+- Windows package construction, installation, runtime selection, UI exercise,
+  cited-summary support review, and persistence proof remain the next separate
+  release slice. Issue #52 remains tabled at its existing fail-closed boundary.
