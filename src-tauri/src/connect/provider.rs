@@ -3409,7 +3409,10 @@ mod tests {
             DEFAULT_MAX_INPUT_BYTES,
             runtime_factory,
         );
-        assert!(matches!(competing, Err(ProviderStartError::Io(_))));
+        assert!(matches!(
+            competing,
+            Err(ProviderStartError::ProviderAlreadyRunning)
+        ));
 
         let conn = db::init_db(&db_path).unwrap();
         let stored = store::get_job(&conn, &request.job_id).unwrap().unwrap();
