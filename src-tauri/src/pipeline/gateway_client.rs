@@ -1049,6 +1049,8 @@ fn validate_file_metadata(
             ));
         }
     }
+    #[cfg(not(unix))]
+    let _ = policy;
     Ok(())
 }
 

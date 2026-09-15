@@ -6,12 +6,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
 use std::io::{Read, Take, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicU64;
+#[cfg(any(unix, test))]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use thiserror::Error;
+
+#[cfg(windows)]
+use crate::connect::windows_storage::{self, FileLockError, WindowsFileLock};
 
 #[cfg(test)]
 use uuid::Uuid;
@@ -41,6 +49,7 @@ const COMPILED_KEYRING: &str = include_str!(concat!(
     env!("OUT_DIR"),
     "/connect-entitlement-keyring.json"
 ));
+#[cfg(unix)]
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(unix)]
 const NONBLOCKING_NOFOLLOW_FLAGS: i32 = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
@@ -125,6 +134,7 @@ impl EntitlementInstallError {
 #[derive(Clone)]
 pub struct EntitlementGate {
     path: Option<PathBuf>,
+    private_root: Option<PathBuf>,
     keys: Arc<BTreeMap<String, Vec<u8>>>,
     clock: Clock,
     #[cfg(test)]
@@ -173,8 +183,16 @@ struct EntitlementClaims {
 impl EntitlementGate {
     pub fn from_installation() -> Result<Self, EntitlementConfigurationError> {
         let keys = parse_keyring(COMPILED_KEYRING)?;
+        #[cfg(unix)]
+        let (path, private_root) = (
+            entitlement_path(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME")),
+            None,
+        );
+        #[cfg(windows)]
+        let (path, private_root) = windows_entitlement_location(env::var_os("LOCALAPPDATA"));
         Ok(Self {
-            path: entitlement_path(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME")),
+            path,
+            private_root,
             keys: Arc::new(keys),
             clock: Arc::new(Utc::now),
             #[cfg(test)]
@@ -197,7 +215,7 @@ impl EntitlementGate {
         let Some(path) = &self.path else {
             return EntitlementDecision::Missing;
         };
-        let Some(bytes) = read_private_entitlement(path) else {
+        let Some(bytes) = read_private_entitlement(path, self.private_root.as_deref()) else {
             return EntitlementDecision::Missing;
         };
         evaluate_entitlement(&bytes, &self.keys, (self.clock)())
@@ -242,8 +260,7 @@ impl EntitlementGate {
 
         #[cfg(not(unix))]
         {
-            let _ = source;
-            Err(EntitlementInstallError::StorageUnavailable)
+            self.install_windows(source, destination)
         }
     }
 
@@ -251,6 +268,7 @@ impl EntitlementGate {
     pub(crate) fn always_active_for_test() -> Self {
         Self {
             path: None,
+            private_root: None,
             keys: Arc::new(BTreeMap::new()),
             clock: Arc::new(Utc::now),
             forced: Some(EntitlementDecision::Active),
@@ -277,10 +295,162 @@ impl EntitlementGate {
     where
         F: Fn() -> DateTime<Utc> + Send + Sync + 'static,
     {
+        #[cfg(windows)]
+        let private_root = path.parent().map(Path::to_path_buf);
         Self {
             path: Some(path),
+            #[cfg(unix)]
+            private_root: None,
+            #[cfg(windows)]
+            private_root,
             keys: Arc::new(keys),
             clock: Arc::new(clock),
+            forced: None,
+            fail_before_replace: false,
+            fail_after_replace_once: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(windows)]
+    fn install_windows(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<EntitlementStatus, EntitlementInstallError> {
+        let private_root = self
+            .private_root
+            .as_deref()
+            .ok_or(EntitlementInstallError::StorageUnavailable)?;
+        let candidate =
+            windows_storage::read_bounded_regular_file(source, MAX_ENTITLEMENT_BYTES, false, None)
+                .map_err(|_| EntitlementInstallError::SourceInvalid)?;
+        require_active_candidate(&candidate, &self.keys, (self.clock)())?;
+        let parent = destination
+            .parent()
+            .ok_or(EntitlementInstallError::StorageUnavailable)?;
+        windows_storage::ensure_private_directory(parent, private_root)
+            .map_err(|_| EntitlementInstallError::StorageUnavailable)?;
+        let _lock = match WindowsFileLock::acquire(
+            &parent.join(ENTITLEMENT_LOCK_FILE_NAME),
+            private_root,
+        ) {
+            Ok(lock) => lock,
+            Err(FileLockError::Busy) => return Err(EntitlementInstallError::ActivationBusy),
+            Err(FileLockError::Io(_)) => return Err(EntitlementInstallError::StorageUnavailable),
+        };
+        let previous = if windows_storage::path_entry_exists(destination)
+            .map_err(|_| EntitlementInstallError::StorageUnavailable)?
+        {
+            Some(
+                windows_storage::read_bounded_regular_file(
+                    destination,
+                    MAX_ENTITLEMENT_BYTES,
+                    true,
+                    Some(private_root),
+                )
+                .map_err(|_| EntitlementInstallError::StorageUnavailable)?,
+            )
+        } else {
+            None
+        };
+        let committed_candidate =
+            windows_storage::read_bounded_regular_file(source, MAX_ENTITLEMENT_BYTES, false, None)
+                .map_err(|_| EntitlementInstallError::SourceInvalid)?;
+        if committed_candidate != candidate {
+            return Err(EntitlementInstallError::SourceInvalid);
+        }
+        require_active_candidate(&committed_candidate, &self.keys, (self.clock)())?;
+        #[cfg(test)]
+        if self.fail_before_replace {
+            return Err(EntitlementInstallError::InstallFailed);
+        }
+        #[cfg(test)]
+        let replacement = if self.fail_after_replace_once.swap(false, Ordering::SeqCst) {
+            windows_storage::atomic_replace_bytes_with_forced_post_promotion_failure(
+                destination,
+                &committed_candidate,
+                MAX_ENTITLEMENT_BYTES,
+                false,
+                private_root,
+            )
+        } else {
+            windows_storage::atomic_replace_bytes_with_outcome(
+                destination,
+                &committed_candidate,
+                MAX_ENTITLEMENT_BYTES,
+                false,
+                private_root,
+            )
+        };
+        #[cfg(not(test))]
+        let replacement = windows_storage::atomic_replace_bytes_with_outcome(
+            destination,
+            &committed_candidate,
+            MAX_ENTITLEMENT_BYTES,
+            false,
+            private_root,
+        );
+        if let Err(error) = replacement {
+            if error.promoted() {
+                self.restore_windows_entitlement(destination, previous.as_deref())?;
+            }
+            return Err(EntitlementInstallError::InstallFailed);
+        }
+        let status = self.status();
+        if !status.active {
+            self.restore_windows_entitlement(destination, previous.as_deref())?;
+            return Err(EntitlementInstallError::InstallFailed);
+        }
+        Ok(status)
+    }
+
+    #[cfg(windows)]
+    fn restore_windows_entitlement(
+        &self,
+        destination: &Path,
+        previous: Option<&[u8]>,
+    ) -> Result<(), EntitlementInstallError> {
+        let private_root = self
+            .private_root
+            .as_deref()
+            .ok_or(EntitlementInstallError::InstallFailed)?;
+        if let Some(previous) = previous {
+            windows_storage::atomic_replace_bytes(
+                destination,
+                previous,
+                MAX_ENTITLEMENT_BYTES,
+                true,
+                private_root,
+            )
+            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+            let restored = windows_storage::read_bounded_regular_file(
+                destination,
+                MAX_ENTITLEMENT_BYTES,
+                true,
+                Some(private_root),
+            )
+            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+            return (restored == previous)
+                .then_some(())
+                .ok_or(EntitlementInstallError::InstallFailed);
+        }
+        windows_storage::remove_private_file(destination, private_root)
+            .map_err(|_| EntitlementInstallError::InstallFailed)?;
+        Ok(())
+    }
+
+    #[cfg(all(test, windows))]
+    fn for_windows_test(
+        path: PathBuf,
+        private_root: PathBuf,
+        keys: BTreeMap<String, Vec<u8>>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            path: Some(path),
+            private_root: Some(private_root),
+            keys: Arc::new(keys),
+            clock: Arc::new(move || now),
             forced: None,
             fail_before_replace: false,
             fail_after_replace_once: Arc::new(AtomicBool::new(false)),
@@ -307,6 +477,7 @@ fn require_active_candidate(
     }
 }
 
+#[cfg(unix)]
 fn entitlement_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     let root = match xdg_config_home.filter(|value| !value.is_empty()) {
         Some(value) => PathBuf::from(value),
@@ -314,6 +485,19 @@ fn entitlement_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -
     };
     root.is_absolute()
         .then(|| root.join("local-connect").join(ENTITLEMENT_FILE_NAME))
+}
+
+#[cfg(windows)]
+fn windows_entitlement_location(
+    local_app_data: Option<OsString>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let Ok(private_root) = windows_storage::local_app_data_root(local_app_data) else {
+        return (None, None);
+    };
+    let path = private_root
+        .join(windows_storage::LOCAL_CONNECT_DIRECTORY)
+        .join(ENTITLEMENT_FILE_NAME);
+    (Some(path), Some(private_root))
 }
 
 fn parse_keyring(value: &str) -> Result<BTreeMap<String, Vec<u8>>, EntitlementConfigurationError> {
@@ -750,7 +934,7 @@ fn sync_directory(path: &Path) -> Result<(), EntitlementInstallError> {
 }
 
 #[cfg(unix)]
-fn read_private_entitlement(path: &Path) -> Option<Vec<u8>> {
+fn read_private_entitlement(path: &Path, _private_root: Option<&Path>) -> Option<Vec<u8>> {
     let parent = path.parent()?;
     let directory = fs::symlink_metadata(parent).ok()?;
     let current_uid = unsafe { libc::geteuid() };
@@ -775,8 +959,9 @@ fn read_private_entitlement(path: &Path) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(unix))]
-fn read_private_entitlement(_path: &Path) -> Option<Vec<u8>> {
-    None
+fn read_private_entitlement(path: &Path, private_root: Option<&Path>) -> Option<Vec<u8>> {
+    windows_storage::read_bounded_regular_file(path, MAX_ENTITLEMENT_BYTES, false, private_root)
+        .ok()
 }
 
 #[cfg(unix)]
@@ -818,6 +1003,7 @@ fn open_verified_regular_file(
     Some(file)
 }
 
+#[cfg(unix)]
 fn read_bounded(mut reader: Take<File>) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes).ok()?;
@@ -830,6 +1016,7 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use serde_json::{json, Value};
+    use std::fs;
     use std::process::Command;
 
     #[cfg(unix)]
@@ -845,6 +1032,8 @@ mod tests {
             fs::create_dir(&path).unwrap();
             #[cfg(unix)]
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            #[cfg(windows)]
+            windows_storage::protect_path_for_test(&path, true).unwrap();
             Self(path)
         }
     }
@@ -890,19 +1079,26 @@ mod tests {
     fn gate(root: &TestDirectory, key: &Ed25519KeyPair, now: &str) -> EntitlementGate {
         let mut keys = BTreeMap::new();
         keys.insert("test-key".to_string(), key.public_key().as_ref().to_vec());
-        EntitlementGate::for_test(
-            root.0.join(ENTITLEMENT_FILE_NAME),
-            keys,
-            DateTime::parse_from_rfc3339(now)
-                .unwrap()
-                .with_timezone(&Utc),
-        )
+        let path = root.0.join(ENTITLEMENT_FILE_NAME);
+        let now = DateTime::parse_from_rfc3339(now)
+            .unwrap()
+            .with_timezone(&Utc);
+        #[cfg(unix)]
+        {
+            EntitlementGate::for_test(path, keys, now)
+        }
+        #[cfg(windows)]
+        {
+            EntitlementGate::for_windows_test(path, root.0.clone(), keys, now)
+        }
     }
 
     fn write_private(path: &Path, bytes: &[u8]) {
         fs::write(path, bytes).unwrap();
         #[cfg(unix)]
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        #[cfg(windows)]
+        windows_storage::protect_path_for_test(path, false).unwrap();
     }
 
     fn active_license(key: &Ed25519KeyPair) -> Vec<u8> {
@@ -915,6 +1111,120 @@ mod tests {
                 vec![FEATURE_ID],
             ),
         )
+    }
+
+    #[cfg(windows)]
+    fn grant_everyone_read(path: &Path) {
+        let status = Command::new("icacls")
+            .arg(path)
+            .args(["/grant", "*S-1-1-0:R"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_entitlement_install_is_atomic_private_and_acl_guarded() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let destination = root
+            .0
+            .join(windows_storage::LOCAL_CONNECT_DIRECTORY)
+            .join(ENTITLEMENT_FILE_NAME);
+        let source = root.0.join("selected-license.json");
+        let license = active_license(&key);
+        write_private(&source, &license);
+        let mut keys = BTreeMap::new();
+        keys.insert("test-key".to_string(), key.public_key().as_ref().to_vec());
+        let gate = EntitlementGate::for_windows_test(
+            destination.clone(),
+            root.0.clone(),
+            keys,
+            DateTime::parse_from_rfc3339("2026-08-31T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+
+        assert!(gate.install(&source).unwrap().active);
+        assert_eq!(fs::read(&destination).unwrap(), license);
+        assert_eq!(gate.decision(), EntitlementDecision::Active);
+        grant_everyone_read(&destination);
+        assert_eq!(gate.decision(), EntitlementDecision::Missing);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_entitlement_lock_contention_and_rollback_fail_closed() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let connect_root = windows_storage::prepare_local_connect_root(&root.0).unwrap();
+        let destination = connect_root.join(ENTITLEMENT_FILE_NAME);
+        let source = root.0.join("selected-license.json");
+        let replacement = active_license(&key);
+        write_private(&source, &replacement);
+        let mut keys = BTreeMap::new();
+        keys.insert("test-key".to_string(), key.public_key().as_ref().to_vec());
+        let gate = EntitlementGate::for_windows_test(
+            destination.clone(),
+            root.0.clone(),
+            keys,
+            DateTime::parse_from_rfc3339("2026-08-31T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        let held =
+            WindowsFileLock::acquire(&connect_root.join(ENTITLEMENT_LOCK_FILE_NAME), &root.0)
+                .unwrap();
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::ActivationBusy)
+        );
+        drop(held);
+
+        let previous = active_license(&key);
+        windows_storage::atomic_replace_bytes(
+            &destination,
+            &previous,
+            MAX_ENTITLEMENT_BYTES,
+            false,
+            &root.0,
+        )
+        .unwrap();
+        gate.fail_after_replace_once.store(true, Ordering::SeqCst);
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::InstallFailed)
+        );
+        assert_eq!(fs::read(destination).unwrap(), previous);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_post_promotion_failure_removes_candidate_without_prior_entitlement() {
+        let root = TestDirectory::new();
+        let key = signing_key();
+        let connect_root = windows_storage::prepare_local_connect_root(&root.0).unwrap();
+        let destination = connect_root.join(ENTITLEMENT_FILE_NAME);
+        let source = root.0.join("selected-license.json");
+        write_private(&source, &active_license(&key));
+        let mut keys = BTreeMap::new();
+        keys.insert("test-key".to_string(), key.public_key().as_ref().to_vec());
+        let gate = EntitlementGate::for_windows_test(
+            destination.clone(),
+            root.0.clone(),
+            keys,
+            DateTime::parse_from_rfc3339("2026-08-31T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        gate.fail_after_replace_once.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            gate.install(&source),
+            Err(EntitlementInstallError::InstallFailed)
+        );
+        assert!(!windows_storage::path_entry_exists(&destination).unwrap());
     }
 
     #[test]
@@ -1080,27 +1390,30 @@ mod tests {
         )
         .is_ok());
         assert!(valid_feature_id("document.local_processing"));
-        assert_eq!(
-            entitlement_path(Some(OsString::from("relative")), None),
-            None
-        );
-        assert_eq!(
-            entitlement_path(None, Some(OsString::from("relative"))),
-            None
-        );
-        assert_eq!(
-            entitlement_path(Some(OsString::from("/config")), None),
-            Some(PathBuf::from("/config/local-connect/entitlement-v1.json"))
-        );
-        assert_eq!(
-            entitlement_path(
-                Some(OsString::new()),
-                Some(OsString::from("/home/test-user")),
-            ),
-            Some(PathBuf::from(
-                "/home/test-user/.config/local-connect/entitlement-v1.json"
-            ))
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                entitlement_path(Some(OsString::from("relative")), None),
+                None
+            );
+            assert_eq!(
+                entitlement_path(None, Some(OsString::from("relative"))),
+                None
+            );
+            assert_eq!(
+                entitlement_path(Some(OsString::from("/config")), None),
+                Some(PathBuf::from("/config/local-connect/entitlement-v1.json"))
+            );
+            assert_eq!(
+                entitlement_path(
+                    Some(OsString::new()),
+                    Some(OsString::from("/home/test-user")),
+                ),
+                Some(PathBuf::from(
+                    "/home/test-user/.config/local-connect/entitlement-v1.json"
+                ))
+            );
+        }
     }
 
     #[cfg(unix)]

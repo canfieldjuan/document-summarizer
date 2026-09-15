@@ -162,8 +162,10 @@ static RUNTIMES: OnceLock<Mutex<HashMap<String, Arc<LlamaCppRuntime>>>> = OnceLo
 type RuntimeSupervisorTask = Box<dyn FnOnce() + Send + 'static>;
 static RUNTIME_SUPERVISOR: OnceLock<mpsc::Sender<RuntimeSupervisorTask>> = OnceLock::new();
 static MODEL_LEASE_BREAK_REQUESTED: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 static MODEL_LEASE_HANDLER_INSTALLED: OnceLock<bool> = OnceLock::new();
 
+#[cfg(unix)]
 extern "C" fn record_model_lease_break(_signal: libc::c_int) {
     MODEL_LEASE_BREAK_REQUESTED.store(true, Ordering::SeqCst);
 }
@@ -2927,6 +2929,8 @@ mod tests {
         let (server_file, libraries) =
             open_qualified_runtime_bundle(&server, &server_digest, &manifest).unwrap();
         assert_eq!(libraries.len(), 1);
+        #[cfg(not(unix))]
+        let _ = &server_file;
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;

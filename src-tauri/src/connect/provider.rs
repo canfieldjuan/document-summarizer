@@ -6,6 +6,8 @@ use crate::connect::contracts::{
 use crate::connect::entitlement::{EntitlementConfigurationError, EntitlementGate};
 use crate::connect::store::{self, ConnectStoreError, StoredConnectJob};
 use crate::connect::v2;
+#[cfg(windows)]
+use crate::connect::windows_storage::{self, FileLockError, WindowsFileLock};
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
     AnalysisPageOmission, ModelRuntime, ModelRuntimeFailure, NormalizedDocument, SummaryArtifacts,
@@ -37,29 +39,50 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::fs::TryLockError;
+use std::fs::{self, File, OpenOptions};
+#[cfg(windows)]
+use std::future::IntoFuture;
+#[cfg(unix)]
+use std::io::Read;
+use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 type RuntimeFactory =
     Arc<dyn Fn() -> Result<Box<dyn ModelRuntime>, ModelRuntimeFailure> + Send + Sync + 'static>;
 const V2_INSTANCE_ID_FILE: &str = "connect-v2-instance-id";
 const MAX_REGISTRATION_BYTES: u64 = 64 * 1024;
+#[cfg(unix)]
 const MAX_PROBED_MANIFEST_BYTES: u64 = 64 * 1024;
+#[cfg(unix)]
 const REGISTRATION_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+#[cfg(unix)]
 const REGISTRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(unix)]
 const REGISTRATION_LOCK_RETRY: Duration = Duration::from_millis(10);
 const CONNECT_PROOF_MODE_ENV: &str = "DOC_SUM_CONNECT_PROOF_MODE";
 const CONNECT_PROOF_MODE_V1: &str = "local-fixture-v1";
+#[cfg(windows)]
+const WINDOWS_SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+
+async fn wait_for_shutdown(mut receiver: watch::Receiver<bool>) {
+    if *receiver.borrow() {
+        return;
+    }
+    let _ = receiver.changed().await;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectRuntimeSource {
@@ -138,6 +161,7 @@ struct ProviderState {
     entitlement: EntitlementGate,
 }
 
+#[cfg(unix)]
 #[derive(Deserialize)]
 struct ManifestIdentity {
     protocol_version: u32,
@@ -145,11 +169,13 @@ struct ManifestIdentity {
     app: ManifestAppIdentity,
 }
 
+#[cfg(unix)]
 #[derive(Deserialize)]
 struct ManifestAppIdentity {
     id: String,
 }
 
+#[cfg(unix)]
 enum ManifestProbe {
     Manifest(ManifestIdentity),
     EntitlementRequired,
@@ -177,9 +203,13 @@ struct RegistrationAuthIdentity {
 }
 
 struct RegistrationLifecycleLock {
+    #[cfg(unix)]
     file: File,
+    #[cfg(windows)]
+    _file: WindowsFileLock,
 }
 
+#[cfg(unix)]
 impl Drop for RegistrationLifecycleLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
@@ -188,7 +218,7 @@ impl Drop for RegistrationLifecycleLock {
 
 #[derive(Debug, Error)]
 pub enum ProviderStartError {
-    #[error("Connect requires XDG_RUNTIME_DIR")]
+    #[error("Connect runtime storage is unavailable")]
     RuntimeDirectoryUnavailable,
     #[error("Invalid DOC_SUM_CONNECT_MAX_BYTES configuration")]
     InvalidMaxInputBytes,
@@ -211,22 +241,33 @@ pub enum ProviderStartError {
 }
 
 pub struct ConnectProvider {
+    #[cfg(unix)]
     registration_lock_path: PathBuf,
+    #[cfg(windows)]
+    _registration_lock_v1: RegistrationLifecycleLock,
+    #[cfg(windows)]
+    _registration_lock_v2: RegistrationLifecycleLock,
+    #[cfg(windows)]
+    private_storage_root: PathBuf,
     registration_path_v1: PathBuf,
     registration_path_v2: PathBuf,
     base_url: String,
     instance_id_v1: String,
     instance_id_v2: String,
     token: String,
-    shutdown: Option<oneshot::Sender<()>>,
+    shutdown: Option<watch::Sender<bool>>,
     server_thread: Option<JoinHandle<()>>,
 }
 
 impl ConnectProvider {
     pub fn start(db_path: PathBuf, app_data_dir: PathBuf) -> Result<Self, ProviderStartError> {
+        #[cfg(unix)]
         let runtime_root = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .ok_or(ProviderStartError::RuntimeDirectoryUnavailable)?;
+        #[cfg(windows)]
+        let runtime_root = windows_storage::local_app_data_root(env::var_os("LOCALAPPDATA"))
+            .map_err(|_| ProviderStartError::RuntimeDirectoryUnavailable)?;
         let max_input_bytes = match env::var("DOC_SUM_CONNECT_MAX_BYTES") {
             Ok(value) => value
                 .parse::<u64>()
@@ -256,6 +297,8 @@ impl ConnectProvider {
         max_input_bytes: u64,
         runtime_factory: RuntimeFactory,
     ) -> Result<Self, ProviderStartError> {
+        #[cfg(windows)]
+        fs::create_dir_all(&runtime_root)?;
         Self::start_at_with_entitlement(
             db_path,
             app_data_dir,
@@ -277,12 +320,20 @@ impl ConnectProvider {
         ensure_private_directory(&app_data_dir)?;
         let imports_dir = app_data_dir.join("connect-imports");
         ensure_private_directory(&imports_dir)?;
+
+        #[cfg(unix)]
         let providers_dir_v1 = runtime_root.join("local-connect/v1/providers");
+        #[cfg(unix)]
         let providers_dir_v2 = runtime_root.join("local-connect/v2/providers");
+        #[cfg(unix)]
         ensure_private_directory(&providers_dir_v1)?;
+        #[cfg(unix)]
         ensure_private_directory(&providers_dir_v2)?;
+        #[cfg(unix)]
         let registration_lock_path = providers_dir_v1.join(format!(".{APP_ID}.lifecycle.lock"));
-        let registration_lock = acquire_registration_lock(&registration_lock_path)?;
+        #[cfg(unix)]
+        let registration_lock = acquire_registration_lock(&registration_lock_path, None)?;
+        #[cfg(unix)]
         let removed_registrations = scavenge_stale_registrations(
             &registration_lock,
             [
@@ -290,14 +341,49 @@ impl ConnectProvider {
                 (&providers_dir_v2, WireVersion::V2),
             ],
         )?;
+        #[cfg(unix)]
         if removed_registrations > 0 {
             eprintln!("Removed {removed_registrations} stale Connect registration(s)");
+        }
+
+        #[cfg(windows)]
+        let private_connect_root = windows_storage::prepare_local_connect_root(&runtime_root)?;
+        #[cfg(windows)]
+        let providers_dir_v1 = private_connect_root.join("runtime/v1/providers");
+        #[cfg(windows)]
+        let providers_dir_v2 = private_connect_root.join("runtime/v2/providers");
+        #[cfg(windows)]
+        let locks_dir_v1 = private_connect_root.join("runtime/v1/locks");
+        #[cfg(windows)]
+        let locks_dir_v2 = private_connect_root.join("runtime/v2/locks");
+        #[cfg(windows)]
+        for directory in [
+            &providers_dir_v1,
+            &providers_dir_v2,
+            &locks_dir_v1,
+            &locks_dir_v2,
+        ] {
+            windows_storage::ensure_private_directory(directory, &runtime_root)?;
         }
 
         let conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
         let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
         let instance_id_v2 =
             load_or_create_v2_instance_id(&app_data_dir, active_v2_instance_id.as_deref())?;
+
+        #[cfg(windows)]
+        let registration_lock_v1 = acquire_registration_lock(
+            &locks_dir_v1.join(format!(".local-connect-v1-{APP_ID}.lock")),
+            Some(&runtime_root),
+        )
+        .map_err(map_windows_registration_lock_error)?;
+        #[cfg(windows)]
+        let registration_lock_v2 = acquire_registration_lock(
+            &locks_dir_v2.join(format!(".local-connect-v2-{instance_id_v2}.lock")),
+            Some(&runtime_root),
+        )
+        .map_err(map_windows_registration_lock_error)?;
+
         store::mark_interrupted_jobs_failed(
             &conn,
             &job_error(
@@ -342,7 +428,7 @@ impl ConnectProvider {
             .layer(DefaultBodyLimit::max(body_limit))
             .with_state(state);
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let server_thread = thread::Builder::new()
             .name("document-summarizer-connect".to_string())
@@ -368,11 +454,30 @@ impl ConnectProvider {
                     if ready_tx.send(Ok(())).is_err() {
                         return;
                     }
-                    let result = axum::serve(listener, app)
-                        .with_graceful_shutdown(async {
-                            let _ = shutdown_rx.await;
-                        })
-                        .await;
+                    #[cfg(windows)]
+                    let graceful_shutdown_rx = shutdown_rx.clone();
+                    #[cfg(unix)]
+                    let graceful_shutdown_rx = shutdown_rx;
+                    let server = axum::serve(listener, app)
+                        .with_graceful_shutdown(wait_for_shutdown(graceful_shutdown_rx));
+                    #[cfg(windows)]
+                    let server = server.into_future();
+                    #[cfg(windows)]
+                    let result = {
+                        tokio::pin!(server);
+                        tokio::select! {
+                            result = &mut server => result,
+                            () = async move {
+                                wait_for_shutdown(shutdown_rx).await;
+                                tokio::time::sleep(WINDOWS_SERVER_SHUTDOWN_GRACE).await;
+                            } => {
+                                eprintln!("Connect provider forced outstanding Windows connections closed after the shutdown grace period");
+                                return;
+                            }
+                        }
+                    };
+                    #[cfg(unix)]
+                    let result = server.await;
                     if let Err(error) = result {
                         eprintln!("Connect provider stopped with an error: {error}");
                     }
@@ -422,26 +527,61 @@ impl ConnectProvider {
                 token: token.clone(),
             },
         };
+        #[cfg(unix)]
         let registration_path_v1 = providers_dir_v1.join(format!("{APP_ID}-{instance_id_v1}.json"));
+        #[cfg(unix)]
         let registration_path_v2 = providers_dir_v2.join(format!("{APP_ID}-{instance_id_v2}.json"));
-        if let Err(error) =
-            write_registration(&registration_lock, &registration_path_v1, &registration_v1)
-        {
-            let _ = shutdown_tx.send(());
+        #[cfg(windows)]
+        let registration_path_v1 = providers_dir_v1.join(format!("local-connect-v1-{APP_ID}.json"));
+        #[cfg(windows)]
+        let registration_path_v2 =
+            providers_dir_v2.join(format!("local-connect-v2-{instance_id_v2}.json"));
+        #[cfg(unix)]
+        let publication_lock_v1 = &registration_lock;
+        #[cfg(unix)]
+        let publication_lock_v2 = &registration_lock;
+        #[cfg(windows)]
+        let publication_lock_v1 = &registration_lock_v1;
+        #[cfg(windows)]
+        let publication_lock_v2 = &registration_lock_v2;
+        #[cfg(unix)]
+        let publication_root = None;
+        #[cfg(windows)]
+        let publication_root = Some(runtime_root.as_path());
+        if let Err(error) = write_registration(
+            publication_lock_v1,
+            &registration_path_v1,
+            &registration_v1,
+            publication_root,
+        ) {
+            let _ = shutdown_tx.send(true);
             let _ = server_thread.join();
             return Err(error);
         }
-        if let Err(error) =
-            write_registration(&registration_lock, &registration_path_v2, &registration_v2)
-        {
+        if let Err(error) = write_registration(
+            publication_lock_v2,
+            &registration_path_v2,
+            &registration_v2,
+            publication_root,
+        ) {
+            #[cfg(unix)]
             let _ = fs::remove_file(&registration_path_v1);
-            let _ = shutdown_tx.send(());
+            #[cfg(windows)]
+            let _ = windows_storage::remove_private_file(&registration_path_v1, &runtime_root);
+            let _ = shutdown_tx.send(true);
             let _ = server_thread.join();
             return Err(error);
         }
 
         Ok(Self {
+            #[cfg(unix)]
             registration_lock_path,
+            #[cfg(windows)]
+            _registration_lock_v1: registration_lock_v1,
+            #[cfg(windows)]
+            _registration_lock_v2: registration_lock_v2,
+            #[cfg(windows)]
+            private_storage_root: runtime_root,
             registration_path_v1,
             registration_path_v2,
             base_url,
@@ -474,13 +614,27 @@ impl ConnectProvider {
     }
 
     pub(crate) fn unregister(&self) {
-        let registration_lock = match acquire_registration_lock(&self.registration_lock_path) {
+        #[cfg(unix)]
+        let registration_lock = match acquire_registration_lock(&self.registration_lock_path, None)
+        {
             Ok(lock) => lock,
             Err(error) => {
                 eprintln!("Connect registration cleanup lock failed: {error}");
                 return;
             }
         };
+        #[cfg(unix)]
+        let cleanup_lock_v1 = &registration_lock;
+        #[cfg(unix)]
+        let cleanup_lock_v2 = &registration_lock;
+        #[cfg(windows)]
+        let cleanup_lock_v1 = &self._registration_lock_v1;
+        #[cfg(windows)]
+        let cleanup_lock_v2 = &self._registration_lock_v2;
+        #[cfg(unix)]
+        let cleanup_root = None;
+        #[cfg(windows)]
+        let cleanup_root = Some(self.private_storage_root.as_path());
         for (path, version, instance_id) in [
             (
                 &self.registration_path_v1,
@@ -493,13 +647,18 @@ impl ConnectProvider {
                 self.instance_id_v2.as_str(),
             ),
         ] {
+            let cleanup_lock = match version {
+                WireVersion::V1 => cleanup_lock_v1,
+                WireVersion::V2 => cleanup_lock_v2,
+            };
             if let Err(error) = remove_registration_if_owned(
-                &registration_lock,
+                cleanup_lock,
                 path,
                 version,
                 instance_id,
                 &self.base_url,
                 &self.token,
+                cleanup_root,
             ) {
                 eprintln!("Connect registration cleanup failed: {error}");
             }
@@ -509,11 +668,24 @@ impl ConnectProvider {
 
 impl Drop for ConnectProvider {
     fn drop(&mut self) {
-        self.unregister();
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+        #[cfg(windows)]
+        {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(true);
+            }
+            if let Some(server_thread) = self.server_thread.take() {
+                let _ = server_thread.join();
+            }
+            self.unregister();
         }
-        self.server_thread.take();
+        #[cfg(unix)]
+        {
+            self.unregister();
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(true);
+            }
+            self.server_thread.take();
+        }
     }
 }
 
@@ -1394,36 +1566,65 @@ impl IntoResponse for ProviderHttpError {
     }
 }
 
-fn acquire_registration_lock(path: &Path) -> Result<RegistrationLifecycleLock, io::Error> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
+fn acquire_registration_lock(
+    path: &Path,
+    private_root: Option<&Path>,
+) -> Result<RegistrationLifecycleLock, io::Error> {
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let private_root = private_root.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows registration lock requires its private root",
+            )
+        })?;
+        match WindowsFileLock::acquire(path, private_root) {
+            Ok(file) => Ok(RegistrationLifecycleLock { _file: file }),
+            Err(FileLockError::Busy) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Connect provider ownership lock is busy",
+            )),
+            Err(FileLockError::Io(error)) => Err(error),
+        }
     }
 
-    let deadline = Instant::now() + REGISTRATION_LOCK_TIMEOUT;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(RegistrationLifecycleLock { file }),
-            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                thread::sleep(REGISTRATION_LOCK_RETRY);
+    #[cfg(unix)]
+    let _ = private_root;
+    #[cfg(unix)]
+    {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+        let file = options.open(path)?;
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+
+        let deadline = Instant::now() + REGISTRATION_LOCK_TIMEOUT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(RegistrationLifecycleLock { file }),
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(REGISTRATION_LOCK_RETRY);
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "timed out waiting for the Connect registration lifecycle lock",
+                    ));
+                }
+                Err(TryLockError::Error(error)) => return Err(error),
             }
-            Err(TryLockError::WouldBlock) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "timed out waiting for the Connect registration lifecycle lock",
-                ));
-            }
-            Err(TryLockError::Error(error)) => return Err(error),
         }
+    }
+}
+
+#[cfg(windows)]
+fn map_windows_registration_lock_error(error: io::Error) -> ProviderStartError {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        ProviderStartError::ProviderAlreadyRunning
+    } else {
+        ProviderStartError::Io(error)
     }
 }
 
@@ -1431,28 +1632,66 @@ fn write_registration<T: Serialize>(
     _registration_lock: &RegistrationLifecycleLock,
     registration_path: &Path,
     registration: &T,
+    private_root: Option<&Path>,
 ) -> Result<(), ProviderStartError> {
+    #[cfg(unix)]
     let parent = registration_path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "registration has no parent"))?;
+    #[cfg(unix)]
     let temporary = parent.join(format!(".{}.tmp", Uuid::new_v4()));
     let bytes = serde_json::to_vec_pretty(registration)?;
-    let write_result = (|| -> Result<(), io::Error> {
-        let mut file = private_create_new(&temporary)?;
-        file.write_all(&bytes)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        fs::rename(&temporary, registration_path)?;
-        File::open(parent)?.sync_all()?;
+    #[cfg(windows)]
+    {
+        let private_root = private_root.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows registration publication requires its private root",
+            )
+        })?;
+        bytes
+            .len()
+            .checked_add(1)
+            .filter(|length| *length as u64 <= MAX_REGISTRATION_BYTES)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Connect registration is oversized",
+                )
+            })?;
+        let mut published = bytes;
+        published.push(b'\n');
+        windows_storage::atomic_replace_bytes(
+            registration_path,
+            &published,
+            MAX_REGISTRATION_BYTES,
+            false,
+            private_root,
+        )?;
         Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temporary);
     }
-    write_result?;
-    Ok(())
+    #[cfg(unix)]
+    let _ = private_root;
+    #[cfg(unix)]
+    {
+        let write_result = (|| -> Result<(), io::Error> {
+            let mut file = private_create_new(&temporary)?;
+            file.write_all(&bytes)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            fs::rename(&temporary, registration_path)?;
+            File::open(parent)?.sync_all()?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        write_result?;
+        Ok(())
+    }
 }
 
+#[cfg(unix)]
 fn scavenge_stale_registrations(
     _registration_lock: &RegistrationLifecycleLock,
     provider_directories: [(&Path, WireVersion); 2],
@@ -1476,7 +1715,7 @@ fn scavenge_stale_registrations(
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
 
     for (path, version, instance_id) in &candidates {
-        if registration_proves_live(&client, path, *version, instance_id) {
+        if registration_proves_live(&client, path, *version, instance_id, None) {
             return Err(ProviderStartError::ProviderAlreadyRunning);
         }
     }
@@ -1491,6 +1730,7 @@ fn scavenge_stale_registrations(
     Ok(candidates.len())
 }
 
+#[cfg(unix)]
 fn owned_registration_instance_id(path: &Path) -> Option<String> {
     let filename = path.file_name()?.to_str()?;
     let instance_id = filename
@@ -1500,13 +1740,15 @@ fn owned_registration_instance_id(path: &Path) -> Option<String> {
     valid_uuid_v4(instance_id).then(|| instance_id.to_string())
 }
 
+#[cfg(unix)]
 fn registration_proves_live(
     client: &reqwest::blocking::Client,
     path: &Path,
     version: WireVersion,
     expected_instance_id: &str,
+    private_root: Option<&Path>,
 ) -> bool {
-    let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES) else {
+    let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES, private_root) else {
         return false;
     };
     let Ok(registration) = serde_json::from_slice::<RegistrationIdentity>(&bytes) else {
@@ -1564,6 +1806,7 @@ fn validated_manifest_url(base_url: &str, version: WireVersion) -> Option<reqwes
     Some(url)
 }
 
+#[cfg(unix)]
 fn probe_manifest(
     client: &reqwest::blocking::Client,
     base_url: &str,
@@ -1608,6 +1851,7 @@ fn probe_manifest(
     Some(ManifestProbe::EntitlementRequired)
 }
 
+#[cfg(unix)]
 fn probe_rejects_invalid_token(
     client: &reqwest::blocking::Client,
     url: reqwest::Url,
@@ -1645,15 +1889,28 @@ fn probe_rejects_invalid_token(
     })
 }
 
-fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
-        return None;
+fn read_bounded_regular_file(
+    path: &Path,
+    max_bytes: u64,
+    private_root: Option<&Path>,
+) -> Option<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        windows_storage::read_bounded_regular_file(path, max_bytes, false, private_root).ok()
     }
-    let file = File::open(path).ok()?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(max_bytes + 1).read_to_end(&mut bytes).ok()?;
-    (bytes.len() as u64 <= max_bytes).then_some(bytes)
+    #[cfg(unix)]
+    let _ = private_root;
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(path).ok()?;
+        if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
+            return None;
+        }
+        let file = File::open(path).ok()?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(max_bytes + 1).read_to_end(&mut bytes).ok()?;
+        (bytes.len() as u64 <= max_bytes).then_some(bytes)
+    }
 }
 
 fn remove_registration_if_owned(
@@ -1663,6 +1920,7 @@ fn remove_registration_if_owned(
     expected_instance_id: &str,
     expected_base_url: &str,
     expected_token: &str,
+    private_root: Option<&Path>,
 ) -> Result<bool, io::Error> {
     if !registration_belongs_to_provider(
         path,
@@ -1670,19 +1928,35 @@ fn remove_registration_if_owned(
         expected_instance_id,
         expected_base_url,
         expected_token,
+        private_root,
     ) {
         return Ok(false);
     }
-    match fs::remove_file(path) {
-        Ok(()) => {
-            let parent = path.parent().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "registration has no parent")
-            })?;
-            File::open(parent)?.sync_all()?;
-            Ok(true)
+    #[cfg(windows)]
+    {
+        let private_root = private_root.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows registration cleanup requires its private root",
+            )
+        })?;
+        windows_storage::remove_private_file(path, private_root)
+    }
+    #[cfg(unix)]
+    let _ = private_root;
+    #[cfg(unix)]
+    {
+        match fs::remove_file(path) {
+            Ok(()) => {
+                let parent = path.parent().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "registration has no parent")
+                })?;
+                File::open(parent)?.sync_all()?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
     }
 }
 
@@ -1692,8 +1966,9 @@ fn registration_belongs_to_provider(
     expected_instance_id: &str,
     expected_base_url: &str,
     expected_token: &str,
+    private_root: Option<&Path>,
 ) -> bool {
-    let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES) else {
+    let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES, private_root) else {
         return false;
     };
     serde_json::from_slice::<RegistrationIdentity>(&bytes)
@@ -1753,6 +2028,7 @@ fn load_or_create_v2_instance_id(
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, &path)?;
+        #[cfg(unix)]
         File::open(app_data_dir)?.sync_all()?;
         Ok(())
     })();
@@ -1774,20 +2050,30 @@ fn private_create_new(path: &Path) -> Result<File, io::Error> {
     options.open(path)
 }
 
-async fn set_private_file_permissions(path: &Path) -> Result<(), io::Error> {
+async fn set_private_file_permissions(_path: &Path) -> Result<(), io::Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(path, fs::Permissions::from_mode(0o600)).await?;
+        tokio::fs::set_permissions(_path, fs::Permissions::from_mode(0o600)).await?;
     }
     Ok(())
 }
 
 async fn sync_directory(path: &Path) -> Result<(), io::Error> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || File::open(path)?.sync_all())
-        .await
-        .map_err(|error| io::Error::other(error.to_string()))?
+    #[cfg(windows)]
+    {
+        let _ = path;
+        // Rust's standard Windows file API cannot open a directory for sync.
+        // Callers flush file contents before completing the metadata operation.
+        Ok(())
+    }
+    #[cfg(unix)]
+    {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || File::open(path)?.sync_all())
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?
+    }
 }
 
 async fn hash_file(path: &Path) -> Result<(u64, String), ProviderHttpError> {
@@ -1850,6 +2136,8 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::collections::BTreeMap;
+    #[cfg(windows)]
+    use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -2002,6 +2290,9 @@ mod tests {
         fn new(label: &str) -> Self {
             let path = std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
             fs::create_dir_all(&path).expect("test directory should be created");
+            #[cfg(windows)]
+            crate::connect::windows_storage::protect_path_for_test(&path, true)
+                .expect("Windows test root should be private");
             Self(path)
         }
     }
@@ -2415,6 +2706,8 @@ mod tests {
         fs::write(path, bytes).unwrap();
         #[cfg(unix)]
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        #[cfg(windows)]
+        crate::connect::windows_storage::protect_path_for_test(path, false).unwrap();
     }
 
     #[test]
@@ -2426,6 +2719,10 @@ mod tests {
         fs::create_dir_all(&entitlement_dir).unwrap();
         #[cfg(unix)]
         fs::set_permissions(&entitlement_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        #[cfg(windows)]
+        crate::connect::windows_storage::protect_path_for_test(&entitlement_dir, true).unwrap();
+        #[cfg(windows)]
+        fs::create_dir(&runtime_root).unwrap();
         let entitlement_path = entitlement_dir.join(ENTITLEMENT_FILE_NAME);
         let key_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
         let key = Ed25519KeyPair::from_pkcs8(key_document.as_ref()).unwrap();
@@ -2516,6 +2813,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let error: ErrorEnvelope = response.json().unwrap();
         assert_eq!(error.error.code, "AUTHENTICATION_REQUIRED");
+        #[cfg(unix)]
         assert!(probe_manifest(
             &http,
             provider.base_url(),
@@ -2576,6 +2874,10 @@ mod tests {
         fs::create_dir_all(&entitlement_dir).unwrap();
         #[cfg(unix)]
         fs::set_permissions(&entitlement_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        #[cfg(windows)]
+        crate::connect::windows_storage::protect_path_for_test(&entitlement_dir, true).unwrap();
+        #[cfg(windows)]
+        fs::create_dir(&runtime_root).unwrap();
         let entitlement_path = entitlement_dir.join(ENTITLEMENT_FILE_NAME);
         let key_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
         let key = Ed25519KeyPair::from_pkcs8(key_document.as_ref()).unwrap();
@@ -2723,6 +3025,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_start_scavenges_stale_owned_registrations_and_preserves_foreign_files() {
         let root = TestDirectory::new("doc-sum-connect-registration-scavenge");
@@ -2733,9 +3036,11 @@ mod tests {
         ensure_private_directory(&providers_v1).unwrap();
         ensure_private_directory(&providers_v2).unwrap();
         ensure_private_directory(&app_data).unwrap();
-        let registration_lock =
-            acquire_registration_lock(&providers_v1.join(format!(".{APP_ID}.lifecycle.lock")))
-                .unwrap();
+        let registration_lock = acquire_registration_lock(
+            &providers_v1.join(format!(".{APP_ID}.lifecycle.lock")),
+            None,
+        )
+        .unwrap();
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let dead_base_url = format!(
@@ -2772,6 +3077,7 @@ mod tests {
                 },
                 auth: auth.clone(),
             },
+            None,
         )
         .unwrap();
         write_registration(
@@ -2789,6 +3095,7 @@ mod tests {
                 },
                 auth,
             },
+            None,
         )
         .unwrap();
         fs::write(&malformed_owned_path, b"not-json").unwrap();
@@ -2826,6 +3133,7 @@ mod tests {
         assert!(provider.registration_path_v2().exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_start_preserves_live_and_serializes_replacement_cleanup() {
         let root = TestDirectory::new("doc-sum-connect-live-registration");
@@ -2888,7 +3196,8 @@ mod tests {
             serde_json::from_slice(&registration_bytes_v2).unwrap();
         replacement.transport.base_url = replacement_base_url.to_string();
         replacement.auth.token = replacement_token.to_string();
-        let publication_lock = acquire_registration_lock(&first.registration_lock_path).unwrap();
+        let publication_lock =
+            acquire_registration_lock(&first.registration_lock_path, None).unwrap();
         let cleanup_provider = Arc::clone(&first);
         let (cleanup_started_tx, cleanup_started_rx) = mpsc::sync_channel(1);
         let (cleanup_finished_tx, cleanup_finished_rx) = mpsc::sync_channel(1);
@@ -2902,7 +3211,7 @@ mod tests {
             cleanup_finished_rx.recv_timeout(Duration::from_millis(50)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
-        write_registration(&publication_lock, &registration_path_v2, &replacement).unwrap();
+        write_registration(&publication_lock, &registration_path_v2, &replacement, None).unwrap();
         drop(publication_lock);
         cleanup_finished_rx
             .recv_timeout(Duration::from_secs(1))
@@ -2911,7 +3220,7 @@ mod tests {
 
         assert!(!registration_path_v1.exists());
         assert!(registration_path_v2.exists());
-        let removal_lock = acquire_registration_lock(&first.registration_lock_path).unwrap();
+        let removal_lock = acquire_registration_lock(&first.registration_lock_path, None).unwrap();
         assert!(remove_registration_if_owned(
             &removal_lock,
             &registration_path_v2,
@@ -2919,9 +3228,197 @@ mod tests {
             first.instance_id_v2(),
             replacement_base_url,
             replacement_token,
+            None,
         )
         .unwrap());
         assert!(!registration_path_v2.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_provider_uses_fixed_private_registrations_and_lifetime_locks() {
+        let root = TestDirectory::new("doc-sum-connect-windows-provider");
+        let app_data = root.0.join("app-data");
+        fs::create_dir(&app_data).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            root.0.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let connect_root = root.0.join(windows_storage::LOCAL_CONNECT_DIRECTORY);
+        assert_eq!(
+            provider.registration_path(),
+            connect_root
+                .join("runtime/v1/providers")
+                .join(format!("local-connect-v1-{APP_ID}.json"))
+        );
+        assert_eq!(
+            provider.registration_path_v2(),
+            connect_root.join("runtime/v2/providers").join(format!(
+                "local-connect-v2-{}.json",
+                provider.instance_id_v2()
+            ))
+        );
+        let v1_lock = connect_root
+            .join("runtime/v1/locks")
+            .join(format!(".local-connect-v1-{APP_ID}.lock"));
+        let v2_lock = connect_root.join("runtime/v2/locks").join(format!(
+            ".local-connect-v2-{}.lock",
+            provider.instance_id_v2()
+        ));
+        assert!(matches!(
+            WindowsFileLock::acquire(&v1_lock, &root.0),
+            Err(FileLockError::Busy)
+        ));
+        assert!(matches!(
+            WindowsFileLock::acquire(&v2_lock, &root.0),
+            Err(FileLockError::Busy)
+        ));
+        let server_address = provider
+            .base_url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+        let registration_v1 = provider.registration_path().to_path_buf();
+        let registration_v2 = provider.registration_path_v2().to_path_buf();
+        drop(provider);
+        assert!(std::net::TcpStream::connect(server_address).is_err());
+        assert!(!registration_v1.exists());
+        assert!(!registration_v2.exists());
+        assert_eq!(fs::read(v1_lock).unwrap(), [0]);
+        assert_eq!(fs::read(v2_lock).unwrap(), [0]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_provider_shutdown_is_bounded_with_an_incomplete_request_body() {
+        let root = TestDirectory::new("doc-sum-connect-windows-bounded-shutdown");
+        let app_data = root.0.join("app-data");
+        fs::create_dir(&app_data).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            root.0.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let server_address = provider
+            .base_url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+        let mut stalled = std::net::TcpStream::connect(server_address).unwrap();
+        std::io::Write::write_all(
+            &mut stalled,
+            b"POST /v1/jobs HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=stalled\r\nContent-Length: 1048576\r\n\r\n--stalled\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n",
+        )
+        .unwrap();
+        std::io::Write::flush(&mut stalled).unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let shutdown = thread::spawn(move || {
+            drop(provider);
+            finished_tx.send(()).unwrap();
+        });
+        finished_rx
+            .recv_timeout(WINDOWS_SERVER_SHUTDOWN_GRACE + Duration::from_secs(2))
+            .expect("provider shutdown should force an incomplete connection closed");
+        drop(stalled);
+        shutdown.join().unwrap();
+        assert!(std::net::TcpStream::connect(server_address).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_provider_rejects_hostile_registration_ancestor() {
+        let root = TestDirectory::new("doc-sum-connect-windows-hostile-acl");
+        let connect_root = windows_storage::prepare_local_connect_root(&root.0).unwrap();
+        let providers = connect_root.join("runtime/v1/providers");
+        windows_storage::ensure_private_directory(&providers, &root.0).unwrap();
+        let status = Command::new("icacls")
+            .arg(&providers)
+            .args(["/grant", "*S-1-1-0:R"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let app_data = root.0.join("app-data");
+        fs::create_dir(&app_data).unwrap();
+
+        let result = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            root.0.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        );
+
+        assert!(matches!(result, Err(ProviderStartError::Io(_))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn competing_windows_provider_cannot_fail_the_live_owners_active_job() {
+        let root = TestDirectory::new("doc-sum-connect-windows-provider-race");
+        let app_data = root.0.join("app-data");
+        fs::create_dir(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let runtime_factory: RuntimeFactory =
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>));
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            root.0.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory.clone(),
+        )
+        .unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(&source).unwrap();
+        let import_path = app_data.join("connect-imports/owned-active.pdf");
+        fs::copy(&source, &import_path).unwrap();
+        let (document, run) =
+            prepare_pdf_ingestion(import_path.to_str().unwrap(), Some("owned-active.pdf")).unwrap();
+        let request = fixture_request(&bytes);
+        let mut conn = db::init_db(&db_path).unwrap();
+        store::accept_job_with_ingestion(
+            &mut conn,
+            &request,
+            "live-owner-request",
+            import_path.to_str().unwrap(),
+            provider.instance_id(),
+            &document,
+            &run,
+        )
+        .unwrap();
+        drop(conn);
+
+        let competing = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data,
+            root.0.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            runtime_factory,
+        );
+        assert!(matches!(
+            competing,
+            Err(ProviderStartError::ProviderAlreadyRunning)
+        ));
+
+        let conn = db::init_db(&db_path).unwrap();
+        let stored = store::get_job(&conn, &request.job_id).unwrap().unwrap();
+        assert_eq!(stored.state, JobState::Accepted);
+        assert!(stored.error.is_none());
+        drop(provider);
     }
 
     #[test]
