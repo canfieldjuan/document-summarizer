@@ -1985,13 +1985,20 @@ install failure rather than success. Successful replacement affects the next
 provider request without an application restart or private-database mutation.
 Native Windows CI exercises the positive path, hostile ACL and reparse paths,
 fixed-temporary atomicity, and lock contention. The installed Windows
-cited-summary demonstration remains pending as a separate release proof.
+cited-summary demonstration is complete from the MSI built on a native Windows
+runner at revision `926cc4bf3a0a1d5703ac39748671408eb31c7d29`. The MSI-installed
+production executable matched the packaged executable, produced a coherent
+summary with page-linked exact source excerpts, and reopened the persisted
+result after a process restart. The proof used a VM-only loopback bridge to the
+already-loaded model on the host GPU, so it does not claim a Windows-native
+Ollama installation or physical Windows GPU execution.
 The installed Linux cited-summary demonstration is complete from the supported
 Debian bundle built at revision
 `7b6defd34a1e51a9692603bbce9d28bf1b738663`; the package-manager-installed
 binary produced and reopened a coherent summary with page-linked exact source
-excerpts. This Linux proof does not satisfy the separate installed Windows
-release requirement.
+excerpts. Together, these demonstrations satisfy the separate installed Linux
+and Windows application-path requirements within their recorded proof
+boundaries.
 
 This offline bearer entitlement is not machine-bound and cannot be revoked
 before expiry without local replacement. License acquisition and production
