@@ -101,7 +101,7 @@ fn windows_connect_release_boundary_is_documented_and_exercised_natively() {
     assert!(contracts.contains(r"%LOCALAPPDATA%\LocalConnect\runtime\v1\providers"));
     assert!(contracts.contains("protected DACL"));
     assert!(contracts.contains("fixed same-directory temporary file"));
-    assert!(contracts.contains("installed Windows cited-summary demonstration remains pending"));
+    assert!(contracts.contains("installed Windows cited-summary demonstration is complete"));
     assert!(workflow.contains("runs-on: windows-2022"));
     assert!(workflow.contains("cargo test --locked --lib connect::"));
     assert!(workflow.contains("cargo clippy --locked --lib --tests -- -D warnings"));
@@ -121,7 +121,38 @@ fn installed_linux_cited_summary_release_proof_is_recorded() {
     assert!(ledger.contains("Slice 38 — Installed Linux Cited-Summary Demonstration"));
     assert!(ledger.contains("39274d7e70788489d014c3c48437a65a88a4168d8169600ad5fce4c605f7b8c8"));
     assert!(ledger.contains("Package-manager-installed Linux cited-summary"));
-    assert!(ledger.contains("Windows demonstration remains pending"));
     assert!(contracts.contains("installed Linux cited-summary demonstration is complete"));
-    assert!(contracts.contains("installed Windows cited-summary demonstration remains pending"));
+}
+
+#[test]
+fn installed_windows_cited_summary_release_proof_is_recorded() {
+    let contracts = include_str!("../../docs/CONTRACTS.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let readme = include_str!("../../README.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let ledger = include_str!("../../docs/BUILD_LEDGER.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    assert!(ledger.contains("Slice 39 — Installed Windows Cited-Summary Demonstration"));
+    assert!(ledger.contains("3d2ed4ffd3676328fc3e50bd30ac2afdca45564d5b2a6aa86c03d82dac1c0d6a"));
+    assert!(ledger.contains("87fbd8e8b86640ba620b37839e16c98ea828e94d1dd0e906a7ef81ee980db8f7"));
+    assert!(ledger.contains("7317f6ba-85cb-4a1f-ba63-f1b853cbaebb"));
+    assert!(ledger.contains("VM-only loopback bridge"));
+    assert!(contracts.contains("installed Windows cited-summary demonstration is complete"));
+    assert!(!contracts.contains("installed Windows cited-summary demonstration remains pending"));
+    assert!(contracts.contains("Native Windows CI produces MSI and NSIS installers"));
+    assert!(!contracts.contains(
+        "AppImage, RPM, macOS, and Windows packaging remain separate target-platform work"
+    ));
+    assert!(readme.contains("On Windows, native CI produces MSI and NSIS installers"));
+    assert!(readme.contains("installed-app lifecycle is proven for the MSI"));
+    assert!(!readme.contains(
+        "Other operating-system bundle formats are deferred until they can be built and exercised on their target platforms"
+    ));
 }

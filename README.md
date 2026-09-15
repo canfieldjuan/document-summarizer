@@ -160,8 +160,10 @@ impersonate a qualified tokenizer vocabulary.
 On Linux, `desktop:build` produces the currently supported Debian package. The
 base Tauri configuration remains cross-platform, while
 `src-tauri/tauri.linux.conf.json` deliberately limits this host to the verified
-`.deb` target. Other operating-system bundle formats are deferred until they can
-be built and exercised on their target platforms.
+`.deb` target. On Windows, native CI produces MSI and NSIS installers from exact
+source revisions; the installed-app lifecycle is proven for the MSI. AppImage,
+RPM, macOS, and an installed NSIS lifecycle remain deferred until they can be
+built and exercised on their target platforms.
 
 A raw `cargo build --release` is intentionally rejected because it can produce a
 desktop executable that points at the development server instead of embedding
