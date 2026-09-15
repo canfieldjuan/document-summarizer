@@ -375,12 +375,14 @@ impl ConnectProvider {
         let registration_lock_v1 = acquire_registration_lock(
             &locks_dir_v1.join(format!(".local-connect-v1-{APP_ID}.lock")),
             Some(&runtime_root),
-        )?;
+        )
+        .map_err(map_windows_registration_lock_error)?;
         #[cfg(windows)]
         let registration_lock_v2 = acquire_registration_lock(
             &locks_dir_v2.join(format!(".local-connect-v2-{instance_id_v2}.lock")),
             Some(&runtime_root),
-        )?;
+        )
+        .map_err(map_windows_registration_lock_error)?;
 
         store::mark_interrupted_jobs_failed(
             &conn,
@@ -1614,6 +1616,15 @@ fn acquire_registration_lock(
                 Err(TryLockError::Error(error)) => return Err(error),
             }
         }
+    }
+}
+
+#[cfg(windows)]
+fn map_windows_registration_lock_error(error: io::Error) -> ProviderStartError {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        ProviderStartError::ProviderAlreadyRunning
+    } else {
+        ProviderStartError::Io(error)
     }
 }
 
