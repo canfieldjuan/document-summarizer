@@ -1780,9 +1780,11 @@ binary name is `document-summarizer`. Cargo automatic binary discovery remains
 disabled, and diagnostic PDF probes live under `src-tauri/tools/legacy` rather
 than `src/bin`, so they cannot become application or package targets. The base
 Tauri bundle configuration remains portable. Its Linux overlay selects only the
-currently verified Debian package; AppImage, RPM, macOS, and Windows packaging
-remain separate target-platform work. A supported Linux package must contain the
-desktop executable, desktop entry, and icons without legacy probe executables.
+currently verified Debian package. Native Windows CI produces MSI and NSIS
+installers; the installed-app lifecycle is proven for the MSI. AppImage, RPM,
+macOS, and an installed NSIS lifecycle remain separate target-platform work. A
+supported Linux package must contain the desktop executable, desktop entry, and
+icons without legacy probe executables.
 
 Connect wire behavior, entitlement, packaging, parsing and OCR/vision changes
 remain outside this runtime slice. The desktop UI renders the selected Key Point

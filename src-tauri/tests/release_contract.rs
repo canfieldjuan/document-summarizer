@@ -130,6 +130,10 @@ fn installed_windows_cited_summary_release_proof_is_recorded() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    let readme = include_str!("../../README.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let ledger = include_str!("../../docs/BUILD_LEDGER.md")
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -142,4 +146,13 @@ fn installed_windows_cited_summary_release_proof_is_recorded() {
     assert!(ledger.contains("VM-only loopback bridge"));
     assert!(contracts.contains("installed Windows cited-summary demonstration is complete"));
     assert!(!contracts.contains("installed Windows cited-summary demonstration remains pending"));
+    assert!(contracts.contains("Native Windows CI produces MSI and NSIS installers"));
+    assert!(!contracts.contains(
+        "AppImage, RPM, macOS, and Windows packaging remain separate target-platform work"
+    ));
+    assert!(readme.contains("On Windows, native CI produces MSI and NSIS installers"));
+    assert!(readme.contains("installed-app lifecycle is proven for the MSI"));
+    assert!(!readme.contains(
+        "Other operating-system bundle formats are deferred until they can be built and exercised on their target platforms"
+    ));
 }
