@@ -60,11 +60,21 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_BUILD_JOBS: 2
+      SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ env.SOURCE_REVISION }}
+      - name: Verify source revision
+        shell: pwsh
+        run: |
+          $actualRevision = (git rev-parse HEAD).Trim()
+          if ($actualRevision -ne $env:SOURCE_REVISION) {
+            throw "Expected source revision $env:SOURCE_REVISION, found $actualRevision"
+          }
+          Set-Content -LiteralPath windows-source-revision.txt -Value $actualRevision -NoNewline
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -160,11 +170,12 @@ jobs:
       - name: Upload Windows installers
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: document-summarizer-windows-${{ github.sha }}
+          name: document-summarizer-windows-${{ env.SOURCE_REVISION }}
           path: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
             windows-bundle-manifest.json
+            windows-source-revision.txt
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
