@@ -4121,3 +4121,98 @@ remains pending
 - Windows package construction, installation, runtime selection, UI exercise,
   cited-summary support review, and persistence proof remain the next separate
   release slice. Issue #52 remains tabled at its existing fail-closed boundary.
+
+## Slice 39 — Installed Windows Cited-Summary Demonstration (2026-09-15)
+
+**Status**: MSI-installed Windows cited-summary and process-restart persistence
+proof complete
+
+**Exact package and installation evidence**:
+- Native Windows CI built the installers from PR #69 revision
+  `926cc4bf3a0a1d5703ac39748671408eb31c7d29` and recorded that revision inside
+  the downloaded artifact. `Document Summarizer_0.1.0_x64_en-US.msi` was
+  8,519,680 bytes with SHA-256
+  `3d2ed4ffd3676328fc3e50bd30ac2afdca45564d5b2a6aa86c03d82dac1c0d6a`.
+  The same native job also produced the NSIS installer, but this demonstration
+  installed and exercised the MSI.
+- A newly installed Windows 11 Enterprise LTSC evaluation VM ran that exact MSI
+  through Windows Installer. `msiexec` returned 0, and the registered product
+  was `Document Summarizer` version 0.1.0, published by `Juan Canfield`, under
+  `C:\Program Files\Document Summarizer`.
+- The installed
+  `C:\Program Files\Document Summarizer\document-summarizer.exe` had SHA-256
+  `87fbd8e8b86640ba620b37839e16c98ea828e94d1dd0e906a7ef81ee980db8f7`,
+  exactly matching the executable extracted from the downloaded MSI. The app
+  was launched from the installed desktop shortcut, not from Cargo, Vite, or an
+  unpacked executable.
+
+**Installed cited-summary proof**:
+- The installed UI reported `Local Qwen ready` and exposed the qualified
+  Qwen 3 30B-A3B Ollama preset at 8,192 safe context tokens. During the live
+  request, host `ollama ps` reported `qwen3-30b-a3b:latest` at 100% GPU with an
+  8,192-token context. The immutable run snapshot recorded model digest
+  `1eda56426671cdf365913097543c2253a73c57e35b12741306689968d7f70292`,
+  native Ollama runtime, and the qualified Qwen tokenizer.
+- The VM-only loopback bridge preserved the app's required inference URL:
+  Windows called `127.0.0.1:11434`, a guest port proxy forwarded to a
+  guest-specific libvirt host listener, and that listener forwarded to the
+  already-loaded Ollama model on the host GPU. The temporary guest-only host
+  firewall rule, listener, and Windows port proxy were removed after the run.
+- Windows Explorer copied the non-sensitive six-page `structured_report.pdf`
+  fixture from the read-only proof media to the desktop after the native picker
+  declined the optical-drive path. The installed native picker selected that
+  desktop copy. Its persisted SHA-256
+  `34aa217d7a21a0ec31abd90d0d7700d42924f334ce107912850398ac3f23d7ea`
+  exactly matched the repository fixture.
+- Run `7317f6ba-85cb-4a1f-ba63-f1b853cbaebb` completed with the expected
+  `NO_NATIVE_TEXT` warning for its visual-only fifth page. The installed UI
+  rendered coherent presentation with one overview paragraph, page controls
+  for pages 1, 2, 3, 4, and 6, and a separately expandable five-claim ledger.
+- Representative installed output was:
+
+  > The 2027 OPERATIONS REPORT serves as a realistic fixture for deterministic
+  > structure testing, prepared for internal architecture verification, and
+  > documents the operating context for the 2027 planning cycle, with the
+  > source text remaining authoritative and structural nodes referencing it by
+  > block ID; the interpreter should retain the operating context under Section
+  > 1 across the page boundary, as adjacency alone is not the signal and the
+  > active numbered section is the anchor, while the fixture verifies nested
+  > hierarchy, stable IDs, and exact source provenance, with a subsection
+  > accepted only after its complete parent numbering prefix exists, and the
+  > deterministic hierarchy should close Section 1 before opening Section 2,
+  > the visual-only fifth page remains represented through page routing
+  > metadata, and all native-text blocks must be owned exactly once in canonical
+  > source order. [p. 1; p. 2; p. 3; p. 4; p. 6]
+
+**Support, usefulness, and persistence review**:
+- Mechanical checks confirmed the exact source revision, installer and
+  installed-executable hashes, coherent presentation mode, five page-linked
+  exact excerpts, one supported overview verification, five supported claim
+  verifications, and SQLite `integrity_check = ok`. These checks prove artifact,
+  reference, and persisted-record integrity; they do not by themselves prove
+  that the sources support the generated wording.
+- Direct comparison with the stored source excerpts found that the overview
+  preserves the fixture's purpose, planning context, source-authority
+  qualification, cross-page Section 1 relationship, nested-prefix rule,
+  Section 2 transition, visual-only page qualification, and canonical-order
+  requirement. Every clause is supported by the cited pages, and no invented
+  fact was observed. The result is a coherent overview rather than a claim
+  list, though its single sentence is dense.
+- The installed process was closed, then independently relaunched from the
+  installed desktop shortcut. Recent Work retained the completed fixture, and
+  reopening it restored the same overview, five page controls, five-claim
+  ledger, and processing warning. This proves installed process-restart
+  persistence; it does not claim an app reopen after a machine reboot.
+- Each app request replaced the operator's infinite Ollama keep-alive with its
+  bounded request value. After the run, the same model was re-pinned at 100%
+  GPU, context 8,192, and `Forever` residency.
+
+**Proof boundary and non-scope**:
+- The proof establishes native-runner MSI construction, Windows installation,
+  installed production-executable identity, installed UI behavior, cited
+  summary support, and process-restart persistence. The VM-only loopback bridge
+  means it does not establish Windows-native Ollama installation, Windows GPU
+  driver setup, or physical Windows GPU execution.
+- No prompt, summary-profile, routing, citation, result-identity, schema,
+  Connect, entitlement, UI, or installer behavior changed in this evidence
+  slice. Issue #52 remains tabled at its existing fail-closed boundary.
