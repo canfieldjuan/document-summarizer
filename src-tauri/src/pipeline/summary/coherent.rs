@@ -2736,6 +2736,7 @@ enum FallbackReason {
     IncompleteCatalog,
     RequestTooLarge,
     VerificationRequestTooLarge,
+    DeliveryCoverage,
 }
 
 impl FallbackReason {
@@ -2750,8 +2751,17 @@ impl FallbackReason {
             Self::VerificationRequestTooLarge => {
                 "The coherent summary does not fit bounded semantic verification; showing verified source claims instead"
             }
+            Self::DeliveryCoverage => {
+                "The coherent summary does not satisfy Connect page coverage; showing verified source claims instead"
+            }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct SynthesisAdmission {
+    profile: SummaryProfile,
+    require_delivery_coverage: bool,
 }
 
 pub(super) fn synthesize(
@@ -2763,6 +2773,56 @@ pub(super) fn synthesize(
     generation_seed: u64,
     control: &dyn ExecutionControl,
 ) -> Result<SynthesizedDocument, PipelineFailure> {
+    synthesize_with_delivery_coverage(
+        SynthesisAdmission {
+            profile,
+            require_delivery_coverage: false,
+        },
+        runtime,
+        analyzed,
+        chunked,
+        normalized,
+        generation_seed,
+        control,
+    )
+}
+
+pub(super) fn synthesize_for_delivery(
+    profile: SummaryProfile,
+    runtime: &dyn ModelRuntime,
+    analyzed: &AnalyzedDocument,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+    generation_seed: u64,
+    control: &dyn ExecutionControl,
+) -> Result<SynthesizedDocument, PipelineFailure> {
+    synthesize_with_delivery_coverage(
+        SynthesisAdmission {
+            profile,
+            require_delivery_coverage: true,
+        },
+        runtime,
+        analyzed,
+        chunked,
+        normalized,
+        generation_seed,
+        control,
+    )
+}
+
+fn synthesize_with_delivery_coverage(
+    admission: SynthesisAdmission,
+    runtime: &dyn ModelRuntime,
+    analyzed: &AnalyzedDocument,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+    generation_seed: u64,
+    control: &dyn ExecutionControl,
+) -> Result<SynthesizedDocument, PipelineFailure> {
+    let SynthesisAdmission {
+        profile,
+        require_delivery_coverage,
+    } = admission;
     cancellation_checkpoint(control, PipelineStage::Synthesize)?;
     validate_analyzed_document(analyzed, chunked, normalized, runtime)?;
     let ledger_claims = direct::source_ordered_claims(analyzed)?;
@@ -2950,14 +3010,31 @@ pub(super) fn synthesize(
         claims: ledger_claims,
         warnings,
     };
-    let result = if coherent_verification_exceeds_runtime_context(
-        profile,
-        runtime,
-        &result,
-        analyzed,
-        normalized,
-        generation_seed,
-    )? {
+    let result = if require_delivery_coverage
+        && !coherent_evidence_satisfies_delivery_page_coverage(
+            &result.synthesis_evidence,
+            &analyzed.omissions,
+            normalized,
+        ) {
+        fallback_document(
+            runtime,
+            analyzed,
+            chunked,
+            result.claims,
+            FallbackReason::DeliveryCoverage,
+        )?
+    } else {
+        result
+    };
+    let result = if result.presentation_mode == SummaryPresentationMode::Coherent
+        && coherent_verification_exceeds_runtime_context(
+            profile,
+            runtime,
+            &result,
+            analyzed,
+            normalized,
+            generation_seed,
+        )? {
         fallback_document(
             runtime,
             analyzed,
@@ -2971,6 +3048,18 @@ pub(super) fn synthesize(
     validate_for_runtime(profile, &result, analyzed, chunked, normalized, runtime)?;
     cancellation_checkpoint(control, PipelineStage::Synthesize)?;
     Ok(result)
+}
+
+fn coherent_evidence_satisfies_delivery_page_coverage(
+    evidence: &[EvidenceItem],
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+) -> bool {
+    let cited_pages = evidence
+        .iter()
+        .map(|item| item.source_span.page_start)
+        .collect::<HashSet<_>>();
+    super::delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
 }
 
 fn supports_long_source_selection(profile: SummaryProfile) -> bool {
@@ -6675,7 +6764,8 @@ pub(super) fn validate_for_runtime(
                 || has_fallback_warning(
                     synthesized,
                     FallbackReason::VerificationRequestTooLarge,
-                ) => {}
+                )
+                || has_fallback_warning(synthesized, FallbackReason::DeliveryCoverage) => {}
         _ => {
             return Err(stage_failure(
                 PipelineStage::Synthesize,

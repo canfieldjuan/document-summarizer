@@ -490,19 +490,24 @@ mode, supported prose claims, ledger claims, their exact evidence and the canoni
 rendered text. The desktop shows coherent paragraphs first and keeps any supported
 ledger claims available as supporting detail.
 
-Current artifacts use synthesis 8.0.0, verification 10.0.0, summary 8.0.0 and
-citation 4.0.0. Completed pre-disclosure coherent artifacts retain synthesis
-6.0.0 with verification 7.0.0 or 8.0.0 and summary 6.0.0 compatibility. Direct
-version-5 and older artifacts retain their original validation, rendering and
-citation contracts when loaded. Historical coherent validation reconstructs
-canonical synthesis-evidence identities with the artifact's synthesis version;
-mixed-version evidence identities fail validation.
+Current artifacts use synthesis 9.0.0, verification 10.0.0, summary 8.0.0 and
+citation 4.0.0. Completed coherent artifacts from before Contract source
+segmentation retain synthesis 8.0.0 with verification 10.0.0 and summary 8.0.0
+compatibility, while an active coherent synthesis-8 checkpoint must regenerate
+before verification. Completed pre-disclosure coherent artifacts retain
+synthesis 6.0.0 with verification 7.0.0 or 8.0.0 and summary 6.0.0 compatibility.
+Direct version-5 and older artifacts retain their original validation,
+rendering and citation contracts when loaded. Historical coherent validation
+reconstructs canonical synthesis-evidence identities with the artifact's
+synthesis version; mixed-version evidence identities fail validation.
 
-Connect delivery-policy runs continue to use the version-5 direct claim-ledger
-synthesis path. Its delivered result has an independent distributed page
-coverage requirement, so a source-selective coherent draft cannot replace the
-coverage-preserving ledger in this slice. This preserves the existing Connect
-wire result while standalone summaries adopt coherent General presentation.
+Connect General delivery-policy runs continue to use the version-5 direct
+claim-ledger synthesis path. Story and Contract use their source-aware coherent
+synthesis profiles. Before either specialized coherent result can persist, its
+cited evidence must satisfy Connect's existing raw and omission-adjusted page
+coverage floors. An undercovered specialized result becomes the verified
+claim-ledger fallback, which preserves the delivery gate rather than weakening
+it for source-selective prose.
 
 ### Summary profile identity and explicit selection
 
@@ -575,14 +580,16 @@ termination and remedies when present. It must retain who acts, what they do,
 the recipient, trigger, qualifications, timing and amount without adding legal
 advice, enforceability conclusions or judgments about a term.
 
-Contract clause references are application-owned provenance. The parser derives
-a reference only when a cited exact source segment begins with a number token
-ending in a period and the clause title itself ends immediately before a line
-break. That structural boundary supports simple and dotted identifiers while
-leaving same-line forms ambiguous instead of guessing whether `1.5` is a clause
-or a decimal quantity. Wrapped title lines are normalized, including an
-initialism-only line such as `U.S.` followed by the remainder of the title. For
-admitted headings, the application appends one canonical, source-derived
+Contract clause references are application-owned provenance. Ordinary source
+segments require a number token ending in a period and a clause title ending
+immediately before a line break. For a bounded short Contract stored inside at
+most six normalized blocks, the application may also split embedded same-line
+numbered headings when each title has a clear terminal period followed by
+operative text. Simple and dotted identifiers are supported; decimal and
+initialism boundaries remain conservative. Each split exact quote remains
+within the existing source-quote ceiling, at most six distinct numbered clauses
+and twelve total derived segments are admitted, and larger or ambiguous inputs
+retain the ordinary catalog. For admitted headings, the application appends one canonical, source-derived
 `[Section …]` suffix before deterministic claim identity is materialized only
 when the cited source segment contains exactly that one leading heading. A
 multi-clause segment keeps page provenance without an inferred section suffix.
@@ -590,15 +597,15 @@ An identical suffix already returned by the model is not duplicated. Persisted
 Contract validation recomputes the applicable suffix from each unit's cited
 evidence, so model-authored title punctuation cannot suppress or replace
 application-owned provenance.
-For a complete short catalog containing at most six source segments where every
-segment contains exactly one distinct numbered clause at its beginning,
-Contract validation also requires the result to retain evidence from every
-supplied clause. A segment containing multiple numbered clauses is ineligible
-for this completeness guarantee, including when headings are separated by
-punctuation instead of whitespace, because its single evidence identity cannot
-prove which embedded clause supports a summary unit. Mixed, incomplete and
-larger catalogs retain normal materiality-based selection; the short-contract
-rule does not turn long summaries into clause inventories.
+For a complete short catalog containing at most six distinct numbered clauses,
+Contract validation requires the result to retain evidence from every supplied
+clause. When a bounded normalized block contains several admitted clauses, each
+derived clause receives a versioned evidence identity over its exact quote.
+Mixed, incomplete, ambiguous and larger catalogs retain normal materiality-based
+selection; the short-contract rule does not turn long summaries into clause
+inventories. Each qualifying clause's cited summary units must retain its own
+explicit dates, durations and currency amounts, so a repeated value from a
+different clause cannot mask an omission.
 The same short-contract coverage rule is checked again after semantic
 verification. If withholding an unsupported or ambiguous unit would remove a
 required clause, verification fails instead of publishing a partial Contract
@@ -616,13 +623,13 @@ semantic verification and modal-strengthening guard; profile instructions do
 not weaken support requirements. Paragraph grouping is an output instruction
 and semantic acceptance criterion, not a mechanically measured quality score.
 
-Connect admissions assign General explicitly in their existing acceptance
-transaction and retain the direct delivery-policy synthesis described above. A
-Story or Contract paired with a Connect delivery policy is rejected rather
-than silently sent through a different summary behavior. This contract does not
-add persisted document-type metadata, measured classification reliability,
-trained adapters, a parallel synthesis framework, Connect specialization or a
-renderer redesign.
+Connect admissions assign the requested General, Story or Contract profile
+explicitly in their existing acceptance transaction. General retains direct
+delivery synthesis. Story and Contract retain their named coherent behavior and
+fall back to the verified ledger when their generated evidence cannot satisfy
+Connect page coverage. This contract does not add persisted document-type
+metadata, measured classification reliability, trained adapters, a parallel
+synthesis framework or a renderer redesign.
 
 ### Historical direct verified paraphrases and explicit omissions
 

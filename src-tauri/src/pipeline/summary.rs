@@ -43,11 +43,12 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "8.0.0";
+pub const SYNTHESIS_VERSION: &str = "9.0.0";
 pub const VERIFICATION_VERSION: &str = "10.0.0";
 pub const SUMMARY_VERSION: &str = "8.0.0";
 pub const CITATION_VERSION: &str = "4.0.0";
 
+const PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION: &str = "8.0.0";
 const PRE_CONTEXT_SYNTHESIS_VERSION: &str = "7.0.0";
 const PRE_DISCLOSURE_SYNTHESIS_VERSION: &str = "6.0.0";
 const DIRECT_SYNTHESIS_VERSION: &str = "5.0.0";
@@ -143,7 +144,10 @@ impl SummaryDeliveryPolicy {
 fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
-        SYNTHESIS_VERSION | PRE_CONTEXT_SYNTHESIS_VERSION | PRE_DISCLOSURE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION
+            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
+            | PRE_CONTEXT_SYNTHESIS_VERSION
+            | PRE_DISCLOSURE_SYNTHESIS_VERSION
     )
 }
 
@@ -151,7 +155,10 @@ fn coherent_verification_versions_match(
     synthesis_version: &str,
     verification_version: &str,
 ) -> bool {
-    (synthesis_version == SYNTHESIS_VERSION && verification_version == VERIFICATION_VERSION)
+    (matches!(
+        synthesis_version,
+        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
+    ) && verification_version == VERIFICATION_VERSION)
         || (synthesis_version == PRE_CONTEXT_SYNTHESIS_VERSION
             && verification_version == PRE_CONTEXT_VERIFICATION_VERSION)
         || (synthesis_version == PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -168,7 +175,9 @@ fn coherent_checkpoint_requires_retry(
     synthesized.presentation_mode == SummaryPresentationMode::Coherent
         && (matches!(
             synthesized.synthesis_version.as_str(),
-            PRE_CONTEXT_SYNTHESIS_VERSION | PRE_DISCLOSURE_SYNTHESIS_VERSION
+            PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
+                | PRE_CONTEXT_SYNTHESIS_VERSION
+                | PRE_DISCLOSURE_SYNTHESIS_VERSION
         ) || verification_version.is_some_and(|version| {
             matches!(
                 version,
@@ -601,11 +610,20 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
 
     let (synthesizing_run, persisted_analysis) =
         db::start_synthesis(conn, run_id, run.state_version)?;
-    let synthesis = match summary_profile {
-        SummaryProfile::General if delivery_policy.is_some() => {
+    let synthesis = match (delivery_policy, summary_profile) {
+        (Some(_), SummaryProfile::General) => {
             direct::synthesize(runtime, &persisted_analysis, &chunked, &normalized, control)
         }
-        profile => coherent::synthesize(
+        (Some(_), profile) => coherent::synthesize_for_delivery(
+            profile,
+            runtime,
+            &persisted_analysis,
+            &chunked,
+            &normalized,
+            generation_seed_for_run(run_id),
+            control,
+        ),
+        (None, profile) => coherent::synthesize(
             profile,
             runtime,
             &persisted_analysis,
@@ -1256,7 +1274,7 @@ fn verify(
             Vec::new()
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
-        SYNTHESIS_VERSION => VERIFICATION_VERSION,
+        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
         PRE_CONTEXT_SYNTHESIS_VERSION => PRE_CONTEXT_VERIFICATION_VERSION,
         PRE_DISCLOSURE_SYNTHESIS_VERSION
             if synthesized.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback =>
@@ -1723,6 +1741,7 @@ fn verification_claim_budget(
     if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
             | DIRECT_SYNTHESIS_VERSION
@@ -3803,6 +3822,7 @@ fn validate_synthesized_document_without_runtime(
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
             | DIRECT_SYNTHESIS_VERSION
@@ -3817,6 +3837,7 @@ fn validate_synthesized_document_without_runtime(
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
             | DIRECT_SYNTHESIS_VERSION
@@ -9764,6 +9785,66 @@ mod tests {
     }
 
     #[test]
+    fn connect_specialized_synthesis_falls_back_before_undercovered_delivery() {
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let (normalized, chunked) = sparse_page_scope_fixture(30, 400);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("the long synthetic source should analyze");
+
+        let standalone = coherent::synthesize(
+            SummaryProfile::Story,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("standalone Story synthesis may use bounded source selection");
+        assert_eq!(
+            standalone.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        let standalone_pages = standalone
+            .synthesis_evidence
+            .iter()
+            .map(|evidence| evidence.source_span.page_start)
+            .collect::<HashSet<_>>();
+        assert!(!delivery_page_coverage_satisfied(
+            &standalone_pages,
+            &analyzed.omissions,
+            &normalized,
+        ));
+
+        let delivered = coherent::synthesize_for_delivery(
+            SummaryProfile::Story,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("Connect Story synthesis should preserve the verified ledger");
+        assert_eq!(
+            delivered.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(delivered.summary_claims.is_empty());
+        assert!(delivered.synthesis_evidence.is_empty());
+        assert!(delivered.warnings.iter().any(|warning| {
+            warning.code == coherent::FALLBACK_WARNING_CODE
+                && warning.message.contains("Connect page coverage")
+        }));
+    }
+
+    #[test]
     fn oversized_complete_general_source_context_uses_bounded_source_selection() {
         let runtime = LowSynthesisContextRuntime::new();
         let database = TestDatabase::new();
@@ -10163,7 +10244,8 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "8.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "9.0.0");
+        assert_eq!(PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION, "8.0.0");
         assert_eq!(PRE_CONTEXT_SYNTHESIS_VERSION, "7.0.0");
         assert_eq!(PRE_DISCLOSURE_SYNTHESIS_VERSION, "6.0.0");
         assert_eq!(DIRECT_SYNTHESIS_VERSION, "5.0.0");
@@ -10215,6 +10297,12 @@ mod tests {
             warnings: Vec::new(),
         };
         assert!(!coherent_checkpoint_requires_retry(&checkpoint, None));
+        checkpoint.synthesis_version = PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION.into();
+        assert!(coherent_checkpoint_requires_retry(&checkpoint, None));
+        assert!(coherent_verification_versions_match(
+            PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION,
+            VERIFICATION_VERSION,
+        ));
         checkpoint.synthesis_version = PRE_CONTEXT_SYNTHESIS_VERSION.into();
         assert!(coherent_checkpoint_requires_retry(&checkpoint, None));
         checkpoint.presentation_mode = SummaryPresentationMode::ClaimLedgerFallback;
