@@ -86,6 +86,7 @@ pub fn accept_job_with_ingestion(
         provider_instance_id,
         document,
         run,
+        SummaryProfile::General,
         None,
         || true,
     )?
@@ -105,6 +106,7 @@ pub fn accept_job_with_ingestion_guarded<F>(
     provider_instance_id: &str,
     document: &IngestedDocument,
     run: &PipelineRun,
+    summary_profile: SummaryProfile,
     profile_snapshot: Option<&ModelProfileSnapshot>,
     mut admission_check: F,
 ) -> Result<Option<(PipelineRun, StoredConnectJob)>, ConnectStoreError>
@@ -118,8 +120,7 @@ where
         return Ok(None);
     }
     let now = Utc::now();
-    let ingested_run =
-        db::persist_ingestion_in_transaction(&tx, document, run, SummaryProfile::General)?;
+    let ingested_run = db::persist_ingestion_in_transaction(&tx, document, run, summary_profile)?;
     db::ensure_run_model_profile(&tx, &ingested_run.run_id, profile_snapshot)?;
     tx.execute(
         "INSERT INTO connect_jobs (
@@ -488,12 +489,17 @@ mod tests {
             &Uuid::new_v4().to_string(),
             &document,
             &run,
+            SummaryProfile::Contract,
             Some(&snapshot),
             || true,
         )
         .expect("first guarded admission should succeed")
         .expect("active entitlement should admit the job");
         assert_eq!(stored.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(
+            db::get_run_summary_profile(&conn, &run.run_id).unwrap(),
+            Some(SummaryProfile::Contract)
+        );
         assert_eq!(
             db::get_run_model_profile(&conn, &run.run_id).unwrap(),
             Some(snapshot.clone())
@@ -513,6 +519,7 @@ mod tests {
             &Uuid::new_v4().to_string(),
             &second_document,
             &second_run,
+            SummaryProfile::General,
             Some(&snapshot),
             || true,
         )
@@ -546,6 +553,10 @@ mod tests {
             &run,
         )
         .unwrap();
+        assert_eq!(
+            db::get_run_summary_profile(&conn, &run.run_id).unwrap(),
+            Some(SummaryProfile::General)
+        );
 
         assert_eq!(
             mark_processing(&conn, &request.job_id).unwrap().state,

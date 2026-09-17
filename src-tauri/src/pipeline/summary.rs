@@ -601,17 +601,11 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
 
     let (synthesizing_run, persisted_analysis) =
         db::start_synthesis(conn, run_id, run.state_version)?;
-    let synthesis = match (delivery_policy, summary_profile) {
-        (Some(_), SummaryProfile::General) => {
+    let synthesis = match summary_profile {
+        SummaryProfile::General if delivery_policy.is_some() => {
             direct::synthesize(runtime, &persisted_analysis, &chunked, &normalized, control)
         }
-        (Some(_), SummaryProfile::Story | SummaryProfile::Contract) => Err(stage_failure(
-            PipelineStage::Synthesize,
-            "SUMMARY_PROFILE_DELIVERY_UNSUPPORTED",
-            "Connect delivery supports only the General summary profile",
-            false,
-        )),
-        (None, profile) => coherent::synthesize(
+        profile => coherent::synthesize(
             profile,
             runtime,
             &persisted_analysis,
@@ -9740,7 +9734,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_delivery_rejects_a_specialized_summary_profile() {
+    fn connect_delivery_synthesizes_each_specialized_summary_profile() {
         for profile in [SummaryProfile::Story, SummaryProfile::Contract] {
             let database = TestDatabase::new();
             let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
@@ -9748,18 +9742,24 @@ mod tests {
             analyze_chunked_document(&mut conn, &runtime, &run_id)
                 .expect("specialized fixture should reach the analyzed checkpoint");
 
-            let error = synthesize_analyzed_document_controlled_with_delivery(
+            let synthesized = synthesize_analyzed_document_controlled_with_delivery(
                 &mut conn,
                 &runtime,
                 &run_id,
                 &UNCONTROLLED_EXECUTION,
                 Some(SummaryDeliveryPolicy::connect()),
             )
-            .expect_err("Connect must not silently use a specialized profile");
-            assert_eq!(error.code(), "SUMMARY_PROFILE_DELIVERY_UNSUPPORTED");
-            assert!(get_synthesized_document(&conn, &run_id)
-                .expect("synthesis query should succeed")
-                .is_none());
+            .expect("Connect should use the requested specialized synthesis profile");
+            assert_eq!(
+                synthesized.presentation_mode,
+                SummaryPresentationMode::Coherent
+            );
+            assert_eq!(
+                get_synthesized_document(&conn, &run_id)
+                    .expect("synthesis query should succeed")
+                    .expect("specialized synthesis should persist"),
+                synthesized
+            );
         }
     }
 
