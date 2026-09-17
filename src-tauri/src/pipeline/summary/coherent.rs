@@ -5168,6 +5168,117 @@ impl ContractMaterialTerm {
     }
 }
 
+fn contract_number_value(value: &str) -> Option<u16> {
+    if let Ok(number) = value.parse::<u16>() {
+        return Some(number);
+    }
+    const SMALL: [&str; 11] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    ];
+    SMALL
+        .iter()
+        .position(|candidate| *candidate == value)
+        .map(|number| number as u16)
+        .or(match value {
+            "twenty" => Some(20),
+            "thirty" => Some(30),
+            "forty" => Some(40),
+            "fifty" => Some(50),
+            "sixty" => Some(60),
+            "seventy" => Some(70),
+            "eighty" => Some(80),
+            "ninety" => Some(90),
+            _ => None,
+        })
+}
+
+fn contract_month_value(value: &str) -> Option<u8> {
+    const MONTHS: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    MONTHS
+        .iter()
+        .position(|month| *month == value)
+        .map(|month| month as u8 + 1)
+}
+
+fn canonical_contract_words(value: Vec<String>) -> Vec<String> {
+    let canonical_date = if value.len() == 3 && value[0].len() == 4 {
+        Some((
+            value[0].parse::<u16>().ok(),
+            value[1].parse::<u8>().ok(),
+            value[2].parse::<u8>().ok(),
+        ))
+    } else if value.len() == 3 && value[2].len() == 4 {
+        let year = value[2].parse::<u16>().ok();
+        if let Some(month) = contract_month_value(&value[0]) {
+            Some((year, Some(month), value[1].parse::<u8>().ok()))
+        } else if let Some(month) = contract_month_value(&value[1]) {
+            Some((year, Some(month), value[0].parse::<u8>().ok()))
+        } else {
+            let first = value[0].parse::<u8>().ok();
+            let second = value[1].parse::<u8>().ok();
+            match (first, second) {
+                (Some(month), Some(day)) if month <= 12 => Some((year, Some(month), Some(day))),
+                (Some(day), Some(month)) if month <= 12 => Some((year, Some(month), Some(day))),
+                _ => None,
+            }
+        }
+    } else {
+        None
+    };
+    if let Some((Some(year), Some(month), Some(day))) = canonical_date {
+        return vec![year.to_string(), month.to_string(), day.to_string()];
+    }
+
+    let unit = value.last().and_then(|word| match word.as_str() {
+        "day" | "days" => Some("days"),
+        "month" | "months" => Some("months"),
+        "year" | "years" => Some("years"),
+        _ => None,
+    });
+    if let (Some(count), Some(unit)) = (
+        value.first().and_then(|word| contract_number_value(word)),
+        unit,
+    ) {
+        let mut canonical = vec![count.to_string()];
+        if value.len() == 3 && matches!(value[1].as_str(), "calendar" | "business") {
+            canonical.push(value[1].clone());
+        }
+        canonical.push(unit.to_string());
+        return canonical;
+    }
+    value
+}
+
+fn canonical_currency_amount(raw: &str) -> Option<String> {
+    let mut parts = raw.trim_end_matches('.').split('.');
+    let integer = parts.next()?;
+    let fractional = parts.next();
+    if parts.next().is_some() || integer.is_empty() {
+        return None;
+    }
+    let integer = integer.trim_start_matches('0');
+    let integer = if integer.is_empty() { "0" } else { integer };
+    let fractional = fractional.unwrap_or_default().trim_end_matches('0');
+    Some(if fractional.is_empty() {
+        integer.to_string()
+    } else {
+        format!("{integer}.{fractional}")
+    })
+}
+
 fn currency_amounts(text: &str) -> HashSet<String> {
     let mut amounts = HashSet::new();
     let mut cursor = 0usize;
@@ -5181,14 +5292,11 @@ fn currency_amounts(text: &str) -> HashSet<String> {
                 break;
             }
         }
-        let canonical = text[start..end]
+        let raw = text[start..end]
             .chars()
             .filter(|character| character.is_ascii_digit() || *character == '.')
             .collect::<String>();
-        if canonical
-            .chars()
-            .any(|character| character.is_ascii_digit())
-        {
+        if let Some(canonical) = canonical_currency_amount(&raw) {
             amounts.insert(canonical);
         }
         cursor = end.max(start);
@@ -5245,6 +5353,7 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
     terms.extend(
         numeric_contract_date_words(text)
             .into_iter()
+            .map(canonical_contract_words)
             .map(ContractMaterialTerm::Words),
     );
     let month = |value: &str| {
@@ -5264,22 +5373,7 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
                 | "december"
         )
     };
-    let number = |value: &str| {
-        value.chars().all(|character| character.is_ascii_digit())
-            || matches!(
-                value,
-                "one"
-                    | "two"
-                    | "three"
-                    | "four"
-                    | "five"
-                    | "six"
-                    | "seven"
-                    | "eight"
-                    | "nine"
-                    | "ten"
-            )
-    };
+    let number = |value: &str| contract_number_value(value).is_some();
     let day = |value: &str| {
         value.len() <= 2
             && value
@@ -5300,9 +5394,9 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
             && tokens.get(index + 1).is_some_and(|value| month(value))
             && tokens.get(index + 2).is_some_and(|value| year(value));
         if month_day_year || day_month_year {
-            terms.insert(ContractMaterialTerm::Words(
+            terms.insert(ContractMaterialTerm::Words(canonical_contract_words(
                 tokens[index..=index + 2].to_vec(),
-            ));
+            )));
         }
         if !number(&tokens[index]) {
             continue;
@@ -5321,9 +5415,9 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
                 "day" | "days" | "month" | "months" | "year" | "years"
             )
         }) {
-            terms.insert(ContractMaterialTerm::Words(
+            terms.insert(ContractMaterialTerm::Words(canonical_contract_words(
                 tokens[index..=unit_index].to_vec(),
-            ));
+            )));
         }
     }
     let mut terms = terms.into_iter().collect::<Vec<_>>();
@@ -5355,16 +5449,12 @@ fn contract_material_term_coverage_feedback(
             .map(|claim| claim.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        let summary_words = words(&clause_summary);
-        let summary_currency = currency_amounts(&clause_summary);
+        let summary_terms = contract_material_terms(&clause_summary)
+            .into_iter()
+            .collect::<HashSet<_>>();
         let missing = contract_material_terms(&source.exact_quote)
             .into_iter()
-            .filter(|term| match term {
-                ContractMaterialTerm::Words(expected) => !summary_words
-                    .windows(expected.len())
-                    .any(|window| window == expected),
-                ContractMaterialTerm::Currency(expected) => !summary_currency.contains(expected),
-            })
+            .filter(|term| !summary_terms.contains(term))
             .map(|term| term.label())
             .collect::<Vec<_>>();
         if !missing.is_empty() {
@@ -13155,6 +13245,40 @@ mod tests {
                 1,
             );
         }
+
+        let reference = ContractClauseReference {
+            number: "2".into(),
+            title: "Payment".into(),
+        };
+        let mut source = candidate("s2", "evidence-2", 1);
+        source.evidence.exact_quote = "2. Payment. Services begin 09/17/2026, payment is due within 30 days, and the fee is $1,250.00.".into();
+        source.contract_clause = Some(reference.clone());
+        let catalog = SourceCatalog {
+            candidates: vec![source],
+            omitted_source_units: 0,
+        };
+        let required = vec![RequiredContractClause {
+            evidence_id: "evidence-2".into(),
+            reference,
+        }];
+        let equivalent = vec![CitedClaim {
+            claim_id: "equivalent-material-terms".into(),
+            text: "Services begin September 17, 2026; payment is due within thirty days; the fee is $1,250.".into(),
+            evidence_ids: vec!["evidence-2".into()],
+        }];
+        assert!(
+            contract_material_term_coverage_feedback(&equivalent, &catalog, Some(&required))
+                .is_empty()
+        );
+
+        let changed = vec![CitedClaim {
+            text: "Services begin September 18, 2026; payment is due within 31 days; the fee is $1,251.".into(),
+            ..equivalent[0].clone()
+        }];
+        assert_eq!(
+            contract_material_term_coverage_feedback(&changed, &catalog, Some(&required)).len(),
+            1,
+        );
 
         assert!(contract_material_terms("Release identifier 2026-19-40.").is_empty());
     }
