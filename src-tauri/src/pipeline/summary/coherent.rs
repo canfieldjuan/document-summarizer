@@ -5199,12 +5199,54 @@ fn currency_amounts(text: &str) -> HashSet<String> {
     amounts
 }
 
+fn numeric_contract_date_words(text: &str) -> HashSet<Vec<String>> {
+    let bounded_number = |value: &str, maximum: u16| {
+        !value.is_empty()
+            && value.chars().all(|character| character.is_ascii_digit())
+            && value
+                .parse::<u16>()
+                .is_ok_and(|number| (1..=maximum).contains(&number))
+    };
+    text.split_whitespace()
+        .filter_map(|raw| {
+            let candidate = raw.trim_matches(|character: char| {
+                !character.is_ascii_digit() && !matches!(character, '/' | '-')
+            });
+            let has_slash = candidate.contains('/');
+            let has_hyphen = candidate.contains('-');
+            if has_slash == has_hyphen {
+                return None;
+            }
+            let separator = if has_slash { '/' } else { '-' };
+            let parts = candidate.split(separator).collect::<Vec<_>>();
+            if parts.len() != 3 {
+                return None;
+            }
+            let year_first = parts[0].len() == 4
+                && bounded_number(parts[0], 9999)
+                && bounded_number(parts[1], 12)
+                && bounded_number(parts[2], 31);
+            let year_last = parts[2].len() == 4
+                && bounded_number(parts[2], 9999)
+                && ((bounded_number(parts[0], 12) && bounded_number(parts[1], 31))
+                    || (bounded_number(parts[0], 31) && bounded_number(parts[1], 12)));
+            (year_first || year_last)
+                .then(|| parts.into_iter().map(str::to_string).collect::<Vec<_>>())
+        })
+        .collect()
+}
+
 fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
     let tokens = words(text);
     let mut terms = currency_amounts(text)
         .into_iter()
         .map(ContractMaterialTerm::Currency)
         .collect::<HashSet<_>>();
+    terms.extend(
+        numeric_contract_date_words(text)
+            .into_iter()
+            .map(ContractMaterialTerm::Words),
+    );
     let month = |value: &str| {
         matches!(
             value,
@@ -5238,15 +5280,26 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
                     | "ten"
             )
     };
+    let day = |value: &str| {
+        value.len() <= 2
+            && value
+                .parse::<u8>()
+                .is_ok_and(|number| (1..=31).contains(&number))
+    };
+    let year = |value: &str| {
+        value.len() == 4
+            && value
+                .parse::<u16>()
+                .is_ok_and(|number| (1..=9999).contains(&number))
+    };
     for index in 0..tokens.len() {
-        if month(&tokens[index])
-            && tokens
-                .get(index + 1)
-                .is_some_and(|value| value.chars().all(|character| character.is_ascii_digit()))
-            && tokens.get(index + 2).is_some_and(|value| {
-                value.len() == 4 && value.chars().all(|character| character.is_ascii_digit())
-            })
-        {
+        let month_day_year = month(&tokens[index])
+            && tokens.get(index + 1).is_some_and(|value| day(value))
+            && tokens.get(index + 2).is_some_and(|value| year(value));
+        let day_month_year = day(&tokens[index])
+            && tokens.get(index + 1).is_some_and(|value| month(value))
+            && tokens.get(index + 2).is_some_and(|value| year(value));
+        if month_day_year || day_month_year {
             terms.insert(ContractMaterialTerm::Words(
                 tokens[index..=index + 2].to_vec(),
             ));
@@ -12741,7 +12794,14 @@ mod tests {
     #[test]
     fn semantic_filtering_cannot_publish_an_incomplete_short_contract() {
         let (normalized, chunked) = contract_documents();
-        let catalog = source_catalog(&chunked, &normalized, None).unwrap();
+        let catalog = source_catalog_for_profile(
+            SummaryProfile::Contract,
+            VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
         assert_eq!(catalog.candidates.len(), CONTRACT_SOURCE_LINES.len());
         assert!(catalog
             .candidates
@@ -13055,6 +13115,48 @@ mod tests {
             CONTRACT_SOURCE_LINES.join("\n"),
             render_cited_summary_with_evidence(&claims, &evidence).unwrap()
         );
+    }
+
+    #[test]
+    fn contract_material_terms_require_common_explicit_date_formats() {
+        for source_date in ["09/17/2026", "2026-09-17", "17 September 2026"] {
+            let reference = ContractClauseReference {
+                number: "1".into(),
+                title: "Term".into(),
+            };
+            let mut source = candidate("s1", "evidence-1", 1);
+            source.evidence.exact_quote = format!("1. Term. Services begin {source_date}.");
+            source.contract_clause = Some(reference.clone());
+            let catalog = SourceCatalog {
+                candidates: vec![source],
+                omitted_source_units: 0,
+            };
+            let required = vec![RequiredContractClause {
+                evidence_id: "evidence-1".into(),
+                reference,
+            }];
+            let complete = vec![CitedClaim {
+                claim_id: "complete-date".into(),
+                text: format!("Services begin {source_date}."),
+                evidence_ids: vec!["evidence-1".into()],
+            }];
+            assert!(
+                contract_material_term_coverage_feedback(&complete, &catalog, Some(&required),)
+                    .is_empty()
+            );
+
+            let omitted = vec![CitedClaim {
+                text: "Services begin during the stated term.".into(),
+                ..complete[0].clone()
+            }];
+            assert_eq!(
+                contract_material_term_coverage_feedback(&omitted, &catalog, Some(&required),)
+                    .len(),
+                1,
+            );
+        }
+
+        assert!(contract_material_terms("Release identifier 2026-19-40.").is_empty());
     }
 
     #[test]
