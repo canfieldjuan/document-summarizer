@@ -150,6 +150,8 @@ struct PromptSourceSegment {
     source_framing: Option<SourceFraming>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_claim: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contract_clause: Option<ContractClauseReference>,
     exact_quote: String,
 }
 
@@ -2701,7 +2703,17 @@ fn maximum_initial_summary_units_for_catalog(
         .collect::<HashSet<_>>()
         .len();
     let base_units = maximum_summary_units(catalog.candidates.len());
-    base_units.max(compatibility_groups).min(MAX_SUMMARY_CLAIMS)
+    let short_contract_units = if profile == SummaryProfile::Contract
+        && required_short_contract_clauses(catalog).is_some()
+    {
+        catalog.candidates.len()
+    } else {
+        0
+    };
+    base_units
+        .max(compatibility_groups)
+        .max(short_contract_units)
+        .min(MAX_SUMMARY_CLAIMS)
 }
 
 fn maximum_summary_units_for_catalog(profile: SummaryProfile, catalog: &SourceCatalog) -> usize {
@@ -3432,6 +3444,7 @@ fn source_selection_prompt_and_schema(
                 selection_window: candidate.selection_window,
                 source_framing: None,
                 source_claim: None,
+                contract_clause: None,
                 exact_quote: candidate.evidence.exact_quote.clone(),
             })
             .collect(),
@@ -4613,7 +4626,7 @@ fn prompt_with_maximum_units(
     serde_json::to_string(&prompt).map_err(|_| invalid_response())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ContractClauseReference {
     number: String,
     title: String,
@@ -5540,12 +5553,14 @@ fn percentage_amounts(text: &str) -> HashSet<String> {
             normalized.push(character);
         }
     }
-    contract_material_words(&normalized)
-        .windows(2)
-        .filter_map(|window| {
-            (window[1] == "percent")
-                .then(|| canonical_contract_number(&window[0]))
-                .flatten()
+    let tokens = contract_material_words(&normalized);
+    (0..tokens.len())
+        .filter_map(|index| {
+            let (amount, consumed) = contract_duration_count_prefix(&tokens[index..])?;
+            tokens
+                .get(index + consumed)
+                .is_some_and(|value| value == "percent")
+                .then_some(amount)
         })
         .collect()
 }
@@ -6210,6 +6225,8 @@ fn prompt_and_schema(
         ));
     }
     let maximum_units = maximum_initial_summary_units_for_catalog(profile, catalog);
+    let include_contract_clause_mapping = profile == SummaryProfile::Contract
+        && required_short_contract_clauses(catalog).is_some();
     let prompt = Prompt {
         maximum_units,
         source_segments: catalog
@@ -6227,6 +6244,13 @@ fn prompt_and_schema(
                 },
                 source_claim: if profile == SummaryProfile::General {
                     candidate.drafting_claim.clone()
+                } else {
+                    None
+                },
+                contract_clause: if include_contract_clause_mapping {
+                    candidate.contract_clause.clone().or_else(|| {
+                        sole_contract_source_clause_reference(&candidate.evidence.exact_quote)
+                    })
                 } else {
                     None
                 },
@@ -13198,6 +13222,30 @@ mod tests {
                 .len(),
             MAX_REQUIRED_SHORT_CONTRACT_CLAUSES
         );
+        let (prompt, schema) =
+            prompt_and_schema(SummaryProfile::Contract, &profile_catalog).unwrap();
+        let prompt: Value = serde_json::from_str(&prompt).unwrap();
+        assert_eq!(prompt["maximum_units"], Value::from(7));
+        assert_eq!(schema["properties"]["units"]["maxItems"], Value::from(7));
+        assert!(prompt["source_segments"][0]
+            .get("contract_clause")
+            .is_none());
+        assert_eq!(
+            prompt["source_segments"][1]["source_id"],
+            Value::String("s2".into())
+        );
+        assert_eq!(
+            prompt["source_segments"][1]["contract_clause"],
+            json!({"number":"1","title":"Services"})
+        );
+        assert_eq!(
+            prompt["source_segments"][6]["source_id"],
+            Value::String("s7".into())
+        );
+        assert_eq!(
+            prompt["source_segments"][6]["contract_clause"]["number"],
+            Value::String("6".into())
+        );
 
         let partial = vec![CitedClaim {
             claim_id: "partial-one-source-contract".into(),
@@ -13649,6 +13697,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["5%"]
         );
+        assert_eq!(
+            contract_material_terms("Late balances incur a five percent monthly fee.")
+                .into_iter()
+                .map(|term| term.label())
+                .collect::<Vec<_>>(),
+            vec!["5%"]
+        );
         assert!(percentage_amounts("Reference A5% and coupon 5%off.").is_empty());
         let reference = ContractClauseReference {
             number: "4".into(),
@@ -13674,6 +13729,19 @@ mod tests {
             contract_material_term_coverage_feedback(&complete, &catalog, Some(&required))
                 .is_empty()
         );
+        let mut written_catalog = catalog.clone();
+        written_catalog.candidates[0].evidence.exact_quote =
+            "4. Late Fees. Late balances incur a five percent monthly fee.".into();
+        let numeric_complete = vec![CitedClaim {
+            text: "Late balances incur a 5% monthly fee.".into(),
+            ..complete[0].clone()
+        }];
+        assert!(contract_material_term_coverage_feedback(
+            &numeric_complete,
+            &written_catalog,
+            Some(&required)
+        )
+        .is_empty());
         for changed_text in [
             "Late balances incur the stated monthly fee.",
             "Late balances incur a 6% monthly fee.",
