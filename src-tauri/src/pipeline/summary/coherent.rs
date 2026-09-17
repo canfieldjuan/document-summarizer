@@ -5173,8 +5173,8 @@ impl ContractMaterialTerm {
     }
 }
 
-fn contract_number_value(value: &str) -> Option<u16> {
-    if let Ok(number) = value.parse::<u16>() {
+fn contract_number_value(value: &str) -> Option<u64> {
+    if let Ok(number) = value.parse::<u64>() {
         return Some(number);
     }
     const SMALL: [&str; 20] = [
@@ -5202,7 +5202,7 @@ fn contract_number_value(value: &str) -> Option<u16> {
     SMALL
         .iter()
         .position(|candidate| *candidate == value)
-        .map(|number| number as u16)
+        .map(|number| number as u64)
         .or(match value {
             "twenty" => Some(20),
             "thirty" => Some(30),
@@ -5216,18 +5216,89 @@ fn contract_number_value(value: &str) -> Option<u16> {
         })
 }
 
-fn contract_cardinal_prefix(values: &[String]) -> Option<(u16, usize)> {
-    let first = contract_number_value(values.first()?)?;
-    if first >= 20 && first % 10 == 0 {
-        if let Some(ones) = values
-            .get(1)
-            .and_then(|value| contract_number_value(value))
-            .filter(|value| (1..=9).contains(value))
-        {
-            return Some((first + ones, 2));
+fn contract_cardinal_under_hundred(values: &[String]) -> Option<u64> {
+    match values {
+        [value] if value.chars().all(|character| character.is_ascii_digit()) => {
+            contract_number_value(value)
         }
+        [value] => contract_number_value(value).filter(|number| *number <= 99),
+        [tens, ones] => {
+            let tens = contract_number_value(tens)?;
+            let ones = contract_number_value(ones)?;
+            ((20..=90).contains(&tens) && tens % 10 == 0 && (1..=9).contains(&ones))
+                .then_some(tens + ones)
+        }
+        _ => None,
     }
-    Some((first, 1))
+}
+
+fn contract_cardinal_under_thousand(values: &[String]) -> Option<u64> {
+    if values.len() >= 2 && values[1] == "hundred" {
+        let hundreds = contract_number_value(&values[0])?;
+        if !(1..=9).contains(&hundreds) {
+            return None;
+        }
+        let mut tail = &values[2..];
+        if tail.first().is_some_and(|value| value == "and") {
+            tail = &tail[1..];
+        }
+        let remainder = if tail.is_empty() {
+            0
+        } else {
+            contract_cardinal_under_hundred(tail)?
+        };
+        return Some(hundreds * 100 + remainder);
+    }
+    contract_cardinal_under_hundred(values)
+}
+
+fn contract_cardinal_value(values: &[String]) -> Option<u64> {
+    let mut total = 0u64;
+    let mut group_start = 0usize;
+    let mut previous_scale = u64::MAX;
+    let mut saw_scale = false;
+    for (index, value) in values.iter().enumerate() {
+        let scale = match value.as_str() {
+            "thousand" => 1_000,
+            "million" => 1_000_000,
+            "billion" => 1_000_000_000,
+            "trillion" => 1_000_000_000_000,
+            _ => continue,
+        };
+        if scale >= previous_scale {
+            return None;
+        }
+        let group = contract_cardinal_under_thousand(&values[group_start..index])?;
+        total = total.checked_add(group.checked_mul(scale)?)?;
+        group_start = index + 1;
+        previous_scale = scale;
+        saw_scale = true;
+    }
+    let mut tail = &values[group_start..];
+    if saw_scale && tail.first().is_some_and(|value| value == "and") {
+        tail = &tail[1..];
+    }
+    if tail.is_empty() {
+        saw_scale.then_some(total)
+    } else {
+        total.checked_add(contract_cardinal_under_thousand(tail)?)
+    }
+}
+
+fn contract_cardinal_prefix(values: &[String]) -> Option<(u64, usize)> {
+    let prefix_length = values
+        .iter()
+        .take_while(|value| {
+            contract_number_value(value).is_some()
+                || matches!(
+                    value.as_str(),
+                    "and" | "hundred" | "thousand" | "million" | "billion" | "trillion"
+                )
+        })
+        .count();
+    (1..=prefix_length)
+        .rev()
+        .find_map(|consumed| contract_cardinal_value(&values[..consumed]).map(|n| (n, consumed)))
 }
 
 fn contract_month_value(value: &str) -> Option<u8> {
@@ -5251,6 +5322,30 @@ fn contract_month_value(value: &str) -> Option<u8> {
         .map(|month| month as u8 + 1)
 }
 
+fn contract_day_value(value: &str) -> Option<u8> {
+    if let Ok(day) = value.parse::<u8>() {
+        return (1..=31).contains(&day).then_some(day);
+    }
+    let (digits, suffix) = ["st", "nd", "rd", "th"]
+        .into_iter()
+        .find_map(|suffix| value.strip_suffix(suffix).map(|digits| (digits, suffix)))?;
+    let day = digits.parse::<u8>().ok()?;
+    if !(1..=31).contains(&day) {
+        return None;
+    }
+    let expected = if (11..=13).contains(&(day % 100)) {
+        "th"
+    } else {
+        match day % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        }
+    };
+    (suffix == expected).then_some(day)
+}
+
 fn canonical_contract_words(value: Vec<String>) -> Vec<String> {
     let canonical_date = if value.len() == 3 && value[0].len() == 4 {
         Some((
@@ -5261,9 +5356,9 @@ fn canonical_contract_words(value: Vec<String>) -> Vec<String> {
     } else if value.len() == 3 && value[2].len() == 4 {
         let year = value[2].parse::<u16>().ok();
         if let Some(month) = contract_month_value(&value[0]) {
-            Some((year, Some(month), value[1].parse::<u8>().ok()))
+            Some((year, Some(month), contract_day_value(&value[1])))
         } else if let Some(month) = contract_month_value(&value[1]) {
-            Some((year, Some(month), value[0].parse::<u8>().ok()))
+            Some((year, Some(month), contract_day_value(&value[0])))
         } else {
             let first = value[0].parse::<u8>().ok();
             let second = value[1].parse::<u8>().ok();
@@ -5311,18 +5406,46 @@ fn canonical_contract_words(value: Vec<String>) -> Vec<String> {
 }
 
 fn canonical_currency_amount(raw: &str) -> Option<String> {
-    if !raw.chars().any(|character| character.is_ascii_digit()) {
+    let value = raw.trim().trim_end_matches([',', '.']);
+    if value.is_empty()
+        || !value.chars().any(|character| character.is_ascii_digit())
+        || value
+            .chars()
+            .any(|character| !character.is_ascii_digit() && !matches!(character, ',' | '.'))
+    {
         return None;
     }
-    let mut parts = raw.trim_end_matches('.').split('.');
-    let integer = parts.next()?;
-    let fractional = parts.next();
-    if parts.next().is_some() || integer.is_empty() {
+    let separators = value
+        .char_indices()
+        .filter(|(_, character)| matches!(character, ',' | '.'))
+        .collect::<Vec<_>>();
+    let decimal_index = separators.last().and_then(|(index, last)| {
+        let fractional_digits = value[index + last.len_utf8()..].len();
+        (1..=2).contains(&fractional_digits).then_some(*index)
+    });
+    let (integer_raw, fractional) =
+        decimal_index.map_or((value, ""), |index| (&value[..index], &value[index + 1..]));
+    let groups = integer_raw.split([',', '.']).collect::<Vec<_>>();
+    if groups.is_empty()
+        || groups[0].is_empty()
+        || !groups[0]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        || (groups.len() > 1
+            && (groups[0].len() > 3
+                || groups[1..].iter().any(|group| {
+                    group.len() != 3 || !group.chars().all(|character| character.is_ascii_digit())
+                })))
+        || !fractional
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
         return None;
     }
-    let integer = integer.trim_start_matches('0');
+    let integer_digits = groups.concat();
+    let integer = integer_digits.trim_start_matches('0');
     let integer = if integer.is_empty() { "0" } else { integer };
-    let fractional = fractional.unwrap_or_default().trim_end_matches('0');
+    let fractional = fractional.trim_end_matches('0');
     Some(if fractional.is_empty() {
         integer.to_string()
     } else {
@@ -5376,11 +5499,7 @@ fn currency_amounts(text: &str) -> HashSet<(String, String)> {
                 break;
             }
         }
-        let raw = text[start..end]
-            .chars()
-            .filter(|character| character.is_ascii_digit() || *character == '.')
-            .collect::<String>();
-        if let Some(canonical) = canonical_currency_amount(&raw) {
+        if let Some(canonical) = canonical_currency_amount(&text[start..end]) {
             amounts.insert((code.to_string(), canonical));
         }
         cursor = end.max(cursor + marker_length);
@@ -5454,12 +5573,7 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
                 | "december"
         )
     };
-    let day = |value: &str| {
-        value.len() <= 2
-            && value
-                .parse::<u8>()
-                .is_ok_and(|number| (1..=31).contains(&number))
-    };
+    let day = |value: &str| contract_day_value(value).is_some();
     let year = |value: &str| {
         value.len() == 4
             && value
@@ -13294,7 +13408,12 @@ mod tests {
 
     #[test]
     fn contract_material_terms_require_common_explicit_date_formats() {
-        for source_date in ["09/17/2026", "2026-09-17", "17 September 2026"] {
+        for (source_date, summary_date) in [
+            ("09/17/2026", "09/17/2026"),
+            ("2026-09-17", "2026-09-17"),
+            ("17 September 2026", "17 September 2026"),
+            ("September 17th, 2026", "September 17, 2026"),
+        ] {
             let reference = ContractClauseReference {
                 number: "1".into(),
                 title: "Term".into(),
@@ -13312,7 +13431,7 @@ mod tests {
             }];
             let complete = vec![CitedClaim {
                 claim_id: "complete-date".into(),
-                text: format!("Services begin {source_date}."),
+                text: format!("Services begin {summary_date}."),
                 evidence_ids: vec!["evidence-1".into()],
             }];
             assert!(
@@ -13366,6 +13485,7 @@ mod tests {
         );
 
         assert!(contract_material_terms("Release identifier 2026-19-40.").is_empty());
+        assert!(contract_material_terms("Services begin September 11st, 2026.").is_empty());
     }
 
     #[test]
@@ -13374,6 +13494,8 @@ mod tests {
             ("fifteen", "15"),
             ("twenty-one", "21"),
             ("ninety-nine", "99"),
+            ("one hundred eighty", "180"),
+            ("one thousand two hundred thirty-four", "1234"),
         ] {
             let reference = ContractClauseReference {
                 number: "1".into(),
@@ -13415,7 +13537,7 @@ mod tests {
             let changed = vec![CitedClaim {
                 text: format!(
                     "Consultant may terminate with {} days' notice.",
-                    numeric.parse::<u16>().unwrap() + 1
+                    numeric.parse::<u64>().unwrap() + 1
                 ),
                 ..equivalent[0].clone()
             }];
@@ -13433,6 +13555,7 @@ mod tests {
             ("£1,250", "£1,250.00", "$1,250"),
             ("USD 1,250", "$1,250.00", "€1,250"),
             ("$1,250", "USD 1,250.00", "£1,250"),
+            ("€1.250,00", "€1,250.00", "€1.25"),
         ] {
             let reference = ContractClauseReference {
                 number: "2".into(),
