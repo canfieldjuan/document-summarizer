@@ -12683,7 +12683,7 @@ mod tests {
             "confidentiality restrictions",
             "six or fewer supplied numbered clauses",
             "material term from every supplied clause",
-            "application attaches exact references",
+            "application attaches the terminal exact references",
             "Preserve a cross-reference",
             "never transfer a duty or right",
             "Distinguish recitals and definitions from operative terms",
@@ -13209,11 +13209,11 @@ mod tests {
         let response = json!({
             "units": [
                 {
-                    "text": "Northstar Bakery LLC engages Rowan Lee from October 1, 2026 through March 31, 2027. The Consultant must deliver monthly inventory reports to the Client by the fifth business day of each month, and the Client must pay the Consultant $2,400 per month within 15 days after an accurate invoice.",
+                    "text": "Section 1: Northstar Bakery LLC engages Rowan Lee from October 1, 2026 through March 31, 2027. Section 2: The Consultant must deliver monthly inventory reports to the Client by the fifth business day of each month. Section 3: The Client must pay the Consultant $2,400 per month within 15 days after an accurate invoice.",
                     "source_ids": ["s1", "s2", "s3"]
                 },
                 {
-                    "text": "The Client will reimburse the Consultant for pre-approved travel up to $500 per month, excluding meals. The Consultant must keep the Client's recipes confidential during the term and for two years afterward unless disclosure is required by law. Either party may terminate with 30 days written notice, and the Client may terminate immediately if the Consultant does not cure a material breach within 10 days after written notice.",
+                    "text": "Section 4: The Client will reimburse the Consultant for pre-approved travel up to $500 per month, excluding meals. Section 5: The Consultant must keep the Client's recipes confidential during the term and for two years afterward unless disclosure is required by law. Section 6: Either party may terminate with 30 days written notice, and the Client may terminate immediately if the Consultant does not cure a material breach within 10 days after written notice.",
                     "source_ids": ["s4", "s5", "s6"]
                 }
             ]
