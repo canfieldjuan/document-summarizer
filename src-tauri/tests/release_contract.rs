@@ -103,6 +103,10 @@ fn windows_connect_release_boundary_is_documented_and_exercised_natively() {
     assert!(contracts.contains("fixed same-directory temporary file"));
     assert!(contracts.contains("installed Windows cited-summary demonstration is complete"));
     assert!(workflow.contains("runs-on: windows-2022"));
+    assert!(workflow.contains("repository: canfieldjuan/connect-contracts"));
+    assert!(workflow.contains("ref: 3005d82a7be885fba36f8688b5967a5b56a0abea"));
+    assert!(workflow.contains("LOCAL_CONNECT_ENTITLEMENT_KEYRING_FILE:"));
+    assert!(workflow.contains("connect-contracts\\entitlements\\v1\\release\\keyring.json"));
     assert!(workflow.contains("cargo test --locked --lib connect::"));
     assert!(workflow.contains("cargo clippy --locked --lib --tests -- -D warnings"));
 }

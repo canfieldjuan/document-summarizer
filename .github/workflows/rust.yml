@@ -61,12 +61,20 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_BUILD_JOBS: 2
       SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      LOCAL_CONNECT_ENTITLEMENT_KEYRING_FILE: ${{ github.workspace }}\connect-contracts\entitlements\v1\release\keyring.json
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           ref: ${{ env.SOURCE_REVISION }}
+      - name: Check out Connect contracts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: canfieldjuan/connect-contracts
+          ref: 3005d82a7be885fba36f8688b5967a5b56a0abea
+          path: connect-contracts
+          persist-credentials: false
       - name: Verify source revision
         shell: pwsh
         run: |
