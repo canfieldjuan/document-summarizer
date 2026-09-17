@@ -5157,6 +5157,7 @@ fn contract_clause_coverage_feedback(
 enum ContractMaterialTerm {
     Words(Vec<String>),
     Currency { code: String, amount: String },
+    Percentage { amount: String },
 }
 
 impl ContractMaterialTerm {
@@ -5169,6 +5170,7 @@ impl ContractMaterialTerm {
                 "GBP" => format!("£{amount}"),
                 _ => format!("{code} {amount}"),
             },
+            Self::Percentage { amount } => format!("{amount}%"),
         }
     }
 }
@@ -5519,6 +5521,35 @@ fn currency_amounts(text: &str) -> HashSet<(String, String)> {
     amounts
 }
 
+fn percentage_amounts(text: &str) -> HashSet<String> {
+    let mut normalized = String::with_capacity(text.len());
+    let mut characters = text.char_indices().peekable();
+    while let Some((_, character)) = characters.next() {
+        if character == '%'
+            && normalized
+                .chars()
+                .rev()
+                .find(|previous| !previous.is_whitespace())
+                .is_some_and(|previous| previous.is_ascii_digit())
+            && characters
+                .peek()
+                .is_none_or(|(_, next)| !next.is_alphanumeric() && *next != '_')
+        {
+            normalized.push_str(" percent ");
+        } else {
+            normalized.push(character);
+        }
+    }
+    contract_material_words(&normalized)
+        .windows(2)
+        .filter_map(|window| {
+            (window[1] == "percent")
+                .then(|| canonical_contract_number(&window[0]))
+                .flatten()
+        })
+        .collect()
+}
+
 fn numeric_contract_date_words(text: &str) -> HashSet<Vec<String>> {
     let bounded_number = |value: &str, maximum: u16| {
         !value.is_empty()
@@ -5585,6 +5616,11 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
         .into_iter()
         .map(|(code, amount)| ContractMaterialTerm::Currency { code, amount })
         .collect::<HashSet<_>>();
+    terms.extend(
+        percentage_amounts(text)
+            .into_iter()
+            .map(|amount| ContractMaterialTerm::Percentage { amount }),
+    );
     terms.extend(
         numeric_contract_date_words(text)
             .into_iter()
@@ -13602,6 +13638,55 @@ mod tests {
 
         assert!(contract_material_terms("Release identifier 2026-19-40.").is_empty());
         assert!(contract_material_terms("Services begin September 11st, 2026.").is_empty());
+    }
+
+    #[test]
+    fn contract_material_terms_require_percentage_rates() {
+        assert_eq!(
+            contract_material_terms("Late balances incur a 5% monthly fee.")
+                .into_iter()
+                .map(|term| term.label())
+                .collect::<Vec<_>>(),
+            vec!["5%"]
+        );
+        assert!(percentage_amounts("Reference A5% and coupon 5%off.").is_empty());
+        let reference = ContractClauseReference {
+            number: "4".into(),
+            title: "Late Fees".into(),
+        };
+        let mut source = candidate("s4", "evidence-4", 1);
+        source.evidence.exact_quote = "4. Late Fees. Late balances incur a 5% monthly fee.".into();
+        source.contract_clause = Some(reference.clone());
+        let catalog = SourceCatalog {
+            candidates: vec![source],
+            omitted_source_units: 0,
+        };
+        let required = vec![RequiredContractClause {
+            evidence_id: "evidence-4".into(),
+            reference,
+        }];
+        let complete = vec![CitedClaim {
+            claim_id: "percentage-rate".into(),
+            text: "Late balances incur a 5 percent monthly fee.".into(),
+            evidence_ids: vec!["evidence-4".into()],
+        }];
+        assert!(
+            contract_material_term_coverage_feedback(&complete, &catalog, Some(&required))
+                .is_empty()
+        );
+        for changed_text in [
+            "Late balances incur the stated monthly fee.",
+            "Late balances incur a 6% monthly fee.",
+        ] {
+            let changed = vec![CitedClaim {
+                text: changed_text.into(),
+                ..complete[0].clone()
+            }];
+            assert_eq!(
+                contract_material_term_coverage_feedback(&changed, &catalog, Some(&required)).len(),
+                1
+            );
+        }
     }
 
     #[test]
