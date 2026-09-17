@@ -5156,14 +5156,19 @@ fn contract_clause_coverage_feedback(
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ContractMaterialTerm {
     Words(Vec<String>),
-    Currency(String),
+    Currency { code: String, amount: String },
 }
 
 impl ContractMaterialTerm {
     fn label(&self) -> String {
         match self {
             Self::Words(words) => words.join(" "),
-            Self::Currency(amount) => format!("${amount}"),
+            Self::Currency { code, amount } => match code.as_str() {
+                "USD" => format!("${amount}"),
+                "EUR" => format!("€{amount}"),
+                "GBP" => format!("£{amount}"),
+                _ => format!("{code} {amount}"),
+            },
         }
     }
 }
@@ -5306,6 +5311,9 @@ fn canonical_contract_words(value: Vec<String>) -> Vec<String> {
 }
 
 fn canonical_currency_amount(raw: &str) -> Option<String> {
+    if !raw.chars().any(|character| character.is_ascii_digit()) {
+        return None;
+    }
     let mut parts = raw.trim_end_matches('.').split('.');
     let integer = parts.next()?;
     let fractional = parts.next();
@@ -5322,11 +5330,44 @@ fn canonical_currency_amount(raw: &str) -> Option<String> {
     })
 }
 
-fn currency_amounts(text: &str) -> HashSet<String> {
+fn currency_amounts(text: &str) -> HashSet<(String, String)> {
     let mut amounts = HashSet::new();
     let mut cursor = 0usize;
-    while let Some(offset) = text[cursor..].find('$') {
-        let start = cursor + offset + 1;
+    while cursor < text.len() {
+        let remaining = &text[cursor..];
+        let marker = if remaining.starts_with('$') {
+            Some(("USD", '$'.len_utf8()))
+        } else if remaining.starts_with('€') {
+            Some(("EUR", '€'.len_utf8()))
+        } else if remaining.starts_with('£') {
+            Some(("GBP", '£'.len_utf8()))
+        } else if remaining
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("USD"))
+            && text[..cursor]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_')
+            && remaining[3..]
+                .chars()
+                .next()
+                .is_none_or(|character| character.is_whitespace() || character.is_ascii_digit())
+        {
+            Some(("USD", 3))
+        } else {
+            None
+        };
+        let Some((code, marker_length)) = marker else {
+            cursor += remaining.chars().next().map(char::len_utf8).unwrap_or(1);
+            continue;
+        };
+        let mut start = cursor + marker_length;
+        while let Some(character) = text[start..].chars().next() {
+            if !character.is_whitespace() {
+                break;
+            }
+            start += character.len_utf8();
+        }
         let mut end = start;
         for (relative, character) in text[start..].char_indices() {
             if character.is_ascii_digit() || matches!(character, ',' | '.') {
@@ -5340,12 +5381,9 @@ fn currency_amounts(text: &str) -> HashSet<String> {
             .filter(|character| character.is_ascii_digit() || *character == '.')
             .collect::<String>();
         if let Some(canonical) = canonical_currency_amount(&raw) {
-            amounts.insert(canonical);
+            amounts.insert((code.to_string(), canonical));
         }
-        cursor = end.max(start);
-        if cursor >= text.len() {
-            break;
-        }
+        cursor = end.max(cursor + marker_length);
     }
     amounts
 }
@@ -5391,7 +5429,7 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
     let tokens = words(text);
     let mut terms = currency_amounts(text)
         .into_iter()
-        .map(ContractMaterialTerm::Currency)
+        .map(|(code, amount)| ContractMaterialTerm::Currency { code, amount })
         .collect::<HashSet<_>>();
     terms.extend(
         numeric_contract_date_words(text)
@@ -13386,6 +13424,65 @@ mod tests {
                 1,
             );
         }
+    }
+
+    #[test]
+    fn contract_material_terms_require_supported_currency_forms_and_identity() {
+        for (source_amount, equivalent_amount, changed_currency) in [
+            ("€1,250", "€1,250.00", "$1,250"),
+            ("£1,250", "£1,250.00", "$1,250"),
+            ("USD 1,250", "$1,250.00", "€1,250"),
+            ("$1,250", "USD 1,250.00", "£1,250"),
+        ] {
+            let reference = ContractClauseReference {
+                number: "2".into(),
+                title: "Payment".into(),
+            };
+            let mut source = candidate("s2", "evidence-2", 1);
+            source.evidence.exact_quote =
+                format!("2. Payment. Customer will pay Contractor {source_amount}.");
+            source.contract_clause = Some(reference.clone());
+            let catalog = SourceCatalog {
+                candidates: vec![source],
+                omitted_source_units: 0,
+            };
+            let required = vec![RequiredContractClause {
+                evidence_id: "evidence-2".into(),
+                reference,
+            }];
+            let equivalent = vec![CitedClaim {
+                claim_id: "equivalent-currency".into(),
+                text: format!("Customer will pay Contractor {equivalent_amount}."),
+                evidence_ids: vec!["evidence-2".into()],
+            }];
+            assert!(contract_material_term_coverage_feedback(
+                &equivalent,
+                &catalog,
+                Some(&required)
+            )
+            .is_empty());
+
+            let omitted = vec![CitedClaim {
+                text: "Customer will pay Contractor the stated amount.".into(),
+                ..equivalent[0].clone()
+            }];
+            assert_eq!(
+                contract_material_term_coverage_feedback(&omitted, &catalog, Some(&required)).len(),
+                1
+            );
+
+            let substituted = vec![CitedClaim {
+                text: format!("Customer will pay Contractor {changed_currency}."),
+                ..equivalent[0].clone()
+            }];
+            assert_eq!(
+                contract_material_term_coverage_feedback(&substituted, &catalog, Some(&required))
+                    .len(),
+                1
+            );
+        }
+
+        assert!(currency_amounts("USDA 1,250 account_USD 1,250 USD policy € £").is_empty());
     }
 
     #[test]

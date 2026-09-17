@@ -3523,6 +3523,35 @@ fn apply_verified_delivery_coverage_fallback(
     {
         return Ok(verified);
     }
+    let ledger_evidence = analyzed
+        .chunks
+        .iter()
+        .flat_map(|analysis| analysis.evidence.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    coherent::apply_semantic_fidelity_guards(
+        &synthesized.claims,
+        &ledger_evidence,
+        &mut verified.claim_verifications,
+    )?;
+    verified.claims = synthesized
+        .claims
+        .iter()
+        .zip(&verified.claim_verifications)
+        .filter(|(_, verification)| verification.verdict == ClaimVerdict::Supported)
+        .map(|(claim, _)| claim.clone())
+        .collect();
+    let all_verifications = verified
+        .claim_verifications
+        .iter()
+        .chain(&verified.summary_claim_verifications)
+        .cloned()
+        .collect::<Vec<_>>();
+    verified.warnings = verification_warnings(
+        synthesized,
+        &all_verifications,
+        verified.synthesis_attempt_ordinal > 0,
+    );
     verified.presentation_mode = SummaryPresentationMode::ClaimLedgerFallback;
     verified.summary_text = render_cited_summary(&verified.claims, analyzed)?;
     verified.summary_claims.clear();
@@ -5279,6 +5308,7 @@ mod tests {
     enum VerificationFixtureMode {
         Mixed,
         SummaryCoverageShortfall,
+        SummaryCoverageShortfallWithSemanticallyInvalidLedger,
         AllUnsupported,
         LedgerUnsupportedSummarySupported,
         ShortfallThenSupported,
@@ -5593,14 +5623,18 @@ mod tests {
                             claim_id: claim.claim_id,
                             verdict: match self.mode {
                                 VerificationFixtureMode::SummaryCoverageShortfall
+                                | VerificationFixtureMode::SummaryCoverageShortfallWithSemanticallyInvalidLedger
                                     if verification_call == 0 =>
                                 {
                                     ClaimVerdict::Supported
                                 }
-                                VerificationFixtureMode::SummaryCoverageShortfall if index == 0 => {
+                                VerificationFixtureMode::SummaryCoverageShortfall
+                                | VerificationFixtureMode::SummaryCoverageShortfallWithSemanticallyInvalidLedger
+                                    if index == 0 => {
                                     ClaimVerdict::Unsupported
                                 }
-                                VerificationFixtureMode::SummaryCoverageShortfall => {
+                                VerificationFixtureMode::SummaryCoverageShortfall
+                                | VerificationFixtureMode::SummaryCoverageShortfallWithSemanticallyInvalidLedger => {
                                     ClaimVerdict::Supported
                                 }
                                 VerificationFixtureMode::AllUnsupported => {
@@ -5658,6 +5692,7 @@ mod tests {
                         && matches!(
                             self.mode,
                             VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback
+                                | VerificationFixtureMode::SummaryCoverageShortfallWithSemanticallyInvalidLedger
                         ) =>
                 {
                     if self.analysis_mutations.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -5675,6 +5710,7 @@ mod tests {
                         && matches!(
                             self.mode,
                             VerificationFixtureMode::ModelSupportsSemanticallyInvalidFallback
+                                | VerificationFixtureMode::SummaryCoverageShortfallWithSemanticallyInvalidLedger
                         ) =>
                 {
                     let prompt: AnalysisPrompt = serde_json::from_str(&request.user_prompt)
@@ -5718,7 +5754,11 @@ mod tests {
                             }]
                         })
                         .to_string()
-                    } else if matches!(self.mode, VerificationFixtureMode::SummaryCoverageShortfall)
+                    } else if matches!(
+                        self.mode,
+                        VerificationFixtureMode::SummaryCoverageShortfall
+                            | VerificationFixtureMode::SummaryCoverageShortfallWithSemanticallyInvalidLedger
+                    )
                     {
                         let prompt: Value = serde_json::from_str(&request.user_prompt)
                             .expect("coverage fixture prompt should deserialize");
@@ -10426,6 +10466,67 @@ mod tests {
         );
         assert!(completed.citations.summary_claims.is_empty());
         assert!(!completed.citations.claims.is_empty());
+    }
+
+    #[test]
+    fn connect_coverage_fallback_reapplies_ledger_semantic_guards() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Story);
+        let runtime = VerificationFixtureRuntime::new(
+            VerificationFixtureMode::SummaryCoverageShortfallWithSemanticallyInvalidLedger,
+        );
+        let delivery = Some(SummaryDeliveryPolicy::connect());
+
+        analyze_chunked_document_controlled_with_delivery(
+            &mut conn,
+            &runtime,
+            &run_id,
+            &UNCONTROLLED_EXECUTION,
+            delivery,
+        )
+        .unwrap();
+        let synthesized = synthesize_analyzed_document_controlled_with_delivery(
+            &mut conn,
+            &runtime,
+            &run_id,
+            &UNCONTROLLED_EXECUTION,
+            delivery,
+        )
+        .unwrap();
+        let invalid_claim = synthesized
+            .claims
+            .iter()
+            .find(|claim| claim.text.contains("A family member of the owner"))
+            .expect("the coverage fixture must include a broadened ledger claim")
+            .clone();
+
+        let verified = verify_synthesized_document_controlled_with_delivery(
+            &mut conn,
+            &runtime,
+            &run_id,
+            &UNCONTROLLED_EXECUTION,
+            delivery,
+        )
+        .expect("safe ledger claims should preserve the delivery fallback");
+
+        assert_eq!(
+            verified.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert_eq!(
+            verified
+                .claim_verifications
+                .iter()
+                .find(|verification| verification.claim_id == invalid_claim.claim_id)
+                .expect("the broadened claim must retain an auditable verdict")
+                .verdict,
+            ClaimVerdict::Unsupported
+        );
+        assert!(verified
+            .claims
+            .iter()
+            .all(|claim| claim.claim_id != invalid_claim.claim_id));
+        assert!(!verified.summary_text.contains(&invalid_claim.text));
     }
 
     #[test]
