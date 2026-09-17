@@ -5172,8 +5172,27 @@ fn contract_number_value(value: &str) -> Option<u16> {
     if let Ok(number) = value.parse::<u16>() {
         return Some(number);
     }
-    const SMALL: [&str; 11] = [
-        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    const SMALL: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
     ];
     SMALL
         .iter()
@@ -5190,6 +5209,20 @@ fn contract_number_value(value: &str) -> Option<u16> {
             "ninety" => Some(90),
             _ => None,
         })
+}
+
+fn contract_cardinal_prefix(values: &[String]) -> Option<(u16, usize)> {
+    let first = contract_number_value(values.first()?)?;
+    if first >= 20 && first % 10 == 0 {
+        if let Some(ones) = values
+            .get(1)
+            .and_then(|value| contract_number_value(value))
+            .filter(|value| (1..=9).contains(value))
+        {
+            return Some((first + ones, 2));
+        }
+    }
+    Some((first, 1))
 }
 
 fn contract_month_value(value: &str) -> Option<u8> {
@@ -5248,13 +5281,23 @@ fn canonical_contract_words(value: Vec<String>) -> Vec<String> {
         "year" | "years" => Some("years"),
         _ => None,
     });
-    if let (Some(count), Some(unit)) = (
-        value.first().and_then(|word| contract_number_value(word)),
-        unit,
-    ) {
+    if let Some(unit) = unit {
+        let count_end = value.len()
+            - 1
+            - usize::from(
+                value
+                    .get(value.len().saturating_sub(2))
+                    .is_some_and(|word| matches!(word.as_str(), "calendar" | "business")),
+            );
+        let Some((count, consumed)) = contract_cardinal_prefix(&value[..count_end]) else {
+            return value;
+        };
+        if consumed != count_end {
+            return value;
+        }
         let mut canonical = vec![count.to_string()];
-        if value.len() == 3 && matches!(value[1].as_str(), "calendar" | "business") {
-            canonical.push(value[1].clone());
+        if count_end + 1 < value.len() {
+            canonical.push(value[count_end].clone());
         }
         canonical.push(unit.to_string());
         return canonical;
@@ -5373,7 +5416,6 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
                 | "december"
         )
     };
-    let number = |value: &str| contract_number_value(value).is_some();
     let day = |value: &str| {
         value.len() <= 2
             && value
@@ -5386,7 +5428,8 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
                 .parse::<u16>()
                 .is_ok_and(|number| (1..=9999).contains(&number))
     };
-    for index in 0..tokens.len() {
+    let mut index = 0usize;
+    while index < tokens.len() {
         let month_day_year = month(&tokens[index])
             && tokens.get(index + 1).is_some_and(|value| day(value))
             && tokens.get(index + 2).is_some_and(|value| year(value));
@@ -5398,16 +5441,17 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
                 tokens[index..=index + 2].to_vec(),
             )));
         }
-        if !number(&tokens[index]) {
+        let Some((_, cardinal_tokens)) = contract_cardinal_prefix(&tokens[index..]) else {
+            index += 1;
             continue;
-        }
+        };
         let unit_index = if tokens
-            .get(index + 1)
+            .get(index + cardinal_tokens)
             .is_some_and(|value| matches!(value.as_str(), "calendar" | "business"))
         {
-            index + 2
+            index + cardinal_tokens + 1
         } else {
-            index + 1
+            index + cardinal_tokens
         };
         if tokens.get(unit_index).is_some_and(|value| {
             matches!(
@@ -5418,6 +5462,9 @@ fn contract_material_terms(text: &str) -> Vec<ContractMaterialTerm> {
             terms.insert(ContractMaterialTerm::Words(canonical_contract_words(
                 tokens[index..=unit_index].to_vec(),
             )));
+            index = unit_index + 1;
+        } else {
+            index += 1;
         }
     }
     let mut terms = terms.into_iter().collect::<Vec<_>>();
@@ -13281,6 +13328,64 @@ mod tests {
         );
 
         assert!(contract_material_terms("Release identifier 2026-19-40.").is_empty());
+    }
+
+    #[test]
+    fn contract_material_terms_parse_written_teens_and_compound_cardinals() {
+        for (written, numeric) in [
+            ("fifteen", "15"),
+            ("twenty-one", "21"),
+            ("ninety-nine", "99"),
+        ] {
+            let reference = ContractClauseReference {
+                number: "1".into(),
+                title: "Termination".into(),
+            };
+            let mut source = candidate("s1", "evidence-1", 1);
+            source.evidence.exact_quote =
+                format!("1. Termination. Consultant may terminate with {written} days' notice.");
+            source.contract_clause = Some(reference.clone());
+            let catalog = SourceCatalog {
+                candidates: vec![source],
+                omitted_source_units: 0,
+            };
+            let required = vec![RequiredContractClause {
+                evidence_id: "evidence-1".into(),
+                reference,
+            }];
+            let equivalent = vec![CitedClaim {
+                claim_id: "equivalent-duration".into(),
+                text: format!("Consultant may terminate with {numeric} days' notice."),
+                evidence_ids: vec!["evidence-1".into()],
+            }];
+            assert!(contract_material_term_coverage_feedback(
+                &equivalent,
+                &catalog,
+                Some(&required)
+            )
+            .is_empty());
+
+            let omitted = vec![CitedClaim {
+                text: "Consultant may terminate with notice.".into(),
+                ..equivalent[0].clone()
+            }];
+            assert_eq!(
+                contract_material_term_coverage_feedback(&omitted, &catalog, Some(&required)).len(),
+                1,
+            );
+
+            let changed = vec![CitedClaim {
+                text: format!(
+                    "Consultant may terminate with {} days' notice.",
+                    numeric.parse::<u16>().unwrap() + 1
+                ),
+                ..equivalent[0].clone()
+            }];
+            assert_eq!(
+                contract_material_term_coverage_feedback(&changed, &catalog, Some(&required)).len(),
+                1,
+            );
+        }
     }
 
     #[test]

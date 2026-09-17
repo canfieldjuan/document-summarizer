@@ -109,6 +109,7 @@ const COVERAGE_SHORTFALL_WARNING_CODE: &str = "SUMMARY_COVERAGE_SHORTFALL";
 const QUOTE_BOUNDARY_OMITTED_WARNING_CODE: &str = "ANALYSIS_QUOTE_BOUNDARY_OMITTED";
 pub const MAX_DELIVERY_SUMMARY_TEXT_BYTES: usize = 1024 * 1024;
 pub const SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE: &str = "SUMMARY_TRUNCATED_FOR_DELIVERY";
+const SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE: &str = "SUMMARY_DELIVERY_COVERAGE_FALLBACK";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryDeliveryPolicy {
@@ -716,6 +717,20 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
         control,
     )
     .and_then(|verified| {
+        let verified = apply_verified_delivery_coverage_fallback(
+            verified,
+            &persisted_synthesis,
+            &persisted_analysis,
+            &normalized,
+            delivery_policy,
+        )?;
+        validate_verified_document(
+            &verified,
+            &persisted_synthesis,
+            &persisted_analysis,
+            &chunked,
+            &normalized,
+        )?;
         coherent::validate_verified_profile(summary_profile, &verified, &chunked, &normalized)?;
         Ok(verified)
     }) {
@@ -3461,6 +3476,60 @@ fn presented_claims_empty(verified: &VerifiedDocument) -> bool {
     }
 }
 
+fn claims_satisfy_delivery_page_coverage(
+    claims: &[CitedClaim],
+    evidence: &[EvidenceItem],
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+) -> bool {
+    let evidence_by_id = evidence
+        .iter()
+        .map(|item| (item.evidence_id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    let mut cited_pages = HashSet::new();
+    for evidence_id in claims.iter().flat_map(|claim| &claim.evidence_ids) {
+        let Some(item) = evidence_by_id.get(evidence_id.as_str()) else {
+            return false;
+        };
+        cited_pages.insert(item.source_span.page_start);
+    }
+    delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
+}
+
+fn delivery_coverage_fallback_warning() -> PipelineWarning {
+    PipelineWarning {
+        code: SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE.to_string(),
+        message: "Semantic verification reduced coherent page coverage; showing the verified source claims instead"
+            .to_string(),
+        stage: Some(PipelineStage::Verify),
+    }
+}
+
+fn apply_verified_delivery_coverage_fallback(
+    mut verified: VerifiedDocument,
+    synthesized: &SynthesizedDocument,
+    analyzed: &AnalyzedDocument,
+    normalized: &NormalizedDocument,
+    delivery_policy: Option<SummaryDeliveryPolicy>,
+) -> Result<VerifiedDocument, PipelineFailure> {
+    if delivery_policy.is_none()
+        || synthesized.presentation_mode != SummaryPresentationMode::Coherent
+        || claims_satisfy_delivery_page_coverage(
+            &verified.summary_claims,
+            &verified.synthesis_evidence,
+            &analyzed.omissions,
+            normalized,
+        )
+    {
+        return Ok(verified);
+    }
+    verified.presentation_mode = SummaryPresentationMode::ClaimLedgerFallback;
+    verified.summary_text = render_cited_summary(&verified.claims, analyzed)?;
+    verified.summary_claims.clear();
+    verified.warnings.push(delivery_coverage_fallback_warning());
+    Ok(verified)
+}
+
 fn validate_analyzed_document(
     analyzed: &AnalyzedDocument,
     chunked: &ChunkedDocument,
@@ -3998,7 +4067,7 @@ fn validate_verified_document(
             | PRE_CONTEXT_VERIFICATION_VERSION
             | VERIFICATION_VERSION
     ) {
-        return validate_coherent_verified_document(verified, synthesized, analyzed);
+        return validate_coherent_verified_document(verified, synthesized, analyzed, normalized);
     }
 
     let expected_version = if synthesized.synthesis_version == DIRECT_SYNTHESIS_VERSION {
@@ -4075,13 +4144,19 @@ fn validate_coherent_verified_document(
     verified: &VerifiedDocument,
     synthesized: &SynthesizedDocument,
     analyzed: &AnalyzedDocument,
+    normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
+    let delivery_coverage_fallback = synthesized.synthesis_version == SYNTHESIS_VERSION
+        && verified.verification_version == VERIFICATION_VERSION
+        && synthesized.presentation_mode == SummaryPresentationMode::Coherent
+        && verified.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback;
     let metadata_valid = coherent_verification_versions_match(
         &synthesized.synthesis_version,
         &verified.verification_version,
     ) && verified.document_id == synthesized.document_id
         && verified.synthesis_attempt_ordinal == 0
-        && verified.presentation_mode == synthesized.presentation_mode
+        && (verified.presentation_mode == synthesized.presentation_mode
+            || delivery_coverage_fallback)
         && verified.synthesis_evidence == synthesized.synthesis_evidence
         && !verified.runtime_id.trim().is_empty()
         && !verified.model_id.trim().is_empty()
@@ -4120,7 +4195,19 @@ fn validate_coherent_verified_document(
         .filter(|(_, verification)| verification.verdict == ClaimVerdict::Supported)
         .map(|(claim, _)| claim.clone())
         .collect::<Vec<_>>();
-    let expected_summary = match synthesized.presentation_mode {
+    let delivery_coverage_fallback_valid = !delivery_coverage_fallback
+        || !claims_satisfy_delivery_page_coverage(
+            &supported_summary_claims,
+            &synthesized.synthesis_evidence,
+            &analyzed.omissions,
+            normalized,
+        );
+    let expected_summary_claims = if delivery_coverage_fallback {
+        Vec::new()
+    } else {
+        supported_summary_claims.clone()
+    };
+    let expected_summary = match verified.presentation_mode {
         SummaryPresentationMode::Coherent => render_cited_summary_with_evidence(
             &supported_summary_claims,
             &synthesized.synthesis_evidence,
@@ -4136,13 +4223,18 @@ fn validate_coherent_verified_document(
         .chain(&verified.summary_claim_verifications)
         .cloned()
         .collect::<Vec<_>>();
+    let mut expected_warnings = verification_warnings(synthesized, &all_verifications, false);
+    if delivery_coverage_fallback {
+        expected_warnings.push(delivery_coverage_fallback_warning());
+    }
     if !ledger_coverage_valid
         || !summary_coverage_valid
+        || !delivery_coverage_fallback_valid
         || verified.claims != supported_claims
-        || verified.summary_claims != supported_summary_claims
+        || verified.summary_claims != expected_summary_claims
         || verified.summary_text != expected_summary
         || !verified.key_point_claim_ids.is_empty()
-        || verified.warnings != verification_warnings(synthesized, &all_verifications, false)
+        || verified.warnings != expected_warnings
     {
         eprintln!(
             "coherent validation: metadata={metadata_valid} synth_version={} document={} verify_version={} ordinal={} mode={} evidence={} runtime={} model={} chunks={} ledger_verdicts={} summary_verdicts={} ledger_coverage={ledger_coverage_valid} summary_coverage={summary_coverage_valid} ledger_claims={} summary_claims={} text={} key_points={} warnings={}",
@@ -4156,7 +4248,8 @@ fn validate_coherent_verified_document(
                 &verified.verification_version,
             ),
             verified.synthesis_attempt_ordinal == 0,
-            verified.presentation_mode == synthesized.presentation_mode,
+            verified.presentation_mode == synthesized.presentation_mode
+                || delivery_coverage_fallback,
             verified.synthesis_evidence == synthesized.synthesis_evidence,
             !verified.runtime_id.trim().is_empty(),
             !verified.model_id.trim().is_empty(),
@@ -4164,19 +4257,20 @@ fn validate_coherent_verified_document(
             verified.claim_verifications.len() == synthesized.claims.len(),
             verified.summary_claim_verifications.len() == synthesized.summary_claims.len(),
             verified.claims == supported_claims,
-            verified.summary_claims == supported_summary_claims,
+            verified.summary_claims == expected_summary_claims,
             verified.summary_text == expected_summary,
             verified.key_point_claim_ids.is_empty(),
-            verified.warnings == verification_warnings(synthesized, &all_verifications, false),
+            verified.warnings == expected_warnings,
         );
     }
     if !ledger_coverage_valid
         || !summary_coverage_valid
+        || !delivery_coverage_fallback_valid
         || verified.claims != supported_claims
-        || verified.summary_claims != supported_summary_claims
+        || verified.summary_claims != expected_summary_claims
         || verified.summary_text != expected_summary
         || !verified.key_point_claim_ids.is_empty()
-        || verified.warnings != verification_warnings(synthesized, &all_verifications, false)
+        || verified.warnings != expected_warnings
         || verified
             .warnings
             .iter()
@@ -5184,6 +5278,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum VerificationFixtureMode {
         Mixed,
+        SummaryCoverageShortfall,
         AllUnsupported,
         LedgerUnsupportedSummarySupported,
         ShortfallThenSupported,
@@ -5497,6 +5592,17 @@ mod tests {
                         .map(|(index, claim)| RawClaimVerdict {
                             claim_id: claim.claim_id,
                             verdict: match self.mode {
+                                VerificationFixtureMode::SummaryCoverageShortfall
+                                    if verification_call == 0 =>
+                                {
+                                    ClaimVerdict::Supported
+                                }
+                                VerificationFixtureMode::SummaryCoverageShortfall if index == 0 => {
+                                    ClaimVerdict::Unsupported
+                                }
+                                VerificationFixtureMode::SummaryCoverageShortfall => {
+                                    ClaimVerdict::Supported
+                                }
                                 VerificationFixtureMode::AllUnsupported => {
                                     ClaimVerdict::Unsupported
                                 }
@@ -5610,6 +5716,33 @@ mod tests {
                                 "text": "A family member of the owner qualifies for the exemption.",
                                 "source_ids": ["s1"]
                             }]
+                        })
+                        .to_string()
+                    } else if matches!(self.mode, VerificationFixtureMode::SummaryCoverageShortfall)
+                    {
+                        let prompt: Value = serde_json::from_str(&request.user_prompt)
+                            .expect("coverage fixture prompt should deserialize");
+                        let sources = prompt["source_segments"]
+                            .as_array()
+                            .expect("coverage fixture requires sources");
+                        let midpoint = sources.len().div_ceil(2);
+                        let source_ids = |range: std::ops::Range<usize>| {
+                            sources[range]
+                                .iter()
+                                .map(|source| source["source_id"].clone())
+                                .collect::<Vec<_>>()
+                        };
+                        json!({
+                            "units": [
+                                {
+                                    "text": "The document presents its central information and material qualifications.",
+                                    "source_ids": source_ids(0..midpoint)
+                                },
+                                {
+                                    "text": "The document also presents its supporting details and stated conditions.",
+                                    "source_ids": source_ids(midpoint..sources.len())
+                                }
+                            ]
                         })
                         .to_string()
                     } else {
@@ -10126,6 +10259,14 @@ mod tests {
         let completed = summarize_chunked_document(&mut conn, &runtime, &run_id).unwrap();
         let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
         let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+        assert_eq!(
+            verified.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert_eq!(
+            completed.citations.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
         assert_eq!(runtime.synthesis_calls.load(Ordering::SeqCst), 1);
         assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
         assert_eq!(verified.synthesis_attempt_ordinal, 0);
@@ -10203,6 +10344,88 @@ mod tests {
             &normalized
         ));
         assert!(get_summary_artifact(&conn, &run_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn connect_verification_falls_back_when_supported_coherent_coverage_is_too_low() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Story);
+        let runtime =
+            VerificationFixtureRuntime::new(VerificationFixtureMode::SummaryCoverageShortfall);
+        let delivery = Some(SummaryDeliveryPolicy::connect());
+
+        analyze_chunked_document_controlled_with_delivery(
+            &mut conn,
+            &runtime,
+            &run_id,
+            &UNCONTROLLED_EXECUTION,
+            delivery,
+        )
+        .unwrap();
+        let synthesized = synthesize_analyzed_document_controlled_with_delivery(
+            &mut conn,
+            &runtime,
+            &run_id,
+            &UNCONTROLLED_EXECUTION,
+            delivery,
+        )
+        .unwrap();
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+
+        let verified = verify_synthesized_document_controlled_with_delivery(
+            &mut conn,
+            &runtime,
+            &run_id,
+            &UNCONTROLLED_EXECUTION,
+            delivery,
+        )
+        .unwrap();
+        let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
+        let supported_coherent_claims = synthesized
+            .summary_claims
+            .iter()
+            .zip(&verified.summary_claim_verifications)
+            .filter(|(_, verification)| verification.verdict == ClaimVerdict::Supported)
+            .map(|(claim, _)| claim);
+        let cited_pages = supported_coherent_claims
+            .flat_map(|claim| &claim.evidence_ids)
+            .filter_map(|evidence_id| {
+                synthesized
+                    .synthesis_evidence
+                    .iter()
+                    .find(|evidence| evidence.evidence_id == *evidence_id)
+                    .map(|evidence| evidence.source_span.page_start)
+            })
+            .collect::<HashSet<_>>();
+        assert!(!delivery_page_coverage_satisfied(
+            &cited_pages,
+            &[],
+            &normalized,
+        ));
+        assert_eq!(
+            verified.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(verified.warnings.iter().any(|warning| {
+            warning.code == SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE
+                && warning.stage == Some(PipelineStage::Verify)
+        }));
+
+        let completed = complete_verified_document_with_delivery(
+            &mut conn,
+            &run_id,
+            Some(SummaryDeliveryPolicy::connect()),
+        )
+        .expect("the already verified ledger should replace undercovered coherent prose");
+        assert_eq!(
+            completed.citations.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(completed.citations.summary_claims.is_empty());
+        assert!(!completed.citations.claims.is_empty());
     }
 
     #[test]
