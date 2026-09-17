@@ -1363,6 +1363,56 @@ mod tests {
     }
 
     #[test]
+    fn pre_contract_source_synthesis_checkpoint_requires_retry_before_verification() {
+        let source = TestSource::from_fixture();
+        let pipeline = TestPipeline::default();
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let run = prepare_checkpoint(
+            &mut conn,
+            &source,
+            &pipeline,
+            &FixtureRuntime,
+            ContinuationCheckpoint::Synthesized,
+        );
+        let mut synthesized = get_synthesized_document(&conn, &run.run_id)
+            .expect("synthesis should load")
+            .expect("synthesis should exist");
+        synthesized.synthesis_version = "8.0.0".to_string();
+        let artifact_json = serde_json::to_string(&synthesized)
+            .expect("pre-Contract-source synthesis should serialize");
+        let artifact_hash = format!("{:x}", Sha256::digest(artifact_json.as_bytes()));
+        conn.execute(
+            "UPDATE synthesized_documents
+             SET synthesis_version = ?1, artifact_hash = ?2, synthesized_artifact = ?3
+             WHERE run_id = ?4",
+            params![
+                synthesized.synthesis_version,
+                artifact_hash,
+                artifact_json,
+                run.run_id
+            ],
+        )
+        .expect("pre-Contract-source synthesis fixture should install");
+
+        let error = continue_run_to_summary(
+            &mut conn,
+            &run.run_id,
+            run.state_version,
+            pipeline.continuation_components(Some(&FixtureRuntime)),
+        )
+        .expect_err("a synthesis-8 coherent checkpoint must not enter current verification");
+        assert_eq!(error.code(), "COHERENT_CHECKPOINT_REQUIRES_RETRY");
+        let failed = get_pipeline_run(&conn, &run.run_id)
+            .expect("failed run should load")
+            .expect("failed run should exist");
+        assert_eq!(failed.state, PipelineState::Failed);
+        assert!(failed.retry_checkpoint().is_some());
+        assert!(get_verified_document(&conn, &run.run_id)
+            .expect("verification query should succeed")
+            .is_none());
+    }
+
+    #[test]
     fn pre_disclosure_fallback_checkpoints_remain_continuable() {
         let source = TestSource::from_fixture();
         let pipeline = TestPipeline::default();

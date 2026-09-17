@@ -6,9 +6,12 @@ use crate::connect::contracts::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
+
+use crate::pipeline::contracts::SummaryProfile;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const TRANSPORT_KIND: &str = "http-loopback-v2";
@@ -80,21 +83,13 @@ pub struct RuntimeRegistration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ParameterValue {
-    String(String),
-    Integer(i64),
-    Boolean(bool),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobRequest {
     pub protocol_version: u32,
     pub job_id: String,
     pub capability: CapabilityRef,
     pub inputs: Vec<InputArtifact>,
-    pub parameters: BTreeMap<String, ParameterValue>,
+    pub parameters: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,7 +163,14 @@ impl AppManifest {
                     max_bytes: max_input_bytes,
                 }],
                 produces: vec![OUTPUT_MEDIA_TYPE.to_string()],
-                parameters: vec![],
+                parameters: vec![ParameterDeclaration {
+                    name: "mode".to_string(),
+                    value_type: ParameterType::String,
+                    required: false,
+                    label: "Summary mode".to_string(),
+                    description: "Choose general, story, or contract. Defaults to general."
+                        .to_string(),
+                }],
                 effects: CapabilityEffects {
                     external: false,
                     confirmation_required: false,
@@ -187,15 +189,24 @@ impl JobRequest {
                 false,
             ));
         }
-        if !self.parameters.is_empty() {
-            return Err(v1::job_error(
-                "PARAMETERS_INVALID",
-                "This capability does not accept invocation parameters.",
-                false,
-            ));
-        }
+        self.summary_profile()?;
         self.as_internal()
             .validate_v2_input_descriptor(max_input_bytes)
+    }
+
+    pub fn summary_profile(&self) -> Result<SummaryProfile, JobError> {
+        if self.parameters.is_empty() {
+            return Ok(SummaryProfile::General);
+        }
+        if self.parameters.len() != 1 {
+            return Err(invalid_parameters());
+        }
+        match self.parameters.get("mode").and_then(Value::as_str) {
+            Some("general") => Ok(SummaryProfile::General),
+            Some("story") => Ok(SummaryProfile::Story),
+            Some("contract") => Ok(SummaryProfile::Contract),
+            _ => Err(invalid_parameters()),
+        }
     }
 
     pub fn canonical_hash(&self) -> Result<String, serde_json::Error> {
@@ -210,6 +221,14 @@ impl JobRequest {
             inputs: self.inputs.clone(),
         }
     }
+}
+
+fn invalid_parameters() -> JobError {
+    v1::job_error(
+        "PARAMETERS_INVALID",
+        "The summary mode parameter is invalid.",
+        false,
+    )
 }
 
 impl JobStatus {
@@ -276,7 +295,7 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
 
-    const CONTRACTS_REVISION: &str = "4d46af25ef5112f76daf841c7622987f05d25142";
+    const CONTRACTS_REVISION: &str = "58d0fa0b57ef0beb27ce4ea5a60293bb4f06b5f2";
 
     fn canonical_fixture(relative_path: &str) -> Value {
         let repository = PathBuf::from(
@@ -332,13 +351,105 @@ mod tests {
         let capability = &manifest.capabilities[0];
         assert_eq!(manifest.protocol_version, PROTOCOL_VERSION);
         assert_eq!(capability.action.label, "Summarize");
-        assert!(capability.parameters.is_empty());
+        assert_eq!(capability.parameters.len(), 1);
         assert!(!capability.effects.external);
         assert!(!capability.effects.confirmation_required);
     }
 
     #[test]
-    fn summary_request_rejects_protocol_parameters_and_v1_input_violations() {
+    fn contract_mode_is_declared_and_accepted() {
+        let manifest = AppManifest::new(
+            "11111111-1111-4111-8111-111111111111",
+            v1::DEFAULT_MAX_INPUT_BYTES,
+        );
+        let capability = &manifest.capabilities[0];
+        assert_eq!(
+            capability.parameters,
+            vec![ParameterDeclaration {
+                name: "mode".to_string(),
+                value_type: ParameterType::String,
+                required: false,
+                label: "Summary mode".to_string(),
+                description: "Choose general, story, or contract. Defaults to general.".to_string(),
+            }]
+        );
+
+        let mut contract = request();
+        contract
+            .parameters
+            .insert("mode".to_string(), Value::String("contract".to_string()));
+        assert!(contract.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_ok());
+        assert_eq!(
+            contract.summary_profile().unwrap(),
+            SummaryProfile::Contract
+        );
+    }
+
+    #[test]
+    fn summary_mode_boundary_matrix_is_exact_and_hashed() {
+        assert_eq!(
+            request().summary_profile().unwrap(),
+            SummaryProfile::General
+        );
+
+        for (mode, expected) in [
+            ("general", SummaryProfile::General),
+            ("story", SummaryProfile::Story),
+            ("contract", SummaryProfile::Contract),
+        ] {
+            let mut accepted = request();
+            accepted
+                .parameters
+                .insert("mode".to_string(), Value::String(mode.to_string()));
+            assert!(accepted.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_ok());
+            assert_eq!(accepted.summary_profile().unwrap(), expected);
+        }
+
+        for rejected in [
+            Value::String("Contract".to_string()),
+            Value::String(String::new()),
+            Value::String("unknown".to_string()),
+            Value::from(0),
+            Value::Bool(false),
+            Value::Null,
+        ] {
+            let mut invalid = request();
+            invalid.parameters.insert("mode".to_string(), rejected);
+            assert_eq!(
+                invalid
+                    .validate(v1::DEFAULT_MAX_INPUT_BYTES)
+                    .unwrap_err()
+                    .code,
+                "PARAMETERS_INVALID"
+            );
+        }
+
+        let mut extra = request();
+        extra
+            .parameters
+            .insert("mode".to_string(), Value::String("contract".to_string()));
+        extra.parameters.insert(
+            "target-language".to_string(),
+            Value::String("Spanish".to_string()),
+        );
+        assert_eq!(
+            extra
+                .validate(v1::DEFAULT_MAX_INPUT_BYTES)
+                .unwrap_err()
+                .code,
+            "PARAMETERS_INVALID"
+        );
+
+        let general_hash = request().canonical_hash().unwrap();
+        let mut contract = request();
+        contract
+            .parameters
+            .insert("mode".to_string(), Value::String("contract".to_string()));
+        assert_ne!(contract.canonical_hash().unwrap(), general_hash);
+    }
+
+    #[test]
+    fn summary_request_rejects_protocol_and_v1_input_violations() {
         assert!(request().validate(v1::DEFAULT_MAX_INPUT_BYTES).is_ok());
 
         let mut protocol = request();
@@ -349,19 +460,6 @@ mod tests {
                 .unwrap_err()
                 .code,
             "PROTOCOL_VERSION_UNSUPPORTED"
-        );
-
-        let mut parameters = request();
-        parameters.parameters.insert(
-            "target-language".to_string(),
-            ParameterValue::String("Spanish".to_string()),
-        );
-        assert_eq!(
-            parameters
-                .validate(v1::DEFAULT_MAX_INPUT_BYTES)
-                .unwrap_err()
-                .code,
-            "PARAMETERS_INVALID"
         );
 
         let mut path = request();

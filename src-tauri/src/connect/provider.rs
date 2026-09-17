@@ -11,6 +11,7 @@ use crate::connect::windows_storage::{self, FileLockError, WindowsFileLock};
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
     AnalysisPageOmission, ModelRuntime, ModelRuntimeFailure, NormalizedDocument, SummaryArtifacts,
+    SummaryProfile,
 };
 #[cfg(test)]
 use crate::pipeline::contracts::{ModelProfileSnapshot, ModelStageProfileSnapshot};
@@ -722,7 +723,7 @@ fn parse_job_request(
     bytes: &[u8],
     version: WireVersion,
     max_input_bytes: u64,
-) -> Result<(JobRequest, String), ProviderHttpError> {
+) -> Result<(JobRequest, String, SummaryProfile), ProviderHttpError> {
     match version {
         WireVersion::V1 => {
             let request: JobRequest = serde_json::from_slice(bytes).map_err(|_| {
@@ -732,7 +733,7 @@ fn parse_job_request(
                 .validate(max_input_bytes)
                 .map_err(ProviderHttpError::from_job_error)?;
             let request_hash = request.canonical_hash().map_err(ProviderHttpError::json)?;
-            Ok((request, request_hash))
+            Ok((request, request_hash, SummaryProfile::General))
         }
         WireVersion::V2 => {
             let request: v2::JobRequest = serde_json::from_slice(bytes).map_err(|_| {
@@ -741,10 +742,13 @@ fn parse_job_request(
             request
                 .validate(max_input_bytes)
                 .map_err(ProviderHttpError::from_job_error)?;
+            let summary_profile = request
+                .summary_profile()
+                .map_err(ProviderHttpError::from_job_error)?;
             let request_hash = request.canonical_hash().map_err(ProviderHttpError::json)?;
             let mut internal = request.as_internal();
             internal.protocol_version = v2::PROTOCOL_VERSION;
-            Ok((internal, request_hash))
+            Ok((internal, request_hash, summary_profile))
         }
     }
 }
@@ -892,7 +896,7 @@ async fn create_job_for(
         ));
     }
     let request_bytes = read_field_limited(request_field, MAX_REQUEST_JSON_BYTES).await?;
-    let (request, request_hash) =
+    let (request, request_hash, summary_profile) =
         parse_job_request(&request_bytes, version, state.max_input_bytes)?;
 
     let mut conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
@@ -1019,6 +1023,7 @@ async fn create_job_for(
         provider_instance_id,
         &document,
         &run,
+        summary_profile,
         Some(&profile_snapshot),
         || state.entitlement.decision().is_active(),
     );
@@ -3781,6 +3786,7 @@ mod tests {
                 "concurrent-provider",
                 &document,
                 &run,
+                SummaryProfile::General,
                 Some(&fixture_profile_snapshot()),
                 || true,
             )
@@ -3986,6 +3992,10 @@ mod tests {
 
         let mut request_v2 = fixture_request_v2(&bytes);
         request_v2.inputs[0].display_name = "quarterly-report".to_string();
+        request_v2.parameters.insert(
+            "mode".to_string(),
+            serde_json::Value::String("contract".to_string()),
+        );
         let accepted_v2 = client
             .post(format!("{}v2/jobs", provider.base_url()))
             .bearer_auth(&registration_v2.auth.token)
@@ -3999,7 +4009,12 @@ mod tests {
             &registration_v2.auth.token,
             &request_v2.job_id,
         );
-        assert_eq!(terminal_v2.status, JobState::Completed);
+        assert_eq!(
+            terminal_v2.status,
+            JobState::Completed,
+            "v2 terminal error: {:?}",
+            terminal_v2.error
+        );
         assert_eq!(terminal_v2.protocol_version, v2::PROTOCOL_VERSION);
         assert!(terminal_v2.error.is_none());
         let output_v2 = &terminal_v2.result.as_ref().unwrap().outputs[0];
@@ -4030,6 +4045,27 @@ mod tests {
             .expect("v2 idempotent submission should succeed");
         assert_eq!(duplicate_v2.status(), StatusCode::OK);
 
+        let mut conflicting_mode_v2 = request_v2.clone();
+        conflicting_mode_v2.parameters.insert(
+            "mode".to_string(),
+            serde_json::Value::String("general".to_string()),
+        );
+        let conflicting_mode_response = client
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration_v2.auth.token)
+            .multipart(form_v2(&conflicting_mode_v2, bytes.clone()))
+            .send()
+            .expect("v2 conflicting mode submission should return a response");
+        assert_eq!(conflicting_mode_response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            conflicting_mode_response
+                .json::<ErrorEnvelope>()
+                .unwrap()
+                .error
+                .code,
+            "JOB_ID_CONFLICT"
+        );
+
         let conn = db::init_db(&db_path).unwrap();
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM connect_jobs", [], |row| {
@@ -4048,6 +4084,10 @@ mod tests {
         let stored = store::get_job(&conn, &request.job_id)
             .unwrap()
             .expect("job should persist");
+        assert_eq!(
+            db::get_run_summary_profile(&conn, &stored.pipeline_run_id).unwrap(),
+            Some(SummaryProfile::General)
+        );
         let run = db::get_pipeline_run(&conn, &stored.pipeline_run_id)
             .unwrap()
             .expect("pipeline run should persist");
@@ -4064,6 +4104,10 @@ mod tests {
             .unwrap()
             .expect("v2 job should persist");
         assert_eq!(stored_v2.protocol_version, v2::PROTOCOL_VERSION);
+        assert_eq!(
+            db::get_run_summary_profile(&conn, &stored_v2.pipeline_run_id).unwrap(),
+            Some(SummaryProfile::Contract)
+        );
         let run_v2 = db::get_pipeline_run(&conn, &stored_v2.pipeline_run_id)
             .unwrap()
             .expect("v2 pipeline run should persist");

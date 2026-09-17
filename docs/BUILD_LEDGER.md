@@ -4216,3 +4216,48 @@ proof complete
 - No prompt, summary-profile, routing, citation, result-identity, schema,
   Connect, entitlement, UI, or installer behavior changed in this evidence
   slice. Issue #52 remains tabled at its existing fail-closed boundary.
+
+## Slice 40 — Contract Watch Connect Profiles (2026-09-17)
+
+**Status**: local implementation and focused cross-application proof complete;
+published review and CI reconciliation remain in progress
+
+**Contract and implementation**:
+- Connect v2 `document.summarize` admits an optional string `mode`. Omission
+  remains General; the strict admitted values are General, Story and Contract.
+  The provider persists that selected profile before running the shared local
+  pipeline.
+- General Connect jobs retain direct claim-ledger synthesis. Story and Contract
+  use their named coherent behavior. A specialized coherent result whose cited
+  evidence does not meet Connect's existing raw and omission-adjusted page
+  coverage floors becomes the verified claim-ledger fallback before synthesis
+  persistence. The final delivery gate remains unchanged and independently
+  rechecks coverage after semantic filtering.
+- Current coherent synthesis is version 9.0.0 because bounded Contract source
+  segmentation changes deterministic evidence identities. Completed version-8
+  artifacts retain their existing validation pairing, while active coherent
+  version-8 checkpoints enter the existing retry path before verification.
+- A bounded short Contract may split numbered clauses embedded in at most six
+  normalized blocks. The derived catalog admits no more than six distinct
+  clauses and twelve total segments, keeps each exact quote inside the existing
+  limit, and fails back to the ordinary catalog on ambiguity or overflow.
+  Clause completeness also checks each clause's own cited units for its explicit
+  dates, durations and currency amounts.
+
+**Focused verification**:
+- The `connect_` filter passed 15 library tests and the native Windows Connect
+  release-boundary test. This includes a 30-page regression proving standalone
+  Story may keep bounded coherent selection while Connect converts the same
+  undercovered evidence into the verified ledger fallback.
+- The `contract_` filter passed 14 deterministic tests with five configured
+  live probes ignored. The covered boundaries include strict mode admission,
+  bounded clause splitting, material-term isolation, semantic filtering and
+  long Contract source selection.
+
+**Non-scope and remaining external gates**:
+- The change does not reduce delivery coverage, change the Connect wire result
+  schema, alter General output, add a model dependency, or change translation.
+- GitHub CI logs for the first published head were unavailable while the
+  workflows were still running. Exact replacement-head CI and review state must
+  be reconciled after publication; installed-app platform proof remains a
+  separate release gate.
