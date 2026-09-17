@@ -6225,8 +6225,8 @@ fn prompt_and_schema(
         ));
     }
     let maximum_units = maximum_initial_summary_units_for_catalog(profile, catalog);
-    let include_contract_clause_mapping = profile == SummaryProfile::Contract
-        && required_short_contract_clauses(catalog).is_some();
+    let include_contract_clause_mapping =
+        profile == SummaryProfile::Contract && required_short_contract_clauses(catalog).is_some();
     let prompt = Prompt {
         maximum_units,
         source_segments: catalog
