@@ -209,9 +209,15 @@ Reinstall completes any interrupted removal, creates a new install generation
 before admission, and settles the preserved choices without starting a provider
 against partial package artifacts.
 The first upgrade from a package without this controller is closed by a
-root-owned, SHA-256-bound preinstall quiesce record. The preinstall script never
-executes the legacy desktop binary; the unpacked controller validates and adopts
-the exact bootstrap generation before provider restoration.
+root-owned, SHA-256-bound preinstall quiesce record. Preinstall validates an
+existing record as a no-follow regular 0600 file with exact canonical fields,
+versions, generation, phase, and digest. It binds the installed executable by
+device, inode, and digest, moves a private verified copy into the package tree,
+installs a fail-closed launcher, and stops only matching legacy processes with a
+bounded wait. It never executes the legacy desktop binary. After unpack, the new
+binary remains barred by the durable record until postinstall adopts the exact
+generation into the package record. Adoption durably marks cleanup, removes only
+the verified quarantine copy, and can resume before or after that removal.
 
 A raw `cargo build --release` is intentionally rejected because it can produce a
 desktop executable that points at the development server instead of embedding

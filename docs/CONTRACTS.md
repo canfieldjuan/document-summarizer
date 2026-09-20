@@ -2021,7 +2021,12 @@ discovery does not enumerate `/etc/passwd` or guess XDG locations.
 Upgrade, removal, and reinstall suppress every recorded manager, stop and clean
 each exact provider, and keep the package record as an admission barrier while
 each participant is settled. An enabled participant with an available user
-manager is recorded ready only after an authenticated provider probe. An
+manager is restored only after the controller releases quiesce, package, and
+per-user startup authorities. The package record remains the admission barrier
+while that successor starts. After authenticated readiness, the controller
+reacquires quiesce, package, and per-user authorities in canonical order and
+revalidates the exact generation, phase, participant snapshot, runtime identity,
+and provider registration before recording settlement. An
 enabled participant without a service session is durably recorded
 `deferred_enabled`; a disabled participant remains disabled. Removal writes a
 generation-bound receipt and retains its root-only controller. A later install
@@ -2042,10 +2047,21 @@ is owner-private. The controller persists that authenticated device and inode in
 the same package generation before restoration. A participant captured with an
 existing runtime never accepts a replacement inode. For the first upgrade from
 a legacy package, preinstall writes the fixed root-owned quiesce record directly
-and never invokes the installed desktop executable. Postinstall's new controller
-validates the record checksum, ownership, mode, generation, kind, and versions,
-adopts it as the package operation, and resumes idempotently; malformed or
-replayed-different bootstrap state remains a barrier.
+and never invokes the installed desktop executable. Before accepting an existing
+record it requires a no-follow regular root-owned 0600 file with one link, exact
+canonical fields, matching source and target versions, a valid phase, and a
+matching SHA-256 digest. The record binds the legacy executable device, inode,
+and digest. Preinstall copies that exact executable into a private fixed
+generation quarantine, atomically replaces the installed path with a launcher
+that exits closed, validates published registrations, and stops every process
+still executing the bound inode with bounded TERM and KILL waits. The wrapper
+blocks legacy restarts before unpack; after unpack, the quiesce record blocks the
+new binary until adoption. Every mutation is replayable from `quarantining` or
+`quiesced` without executing the old binary. Postinstall's new controller
+validates the same record and quarantine, creates the exact package operation,
+durably advances the marker to `adopted`, and removes only the matching private
+quarantine. A crash before or after removal resumes from that phase. Malformed,
+replayed-different, or tampered bootstrap state remains a barrier.
 
 On Unix, publication, startup scavenging, and removal share an owner-only
 lifecycle-file lock. Windows publication writes a fixed same-directory

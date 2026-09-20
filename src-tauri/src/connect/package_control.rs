@@ -27,6 +27,7 @@ const REMOVAL_RECEIPT_FILE: &str = "package-removal-receipt-v1.json";
 const INSTALL_RECEIPT_FILE: &str = "package-install-receipt-v1.json";
 const MAX_RECORD_BYTES: u64 = 256 * 1024;
 const QUIESCE_FORMAT_VERSION: u32 = 1;
+const BOOTSTRAP_QUIESCE_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub(crate) enum PackageControlError {
@@ -152,6 +153,22 @@ struct QuiesceIntent {
     kind: PackageKind,
     source_version: String,
     target_version: String,
+    bootstrap: Option<BootstrapQuiesce>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootstrapPhase {
+    Quarantining,
+    Quiesced,
+    Adopted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BootstrapQuiesce {
+    phase: BootstrapPhase,
+    legacy_device: u64,
+    legacy_inode: u64,
+    legacy_sha256: String,
 }
 
 pub(crate) enum PackageAction<'a> {
@@ -174,6 +191,12 @@ trait PackageEffects {
         participant: &Participant,
         package_generation: &str,
     ) -> Result<ParticipantSettlement, PackageControlError>;
+    fn validate_restored(
+        &mut self,
+        participant: &Participant,
+        package_generation: &str,
+        settlement: ParticipantSettlement,
+    ) -> Result<(), PackageControlError>;
     fn cleanup(&mut self, participant: &Participant) -> Result<(), PackageControlError>;
     fn refresh_runtime_identity(
         &mut self,
@@ -250,6 +273,11 @@ impl PackageStore {
 
     fn quiesce_path(&self) -> PathBuf {
         self.root.join(QUIESCE_FILE)
+    }
+
+    fn bootstrap_quarantine_path(&self, generation: &str) -> Result<PathBuf, PackageControlError> {
+        Uuid::parse_str(generation).map_err(|_| PackageControlError::Conflict)?;
+        Ok(self.root.join(format!("legacy-executable-{generation}")))
     }
 
     fn removal_receipt_path(&self) -> PathBuf {
@@ -455,7 +483,7 @@ pub(crate) fn run(action: PackageAction<'_>) -> Result<(), PackageControlError> 
     }
     let store = PackageStore::production();
     let _controller = store.controller_lock()?;
-    let _quiesce_authority = store.quiesce_lock(true)?;
+    let quiesce_authority = store.quiesce_lock(true)?;
     let mut effects = SystemEffects {
         package_root: store.root.clone(),
     };
@@ -477,13 +505,17 @@ pub(crate) fn run(action: PackageAction<'_>) -> Result<(), PackageControlError> 
             if intent.kind != PackageKind::Upgrade {
                 return Err(PackageControlError::Conflict);
             }
-            prepare_from_intent(&store, &intent, &mut effects)?;
-            let _package_authority = store.lock()?;
-            store.clear_quiesce(&intent.generation)
+            adopt_bootstrap(&store, &intent, &mut effects)
         }
         action => {
             let lock = store.lock()?;
-            run_with(&store, action, &mut effects, Some(&lock))
+            run_with(
+                &store,
+                action,
+                &mut effects,
+                Some(&quiesce_authority),
+                Some(&lock),
+            )
         }
     }
 }
@@ -505,6 +537,7 @@ fn ensure_quiesce_intent(
         kind,
         source_version: source.to_string(),
         target_version: target.to_string(),
+        bootstrap: None,
     };
     if let Some(existing) = store.read_quiesce()? {
         return (existing == expected
@@ -517,6 +550,42 @@ fn ensure_quiesce_intent(
     }
     store.write_quiesce(&expected)?;
     Ok(expected)
+}
+
+fn adopt_bootstrap(
+    store: &PackageStore,
+    intent: &QuiesceIntent,
+    effects: &mut dyn PackageEffects,
+) -> Result<(), PackageControlError> {
+    let bootstrap = intent
+        .bootstrap
+        .as_ref()
+        .ok_or(PackageControlError::Conflict)?;
+    match bootstrap.phase {
+        BootstrapPhase::Quarantining => return Err(PackageControlError::Conflict),
+        BootstrapPhase::Quiesced => validate_bootstrap_quarantine(store, intent, false)?,
+        BootstrapPhase::Adopted => validate_bootstrap_quarantine(store, intent, true)?,
+    }
+    prepare_from_intent(store, intent, effects)?;
+    let _package_authority = store.lock()?;
+    let current = store.read_quiesce()?.ok_or(PackageControlError::Conflict)?;
+    if current != *intent {
+        return Err(PackageControlError::Conflict);
+    }
+    let adopted = if bootstrap.phase == BootstrapPhase::Adopted {
+        intent.clone()
+    } else {
+        let mut adopted = intent.clone();
+        adopted
+            .bootstrap
+            .as_mut()
+            .ok_or(PackageControlError::Conflict)?
+            .phase = BootstrapPhase::Adopted;
+        store.write_quiesce(&adopted)?;
+        adopted
+    };
+    remove_bootstrap_quarantine(store, &adopted)?;
+    store.clear_quiesce(&adopted.generation)
 }
 
 fn prepare_from_intent(
@@ -580,6 +649,7 @@ fn run_with(
     store: &PackageStore,
     action: PackageAction<'_>,
     effects: &mut dyn PackageEffects,
+    quiesce_lock: Option<&File>,
     package_lock: Option<&File>,
 ) -> Result<(), PackageControlError> {
     match action {
@@ -590,21 +660,41 @@ fn run_with(
         PackageAction::PrepareRemove { target } => {
             prepare(store, PackageKind::Remove, target, target, effects)
         }
-        PackageAction::FinishUpgrade { target } => {
-            finish(store, PackageKind::Upgrade, target, effects, package_lock)
-        }
-        PackageAction::FinishRemove { target } => {
-            finish(store, PackageKind::Remove, target, effects, package_lock)
-        }
+        PackageAction::FinishUpgrade { target } => finish(
+            store,
+            PackageKind::Upgrade,
+            target,
+            effects,
+            quiesce_lock,
+            package_lock,
+        ),
+        PackageAction::FinishRemove { target } => finish(
+            store,
+            PackageKind::Remove,
+            target,
+            effects,
+            quiesce_lock,
+            package_lock,
+        ),
         PackageAction::RecoverInstall { target } => {
             let record = store.read()?.ok_or(PackageControlError::Conflict)?;
             match record.kind {
-                PackageKind::Upgrade => {
-                    finish(store, PackageKind::Upgrade, target, effects, package_lock)
-                }
-                PackageKind::Reinstall => {
-                    finish(store, PackageKind::Reinstall, target, effects, package_lock)
-                }
+                PackageKind::Upgrade => finish(
+                    store,
+                    PackageKind::Upgrade,
+                    target,
+                    effects,
+                    quiesce_lock,
+                    package_lock,
+                ),
+                PackageKind::Reinstall => finish(
+                    store,
+                    PackageKind::Reinstall,
+                    target,
+                    effects,
+                    quiesce_lock,
+                    package_lock,
+                ),
                 PackageKind::Remove => Err(PackageControlError::Conflict),
             }
         }
@@ -624,6 +714,7 @@ fn run_with(
                             PackageKind::Remove,
                             &record.target_version,
                             effects,
+                            quiesce_lock,
                             package_lock,
                         )?;
                     }
@@ -687,6 +778,7 @@ fn finish(
     kind: PackageKind,
     target: &str,
     effects: &mut dyn PackageEffects,
+    quiesce_lock: Option<&File>,
     package_lock: Option<&File>,
 ) -> Result<(), PackageControlError> {
     let mut record = store.read()?.ok_or(PackageControlError::Conflict)?;
@@ -724,9 +816,15 @@ fn finish(
                 if let Some(lock) = package_lock {
                     File::unlock(lock).map_err(|_| PackageControlError::Storage)?;
                 }
+                if let Some(lock) = quiesce_lock {
+                    File::unlock(lock).map_err(|_| PackageControlError::Storage)?;
+                }
                 let restored = effects.restore(&participant, &record.generation);
+                if let Some(lock) = quiesce_lock {
+                    lock_exclusive_bounded(lock)?;
+                }
                 if let Some(lock) = package_lock {
-                    lock.lock().map_err(|_| PackageControlError::Storage)?;
+                    lock_exclusive_bounded(lock)?;
                 }
                 participant_authorities = lock_participant_authorities(
                     &record.participants,
@@ -740,7 +838,9 @@ fn finish(
                 {
                     return Err(PackageControlError::Conflict);
                 }
-                record.participants[index].settlement = restored?;
+                let settlement = restored?;
+                effects.validate_restored(&participant, &record.generation, settlement)?;
+                record.participants[index].settlement = settlement;
             } else {
                 record.participants[index].settlement = ParticipantSettlement::Disabled;
             }
@@ -1318,19 +1418,141 @@ fn package_kind_text(kind: PackageKind) -> &'static str {
     }
 }
 
+fn open_bootstrap_quarantine(
+    store: &PackageStore,
+    intent: &QuiesceIntent,
+) -> Result<Option<(File, fs::Metadata, PathBuf)>, PackageControlError> {
+    let bootstrap = intent
+        .bootstrap
+        .as_ref()
+        .ok_or(PackageControlError::Conflict)?;
+    if bootstrap.legacy_device == 0
+        || bootstrap.legacy_inode == 0
+        || bootstrap.legacy_sha256.len() != 64
+        || !bootstrap
+            .legacy_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(PackageControlError::Conflict);
+    }
+    let path = store.bootstrap_quarantine_path(&intent.generation)?;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(PackageControlError::Storage),
+    };
+    let metadata = file.metadata().map_err(|_| PackageControlError::Storage)?;
+    let root = fs::symlink_metadata(&store.root).map_err(|_| PackageControlError::Storage)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != root.uid()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.len() == 0
+    {
+        return Err(PackageControlError::Conflict);
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| PackageControlError::Storage)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if format!("{:x}", hasher.finalize()) != bootstrap.legacy_sha256 {
+        return Err(PackageControlError::Conflict);
+    }
+    let current = fs::symlink_metadata(&path).map_err(|_| PackageControlError::Storage)?;
+    if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
+        return Err(PackageControlError::Conflict);
+    }
+    Ok(Some((file, metadata, path)))
+}
+
+fn validate_bootstrap_quarantine(
+    store: &PackageStore,
+    intent: &QuiesceIntent,
+    allow_missing: bool,
+) -> Result<(), PackageControlError> {
+    match open_bootstrap_quarantine(store, intent)? {
+        Some(_) => Ok(()),
+        None if allow_missing => Ok(()),
+        None => Err(PackageControlError::Conflict),
+    }
+}
+
+fn remove_bootstrap_quarantine(
+    store: &PackageStore,
+    intent: &QuiesceIntent,
+) -> Result<(), PackageControlError> {
+    let bootstrap = intent
+        .bootstrap
+        .as_ref()
+        .ok_or(PackageControlError::Conflict)?;
+    if bootstrap.phase != BootstrapPhase::Adopted {
+        return Err(PackageControlError::Conflict);
+    }
+    let Some((_file, metadata, path)) = open_bootstrap_quarantine(store, intent)? else {
+        return Ok(());
+    };
+    let current = fs::symlink_metadata(&path).map_err(|_| PackageControlError::Storage)?;
+    if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
+        return Err(PackageControlError::Conflict);
+    }
+    fs::remove_file(path).map_err(|_| PackageControlError::Storage)?;
+    sync_directory(&store.root)
+}
+
 fn encode_quiesce_intent(intent: &QuiesceIntent) -> Result<Vec<u8>, PackageControlError> {
     if Uuid::parse_str(&intent.generation).is_err() || intent.kind == PackageKind::Reinstall {
         return Err(PackageControlError::Conflict);
     }
     validate_version(&intent.source_version)?;
     validate_version(&intent.target_version)?;
-    let payload = format!(
-        "format_version={QUIESCE_FORMAT_VERSION}\npackage_id={PACKAGE_ID}\nartifact_scope=shared-debian\ngeneration={}\nkind={}\nsource_version={}\ntarget_version={}\n",
-        intent.generation,
-        package_kind_text(intent.kind),
-        intent.source_version,
-        intent.target_version,
-    );
+    let payload = if let Some(bootstrap) = &intent.bootstrap {
+        if intent.kind != PackageKind::Upgrade
+            || bootstrap.legacy_device == 0
+            || bootstrap.legacy_inode == 0
+            || bootstrap.legacy_sha256.len() != 64
+            || !bootstrap
+                .legacy_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(PackageControlError::Conflict);
+        }
+        let phase = match bootstrap.phase {
+            BootstrapPhase::Quarantining => "quarantining",
+            BootstrapPhase::Quiesced => "quiesced",
+            BootstrapPhase::Adopted => "adopted",
+        };
+        format!(
+            "format_version={BOOTSTRAP_QUIESCE_FORMAT_VERSION}\npackage_id={PACKAGE_ID}\nartifact_scope=shared-debian\ngeneration={}\nkind={}\nphase={phase}\nsource_version={}\ntarget_version={}\nlegacy_device={}\nlegacy_inode={}\nlegacy_sha256={}\n",
+            intent.generation,
+            package_kind_text(intent.kind),
+            intent.source_version,
+            intent.target_version,
+            bootstrap.legacy_device,
+            bootstrap.legacy_inode,
+            bootstrap.legacy_sha256,
+        )
+    } else {
+        format!(
+            "format_version={QUIESCE_FORMAT_VERSION}\npackage_id={PACKAGE_ID}\nartifact_scope=shared-debian\ngeneration={}\nkind={}\nsource_version={}\ntarget_version={}\n",
+            intent.generation,
+            package_kind_text(intent.kind),
+            intent.source_version,
+            intent.target_version,
+        )
+    };
     let digest = format!("{:x}", Sha256::digest(payload.as_bytes()));
     Ok(format!("{payload}sha256={digest}\n").into_bytes())
 }
@@ -1374,7 +1596,9 @@ fn read_quiesce_intent(
         .strip_suffix('\n')
         .ok_or(PackageControlError::Conflict)?;
     if digest.len() != 64
-        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || format!("{:x}", Sha256::digest(payload.as_bytes())) != digest
     {
         return Err(PackageControlError::Conflict);
@@ -1386,9 +1610,7 @@ fn read_quiesce_intent(
             return Err(PackageControlError::Conflict);
         }
     }
-    if values.len() != 7
-        || values.get("format_version") != Some(&"1")
-        || values.get("package_id") != Some(&PACKAGE_ID)
+    if values.get("package_id") != Some(&PACKAGE_ID)
         || values.get("artifact_scope") != Some(&"shared-debian")
     {
         return Err(PackageControlError::Conflict);
@@ -1410,12 +1632,49 @@ fn read_quiesce_intent(
         .ok_or(PackageControlError::Conflict)?;
     validate_version(source_version)?;
     validate_version(target_version)?;
-    Ok(Some(QuiesceIntent {
+    let bootstrap = match values.get("format_version") {
+        Some(&"1") if values.len() == 7 => None,
+        Some(&"2") if values.len() == 11 && kind == PackageKind::Upgrade => {
+            let phase = match values.get("phase") {
+                Some(&"quarantining") => BootstrapPhase::Quarantining,
+                Some(&"quiesced") => BootstrapPhase::Quiesced,
+                Some(&"adopted") => BootstrapPhase::Adopted,
+                _ => return Err(PackageControlError::Conflict),
+            };
+            let legacy_device = values
+                .get("legacy_device")
+                .ok_or(PackageControlError::Conflict)?
+                .parse::<u64>()
+                .map_err(|_| PackageControlError::Conflict)?;
+            let legacy_inode = values
+                .get("legacy_inode")
+                .ok_or(PackageControlError::Conflict)?
+                .parse::<u64>()
+                .map_err(|_| PackageControlError::Conflict)?;
+            let legacy_sha256 = values
+                .get("legacy_sha256")
+                .ok_or(PackageControlError::Conflict)?
+                .to_string();
+            Some(BootstrapQuiesce {
+                phase,
+                legacy_device,
+                legacy_inode,
+                legacy_sha256,
+            })
+        }
+        _ => return Err(PackageControlError::Conflict),
+    };
+    let intent = QuiesceIntent {
         generation: (*generation).to_string(),
         kind,
         source_version: source_version.to_string(),
         target_version: target_version.to_string(),
-    }))
+        bootstrap,
+    };
+    if encode_quiesce_intent(&intent)? != bytes {
+        return Err(PackageControlError::Conflict);
+    }
+    Ok(Some(intent))
 }
 
 fn safe_directory_identity(
@@ -1616,6 +1875,71 @@ impl PackageEffects for SystemEffects {
         )
         .map_err(|_| PackageControlError::Manager)?;
         Ok(ParticipantSettlement::SuccessorReady)
+    }
+
+    fn validate_restored(
+        &mut self,
+        participant: &Participant,
+        _package_generation: &str,
+        settlement: ParticipantSettlement,
+    ) -> Result<(), PackageControlError> {
+        validate_participant_directories(participant)?;
+        match (participant.enabled, settlement) {
+            (true, ParticipantSettlement::SuccessorReady) => {
+                let runtime = safe_directory_identity(
+                    Path::new(&participant.runtime_root),
+                    participant.uid,
+                    true,
+                )?;
+                if Some(runtime.dev()) != participant.runtime_device
+                    || Some(runtime.ino()) != participant.runtime_inode
+                {
+                    return Err(PackageControlError::Conflict);
+                }
+                crate::connect::provider::wait_for_registered_provider(
+                    Path::new(&participant.runtime_root),
+                    None,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .map_err(|_| PackageControlError::Manager)
+            }
+            (true, ParticipantSettlement::DeferredEnabled) => {
+                if Path::new(&participant.runtime_root).exists() {
+                    return Err(PackageControlError::Conflict);
+                }
+                let directory = open_participant_manager_parent(participant)?;
+                let name = participant_link_name(participant)?;
+                (read_participant_enablement_target(&directory, &name)?
+                    == Some(PathBuf::from(
+                        "/usr/lib/systemd/user/document-summarizer-connect.service",
+                    )))
+                .then_some(())
+                .ok_or(PackageControlError::Conflict)
+            }
+            (false, ParticipantSettlement::Disabled) => {
+                if Path::new(&participant.runtime_root).is_dir() {
+                    let status = systemctl_user(
+                        &participant.user,
+                        &[
+                            "is-enabled",
+                            "--quiet",
+                            "document-summarizer-connect.service",
+                        ],
+                    )?;
+                    (status.code() == Some(1))
+                        .then_some(())
+                        .ok_or(PackageControlError::Manager)
+                } else {
+                    let directory = open_participant_manager_parent(participant)?;
+                    let name = participant_link_name(participant)?;
+                    read_participant_enablement_target(&directory, &name)?
+                        .is_none()
+                        .then_some(())
+                        .ok_or(PackageControlError::Conflict)
+                }
+            }
+            _ => Err(PackageControlError::Conflict),
+        }
     }
 
     fn suppress(&mut self, participant: &Participant) -> Result<(), PackageControlError> {
@@ -2098,6 +2422,20 @@ fn bounded_command(
     }
 }
 
+fn lock_exclusive_bounded(file: &File) -> Result<(), PackageControlError> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err(PackageControlError::Manager),
+            Err(std::fs::TryLockError::Error(_)) => return Err(PackageControlError::Storage),
+        }
+    }
+}
+
 fn bounded_stdout(
     command: &mut Command,
     timeout: Duration,
@@ -2160,6 +2498,8 @@ mod tests {
         fail_restore_once: bool,
         controller_root: Option<PathBuf>,
         refreshed_runtime: Option<(u64, u64)>,
+        restore_flock_paths: Option<(PathBuf, PathBuf)>,
+        restore_record_path: Option<PathBuf>,
     }
 
     impl PackageEffects for MockEffects {
@@ -2182,6 +2522,30 @@ mod tests {
                 self.fail_restore_once = false;
                 return Err(PackageControlError::Manager);
             }
+            if let Some((quiesce, package)) = &self.restore_flock_paths {
+                let status = bounded_command(
+                    Command::new("flock")
+                        .arg("-s")
+                        .arg(quiesce)
+                        .arg("flock")
+                        .arg("-s")
+                        .arg(package)
+                        .arg("true"),
+                    Duration::from_millis(250),
+                )?;
+                if !status.success() {
+                    return Err(PackageControlError::Manager);
+                }
+            }
+            if let Some(path) = &self.restore_record_path {
+                let mut record = read_record(path)?.ok_or(PackageControlError::Conflict)?;
+                record.participants[0].enabled = !record.participants[0].enabled;
+                fs::write(
+                    path,
+                    serde_json::to_vec(&record).map_err(|_| PackageControlError::Storage)?,
+                )
+                .map_err(|_| PackageControlError::Storage)?;
+            }
             self.calls.lock().unwrap().push(format!(
                 "restore:{}:{}",
                 participant.uid, participant.enabled
@@ -2193,6 +2557,18 @@ mod tests {
             } else {
                 ParticipantSettlement::Disabled
             })
+        }
+        fn validate_restored(
+            &mut self,
+            participant: &Participant,
+            package_generation: &str,
+            settlement: ParticipantSettlement,
+        ) -> Result<(), PackageControlError> {
+            self.calls.lock().unwrap().push(format!(
+                "validate:{}:{package_generation}:{settlement:?}",
+                participant.uid
+            ));
+            Ok(())
         }
         fn suppress(&mut self, participant: &Participant) -> Result<(), PackageControlError> {
             self.calls
@@ -2281,21 +2657,31 @@ mod tests {
         let generation = store.read().unwrap().unwrap().generation;
         prepare(&store, PackageKind::Upgrade, "0.0.9", "0.1.0", &mut effects).unwrap();
         assert_eq!(store.read().unwrap().unwrap().generation, generation);
-        finish(&store, PackageKind::Upgrade, "0.1.0", &mut effects, None).unwrap();
+        finish(
+            &store,
+            PackageKind::Upgrade,
+            "0.1.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(store.read().unwrap().is_none());
         assert_eq!(
-            effects.calls.lock().unwrap().as_slice(),
-            [
-                "stop:1000",
-                "suppress:1000",
-                "cleanup:1000",
-                "stop:1001",
-                "suppress:1001",
-                "cleanup:1001",
-                "cleanup:1000",
-                "restore:1000:true",
-                "cleanup:1001",
-                "restore:1001:false"
+            effects.calls.lock().unwrap().clone(),
+            vec![
+                "stop:1000".to_string(),
+                "suppress:1000".to_string(),
+                "cleanup:1000".to_string(),
+                "stop:1001".to_string(),
+                "suppress:1001".to_string(),
+                "cleanup:1001".to_string(),
+                "cleanup:1000".to_string(),
+                "restore:1000:true".to_string(),
+                format!("validate:1000:{generation}:SuccessorReady"),
+                "cleanup:1001".to_string(),
+                "restore:1001:false".to_string(),
+                format!("validate:1001:{generation}:Disabled"),
             ]
         );
         fs::remove_dir_all(root).unwrap();
@@ -2309,7 +2695,15 @@ mod tests {
             ..Default::default()
         };
         prepare(&store, PackageKind::Remove, "0.1.0", "0.1.0", &mut effects).unwrap();
-        finish(&store, PackageKind::Remove, "0.1.0", &mut effects, None).unwrap();
+        finish(
+            &store,
+            PackageKind::Remove,
+            "0.1.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(store.read().unwrap().is_none());
         assert_eq!(
             effects.calls.lock().unwrap().as_slice(),
@@ -2324,7 +2718,14 @@ mod tests {
         let mut effects = MockEffects::default();
         prepare(&store, PackageKind::Upgrade, "0.0.9", "0.1.0", &mut effects).unwrap();
         assert!(matches!(
-            finish(&store, PackageKind::Remove, "0.1.0", &mut effects, None),
+            finish(
+                &store,
+                PackageKind::Remove,
+                "0.1.0",
+                &mut effects,
+                None,
+                None
+            ),
             Err(PackageControlError::Conflict)
         ));
         fs::write(store.record_path(), b"{}\n").unwrap();
@@ -2586,7 +2987,14 @@ mod tests {
         };
         prepare(&store, PackageKind::Upgrade, "0.0.9", "0.1.0", &mut effects).unwrap();
         assert!(matches!(
-            finish(&store, PackageKind::Upgrade, "0.1.0", &mut effects, None),
+            finish(
+                &store,
+                PackageKind::Upgrade,
+                "0.1.0",
+                &mut effects,
+                None,
+                None
+            ),
             Err(PackageControlError::Manager)
         ));
         let interrupted = store.read().unwrap().unwrap();
@@ -2595,9 +3003,183 @@ mod tests {
             interrupted.participants[0].settlement,
             ParticipantSettlement::Pending
         );
-        finish(&store, PackageKind::Upgrade, "0.1.0", &mut effects, None).unwrap();
+        finish(
+            &store,
+            PackageKind::Upgrade,
+            "0.1.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(store.read().unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finish_releases_quiesce_before_successor_start_and_reacquires_in_order() {
+        let (store, root) = store("doc-sum-package-successor-flock-handoff");
+        let mut effects = MockEffects {
+            participants: vec![participant(1000, true)],
+            restore_flock_paths: Some((root.join(QUIESCE_LOCK_FILE), root.join(LOCK_FILE))),
+            ..Default::default()
+        };
+        prepare(&store, PackageKind::Upgrade, "0.0.9", "0.1.0", &mut effects).unwrap();
+        let quiesce = store.quiesce_lock(true).unwrap();
+        let package = store.lock().unwrap();
+
+        finish(
+            &store,
+            PackageKind::Upgrade,
+            "0.1.0",
+            &mut effects,
+            Some(&quiesce),
+            Some(&package),
+        )
+        .unwrap();
+
+        assert!(quiesce.metadata().is_ok());
+        assert!(store.read().unwrap().is_none());
+        let calls = effects.calls.lock().unwrap();
+        let restore = calls
+            .iter()
+            .position(|call| call == "restore:1000:true")
+            .unwrap();
+        let validate = calls
+            .iter()
+            .position(|call| call.starts_with("validate:1000:"))
+            .unwrap();
+        assert_eq!(validate, restore + 1);
+        drop(calls);
+        drop(package);
+        drop(quiesce);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successor_child_lock_wait_times_out_while_startup_authority_is_held() {
+        let (store, root) = store("doc-sum-package-successor-flock-timeout");
+        let _quiesce = store.quiesce_lock(true).unwrap();
+        let _package = store.lock().unwrap();
+        let started = Instant::now();
+        assert!(matches!(
+            bounded_command(
+                Command::new("flock")
+                    .arg("-s")
+                    .arg(root.join(QUIESCE_LOCK_FILE))
+                    .arg("flock")
+                    .arg("-s")
+                    .arg(root.join(LOCK_FILE))
+                    .arg("true"),
+                Duration::from_millis(150),
+            ),
+            Err(PackageControlError::Manager)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(_package);
+        drop(_quiesce);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finish_rejects_record_change_while_successor_starts_before_settlement() {
+        let (store, root) = store("doc-sum-package-successor-record-recheck");
+        let mut effects = MockEffects {
+            participants: vec![participant(1000, true)],
+            restore_record_path: Some(store.record_path()),
+            ..Default::default()
+        };
+        prepare(&store, PackageKind::Upgrade, "0.0.9", "0.1.0", &mut effects).unwrap();
+        let quiesce = store.quiesce_lock(true).unwrap();
+        let package = store.lock().unwrap();
+
+        assert!(matches!(
+            finish(
+                &store,
+                PackageKind::Upgrade,
+                "0.1.0",
+                &mut effects,
+                Some(&quiesce),
+                Some(&package),
+            ),
+            Err(PackageControlError::Conflict)
+        ));
+        assert!(!effects
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("validate:")));
+        assert_eq!(
+            store.read().unwrap().unwrap().participants[0].settlement,
+            ParticipantSettlement::Pending
+        );
+        drop(package);
+        drop(quiesce);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_adoption_resumes_after_each_durable_cleanup_boundary() {
+        fn bootstrap_intent(phase: BootstrapPhase, bytes: &[u8]) -> QuiesceIntent {
+            QuiesceIntent {
+                generation: Uuid::new_v4().to_string(),
+                kind: PackageKind::Upgrade,
+                source_version: "0.0.9".to_string(),
+                target_version: "0.1.0".to_string(),
+                bootstrap: Some(BootstrapQuiesce {
+                    phase,
+                    legacy_device: 11,
+                    legacy_inode: 12,
+                    legacy_sha256: format!("{:x}", Sha256::digest(bytes)),
+                }),
+            }
+        }
+
+        let bytes = b"legacy executable fixture";
+        let (store_one, root_one) = store("doc-sum-bootstrap-adopted-before-cleanup");
+        let intent = bootstrap_intent(BootstrapPhase::Adopted, bytes);
+        let quarantine = store_one
+            .bootstrap_quarantine_path(&intent.generation)
+            .unwrap();
+        fs::write(&quarantine, bytes).unwrap();
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o600)).unwrap();
+        store_one.write_quiesce(&intent).unwrap();
+        adopt_bootstrap(&store_one, &intent, &mut MockEffects::default()).unwrap();
+        assert!(!quarantine.exists());
+        assert!(store_one.read_quiesce().unwrap().is_none());
+        assert_eq!(
+            store_one.read().unwrap().unwrap().phase,
+            PackagePhase::PublishersStopped
+        );
+        fs::remove_dir_all(root_one).unwrap();
+
+        let (store_two, root_two) = store("doc-sum-bootstrap-adopted-after-cleanup");
+        let intent = bootstrap_intent(BootstrapPhase::Adopted, bytes);
+        store_two.write_quiesce(&intent).unwrap();
+        adopt_bootstrap(&store_two, &intent, &mut MockEffects::default()).unwrap();
+        assert!(store_two.read_quiesce().unwrap().is_none());
+        assert_eq!(
+            store_two.read().unwrap().unwrap().generation,
+            intent.generation
+        );
+        fs::remove_dir_all(root_two).unwrap();
+
+        let (store_three, root_three) = store("doc-sum-bootstrap-tampered-quarantine");
+        let intent = bootstrap_intent(BootstrapPhase::Quiesced, bytes);
+        let quarantine = store_three
+            .bootstrap_quarantine_path(&intent.generation)
+            .unwrap();
+        fs::write(&quarantine, b"tampered executable").unwrap();
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o600)).unwrap();
+        store_three.write_quiesce(&intent).unwrap();
+        assert!(matches!(
+            adopt_bootstrap(&store_three, &intent, &mut MockEffects::default()),
+            Err(PackageControlError::Conflict)
+        ));
+        assert_eq!(store_three.read_quiesce().unwrap(), Some(intent));
+        assert!(quarantine.exists());
+        fs::remove_dir_all(root_three).unwrap();
     }
 
     #[test]
@@ -2612,7 +3194,15 @@ mod tests {
         let controller = root.join(format!("package-controller-{removal_generation}"));
         fs::write(&controller, b"controller").unwrap();
         fs::set_permissions(&controller, fs::Permissions::from_mode(0o700)).unwrap();
-        finish(&store, PackageKind::Remove, "0.1.0", &mut effects, None).unwrap();
+        finish(
+            &store,
+            PackageKind::Remove,
+            "0.1.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(store.removal_receipt_path().exists());
 
         prepare_reinstall(&store, "0.2.0").unwrap();
@@ -2623,7 +3213,15 @@ mod tests {
             Some(removal_generation.as_str())
         );
         assert!(enter_admission_store(&store).is_err());
-        finish(&store, PackageKind::Reinstall, "0.2.0", &mut effects, None).unwrap();
+        finish(
+            &store,
+            PackageKind::Reinstall,
+            "0.2.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!store.removal_receipt_path().exists());
         let installed: InstallReceipt = read_json_record(&store.install_receipt_path())
             .unwrap()
@@ -2652,7 +3250,15 @@ mod tests {
         let predecessor = root.join(format!("package-controller-{}", removal.generation));
         fs::write(&predecessor, b"controller").unwrap();
         fs::set_permissions(&predecessor, fs::Permissions::from_mode(0o700)).unwrap();
-        finish(&store, PackageKind::Remove, "0.1.0", &mut effects, None).unwrap();
+        finish(
+            &store,
+            PackageKind::Remove,
+            "0.1.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
 
         let receipt = store.read_removal_receipt().unwrap().unwrap();
         let interrupted = PackageRecord {
@@ -2702,6 +3308,7 @@ mod tests {
             PackageAction::PrepareReinstall { target: "0.2.0" },
             &mut effects,
             None,
+            None,
         )
         .unwrap();
         let reinstall = store.read().unwrap().unwrap();
@@ -2727,7 +3334,15 @@ mod tests {
         let predecessor = root.join(format!("package-controller-{}", removal.generation));
         fs::write(&predecessor, b"controller").unwrap();
         fs::set_permissions(&predecessor, fs::Permissions::from_mode(0o700)).unwrap();
-        finish(&store, PackageKind::Remove, "0.1.0", &mut effects, None).unwrap();
+        finish(
+            &store,
+            PackageKind::Remove,
+            "0.1.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
         prepare_reinstall(&store, "0.2.0").unwrap();
 
         let mut interrupted = store.read().unwrap().unwrap();
@@ -2738,7 +3353,15 @@ mod tests {
         fs::remove_file(root.join(format!("package-controller-{}", interrupted.generation)))
             .unwrap();
 
-        finish(&store, PackageKind::Reinstall, "0.2.0", &mut effects, None).unwrap();
+        finish(
+            &store,
+            PackageKind::Reinstall,
+            "0.2.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(store.read().unwrap().is_none());
         assert!(!store.removal_receipt_path().exists());
         fs::remove_dir_all(root).unwrap();
@@ -2786,6 +3409,7 @@ mod tests {
             kind: PackageKind::Upgrade,
             source_version: "0.0.9".to_string(),
             target_version: "0.1.0".to_string(),
+            bootstrap: None,
         };
         store.write_quiesce(&intent).unwrap();
         let mut effects = MockEffects {
@@ -2871,10 +3495,24 @@ mod tests {
         let root = env::temp_dir().join(format!("doc-sum-preinst-bootstrap-{}", Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let package_root = root.join("package-root");
+        let installed_binary = root.join("document-summarizer");
+        fs::copy("/bin/true", &installed_binary).unwrap();
+        fs::set_permissions(&installed_binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime_root = root.join("run-user");
+        fs::create_dir(&runtime_root).unwrap();
         let script = include_str!("../../linux/debian/preinst")
             .replace(
                 "/var/lib/document-summarizer",
                 package_root.to_str().unwrap(),
+            )
+            .replace(
+                "/usr/bin/document-summarizer",
+                installed_binary.to_str().unwrap(),
+            )
+            .replace("/run/user", runtime_root.to_str().unwrap())
+            .replace(
+                "expected_root_uid=0",
+                &format!("expected_root_uid={}", unsafe { libc::geteuid() }),
             )
             .replace(" -o root -g root", "");
         let script_path = root.join("preinst");
@@ -2891,6 +3529,12 @@ mod tests {
         assert_eq!(intent.kind, PackageKind::Upgrade);
         assert_eq!(intent.source_version, "0.0.9");
         assert_eq!(intent.target_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            intent.bootstrap.as_ref().map(|state| state.phase),
+            Some(BootstrapPhase::Quiesced)
+        );
+        let quarantine = store.bootstrap_quarantine_path(&intent.generation).unwrap();
+        assert!(quarantine.is_file());
         let path = store.quiesce_path();
         let original = fs::read(&path).unwrap();
         assert!(Command::new("sh")
@@ -2907,17 +3551,32 @@ mod tests {
         assert_eq!(record.generation, intent.generation);
         assert_eq!(record.phase, PackagePhase::PublishersStopped);
 
-        let mut bytes = original;
+        let mut bytes = original.clone();
         let source = bytes
             .windows(b"source_version=0.0.9".len())
             .position(|window| window == b"source_version=0.0.9")
             .unwrap();
         bytes[source + "source_version=".len()] = b'9';
         fs::write(&path, bytes).unwrap();
+        assert!(!Command::new("sh")
+            .arg(&script_path)
+            .args(["upgrade", "0.0.9"])
+            .status()
+            .unwrap()
+            .success());
         assert!(matches!(
             store.read_quiesce(),
             Err(PackageControlError::Conflict)
         ));
+        fs::write(&path, original).unwrap();
+        let mut effects = MockEffects::default();
+        adopt_bootstrap(&store, &intent, &mut effects).unwrap();
+        assert!(store.read_quiesce().unwrap().is_none());
+        assert!(!quarantine.exists());
+        assert_eq!(
+            store.read().unwrap().unwrap().phase,
+            PackagePhase::PublishersStopped
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
