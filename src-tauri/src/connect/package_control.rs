@@ -47,6 +47,7 @@ enum PackagePhase {
 struct Participant {
     uid: u32,
     user: String,
+    home: String,
     runtime_root: String,
     app_data_root: String,
     enabled: bool,
@@ -375,35 +376,32 @@ impl PackageEffects for SystemEffects {
     fn discover(&mut self) -> Result<Vec<Participant>, PackageControlError> {
         let passwd = fs::read_to_string("/etc/passwd").map_err(|_| PackageControlError::Storage)?;
         let mut participants = Vec::new();
-        let runtime = fs::read_dir("/run/user").map_err(|_| PackageControlError::Storage)?;
-        for entry in runtime.filter_map(Result::ok) {
-            let Some(uid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|value| value.parse::<u32>().ok())
-            else {
+        for line in passwd.lines() {
+            let fields = line.split(':').collect::<Vec<_>>();
+            if fields.len() < 6 {
+                continue;
+            }
+            let Some(uid) = fields[2].parse::<u32>().ok() else {
                 continue;
             };
-            let Some(user) = passwd.lines().find_map(|line| {
-                let fields = line.split(':').collect::<Vec<_>>();
-                (fields.len() > 2 && fields[2].parse::<u32>().ok() == Some(uid))
-                    .then(|| fields[0].to_string())
-            }) else {
-                return Err(PackageControlError::Storage);
+            let user = fields[0].to_string();
+            let home = PathBuf::from(fields[5]);
+            let runtime_root = PathBuf::from(format!("/run/user/{uid}"));
+            let active_session = runtime_root.is_dir();
+            let enabled = if active_session {
+                manager_status(&user, &["is-enabled", "--quiet"])?
+            } else {
+                exact_enablement_link(&home)?.is_some()
             };
-            let home = passwd
-                .lines()
-                .find_map(|line| {
-                    let fields = line.split(':').collect::<Vec<_>>();
-                    (fields.len() > 5 && fields[0] == user).then(|| fields[5].to_string())
-                })
-                .ok_or(PackageControlError::Storage)?;
-            let enabled = manager_status(&user, &["is-enabled", "--quiet"])?;
+            if !active_session && !enabled {
+                continue;
+            }
             participants.push(Participant {
                 uid,
                 user,
-                runtime_root: entry.path().to_string_lossy().into_owned(),
-                app_data_root: Path::new(&home)
+                home: home.to_string_lossy().into_owned(),
+                runtime_root: runtime_root.to_string_lossy().into_owned(),
+                app_data_root: home
                     .join(".local/share/com.juan-canfield.docsum")
                     .to_string_lossy()
                     .into_owned(),
@@ -415,6 +413,9 @@ impl PackageEffects for SystemEffects {
     }
 
     fn stop(&mut self, participant: &Participant) -> Result<(), PackageControlError> {
+        if !Path::new(&participant.runtime_root).is_dir() {
+            return Ok(());
+        }
         manager_success(&participant.user, &["stop"])?;
         let executable = env::current_exe().map_err(|_| PackageControlError::Storage)?;
         bounded_command(
@@ -437,6 +438,9 @@ impl PackageEffects for SystemEffects {
     }
 
     fn restore(&mut self, participant: &Participant) -> Result<(), PackageControlError> {
+        if !Path::new(&participant.runtime_root).is_dir() {
+            return Ok(());
+        }
         if participant.enabled {
             manager_success(&participant.user, &["enable", "--now"])
         } else {
@@ -445,7 +449,15 @@ impl PackageEffects for SystemEffects {
     }
 
     fn suppress(&mut self, participant: &Participant) -> Result<(), PackageControlError> {
-        manager_success(&participant.user, &["disable", "--now"])
+        if Path::new(&participant.runtime_root).is_dir() {
+            return manager_success(&participant.user, &["disable", "--now"]);
+        }
+        let home = Path::new(&participant.home);
+        if let Some(path) = exact_enablement_link(home)? {
+            fs::remove_file(&path).map_err(|_| PackageControlError::Storage)?;
+            sync_directory(path.parent().ok_or(PackageControlError::Storage)?)?;
+        }
+        Ok(())
     }
 
     fn cleanup(&mut self, participant: &Participant) -> Result<(), PackageControlError> {
@@ -533,6 +545,25 @@ impl PackageEffects for SystemEffects {
         fs::remove_file(&path).map_err(|_| PackageControlError::Storage)?;
         sync_directory(path.parent().ok_or(PackageControlError::Storage)?)
     }
+}
+
+fn exact_enablement_link(home: &Path) -> Result<Option<PathBuf>, PackageControlError> {
+    let path = home
+        .join(".config/systemd/user/default.target.wants")
+        .join("document-summarizer-connect.service");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(PackageControlError::Storage),
+    };
+    if !metadata.file_type().is_symlink() {
+        return Err(PackageControlError::Conflict);
+    }
+    let target = fs::read_link(&path).map_err(|_| PackageControlError::Conflict)?;
+    if target != Path::new("/usr/lib/systemd/user/document-summarizer-connect.service") {
+        return Err(PackageControlError::Conflict);
+    }
+    Ok(Some(path))
 }
 
 fn manager_status(user: &str, arguments: &[&str]) -> Result<bool, PackageControlError> {
@@ -655,6 +686,7 @@ mod tests {
         Participant {
             uid,
             user: format!("user-{uid}"),
+            home: format!("/home/user-{uid}"),
             runtime_root: format!("/run/user/{uid}"),
             app_data_root: format!("/home/user-{uid}/.local/share/com.juan-canfield.docsum"),
             enabled,
@@ -719,5 +751,28 @@ mod tests {
         fs::write(store.record_path(), b"{}\n").unwrap();
         assert!(matches!(store.read(), Err(PackageControlError::Conflict)));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn logged_out_enablement_requires_the_exact_systemd_link() {
+        use std::os::unix::fs::symlink;
+
+        let home = env::temp_dir().join(format!("doc-sum-package-home-{}", Uuid::new_v4()));
+        let wants = home.join(".config/systemd/user/default.target.wants");
+        fs::create_dir_all(&wants).unwrap();
+        let link = wants.join("document-summarizer-connect.service");
+        symlink(
+            "/usr/lib/systemd/user/document-summarizer-connect.service",
+            &link,
+        )
+        .unwrap();
+        assert_eq!(exact_enablement_link(&home).unwrap(), Some(link.clone()));
+        fs::remove_file(&link).unwrap();
+        symlink("/tmp/foreign.service", &link).unwrap();
+        assert!(matches!(
+            exact_enablement_link(&home),
+            Err(PackageControlError::Conflict)
+        ));
+        fs::remove_dir_all(home).unwrap();
     }
 }
