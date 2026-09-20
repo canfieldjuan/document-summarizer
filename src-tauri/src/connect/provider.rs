@@ -299,8 +299,65 @@ struct ProviderState {
     runtime_factory: RuntimeFactory,
     entitlement: EntitlementGate,
     workers: ProviderWorkerOwner,
+    admission_authority: Arc<ProviderAdmissionAuthority>,
     #[cfg(target_os = "linux")]
     transition_store: Arc<TransitionStore>,
+    #[cfg(all(target_os = "linux", test))]
+    package_control_root: PathBuf,
+}
+
+#[derive(Default)]
+struct ProviderAdmissionAuthority {
+    stopped: Mutex<bool>,
+}
+
+impl ProviderAdmissionAuthority {
+    fn enter(&self) -> Result<std::sync::MutexGuard<'_, bool>, ()> {
+        let guard = self
+            .stopped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *guard {
+            Err(())
+        } else {
+            Ok(guard)
+        }
+    }
+
+    fn begin_stop(&self) {
+        *self
+            .stopped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    }
+
+    fn stopped(&self) -> bool {
+        *self
+            .stopped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ProviderStopControl {
+    authority: Arc<ProviderAdmissionAuthority>,
+}
+
+impl ProviderStopControl {
+    pub(crate) fn new() -> Self {
+        Self {
+            authority: Arc::new(ProviderAdmissionAuthority::default()),
+        }
+    }
+
+    pub(crate) fn request_stop(&self) {
+        self.authority.begin_stop();
+    }
+
+    pub(crate) fn requested(&self) -> bool {
+        self.authority.stopped()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -312,6 +369,7 @@ enum ProviderMode {
 struct ProviderStartup<'a> {
     mode: ProviderMode,
     stop_requested: &'a dyn Fn() -> bool,
+    stop_control: Option<ProviderStopControl>,
 }
 
 #[cfg(unix)]
@@ -418,6 +476,7 @@ pub struct ConnectProvider {
     instance_id_v2: String,
     token: String,
     workers: ProviderWorkerOwner,
+    admission_authority: Arc<ProviderAdmissionAuthority>,
     shutdown: Option<watch::Sender<bool>>,
     terminal_result: Mutex<mpsc::Receiver<Result<(), String>>>,
     #[cfg(test)]
@@ -428,20 +487,29 @@ pub struct ConnectProvider {
 
 impl ConnectProvider {
     pub fn start(db_path: PathBuf, app_data_dir: PathBuf) -> Result<Self, ProviderStartError> {
-        Self::start_in_mode(db_path, app_data_dir, ProviderMode::Foreground, &|| false)
+        Self::start_in_mode(
+            db_path,
+            app_data_dir,
+            ProviderMode::Foreground,
+            &|| false,
+            None,
+        )
     }
 
     #[cfg(target_os = "linux")]
     pub(crate) fn start_background_with_control(
         db_path: PathBuf,
         app_data_dir: PathBuf,
-        stop_requested: impl Fn() -> bool,
+        stop_control: ProviderStopControl,
     ) -> Result<Self, ProviderStartError> {
+        let probe_control = stop_control.clone();
+        let stop_probe = || probe_control.requested();
         Self::start_in_mode(
             db_path,
             app_data_dir,
             ProviderMode::Background,
-            &stop_requested,
+            &stop_probe,
+            Some(stop_control),
         )
     }
 
@@ -450,6 +518,7 @@ impl ConnectProvider {
         app_data_dir: PathBuf,
         mode: ProviderMode,
         stop_requested: &dyn Fn() -> bool,
+        stop_control: Option<ProviderStopControl>,
     ) -> Result<Self, ProviderStartError> {
         #[cfg(unix)]
         let runtime_root = env::var_os("XDG_RUNTIME_DIR")
@@ -479,6 +548,7 @@ impl ConnectProvider {
             ProviderStartup {
                 mode,
                 stop_requested,
+                stop_control,
             },
         )
     }
@@ -522,6 +592,7 @@ impl ConnectProvider {
             ProviderStartup {
                 mode: ProviderMode::Foreground,
                 stop_requested: &|| false,
+                stop_control: None,
             },
         )
     }
@@ -539,19 +610,20 @@ impl ConnectProvider {
         if (startup.stop_requested)() {
             return Err(ProviderStartError::StartupCancelled);
         }
-        #[cfg(target_os = "linux")]
-        if package_control::barrier_active()
-            .map_err(|_| ProviderStartError::LifecycleTransitionActive)?
-        {
-            return Err(ProviderStartError::LifecycleTransitionActive);
-        }
         ensure_private_directory(&app_data_dir)?;
+        #[cfg(target_os = "linux")]
+        let _package_admission = package_admission_for_start(&app_data_dir, &runtime_root)?;
         #[cfg(target_os = "linux")]
         let transition_store = transition_store_for_start(&app_data_dir)?;
         #[cfg(target_os = "linux")]
-        let transition_generation = (startup.mode == ProviderMode::Background)
-            .then(|| env::var("DOC_SUM_BACKGROUND_TRANSITION_GENERATION").ok())
-            .flatten();
+        let transition_generation = if startup.mode == ProviderMode::Background {
+            transition_store
+                .current()
+                .map_err(map_lifecycle_control_error)?
+                .map(|record| record.generation)
+        } else {
+            None
+        };
         #[cfg(target_os = "linux")]
         if !transition_store
             .admitted_transition_child(transition_generation.as_deref())
@@ -664,6 +736,11 @@ impl ConnectProvider {
         let manifest_v1 = AppManifest::new(&instance_id_v1, max_input_bytes);
         let manifest_v2 = v2::AppManifest::new(&instance_id_v2, max_input_bytes);
         let workers = ProviderWorkerOwner::new();
+        let admission_authority = startup
+            .stop_control
+            .as_ref()
+            .map(|control| Arc::clone(&control.authority))
+            .unwrap_or_else(|| Arc::new(ProviderAdmissionAuthority::default()));
         let state = ProviderState {
             db_path,
             imports_dir,
@@ -676,8 +753,11 @@ impl ConnectProvider {
             runtime_factory,
             entitlement,
             workers: workers.clone(),
+            admission_authority: Arc::clone(&admission_authority),
             #[cfg(target_os = "linux")]
             transition_store: Arc::clone(&transition_store),
+            #[cfg(all(target_os = "linux", test))]
+            package_control_root: app_data_dir.join("test-package-control"),
         };
         let body_limit = usize::try_from(max_input_bytes)
             .unwrap_or(usize::MAX)
@@ -828,15 +908,20 @@ impl ConnectProvider {
         let publication_root = None;
         #[cfg(windows)]
         let publication_root = Some(runtime_root.as_path());
+        let publication_authority = admission_authority
+            .enter()
+            .map_err(|()| ProviderStartError::StartupCancelled)?;
         #[cfg(target_os = "linux")]
-        if (startup.stop_requested)()
+        let cancellation_requested = startup.stop_control.is_none() && (startup.stop_requested)();
+        #[cfg(target_os = "linux")]
+        if cancellation_requested
             || !transition_store
                 .admitted_transition_child(transition_generation.as_deref())
                 .map_err(map_lifecycle_control_error)?
         {
             let _ = shutdown_tx.send(true);
             let _ = server_thread.join();
-            return Err(if (startup.stop_requested)() {
+            return Err(if cancellation_requested {
                 ProviderStartError::StartupCancelled
             } else {
                 ProviderStartError::LifecycleTransitionActive
@@ -853,7 +938,9 @@ impl ConnectProvider {
             return Err(error);
         }
         #[cfg(target_os = "linux")]
-        if (startup.stop_requested)()
+        let cancellation_requested = startup.stop_control.is_none() && (startup.stop_requested)();
+        #[cfg(target_os = "linux")]
+        if cancellation_requested
             || !transition_store
                 .admitted_transition_child(transition_generation.as_deref())
                 .map_err(map_lifecycle_control_error)?
@@ -861,7 +948,7 @@ impl ConnectProvider {
             let _ = fs::remove_file(&registration_path_v1);
             let _ = shutdown_tx.send(true);
             let _ = server_thread.join();
-            return Err(if (startup.stop_requested)() {
+            return Err(if cancellation_requested {
                 ProviderStartError::StartupCancelled
             } else {
                 ProviderStartError::LifecycleTransitionActive
@@ -881,6 +968,7 @@ impl ConnectProvider {
             let _ = server_thread.join();
             return Err(error);
         }
+        drop(publication_authority);
 
         Ok(Self {
             #[cfg(unix)]
@@ -900,6 +988,7 @@ impl ConnectProvider {
             instance_id_v2,
             token,
             workers,
+            admission_authority,
             shutdown: Some(shutdown_tx),
             terminal_result: Mutex::new(terminal_rx),
             #[cfg(test)]
@@ -1010,6 +1099,7 @@ impl ConnectProvider {
             return;
         }
         self.stopped = true;
+        self.admission_authority.begin_stop();
         let deadline = Instant::now() + CONNECT_GRACEFUL_SHUTDOWN_TIMEOUT;
         self.workers.shutdown_until(deadline);
         if let Some(shutdown) = self.shutdown.take() {
@@ -1081,6 +1171,35 @@ fn transition_store_for_start(
         TransitionStore::from_environment()
     };
     store.map(Arc::new).map_err(map_lifecycle_control_error)
+}
+
+#[cfg(target_os = "linux")]
+fn package_admission_for_start(
+    app_data_dir: &Path,
+    runtime_root: &Path,
+) -> Result<package_control::PackageAdmissionGuard, ProviderStartError> {
+    #[cfg(test)]
+    let guard = package_control::enter_startup_admission_at(
+        &app_data_dir.join("test-package-control"),
+        app_data_dir,
+        runtime_root,
+    );
+    #[cfg(not(test))]
+    let guard = { package_control::enter_startup_admission(app_data_dir, runtime_root) };
+    guard.map_err(|_| ProviderStartError::LifecycleTransitionActive)
+}
+
+#[cfg(target_os = "linux")]
+fn package_admission_for_job(
+    state: &ProviderState,
+) -> Result<package_control::PackageAdmissionGuard, package_control::PackageControlError> {
+    #[cfg(test)]
+    return package_control::enter_admission_at(&state.package_control_root);
+    #[cfg(not(test))]
+    {
+        let _ = state;
+        package_control::enter_admission()
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1278,6 +1397,15 @@ async fn create_job_for_request(
     authorize(&state, request.headers())?;
     require_entitlement(&state)?;
     #[cfg(target_os = "linux")]
+    let _package_admission = package_admission_for_job(&state).map_err(|_| {
+        ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider package is changing lifecycle state.",
+            true,
+        )
+    })?;
+    #[cfg(target_os = "linux")]
     let _transition_admission = state.transition_store.enter_job_admission().map_err(|_| {
         ProviderHttpError::new(
             StatusCode::CONFLICT,
@@ -1286,15 +1414,6 @@ async fn create_job_for_request(
             true,
         )
     })?;
-    #[cfg(target_os = "linux")]
-    if package_control::barrier_active().unwrap_or(true) {
-        return Err(ProviderHttpError::new(
-            StatusCode::CONFLICT,
-            "PROVIDER_BUSY",
-            "The provider package is changing lifecycle state.",
-            true,
-        ));
-    }
     if !state.workers.accepting() {
         return Err(ProviderHttpError::new(
             StatusCode::CONFLICT,
@@ -1447,7 +1566,25 @@ async fn create_job_for(
         WireVersion::V1 => &state.instance_id_v1,
         WireVersion::V2 => &state.instance_id_v2,
     };
-    let accepted = store::accept_job_with_ingestion_guarded(
+    let _provider_admission = state.admission_authority.enter().map_err(|()| {
+        ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is shutting down.",
+            true,
+        )
+    })?;
+    if !state.workers.accepting() {
+        drop(_provider_admission);
+        remove_file_quietly(&import_path).await;
+        return Err(ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is shutting down.",
+            true,
+        ));
+    }
+    let accepted_result = store::accept_job_with_ingestion_guarded(
         &mut conn,
         &request,
         &request_hash,
@@ -1459,7 +1596,8 @@ async fn create_job_for(
         Some(&profile_snapshot),
         || state.entitlement.decision().is_active(),
     );
-    let accepted = match accepted {
+    drop(_provider_admission);
+    let accepted = match accepted_result {
         Ok(Some((_, accepted))) => accepted,
         Ok(None) => {
             remove_file_quietly(&import_path).await;
@@ -2921,6 +3059,7 @@ mod tests {
             ProviderStartup {
                 mode: ProviderMode::Foreground,
                 stop_requested: &|| checks.fetch_add(1, Ordering::SeqCst) >= 2,
+                stop_control: None,
             },
         );
         assert!(matches!(result, Err(ProviderStartError::StartupCancelled)));
@@ -4993,4 +5132,23 @@ mod tests {
         let imports = app_data.join("connect-imports");
         assert_eq!(fs::read_dir(imports).unwrap().count(), 0);
     }
+}
+#[test]
+fn stop_authority_linearizes_publication_and_job_commit() {
+    let authority = Arc::new(ProviderAdmissionAuthority::default());
+    let commit = authority.enter().unwrap();
+    let stopping = Arc::clone(&authority);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (stopped_tx, stopped_rx) = std::sync::mpsc::sync_channel(1);
+    let stop = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        stopping.begin_stop();
+        stopped_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(stopped_rx.try_recv().is_err());
+    drop(commit);
+    stopped_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    stop.join().unwrap();
+    assert!(authority.enter().is_err());
 }

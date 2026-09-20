@@ -2,6 +2,7 @@
 set -eu
 
 if [ "${1:-}" = "configure" ]; then
+  /usr/bin/document-summarizer --connect-package initialize
   if [ -f /var/lib/document-summarizer/package-operation-v1.json ]; then
     /usr/bin/document-summarizer --connect-package recover-install "0.1.0"
   fi

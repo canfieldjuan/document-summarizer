@@ -1,7 +1,8 @@
-use super::provider::{ConnectProvider, ProviderStartError};
+use super::provider::{ConnectProvider, ProviderStartError, ProviderStopControl};
 use std::env;
 use std::io;
 use std::path::PathBuf;
+use std::thread;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -19,6 +20,8 @@ pub(crate) enum BackgroundProviderError {
 
 pub(crate) fn run() -> Result<(), BackgroundProviderError> {
     let signals = BlockedShutdownSignals::new()?;
+    let stop_control = ProviderStopControl::new();
+    signals.spawn_stop_notifier(stop_control.clone())?;
     let app_data_dir = app_data_dir()?;
     let db_path = app_data_dir.join("summarizer.db");
     let Some(provider) = acquire_after_foreground(
@@ -26,10 +29,15 @@ pub(crate) fn run() -> Result<(), BackgroundProviderError> {
             ConnectProvider::start_background_with_control(
                 db_path.clone(),
                 app_data_dir.clone(),
-                || signals.wait_timeout(Duration::ZERO).unwrap_or(true),
+                stop_control.clone(),
             )
         },
-        |timeout| signals.wait_timeout(timeout),
+        |timeout| {
+            if !timeout.is_zero() {
+                thread::sleep(timeout);
+            }
+            Ok(stop_control.requested())
+        },
     )?
     else {
         return Ok(());
@@ -37,13 +45,16 @@ pub(crate) fn run() -> Result<(), BackgroundProviderError> {
     loop {
         if let Some(error) = provider.terminal_failure() {
             provider.shutdown();
+            crate::pipeline::llama_cpp::shutdown_managed_runtimes();
             return Err(error.into());
         }
-        if signals.wait_timeout(Duration::from_millis(250))? {
+        if stop_control.requested() {
             break;
         }
+        thread::sleep(Duration::from_millis(250));
     }
     provider.shutdown();
+    crate::pipeline::llama_cpp::shutdown_managed_runtimes();
     Ok(())
 }
 
@@ -101,20 +112,18 @@ impl BlockedShutdownSignals {
         Ok(Self { shutdown, previous })
     }
 
-    fn wait_timeout(&self, timeout: Duration) -> io::Result<bool> {
-        let timeout = libc::timespec {
-            tv_sec: timeout.as_secs().try_into().unwrap_or(libc::time_t::MAX),
-            tv_nsec: timeout.subsec_nanos().into(),
-        };
-        let mut info = unsafe { std::mem::zeroed() };
-        let result = unsafe { libc::sigtimedwait(&self.shutdown, &mut info, &timeout) };
-        if result == libc::SIGTERM || result == libc::SIGINT {
-            return Ok(true);
-        }
-        if result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN) {
-            return Ok(false);
-        }
-        Err(io::Error::last_os_error())
+    fn spawn_stop_notifier(&self, control: ProviderStopControl) -> io::Result<()> {
+        let shutdown = self.shutdown;
+        thread::Builder::new()
+            .name("connect-signal-waiter".to_string())
+            .spawn(move || {
+                let mut signal = 0;
+                let result = unsafe { libc::sigwait(&shutdown, &mut signal) };
+                if result == 0 && matches!(signal, libc::SIGTERM | libc::SIGINT) {
+                    control.request_stop();
+                }
+            })
+            .map(|_| ())
     }
 }
 

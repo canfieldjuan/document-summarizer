@@ -4,3 +4,12 @@ set -eu
 if [ "${1:-}" = "upgrade" ] && [ -x /usr/bin/document-summarizer ]; then
   /usr/bin/document-summarizer --connect-package prepare-upgrade "${2:-unknown}" "0.1.0"
 fi
+
+if [ "${1:-}" = "install" ] && { [ -f /var/lib/document-summarizer/package-operation-v1.json ] || [ -f /var/lib/document-summarizer/package-removal-receipt-v1.json ]; }; then
+  controllers=$(find /var/lib/document-summarizer -maxdepth 1 -type f -name 'package-controller-*' -perm 0700 -user root -links 1 -print 2>/dev/null || true)
+  set -- $controllers
+  if [ "$#" -ne 1 ]; then
+    exit 1
+  fi
+  "$1" --connect-package prepare-reinstall "0.1.0"
+fi

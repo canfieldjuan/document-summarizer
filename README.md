@@ -191,11 +191,15 @@ document-summarizer --connect-background disable
 
 `document-summarizer --connect-background status` reports the stable manager
 choice or an incomplete transition. `recover` resumes the exact incomplete
-generation. Debian upgrade and removal hooks use a root-owned package operation
-record to stop foreground and background owners across active user sessions,
-clean exact dead registrations, preserve each explicit enablement choice across
-upgrade, and use a generation-bound root-only controller copy to finish cleanup
-after dpkg removes the installed executable.
+generation. Debian hooks coordinate through the fixed root-owned package
+authority. Each enabled or disabled user records exact XDG runtime, data,
+control, and manager paths during the lifecycle operation. Upgrade suppresses
+all recorded managers and restores an active user only after authenticated
+provider readiness; logged-out enabled users are durably deferred until their
+next service session. Removal preserves choices in a generation-bound receipt.
+Reinstall completes any interrupted removal, creates a new install generation
+before admission, and settles the preserved choices without starting a provider
+against partial package artifacts.
 
 A raw `cargo build --release` is intentionally rejected because it can produce a
 desktop executable that points at the development server instead of embedding

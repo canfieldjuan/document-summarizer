@@ -63,8 +63,7 @@ fn linux_bundle_installs_disabled_background_provider_unit_with_bounded_supervis
     assert!(unit.contains("StartLimitBurst=5"));
     assert!(unit.contains("TimeoutStopSec=40s"));
     assert!(unit.contains("KillMode=control-group"));
-    assert!(unit
-        .contains("EnvironmentFile=-%h/.config/com.juan-canfield.docsum/connect-background.env"));
+    assert!(!unit.contains("EnvironmentFile="));
     assert!(unit.contains("WantedBy=default.target"));
     assert!(!unit.contains("Alias="));
 }
@@ -93,6 +92,8 @@ fn debian_package_hooks_coordinate_provider_ownership() {
     let prerm = include_str!("../linux/debian/prerm");
     let postrm = include_str!("../linux/debian/postrm");
     assert!(preinst.contains("--connect-package prepare-upgrade"));
+    assert!(preinst.contains("--connect-package prepare-reinstall"));
+    assert!(postinst.contains("--connect-package initialize"));
     assert!(postinst.contains("--connect-package recover-install"));
     assert!(prerm.contains("--connect-package prepare-remove"));
     assert!(postrm.contains("--connect-package finish-remove"));

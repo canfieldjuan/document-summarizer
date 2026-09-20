@@ -670,6 +670,7 @@ pub fn run_package_control(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     use connect::package_control::{self, PackageAction};
 
     let action = match arguments {
+        [command] if command == "initialize" => PackageAction::Initialize,
         [command, source, target] if command == "prepare-upgrade" => {
             PackageAction::PrepareUpgrade { source, target }
         }
@@ -678,6 +679,9 @@ pub fn run_package_control(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         [command, target] if command == "finish-remove" => PackageAction::FinishRemove { target },
         [command, target] if command == "recover-install" => {
             PackageAction::RecoverInstall { target }
+        }
+        [command, target] if command == "prepare-reinstall" => {
+            PackageAction::PrepareReinstall { target }
         }
         _ => return Err("invalid package lifecycle control command".into()),
     };

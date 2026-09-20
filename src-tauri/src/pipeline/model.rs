@@ -36,7 +36,28 @@ const CHAT_RUNNER_KEEP_ALIVE: &str = "30s";
 pub(super) const MAX_DECODER_STRING_LENGTH: u64 = 1_536;
 
 thread_local! {
-    static CONTROLLED_REQUEST_TIMEOUT: Cell<Option<Duration>> = const { Cell::new(None) };
+    static CONTROLLED_REQUEST_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+fn controlled_request_timeout() -> Option<Duration> {
+    CONTROLLED_REQUEST_DEADLINE.with(|slot| {
+        slot.get()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    })
+}
+
+fn controlled_effect_timeout(configured: Duration) -> Result<Duration, ModelRuntimeFailure> {
+    let remaining = controlled_request_timeout()
+        .unwrap_or(configured)
+        .min(configured);
+    if remaining.is_zero() {
+        return Err(runtime_failure(
+            "MODEL_REQUEST_CANCELLED",
+            "Model request deadline expired before the next local model effect",
+            true,
+        ));
+    }
+    Ok(remaining)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -612,10 +633,10 @@ impl OllamaRuntime {
     ) -> Result<Response, ModelRuntimeFailure> {
         let payload = self.chat_payload(request, format);
         let request = self.authorize(self.client.post(self.endpoint("api/chat")?).json(&payload));
-        let request = CONTROLLED_REQUEST_TIMEOUT.with(|timeout| match timeout.get() {
-            Some(timeout) => request.timeout(timeout),
+        let request = match controlled_request_timeout() {
+            Some(_) => request.timeout(controlled_effect_timeout(Duration::MAX)?),
             None => request,
-        });
+        };
         request.send().map_err(|_| {
             runtime_failure(
                 "MODEL_RUNTIME_UNAVAILABLE",
@@ -750,12 +771,9 @@ impl OllamaRuntime {
         let Some(expected) = self.expected_digest.as_ref() else {
             return Ok(());
         };
+        let timeout = controlled_effect_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS))?;
         let response = self
-            .authorize(
-                self.client
-                    .get(self.endpoint("api/ps")?)
-                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
-            )
+            .authorize(self.client.get(self.endpoint("api/ps")?).timeout(timeout))
             .send()
             .map_err(|_| {
                 runtime_failure(
@@ -1140,10 +1158,12 @@ impl ModelRuntime for OllamaRuntime {
                 true,
             ));
         }
-        let previous =
-            CONTROLLED_REQUEST_TIMEOUT.with(|slot| slot.replace(control.request_timeout()));
+        let deadline = control
+            .request_timeout()
+            .map(|timeout| Instant::now() + timeout);
+        let previous = CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.replace(deadline));
         let result = self.generate(request);
-        CONTROLLED_REQUEST_TIMEOUT.with(|slot| slot.set(previous));
+        CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.set(previous));
         result
     }
 
@@ -1678,6 +1698,22 @@ mod tests {
     use std::io::{Cursor, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
+
+    #[test]
+    fn ollama_fallback_recomputes_the_same_absolute_deadline() {
+        let deadline = Some(Instant::now() + Duration::from_millis(80));
+        let previous = CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.replace(deadline));
+        let first = controlled_request_timeout().unwrap();
+        thread::sleep(Duration::from_millis(25));
+        let fallback = controlled_request_timeout().unwrap();
+        CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.set(previous));
+        assert!(fallback < first.saturating_sub(Duration::from_millis(10)));
+
+        let previous = CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.replace(Some(Instant::now())));
+        let expired = controlled_effect_timeout(Duration::from_secs(1));
+        CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.set(previous));
+        assert!(expired.is_err_and(|failure| failure.code == "MODEL_REQUEST_CANCELLED"));
+    }
 
     fn empty_installed_descriptor() -> InstalledModelDescriptor {
         InstalledModelDescriptor {

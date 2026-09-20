@@ -36,7 +36,7 @@ impl CancellationToken {
         Self {
             requested: Arc::new(AtomicBool::new(false)),
             request_timeout: Some(request_timeout),
-            deadline: None,
+            deadline: Instant::now().checked_add(request_timeout),
         }
     }
 
@@ -82,7 +82,9 @@ mod tests {
         let observer = token.clone();
 
         assert!(!observer.cancellation_requested());
-        assert_eq!(observer.request_timeout(), Some(Duration::from_secs(30)));
+        assert!(observer.request_timeout().is_some_and(|remaining| {
+            remaining > Duration::from_secs(29) && remaining <= Duration::from_secs(30)
+        }));
         token.request();
         assert!(observer.cancellation_requested());
     }

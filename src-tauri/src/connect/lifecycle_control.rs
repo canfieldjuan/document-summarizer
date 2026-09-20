@@ -20,7 +20,6 @@ const MAX_RECORD_BYTES: u64 = 32 * 1024;
 const TRANSITION_FILE: &str = "background-mode-transition-v1.json";
 const CONTROL_LOCK_FILE: &str = ".background-control-v1.lock";
 const ADMISSION_LOCK_FILE: &str = ".background-admission-v1.lock";
-pub(crate) const TRANSITION_ENV_FILE: &str = "connect-background.env";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -618,6 +617,8 @@ pub(crate) enum ControlStatus {
 }
 
 pub(crate) fn run_control(action: ControlAction) -> Result<ControlStatus, LifecycleControlError> {
+    let _package_authority = crate::connect::package_control::enter_admission()
+        .map_err(|_| LifecycleControlError::ConflictingTransition)?;
     let store = TransitionStore::from_environment()?;
     let app_data_dir = app_data_directory()?;
     ensure_private_directory(&app_data_dir)?;
@@ -625,10 +626,31 @@ pub(crate) fn run_control(action: ControlAction) -> Result<ControlStatus, Lifecy
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or(LifecycleControlError::Storage)?;
+    let manager_config_root =
+        if let Some(root) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+            PathBuf::from(root)
+        } else {
+            PathBuf::from(
+                env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .ok_or(LifecycleControlError::Storage)?,
+            )
+            .join(".config")
+        };
+    let manager_link = manager_config_root
+        .join("systemd/user/default.target.wants")
+        .join(service_unit());
+    fs::create_dir_all(
+        manager_link
+            .parent()
+            .ok_or(LifecycleControlError::Storage)?,
+    )
+    .map_err(|_| LifecycleControlError::Storage)?;
     let mut effects = SystemdUserEffects {
         app_data_dir: app_data_dir.clone(),
         runtime_root,
         control_root: store.root().to_path_buf(),
+        manager_link,
     };
     if action == ControlAction::Status {
         return if store.current()?.is_some() {
@@ -645,6 +667,14 @@ pub(crate) fn run_control(action: ControlAction) -> Result<ControlStatus, Lifecy
         ControlAction::Recover => None,
         ControlAction::Status => unreachable!(),
     };
+    crate::connect::package_control::record_participant_acknowledgement(
+        effects.manager_enabled()?,
+        &effects.runtime_root,
+        &effects.app_data_dir,
+        &effects.control_root,
+        &effects.manager_link,
+    )
+    .map_err(|_| LifecycleControlError::Storage)?;
     let expected_v2_instance_id = read_expected_v2_instance_id(&app_data_dir)?;
     store.run(
         requested,
@@ -652,68 +682,22 @@ pub(crate) fn run_control(action: ControlAction) -> Result<ControlStatus, Lifecy
         expected_v2_instance_id,
         &mut effects,
     )?;
-    if effects.manager_enabled()? {
-        Ok(ControlStatus::Enabled)
+    let enabled = effects.manager_enabled()?;
+    Ok(if enabled {
+        ControlStatus::Enabled
     } else {
-        Ok(ControlStatus::Disabled)
-    }
+        ControlStatus::Disabled
+    })
 }
 
 struct SystemdUserEffects {
     app_data_dir: PathBuf,
     runtime_root: PathBuf,
     control_root: PathBuf,
+    manager_link: PathBuf,
 }
 
-impl SystemdUserEffects {
-    fn generation_env_path(&self) -> PathBuf {
-        self.control_root.join(TRANSITION_ENV_FILE)
-    }
-
-    fn write_generation_env(
-        &self,
-        transition: &BackgroundTransition,
-    ) -> Result<(), LifecycleControlError> {
-        let path = self.generation_env_path();
-        let temporary = self.control_root.join(format!(
-            ".{TRANSITION_ENV_FILE}.{}.tmp",
-            transition.generation
-        ));
-        let result = (|| {
-            let mut options = OpenOptions::new();
-            options
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-            let mut file = options
-                .open(&temporary)
-                .map_err(|_| LifecycleControlError::Storage)?;
-            writeln!(
-                file,
-                "DOC_SUM_BACKGROUND_TRANSITION_GENERATION={}",
-                transition.generation
-            )
-            .map_err(|_| LifecycleControlError::Storage)?;
-            file.sync_all()
-                .map_err(|_| LifecycleControlError::Storage)?;
-            fs::rename(&temporary, &path).map_err(|_| LifecycleControlError::Storage)?;
-            sync_directory(&self.control_root)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
-    }
-
-    fn remove_generation_env(&self) -> Result<(), LifecycleControlError> {
-        match fs::remove_file(self.generation_env_path()) {
-            Ok(()) => sync_directory(&self.control_root),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(LifecycleControlError::Storage),
-        }
-    }
-}
+impl SystemdUserEffects {}
 
 impl TransitionEffects for SystemdUserEffects {
     fn manager_enabled(&mut self) -> Result<bool, LifecycleControlError> {
@@ -742,7 +726,7 @@ impl TransitionEffects for SystemdUserEffects {
         &mut self,
         transition: &BackgroundTransition,
     ) -> Result<(), LifecycleControlError> {
-        self.write_generation_env(transition)?;
+        let _ = transition;
         require_success(systemctl(&["enable", "--now", service_unit()])?)
     }
 
@@ -769,7 +753,6 @@ impl TransitionEffects for SystemdUserEffects {
         &mut self,
         transition: &BackgroundTransition,
     ) -> Result<(), LifecycleControlError> {
-        self.remove_generation_env()?;
         if transition.prior_enabled {
             require_success(systemctl(&["enable", service_unit()])?)
         } else {
@@ -781,7 +764,14 @@ impl TransitionEffects for SystemdUserEffects {
         &mut self,
         _transition: &BackgroundTransition,
     ) -> Result<(), LifecycleControlError> {
-        self.remove_generation_env()
+        crate::connect::package_control::record_participant_acknowledgement(
+            self.manager_enabled()?,
+            &self.runtime_root,
+            &self.app_data_dir,
+            &self.control_root,
+            &self.manager_link,
+        )
+        .map_err(|_| LifecycleControlError::Storage)
     }
 }
 

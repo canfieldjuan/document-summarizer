@@ -516,9 +516,28 @@ impl LlamaCppRuntime {
         request.bearer_auth(&self.api_token)
     }
 
-    fn prompt_tokens(&self, system: &str, user: &str) -> Result<Vec<u32>, ModelRuntimeFailure> {
-        let system = tokenize_text(&self.client, &self.base_url, &self.api_token, system, false)?;
-        let user = tokenize_text(&self.client, &self.base_url, &self.api_token, user, false)?;
+    fn prompt_tokens(
+        &self,
+        system: &str,
+        user: &str,
+        control: &dyn ExecutionControl,
+    ) -> Result<Vec<u32>, ModelRuntimeFailure> {
+        let system = tokenize_text(
+            &self.client,
+            &self.base_url,
+            &self.api_token,
+            system,
+            false,
+            remaining_effect_timeout(control)?,
+        )?;
+        let user = tokenize_text(
+            &self.client,
+            &self.base_url,
+            &self.api_token,
+            user,
+            false,
+            remaining_effect_timeout(control)?,
+        )?;
         let capacity = self
             .prompt_framing
             .system_open
@@ -640,6 +659,22 @@ fn cancelled_model_request() -> ModelRuntimeFailure {
     )
 }
 
+fn remaining_effect_timeout(
+    control: &dyn ExecutionControl,
+) -> Result<Duration, ModelRuntimeFailure> {
+    if control.cancellation_requested() {
+        return Err(cancelled_model_request());
+    }
+    let remaining = control
+        .request_timeout()
+        .unwrap_or(REQUEST_TIMEOUT)
+        .min(REQUEST_TIMEOUT);
+    if remaining.is_zero() {
+        return Err(cancelled_model_request());
+    }
+    Ok(remaining)
+}
+
 impl LlamaCppRuntime {
     fn wait_for_inference_slot(
         &self,
@@ -711,7 +746,8 @@ impl ModelRuntime for LlamaCppRuntime {
                 ));
             }
             let schema = response_format(&request.output_format)?;
-            let prompt = self.prompt_tokens(&request.system_prompt, &request.user_prompt)?;
+            let prompt =
+                self.prompt_tokens(&request.system_prompt, &request.user_prompt, control)?;
             let prompt_tokens = u32::try_from(prompt.len()).map_err(|_| {
                 failure(
                     "MODEL_CONTEXT_EXCEEDED",
@@ -733,15 +769,8 @@ impl ModelRuntime for LlamaCppRuntime {
                     false,
                 ));
             }
-            let completed = self.completion(
-                request,
-                &prompt,
-                schema,
-                control
-                    .request_timeout()
-                    .unwrap_or(REQUEST_TIMEOUT)
-                    .min(REQUEST_TIMEOUT),
-            )?;
+            let completed =
+                self.completion(request, &prompt, schema, remaining_effect_timeout(control)?)?;
             observed_usage.prompt_tokens = completed.tokens_evaluated;
             observed_usage.completion_tokens = completed.tokens_predicted;
             observed_usage.total_tokens = completed
@@ -819,8 +848,12 @@ impl ModelRuntime for LlamaCppRuntime {
     fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
         response_format(&request.output_format)?;
         let prompt_tokens = u32::try_from(
-            self.prompt_tokens(&request.system_prompt, &request.user_prompt)?
-                .len(),
+            self.prompt_tokens(
+                &request.system_prompt,
+                &request.user_prompt,
+                &UNCONTROLLED_EXECUTION,
+            )?
+            .len(),
         )
         .map_err(|_| {
             failure(
@@ -1419,13 +1452,21 @@ fn create_private_api_key_file(
 
 impl PromptFraming {
     fn load(client: &Client, base_url: &str, token: &str) -> Result<Self, ModelRuntimeFailure> {
-        let system_open = tokenize_text(client, base_url, token, "<|im_start|>system\n", true)?;
+        let system_open = tokenize_text(
+            client,
+            base_url,
+            token,
+            "<|im_start|>system\n",
+            true,
+            HEALTH_TIMEOUT,
+        )?;
         let system_close_user_open = tokenize_text(
             client,
             base_url,
             token,
             "<|im_end|>\n<|im_start|>user\n",
             true,
+            HEALTH_TIMEOUT,
         )?;
         let user_close_assistant_open = tokenize_text(
             client,
@@ -1433,6 +1474,7 @@ impl PromptFraming {
             token,
             "<|im_end|>\n<|im_start|>assistant\n",
             true,
+            HEALTH_TIMEOUT,
         )?;
         if system_open.is_empty()
             || system_close_user_open.is_empty()
@@ -1458,11 +1500,12 @@ fn tokenize_text(
     token: &str,
     content: &str,
     parse_special: bool,
+    timeout: Duration,
 ) -> Result<Vec<u32>, ModelRuntimeFailure> {
     let response = client
         .post(format!("{base_url}/tokenize"))
         .bearer_auth(token)
-        .timeout(HEALTH_TIMEOUT)
+        .timeout(timeout)
         .json(&TokenizeRequest {
             content,
             add_special: false,
@@ -2096,6 +2139,15 @@ mod tests {
     use super::*;
     use crate::pipeline::control::CancellationToken;
     use std::io::{Read, Write};
+
+    #[test]
+    fn llama_tokenize_and_completion_effects_share_one_deadline() {
+        let control = CancellationToken::with_request_timeout(Duration::from_millis(80));
+        let first = remaining_effect_timeout(&control).unwrap();
+        thread::sleep(Duration::from_millis(25));
+        let second = remaining_effect_timeout(&control).unwrap();
+        assert!(second < first.saturating_sub(Duration::from_millis(10)));
+    }
 
     static LEASE_TEST_LOCK: Mutex<()> = Mutex::new(());
 

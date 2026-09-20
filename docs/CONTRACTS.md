@@ -1980,11 +1980,15 @@ held.
 Provider shutdown first closes new-job admission and requests cooperative
 cancellation from every retained Connect worker. Each admitted Connect job gets
 one absolute 30-second deadline; Ollama, llama.cpp completion, and
-inference-gateway transports receive only its remaining time. Shutdown reaps
+inference-gateway transports receive only its remaining time. Ollama recomputes
+before primary and fallback chat calls, llama.cpp recomputes before each
+tokenizer call and completion, and the gateway recomputes before inference and
+acknowledgement. Shutdown reaps
 finished worker handles during
 steady admission and drains remaining handles through the 35-second graceful
 deadline. It then requests endpoint shutdown, joins the server thread, and
-removes both exact protocol registrations. The foreground invokes this sequence
+removes both exact protocol registrations. The headless owner also clears its
+managed llama runtime registry so the owned child is terminated. The foreground invokes this sequence
 on Tauri's final `RunEvent::Exit`; the headless owner invokes it after blocked
 `SIGTERM` or `SIGINT` is synchronously received. If a noncooperating worker
 survives the graceful deadline, process shutdown owns that thread and systemd
@@ -1993,18 +1997,31 @@ owner uses stale-registration and interrupted-job recovery before publishing
 fresh process credentials.
 
 Debian maintainer scripts call the app-owned `--connect-package` controller.
-Before upgrade or removal mutation, it writes a root-owned durable package
-generation under `/var/lib/document-summarizer`, discovers active user runtime
-roots, records each explicit enablement choice, stops the systemd unit, and runs
-the authenticated provider stop and registration cleanup path under that user's
-UID. The package record is also a provider-start and job-admission barrier.
-Upgrade recovery restores only the recorded choices and then clears the exact
-generation. Removal stops and cleans every participant without restoring a
-worker. Prepare writes a root-only controller copy named by the generation;
-`postrm` uses that copy to recheck cleanup, unlink the controller, and clear the
-exact record after package removal. A crash before exact clear leaves the
-recorded barrier for the next package controller to resume. Malformed,
-wrong-kind, wrong-target, or changed-generation records fail closed.
+The production package authority is the fixed root-owned
+`/var/lib/document-summarizer` tree and cannot be redirected by an environment
+variable. Provider startup and each accepted-job commit hold its shared lock;
+dpkg transitions hold it exclusively before taking recorded per-user control
+and admission locks in ascending UID order. Enable and disable record an
+owner-authenticated 0600 participant acknowledgement before manager mutation
+and update it after settlement while the per-user barrier is still held. That acknowledgement carries the exact runtime,
+application data, lifecycle control, and systemd enablement paths, so package
+discovery does not enumerate `/etc/passwd` or guess XDG locations.
+
+Upgrade, removal, and reinstall suppress every recorded manager, stop and clean
+each exact provider, and keep the package record as an admission barrier while
+each participant is settled. An enabled participant with an available user
+manager is recorded ready only after an authenticated provider probe. An
+enabled participant without a service session is durably recorded
+`deferred_enabled`; a disabled participant remains disabled. Removal writes a
+generation-bound receipt and retains its root-only controller. A later install
+first completes any interrupted removal, then durably writes a distinct
+reinstall generation before package admission. Successful reinstall writes an
+install receipt that copies the preserved choices and enters a durable
+`finalizing` phase before retiring the old controller and removal receipt. The
+admission barrier is cleared only after those idempotent finalization effects.
+Malformed, wrong-kind, wrong-target, changed
+generation, unowned participant receipt, or incomplete per-user transition
+fails closed.
 
 On Unix, publication, startup scavenging, and removal share an owner-only
 lifecycle-file lock. Windows publication writes a fixed same-directory
