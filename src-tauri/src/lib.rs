@@ -33,8 +33,6 @@ use pipeline::profile_suggestion::{
     suggest_summary_profile as suggest_profile_from_document, SummaryProfileSuggestion,
     PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
 };
-#[cfg(not(target_os = "linux"))]
-use pipeline::recovery::reconcile_interrupted_runs;
 use pipeline::service::DocumentServiceError;
 use pipeline::structure::{
     structure_document as structure_pipeline_document, DeterministicStructureInterpreter,
@@ -550,19 +548,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             ensure_private_app_data_directory(&app_data_dir)?;
             let db_path = app_data_dir.join("summarizer.db");
             let settings_path = model_settings_path(&app_data_dir);
-            #[cfg(not(target_os = "linux"))]
-            let mut conn = init_db(&db_path)?;
-            #[cfg(not(target_os = "linux"))]
-            let recovered = reconcile_interrupted_runs(&mut conn)?;
-            #[cfg(not(target_os = "linux"))]
-            if !recovered.is_empty() {
-                eprintln!(
-                    "Reconciled {} interrupted pipeline run(s) after restart",
-                    recovered.len()
-                );
-            }
-            #[cfg(not(target_os = "linux"))]
-            drop(conn);
 
             let entitlement = match EntitlementGate::from_installation() {
                 Ok(gate) => Some(gate),
@@ -582,7 +567,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 Err(error) => {
                     eprintln!("Connect provider unavailable; standalone mode continues: {error}");
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", windows))]
                     match connect::provider::reconcile_standalone_state_if_unowned(
                         &db_path,
                         &app_data_dir,

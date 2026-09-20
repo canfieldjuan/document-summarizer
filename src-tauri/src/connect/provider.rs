@@ -27,7 +27,7 @@ use crate::pipeline::model_settings::connect_proof_runtime_from_environment;
 use crate::pipeline::model_settings::{runtime_from_settings, settings_path};
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::pipeline::recovery::reconcile_interrupted_runs;
 use crate::pipeline::service::{
     process_ingested_to_summary_with_delivery_policy_controlled, SummaryComponents,
@@ -744,7 +744,7 @@ impl ConnectProvider {
         #[cfg(unix)]
         let mut conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
         #[cfg(not(unix))]
-        let conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
+        let mut conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
         #[cfg(unix)]
         let recovered_runs =
             reconcile_interrupted_runs(&mut conn).map_err(ConnectStoreError::from)?;
@@ -773,6 +773,17 @@ impl ConnectProvider {
             None,
         )
         .map_err(map_windows_registration_lock_error)?;
+
+        #[cfg(windows)]
+        let recovered_runs =
+            reconcile_interrupted_runs(&mut conn).map_err(ConnectStoreError::from)?;
+        #[cfg(windows)]
+        if !recovered_runs.is_empty() {
+            eprintln!(
+                "Reconciled {} interrupted pipeline run(s) after acquiring provider ownership",
+                recovered_runs.len()
+            );
+        }
 
         store::mark_interrupted_jobs_failed(
             &conn,
@@ -1217,6 +1228,103 @@ pub(crate) fn reconcile_standalone_state_if_unowned(
             Err(error) => return Err(error),
         };
     let mut conn = db::init_db(db_path).map_err(ConnectStoreError::from)?;
+    Ok(Some(
+        reconcile_interrupted_runs(&mut conn)
+            .map_err(ConnectStoreError::from)?
+            .len(),
+    ))
+}
+
+#[cfg(windows)]
+pub(crate) fn reconcile_standalone_state_if_unowned(
+    db_path: &Path,
+    app_data_dir: &Path,
+) -> Result<Option<usize>, ProviderStartError> {
+    let runtime_root = windows_storage::local_app_data_root(env::var_os("LOCALAPPDATA"))
+        .map_err(|_| ProviderStartError::RuntimeDirectoryUnavailable)?;
+    reconcile_standalone_state_if_unowned_at(db_path, app_data_dir, &runtime_root)
+}
+
+#[cfg(windows)]
+fn standalone_v2_instance_id_without_writes(
+    db_path: &Path,
+    app_data_dir: &Path,
+) -> Result<String, ProviderStartError> {
+    let identity_path = app_data_dir.join(V2_INSTANCE_ID_FILE);
+    match fs::read_to_string(&identity_path) {
+        Ok(value) => return parse_v2_instance_id(&value),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    if !db_path.exists() {
+        return Ok(Uuid::new_v4().to_string());
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(ConnectStoreError::from)?;
+    let has_connect_jobs: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'connect_jobs'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ConnectStoreError::from)?;
+    if !has_connect_jobs {
+        return Ok(Uuid::new_v4().to_string());
+    }
+    Ok(store::active_v2_provider_instance_id(&conn)?.unwrap_or_else(|| Uuid::new_v4().to_string()))
+}
+
+#[cfg(windows)]
+fn reconcile_standalone_state_if_unowned_at(
+    db_path: &Path,
+    app_data_dir: &Path,
+    runtime_root: &Path,
+) -> Result<Option<usize>, ProviderStartError> {
+    ensure_private_directory(app_data_dir)?;
+    let private_connect_root = windows_storage::prepare_local_connect_root(runtime_root)?;
+    let locks_dir_v1 = private_connect_root.join("runtime/v1/locks");
+    let locks_dir_v2 = private_connect_root.join("runtime/v2/locks");
+    for directory in [&locks_dir_v1, &locks_dir_v2] {
+        windows_storage::ensure_private_directory(directory, runtime_root)?;
+    }
+
+    let _registration_lock_v1 = match acquire_registration_lock(
+        &locks_dir_v1.join(format!(".local-connect-v1-{APP_ID}.lock")),
+        Some(runtime_root),
+        None,
+    ) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(map_windows_registration_lock_error(error)),
+    };
+    let candidate_instance_id = standalone_v2_instance_id_without_writes(db_path, app_data_dir)?;
+    let _registration_lock_v2 = match acquire_registration_lock(
+        &locks_dir_v2.join(format!(".local-connect-v2-{candidate_instance_id}.lock")),
+        Some(runtime_root),
+        None,
+    ) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(map_windows_registration_lock_error(error)),
+    };
+
+    let mut conn = db::init_db(db_path).map_err(ConnectStoreError::from)?;
+    let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
+    if active_v2_instance_id
+        .as_deref()
+        .is_some_and(|active| active != candidate_instance_id)
+    {
+        return Err(ProviderStartError::InvalidInstanceIdentity);
+    }
+    let instance_id = load_or_create_v2_instance_id(app_data_dir, Some(&candidate_instance_id))?;
+    if instance_id != candidate_instance_id {
+        return Err(ProviderStartError::InvalidInstanceIdentity);
+    }
     Ok(Some(
         reconcile_interrupted_runs(&mut conn)
             .map_err(ConnectStoreError::from)?
@@ -3336,7 +3444,7 @@ mod tests {
         PipelineStage, PipelineState, SourceSpan, SourceType, SummaryArtifact,
     };
     use crate::pipeline::control::ExecutionControl;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use crate::pipeline::ingest::ingest_pdf;
     use crate::pipeline::normalize::normalize_document;
     use crate::pipeline::parser::parse_document;
@@ -5342,6 +5450,88 @@ mod tests {
             reconcile_standalone_state_if_unowned(&db_path, &app_data).unwrap(),
             Some(1)
         );
+        assert_eq!(
+            db::get_pipeline_run(&db::init_db(&db_path).unwrap(), &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Failed
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn standalone_recovery_waits_for_windows_provider_ownership() {
+        let root = TestDirectory::new("doc-sum-connect-windows-standalone-recovery");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let mut conn = db::init_db(&db_path).unwrap();
+        let (_, active_run) = ingest_pdf(&mut conn, source.to_str().unwrap()).unwrap();
+        let (active_run, _) =
+            db::start_parsing(&mut conn, &active_run.run_id, active_run.state_version).unwrap();
+        drop(conn);
+
+        assert_eq!(
+            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root).unwrap(),
+            None
+        );
+        assert_eq!(
+            db::get_pipeline_run(&db::init_db(&db_path).unwrap(), &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Parsing
+        );
+
+        provider.shutdown();
+        assert_eq!(
+            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            db::get_pipeline_run(&db::init_db(&db_path).unwrap(), &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Failed
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_standalone_recovery_persists_the_locked_v2_identity() {
+        let root = TestDirectory::new("doc-sum-connect-windows-first-standalone-recovery");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let mut conn = db::init_db(&db_path).unwrap();
+        let (_, active_run) = ingest_pdf(&mut conn, source.to_str().unwrap()).unwrap();
+        let (active_run, _) =
+            db::start_parsing(&mut conn, &active_run.run_id, active_run.state_version).unwrap();
+        drop(conn);
+        assert!(!app_data.join(V2_INSTANCE_ID_FILE).exists());
+
+        assert_eq!(
+            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root).unwrap(),
+            Some(1)
+        );
+        assert!(app_data.join(V2_INSTANCE_ID_FILE).is_file());
         assert_eq!(
             db::get_pipeline_run(&db::init_db(&db_path).unwrap(), &active_run.run_id)
                 .unwrap()
