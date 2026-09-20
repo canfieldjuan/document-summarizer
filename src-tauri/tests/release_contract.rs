@@ -43,6 +43,31 @@ fn linux_release_targets_only_the_supported_bundle() {
 }
 
 #[test]
+fn linux_bundle_installs_disabled_background_provider_unit_with_bounded_supervision() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config: Value = serde_json::from_str(include_str!("../tauri.linux.conf.json"))
+        .expect("Linux Tauri config must be valid JSON");
+    assert_eq!(
+        config["bundle"]["linux"]["deb"]["files"]
+            ["/usr/lib/systemd/user/document-summarizer-connect.service"],
+        "linux/document-summarizer-connect.service"
+    );
+
+    let unit_path = manifest_dir.join("linux/document-summarizer-connect.service");
+    let unit = std::fs::read_to_string(unit_path)
+        .expect("the Linux bundle must carry its systemd user unit");
+    assert!(unit.contains("ExecStart=/usr/bin/document-summarizer --connect-provider"));
+    assert!(unit.contains("Restart=on-failure"));
+    assert!(unit.contains("RestartSec=5s"));
+    assert!(unit.contains("StartLimitIntervalSec=300"));
+    assert!(unit.contains("StartLimitBurst=5"));
+    assert!(unit.contains("TimeoutStopSec=40s"));
+    assert!(unit.contains("KillMode=control-group"));
+    assert!(unit.contains("WantedBy=default.target"));
+    assert!(!unit.contains("Alias="));
+}
+
+#[test]
 fn legacy_pdf_probes_cannot_be_discovered_as_release_binaries() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let conventional_bin_dir = manifest_dir.join("src/bin");

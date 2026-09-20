@@ -33,6 +33,7 @@ use pipeline::profile_suggestion::{
     suggest_summary_profile as suggest_profile_from_document, SummaryProfileSuggestion,
     PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
 };
+#[cfg(not(target_os = "linux"))]
 use pipeline::recovery::reconcile_interrupted_runs;
 use pipeline::service::DocumentServiceError;
 use pipeline::structure::{
@@ -549,14 +550,18 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             ensure_private_app_data_directory(&app_data_dir)?;
             let db_path = app_data_dir.join("summarizer.db");
             let settings_path = model_settings_path(&app_data_dir);
+            #[cfg(not(target_os = "linux"))]
             let mut conn = init_db(&db_path)?;
+            #[cfg(not(target_os = "linux"))]
             let recovered = reconcile_interrupted_runs(&mut conn)?;
+            #[cfg(not(target_os = "linux"))]
             if !recovered.is_empty() {
                 eprintln!(
                     "Reconciled {} interrupted pipeline run(s) after restart",
                     recovered.len()
                 );
             }
+            #[cfg(not(target_os = "linux"))]
             drop(conn);
 
             let entitlement = match EntitlementGate::from_installation() {
@@ -571,12 +576,27 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 model_settings_path: settings_path,
                 entitlement,
             });
-            match ConnectProvider::start(db_path, app_data_dir) {
+            match ConnectProvider::start(db_path.clone(), app_data_dir.clone()) {
                 Ok(provider) => {
                     app.manage(Mutex::new(Some(provider)));
                 }
                 Err(error) => {
                     eprintln!("Connect provider unavailable; standalone mode continues: {error}");
+                    #[cfg(target_os = "linux")]
+                    match connect::provider::reconcile_standalone_state_if_unowned(
+                        &db_path,
+                        &app_data_dir,
+                    ) {
+                        Ok(Some(count)) if count > 0 => {
+                            eprintln!(
+                                "Reconciled {count} interrupted pipeline run(s) in standalone mode"
+                            );
+                        }
+                        Ok(Some(_) | None) => {}
+                        Err(recovery_error) => {
+                            eprintln!("Standalone recovery unavailable: {recovery_error}");
+                        }
+                    }
                 }
             }
             Ok(())
@@ -620,6 +640,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
     });
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_background_connect_provider() -> Result<(), Box<dyn Error>> {
+    connect::lifecycle::run().map_err(Into::into)
 }
 
 #[cfg(test)]

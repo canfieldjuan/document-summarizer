@@ -165,6 +165,24 @@ source revisions; the installed-app lifecycle is proven for the MSI. AppImage,
 RPM, macOS, and an installed NSIS lifecycle remain deferred until they can be
 built and exercised on their target platforms.
 
+The Debian package installs a disabled systemd user unit for the Connect
+provider. A user can explicitly keep Connect available without an open Document
+Summarizer window with:
+
+```bash
+systemctl --user enable --now document-summarizer-connect.service
+```
+
+The unit runs the package's headless `--connect-provider` entry point against
+the same per-user database and provider identity as the desktop. Connect startup
+failure exits nonzero so systemd applies its bounded restart policy; desktop
+startup continues in standalone mode when Connect is unavailable. Stop the
+owner and remove automatic startup with:
+
+```bash
+systemctl --user disable --now document-summarizer-connect.service
+```
+
 A raw `cargo build --release` is intentionally rejected because it can produce a
 desktop executable that points at the development server instead of embedding
 `dist`.

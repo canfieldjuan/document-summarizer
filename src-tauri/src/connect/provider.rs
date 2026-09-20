@@ -15,6 +15,7 @@ use crate::pipeline::contracts::{
 };
 #[cfg(test)]
 use crate::pipeline::contracts::{ModelProfileSnapshot, ModelStageProfileSnapshot};
+use crate::pipeline::control::CancellationToken;
 use crate::pipeline::db;
 use crate::pipeline::ingest::prepare_pdf_ingestion;
 #[cfg(feature = "connect-proof-runtime")]
@@ -22,8 +23,10 @@ use crate::pipeline::model_settings::connect_proof_runtime_from_environment;
 use crate::pipeline::model_settings::{runtime_from_settings, settings_path};
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
+#[cfg(unix)]
+use crate::pipeline::recovery::reconcile_interrupted_runs;
 use crate::pipeline::service::{
-    process_ingested_to_summary_with_delivery_policy, SummaryComponents,
+    process_ingested_to_summary_with_delivery_policy_controlled, SummaryComponents,
 };
 use crate::pipeline::structure::DeterministicStructureInterpreter;
 use crate::pipeline::summary::{
@@ -50,7 +53,7 @@ use std::io::Read;
 use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 #[cfg(unix)]
@@ -149,6 +152,84 @@ fn connect_proof_runtime(
 }
 
 #[derive(Clone)]
+struct ProviderWorkerOwner {
+    state: Arc<Mutex<ProviderWorkerState>>,
+    cancellation: CancellationToken,
+}
+
+struct ProviderWorkerState {
+    accepting: bool,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl ProviderWorkerOwner {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ProviderWorkerState {
+                accepting: true,
+                handles: Vec::new(),
+            })),
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    fn accepting(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .accepting
+    }
+
+    fn spawn<F>(&self, name: String, worker: F) -> io::Result<()>
+    where
+        F: FnOnce(CancellationToken) + Send + 'static,
+    {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.accepting {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Connect provider is shutting down",
+            ));
+        }
+        let cancellation = self.cancellation.clone();
+        let handle = thread::Builder::new()
+            .name(name)
+            .spawn(move || worker(cancellation))?;
+        state.handles.push(handle);
+        Ok(())
+    }
+
+    fn shutdown(&self) {
+        let handles = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.accepting = false;
+            std::mem::take(&mut state.handles)
+        };
+        self.cancellation.request();
+        for handle in handles {
+            if handle.join().is_err() {
+                eprintln!("Connect provider worker panicked during shutdown");
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn retained_worker_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .handles
+            .len()
+    }
+}
+
+#[derive(Clone)]
 struct ProviderState {
     db_path: PathBuf,
     imports_dir: PathBuf,
@@ -160,6 +241,7 @@ struct ProviderState {
     max_input_bytes: u64,
     runtime_factory: RuntimeFactory,
     entitlement: EntitlementGate,
+    workers: ProviderWorkerOwner,
 }
 
 #[cfg(unix)]
@@ -243,6 +325,8 @@ pub enum ProviderStartError {
 
 pub struct ConnectProvider {
     #[cfg(unix)]
+    _provider_owner_lock: RegistrationLifecycleLock,
+    #[cfg(unix)]
     registration_lock_path: PathBuf,
     #[cfg(windows)]
     _registration_lock_v1: RegistrationLifecycleLock,
@@ -256,8 +340,10 @@ pub struct ConnectProvider {
     instance_id_v1: String,
     instance_id_v2: String,
     token: String,
+    workers: ProviderWorkerOwner,
     shutdown: Option<watch::Sender<bool>>,
     server_thread: Option<JoinHandle<()>>,
+    stopped: bool,
 }
 
 impl ConnectProvider {
@@ -319,6 +405,9 @@ impl ConnectProvider {
         entitlement: EntitlementGate,
     ) -> Result<Self, ProviderStartError> {
         ensure_private_directory(&app_data_dir)?;
+        #[cfg(unix)]
+        let provider_owner_lock =
+            acquire_provider_ownership_lock(&app_data_dir.join(".connect-provider-owner.lock"))?;
         let imports_dir = app_data_dir.join("connect-imports");
         ensure_private_directory(&imports_dir)?;
 
@@ -367,7 +456,20 @@ impl ConnectProvider {
             windows_storage::ensure_private_directory(directory, &runtime_root)?;
         }
 
+        #[cfg(unix)]
+        let mut conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
+        #[cfg(not(unix))]
         let conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
+        #[cfg(unix)]
+        let recovered_runs =
+            reconcile_interrupted_runs(&mut conn).map_err(ConnectStoreError::from)?;
+        #[cfg(unix)]
+        if !recovered_runs.is_empty() {
+            eprintln!(
+                "Reconciled {} interrupted pipeline run(s) before Connect publication",
+                recovered_runs.len()
+            );
+        }
         let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
         let instance_id_v2 =
             load_or_create_v2_instance_id(&app_data_dir, active_v2_instance_id.as_deref())?;
@@ -403,6 +505,7 @@ impl ConnectProvider {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let manifest_v1 = AppManifest::new(&instance_id_v1, max_input_bytes);
         let manifest_v2 = v2::AppManifest::new(&instance_id_v2, max_input_bytes);
+        let workers = ProviderWorkerOwner::new();
         let state = ProviderState {
             db_path,
             imports_dir,
@@ -414,6 +517,7 @@ impl ConnectProvider {
             max_input_bytes,
             runtime_factory,
             entitlement,
+            workers: workers.clone(),
         };
         let body_limit = usize::try_from(max_input_bytes)
             .unwrap_or(usize::MAX)
@@ -576,6 +680,8 @@ impl ConnectProvider {
 
         Ok(Self {
             #[cfg(unix)]
+            _provider_owner_lock: provider_owner_lock,
+            #[cfg(unix)]
             registration_lock_path,
             #[cfg(windows)]
             _registration_lock_v1: registration_lock_v1,
@@ -589,8 +695,10 @@ impl ConnectProvider {
             instance_id_v1,
             instance_id_v2,
             token,
+            workers,
             shutdown: Some(shutdown_tx),
             server_thread: Some(server_thread),
+            stopped: false,
         })
     }
 
@@ -665,28 +773,64 @@ impl ConnectProvider {
             }
         }
     }
+
+    fn shutdown_inner(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        self.workers.shutdown();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(true);
+        }
+        if let Some(server_thread) = self.server_thread.take() {
+            if server_thread.join().is_err() {
+                eprintln!("Connect provider server panicked during shutdown");
+            }
+        }
+        self.unregister();
+    }
+
+    pub fn shutdown(mut self) {
+        self.shutdown_inner();
+    }
+
+    #[cfg(test)]
+    fn simulate_process_loss(mut self) {
+        self.workers.shutdown();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(true);
+        }
+        if let Some(server_thread) = self.server_thread.take() {
+            let _ = server_thread.join();
+        }
+        self.stopped = true;
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn reconcile_standalone_state_if_unowned(
+    db_path: &Path,
+    app_data_dir: &Path,
+) -> Result<Option<usize>, ProviderStartError> {
+    ensure_private_directory(app_data_dir)?;
+    let _owner =
+        match acquire_provider_ownership_lock(&app_data_dir.join(".connect-provider-owner.lock")) {
+            Ok(owner) => owner,
+            Err(ProviderStartError::ProviderAlreadyRunning) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+    let mut conn = db::init_db(db_path).map_err(ConnectStoreError::from)?;
+    Ok(Some(
+        reconcile_interrupted_runs(&mut conn)
+            .map_err(ConnectStoreError::from)?
+            .len(),
+    ))
 }
 
 impl Drop for ConnectProvider {
     fn drop(&mut self) {
-        #[cfg(windows)]
-        {
-            if let Some(shutdown) = self.shutdown.take() {
-                let _ = shutdown.send(true);
-            }
-            if let Some(server_thread) = self.server_thread.take() {
-                let _ = server_thread.join();
-            }
-            self.unregister();
-        }
-        #[cfg(unix)]
-        {
-            self.unregister();
-            if let Some(shutdown) = self.shutdown.take() {
-                let _ = shutdown.send(true);
-            }
-            self.server_thread.take();
-        }
+        self.shutdown_inner();
     }
 }
 
@@ -871,6 +1015,14 @@ async fn create_job_for_request(
 ) -> Result<Response, ProviderHttpError> {
     authorize(&state, request.headers())?;
     require_entitlement(&state)?;
+    if !state.workers.accepting() {
+        return Err(ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is shutting down.",
+            true,
+        ));
+    }
     let multipart = Multipart::from_request(request, &state)
         .await
         .map_err(ProviderHttpError::multipart)?;
@@ -1060,10 +1212,10 @@ async fn create_job_for(
 
     let worker_state = state.clone();
     let worker_job_id = request.job_id.clone();
-    if let Err(error) = thread::Builder::new()
-        .name(format!("connect-job-{}", &worker_job_id[..8]))
-        .spawn(move || process_job(worker_state, worker_job_id, runtime))
-    {
+    if let Err(error) = state.workers.spawn(
+        format!("connect-job-{}", &worker_job_id[..8]),
+        move |cancellation| process_job(worker_state, worker_job_id, runtime, cancellation),
+    ) {
         eprintln!("Connect provider worker could not start: {error}");
         let worker_error = job_error(
             "PROVIDER_WORKER_UNAVAILABLE",
@@ -1081,7 +1233,12 @@ async fn create_job_for(
     job_response(version, StatusCode::ACCEPTED, &accepted)
 }
 
-fn process_job(state: ProviderState, job_id: String, runtime: Box<dyn ModelRuntime>) {
+fn process_job(
+    state: ProviderState,
+    job_id: String,
+    runtime: Box<dyn ModelRuntime>,
+    cancellation: CancellationToken,
+) {
     let result = (|| -> Result<(), ProcessJobError> {
         let conn = db::init_db(&state.db_path)?;
         let job = store::mark_processing(&conn, &job_id)?;
@@ -1090,7 +1247,7 @@ fn process_job(state: ProviderState, job_id: String, runtime: Box<dyn ModelRunti
         let normalizer = CanonicalNormalizer::new();
         let interpreter = DeterministicStructureInterpreter::new();
         let chunker = DeterministicDocumentChunker::new();
-        let summary = process_ingested_to_summary_with_delivery_policy(
+        let summary = process_ingested_to_summary_with_delivery_policy_controlled(
             &mut pipeline_conn,
             &job.pipeline_run_id,
             SummaryComponents {
@@ -1101,6 +1258,7 @@ fn process_job(state: ProviderState, job_id: String, runtime: Box<dyn ModelRunti
                 runtime: runtime.as_ref(),
             },
             SummaryDeliveryPolicy::connect(),
+            &cancellation,
         )?;
         let analyzed = db::get_analyzed_document(&pipeline_conn, &job.pipeline_run_id)?
             .ok_or_else(
@@ -1214,6 +1372,7 @@ fn retryable_pipeline_code(code: &str) -> bool {
             | "PIPELINE_STORE_ERROR"
             | "DATABASE_ERROR"
             | "SUMMARY_ARTIFACT_PERSISTENCE_FAILED"
+            | "PIPELINE_CANCELLATION_OBSERVED"
     )
 }
 
@@ -1621,6 +1780,24 @@ fn acquire_registration_lock(
                 Err(TryLockError::Error(error)) => return Err(error),
             }
         }
+    }
+}
+
+#[cfg(unix)]
+fn acquire_provider_ownership_lock(
+    path: &Path,
+) -> Result<RegistrationLifecycleLock, ProviderStartError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(0o600);
+    let file = options.open(path)?;
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    match file.try_lock() {
+        Ok(()) => Ok(RegistrationLifecycleLock { file }),
+        Err(TryLockError::WouldBlock) => Err(ProviderStartError::ProviderAlreadyRunning),
+        Err(TryLockError::Error(error)) => Err(ProviderStartError::Io(error)),
     }
 }
 
@@ -2128,8 +2305,9 @@ mod tests {
     use crate::connect::entitlement::{EntitlementGate, ENTITLEMENT_FILE_NAME, FEATURE_ID};
     use crate::pipeline::contracts::{
         CitationArtifact, CitedClaim, EvidenceItem, ModelRequest, ModelResponse, PipelineFailure,
-        PipelineStage, SourceSpan, SourceType, SummaryArtifact,
+        PipelineStage, PipelineState, SourceSpan, SourceType, SummaryArtifact,
     };
+    use crate::pipeline::ingest::ingest_pdf;
     use crate::pipeline::normalize::normalize_document;
     use crate::pipeline::parser::parse_document;
     use base64::{
@@ -3427,7 +3605,7 @@ mod tests {
     }
 
     #[test]
-    fn restarted_v2_provider_reuses_identity_and_exposes_interrupted_failure() {
+    fn supervised_restart_reuses_v2_identity_and_exposes_interrupted_failure() {
         let root = TestDirectory::new("doc-sum-connect-v2-restart");
         let runtime_root = root.0.join("runtime");
         let app_data = root.0.join("app-data");
@@ -3469,8 +3647,14 @@ mod tests {
             &run,
         )
         .unwrap();
+        let persisted = db::get_pipeline_run(&conn, &run.run_id).unwrap().unwrap();
+        db::start_parsing(&mut conn, &run.run_id, persisted.state_version).unwrap();
         drop(conn);
-        drop(first);
+        let stale_v1 = first.registration_path().to_path_buf();
+        let stale_v2 = first.registration_path_v2().to_path_buf();
+        first.simulate_process_loss();
+        assert!(stale_v1.exists());
+        assert!(stale_v2.exists());
         fs::remove_file(app_data.join(V2_INSTANCE_ID_FILE)).unwrap();
 
         let second = ConnectProvider::start_at(
@@ -3518,6 +3702,131 @@ mod tests {
         assert_eq!(status.provider.instance_id, first_v2.instance_id);
         assert_eq!(status.status, JobState::Failed);
         assert_eq!(status.error.unwrap().code, "PROVIDER_RESTARTED");
+        let recovered_run = db::get_pipeline_run(
+            &db::init_db(app_data.join("summarizer.db")).unwrap(),
+            &run.run_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered_run.state, PipelineState::Failed);
+        assert_eq!(
+            recovered_run.failure.unwrap().code,
+            crate::pipeline::recovery::INTERRUPTION_FAILURE_CODE
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connect_owned_provider_remains_available_after_foreground_exit() {
+        let root = TestDirectory::new("doc-sum-connect-background-owner");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let registration_v1 = provider.registration_path().to_path_buf();
+        let registration_v2 = provider.registration_path_v2().to_path_buf();
+        let server_address = provider
+            .base_url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let mut conn = db::init_db(&db_path).unwrap();
+        let (_, active_run) = ingest_pdf(&mut conn, source.to_str().unwrap()).unwrap();
+        let (active_run, _) =
+            db::start_parsing(&mut conn, &active_run.run_id, active_run.state_version).unwrap();
+        drop(conn);
+
+        let foreground = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        );
+        assert!(matches!(
+            foreground,
+            Err(ProviderStartError::ProviderAlreadyRunning)
+        ));
+        assert_eq!(
+            reconcile_standalone_state_if_unowned(&db_path, &app_data).unwrap(),
+            None
+        );
+        let conn = db::init_db(&db_path).unwrap();
+        assert_eq!(
+            db::get_pipeline_run(&conn, &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Parsing
+        );
+
+        assert_eq!(
+            client()
+                .get(format!("{}v1/manifest", provider.base_url()))
+                .bearer_auth(registration.auth.token)
+                .send()
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        provider.shutdown();
+        assert!(std::net::TcpStream::connect(server_address).is_err());
+        assert!(!registration_v1.exists());
+        assert!(!registration_v2.exists());
+        assert_eq!(
+            reconcile_standalone_state_if_unowned(&db_path, &app_data).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            db::get_pipeline_run(&db::init_db(&db_path).unwrap(), &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Failed
+        );
+    }
+
+    #[test]
+    fn deliberate_owner_shutdown_cancels_and_joins_every_worker() {
+        use crate::pipeline::control::ExecutionControl;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let workers = ProviderWorkerOwner::new();
+        let worker_exited = Arc::new(AtomicBool::new(false));
+        let exited = Arc::clone(&worker_exited);
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        workers
+            .spawn("lifecycle-test".to_string(), move |cancellation| {
+                started_tx.send(()).unwrap();
+                while !cancellation.cancellation_requested() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                exited.store(true, Ordering::Release);
+            })
+            .unwrap();
+        started_rx.recv().unwrap();
+
+        workers.shutdown();
+
+        assert!(worker_exited.load(Ordering::Acquire));
+        assert_eq!(workers.retained_worker_count(), 0);
+        assert!(workers.spawn("late-worker".to_string(), |_| {}).is_err());
     }
 
     #[test]

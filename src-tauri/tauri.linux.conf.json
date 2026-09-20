@@ -1,6 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["deb"]
+    "targets": ["deb"],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/systemd/user/document-summarizer-connect.service": "linux/document-summarizer-connect.service"
+        }
+      }
+    }
   }
 }

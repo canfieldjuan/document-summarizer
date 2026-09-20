@@ -1512,7 +1512,7 @@ fn transition_pipeline_run(
     Ok(run)
 }
 
-pub(super) fn start_parsing(
+pub(crate) fn start_parsing(
     conn: &mut Connection,
     run_id: &str,
     expected_version: u32,

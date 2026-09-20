@@ -7,7 +7,22 @@ compile_error!(
 );
 
 fn main() {
-    if let Err(error) = document_summarizer_lib::run() {
+    let background_provider = std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "--connect-provider");
+    #[cfg(target_os = "linux")]
+    let result = if background_provider {
+        document_summarizer_lib::run_background_connect_provider()
+    } else {
+        document_summarizer_lib::run()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let result = if background_provider {
+        Err("The Connect background provider is currently supported only on Linux".into())
+    } else {
+        document_summarizer_lib::run()
+    };
+    if let Err(error) = result {
         eprintln!("Document Summarizer failed to start: {error}");
         std::process::exit(1);
     }

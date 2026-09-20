@@ -1888,7 +1888,33 @@ the executable contracts committed in the separate `connect-contracts`
 repository. Protocol, application, capability, and summary versions are
 separate fields.
 
-The Tauri process binds an ephemeral exact IPv4-loopback HTTP endpoint.
+The foreground Tauri process or Linux headless provider process binds an
+ephemeral exact IPv4-loopback HTTP endpoint. The Debian package installs a
+disabled systemd user unit whose exact entry point is
+`/usr/bin/document-summarizer --connect-provider`. Enabling that unit is an
+explicit per-user operator action; installation and entitlement do not enable
+it. The unit uses restart-on-failure with a five-second delay, five starts per
+five-minute window, control-group termination, and a 40-second stop timeout.
+The headless entry point opens the same per-user database, imports directory,
+model settings, v2 durable identity, and registration paths as the desktop.
+Closing the visible window therefore does not stop a provider owned by the user
+service manager.
+
+Foreground startup preserves standalone recovery: a Connect startup failure is
+logged and the desktop continues without a provider. Headless startup is a
+Connect owner, so the same failure exits nonzero and is visible to systemd's
+bounded restart policy. Neither path changes Connect wire schemas or copies
+provider state.
+
+On Linux, every foreground and headless provider takes the same nonblocking,
+owner-private application-state lock before stale-registration cleanup,
+interrupted pipeline or Connect-job recovery, endpoint binding, or publication,
+and holds it through ordered shutdown and registration removal. If a live
+background owner holds that lock, foreground startup continues as standalone
+without running interrupted-state recovery against the live owner's work.
+Standalone recovery runs only while the same lock proves there is no Connect
+owner.
+
 On Unix, it atomically writes owner-only registrations under
 `$XDG_RUNTIME_DIR/local-connect/v1/providers/` and
 `$XDG_RUNTIME_DIR/local-connect/v2/providers/`. On Windows, it publishes the
@@ -1926,7 +1952,17 @@ provider lifetime. An existing live owner therefore fails startup closed; a
 safe stale fixed registration may be replaced only after its ownership lock is
 held.
 
-On Tauri's final `RunEvent::Exit`, the provider unregisters both protocol files.
+Provider shutdown first closes new-job admission, requests cooperative
+cancellation from every retained Connect worker, joins every worker, requests
+endpoint shutdown, joins the server thread, and only then removes both exact
+protocol registrations. The foreground invokes this sequence on Tauri's final
+`RunEvent::Exit`; the headless owner invokes it after blocked `SIGTERM` or
+`SIGINT` is synchronously received. A completed or cancelled worker handle is
+never detached. If graceful shutdown exceeds the service budget, systemd owns
+the complete process tree and force-terminates it at 40 seconds; the next owner
+uses the existing stale-registration and interrupted-job recovery before it
+publishes fresh process credentials.
+
 On Unix, publication, startup scavenging, and removal share an owner-only
 lifecycle-file lock. Windows publication writes a fixed same-directory
 temporary file, applies and validates its private DACL, writes and flushes the
