@@ -333,6 +333,7 @@ impl ProviderAdmissionAuthority {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
     }
 
+    #[cfg(target_os = "linux")]
     fn stopped(&self) -> bool {
         *self
             .stopped
@@ -341,11 +342,13 @@ impl ProviderAdmissionAuthority {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub(crate) struct ProviderStopControl {
     authority: Arc<ProviderAdmissionAuthority>,
 }
 
+#[cfg(target_os = "linux")]
 impl ProviderStopControl {
     pub(crate) fn new() -> Self {
         Self {
@@ -362,6 +365,7 @@ impl ProviderStopControl {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProviderMode {
     Foreground,
@@ -369,9 +373,40 @@ enum ProviderMode {
 }
 
 struct ProviderStartup<'a> {
+    #[cfg(target_os = "linux")]
     mode: ProviderMode,
+    #[cfg(target_os = "linux")]
     stop_requested: &'a dyn Fn() -> bool,
+    #[cfg(target_os = "linux")]
     stop_control: Option<ProviderStopControl>,
+    #[cfg(not(target_os = "linux"))]
+    _marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl ProviderStartup<'static> {
+    fn foreground() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            mode: ProviderMode::Foreground,
+            #[cfg(target_os = "linux")]
+            stop_requested: &|| false,
+            #[cfg(target_os = "linux")]
+            stop_control: None,
+            #[cfg(not(target_os = "linux"))]
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<'a> ProviderStartup<'a> {
+    fn background(stop_requested: &'a dyn Fn() -> bool, stop_control: ProviderStopControl) -> Self {
+        Self {
+            mode: ProviderMode::Background,
+            stop_requested,
+            stop_control: Some(stop_control),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -399,6 +434,7 @@ struct RegistrationIdentity {
     protocol_version: u32,
     instance_id: String,
     app_id: String,
+    #[cfg(unix)]
     pid: u32,
     transport: RegistrationTransportIdentity,
     auth: RegistrationAuthIdentity,
@@ -511,8 +547,9 @@ pub struct ConnectProvider {
     workers: ProviderWorkerOwner,
     admission_authority: Arc<ProviderAdmissionAuthority>,
     shutdown: Option<watch::Sender<bool>>,
+    #[cfg(target_os = "linux")]
     terminal_result: Mutex<mpsc::Receiver<Result<(), String>>>,
-    #[cfg(test)]
+    #[cfg(all(target_os = "linux", test))]
     terminal_result_probe: mpsc::SyncSender<Result<(), String>>,
     server_thread: Option<JoinHandle<()>>,
     stopped: bool,
@@ -520,13 +557,7 @@ pub struct ConnectProvider {
 
 impl ConnectProvider {
     pub fn start(db_path: PathBuf, app_data_dir: PathBuf) -> Result<Self, ProviderStartError> {
-        Self::start_in_mode(
-            db_path,
-            app_data_dir,
-            ProviderMode::Foreground,
-            &|| false,
-            None,
-        )
+        Self::start_in_mode(db_path, app_data_dir, ProviderStartup::foreground())
     }
 
     #[cfg(target_os = "linux")]
@@ -540,18 +571,14 @@ impl ConnectProvider {
         Self::start_in_mode(
             db_path,
             app_data_dir,
-            ProviderMode::Background,
-            &stop_probe,
-            Some(stop_control),
+            ProviderStartup::background(&stop_probe, stop_control),
         )
     }
 
     fn start_in_mode(
         db_path: PathBuf,
         app_data_dir: PathBuf,
-        mode: ProviderMode,
-        stop_requested: &dyn Fn() -> bool,
-        stop_control: Option<ProviderStopControl>,
+        startup: ProviderStartup<'_>,
     ) -> Result<Self, ProviderStartError> {
         #[cfg(unix)]
         let runtime_root = env::var_os("XDG_RUNTIME_DIR")
@@ -578,11 +605,7 @@ impl ConnectProvider {
             max_input_bytes,
             runtime_factory,
             entitlement,
-            ProviderStartup {
-                mode,
-                stop_requested,
-                stop_control,
-            },
+            startup,
         )
     }
 
@@ -622,11 +645,7 @@ impl ConnectProvider {
             max_input_bytes,
             runtime_factory,
             entitlement,
-            ProviderStartup {
-                mode: ProviderMode::Foreground,
-                stop_requested: &|| false,
-                stop_control: None,
-            },
+            ProviderStartup::foreground(),
         )
     }
 
@@ -637,8 +656,10 @@ impl ConnectProvider {
         max_input_bytes: u64,
         runtime_factory: RuntimeFactory,
         entitlement: EntitlementGate,
-        startup: ProviderStartup<'_>,
+        _startup: ProviderStartup<'_>,
     ) -> Result<Self, ProviderStartError> {
+        #[cfg(target_os = "linux")]
+        let startup = _startup;
         #[cfg(target_os = "linux")]
         if (startup.stop_requested)() {
             return Err(ProviderStartError::StartupCancelled);
@@ -772,11 +793,14 @@ impl ConnectProvider {
         let manifest_v1 = AppManifest::new(&instance_id_v1, max_input_bytes);
         let manifest_v2 = v2::AppManifest::new(&instance_id_v2, max_input_bytes);
         let workers = ProviderWorkerOwner::new();
+        #[cfg(target_os = "linux")]
         let admission_authority = startup
             .stop_control
             .as_ref()
             .map(|control| Arc::clone(&control.authority))
             .unwrap_or_else(|| Arc::new(ProviderAdmissionAuthority::default()));
+        #[cfg(not(target_os = "linux"))]
+        let admission_authority = Arc::new(ProviderAdmissionAuthority::default());
         let state = ProviderState {
             db_path,
             imports_dir,
@@ -811,8 +835,11 @@ impl ConnectProvider {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        #[cfg(target_os = "linux")]
         let (terminal_tx, terminal_rx) = mpsc::sync_channel(1);
-        #[cfg(test)]
+        #[cfg(not(target_os = "linux"))]
+        let (terminal_tx, _terminal_rx) = mpsc::sync_channel(1);
+        #[cfg(all(target_os = "linux", test))]
         let terminal_result_probe = terminal_tx.clone();
         let server_thread = thread::Builder::new()
             .name("document-summarizer-connect".to_string())
@@ -1026,8 +1053,9 @@ impl ConnectProvider {
             workers,
             admission_authority,
             shutdown: Some(shutdown_tx),
+            #[cfg(target_os = "linux")]
             terminal_result: Mutex::new(terminal_rx),
-            #[cfg(test)]
+            #[cfg(all(target_os = "linux", test))]
             terminal_result_probe,
             server_thread: Some(server_thread),
             stopped: false,
@@ -1054,6 +1082,7 @@ impl ConnectProvider {
         &self.registration_path_v2
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn terminal_failure(&self) -> Option<ProviderStartError> {
         let receiver = self
             .terminal_result
@@ -1071,7 +1100,7 @@ impl ConnectProvider {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(target_os = "linux", test))]
     fn force_terminal_failure(&self) {
         let _ = self
             .terminal_result_probe
@@ -3307,7 +3336,7 @@ mod tests {
         PipelineStage, PipelineState, SourceSpan, SourceType, SummaryArtifact,
     };
     use crate::pipeline::control::ExecutionControl;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     use crate::pipeline::ingest::ingest_pdf;
     use crate::pipeline::normalize::normalize_document;
     use crate::pipeline::parser::parse_document;
@@ -3622,6 +3651,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn terminal_server_failure_is_observable_and_cleanup_removes_registration() {
         let root = TestDirectory::new("doc-sum-connect-terminal-server");

@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::Command;
 
 fn contains_rust_source(path: &Path) -> bool {
