@@ -241,14 +241,15 @@ impl AppManifest {
 
 impl JobRequest {
     pub fn validate(&self, max_input_bytes: u64) -> Result<(), JobError> {
-        self.validate_input(max_input_bytes, false, true)
+        self.validate_input(max_input_bytes, false, true, &[INPUT_MEDIA_TYPE])
     }
 
     pub(crate) fn validate_v2_input_descriptor(
         &self,
         max_input_bytes: u64,
+        accepted_media_types: &[&str],
     ) -> Result<(), JobError> {
-        self.validate_input(max_input_bytes, true, false)
+        self.validate_input(max_input_bytes, true, false, accepted_media_types)
     }
 
     fn validate_input(
@@ -256,6 +257,7 @@ impl JobRequest {
         max_input_bytes: u64,
         allow_empty_input: bool,
         require_pdf_extension: bool,
+        accepted_media_types: &[&str],
     ) -> Result<(), JobError> {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(job_error(
@@ -287,7 +289,7 @@ impl JobRequest {
         }
         let input = &self.inputs[0];
         if !valid_uuid_v4(&input.artifact_id)
-            || input.media_type != INPUT_MEDIA_TYPE
+            || !accepted_media_types.contains(&input.media_type.as_str())
             || (!allow_empty_input && input.byte_size == 0)
             || input.byte_size > max_input_bytes
             || !valid_sha256(&input.sha256)

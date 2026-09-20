@@ -989,12 +989,9 @@ fn document_claim_budget(normalized: &NormalizedDocument) -> Result<usize, Pipel
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                matches!(
-                    block.source.source_type,
-                    crate::pipeline::contracts::SourceType::NativeText
-                ) && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .count();
     let scaled_pages = native_text_pages
@@ -2527,10 +2524,9 @@ fn delivery_page_coverage_satisfied(
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
-                    && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .map(|page| page.page_number)
         .collect::<HashSet<_>>();
@@ -2657,10 +2653,9 @@ fn versioned_analysis_selected_pages(
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
-                    && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .map(|page| page.page_number)
         .collect::<Vec<_>>();
@@ -2707,12 +2702,9 @@ fn analysis_selected_pages(
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                matches!(
-                    block.source.source_type,
-                    crate::pipeline::contracts::SourceType::NativeText
-                ) && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .map(|page| page.page_number)
         .collect::<Vec<_>>();
@@ -6536,6 +6528,28 @@ mod tests {
         let error = ensure_evidence_coverage_is_representable(&evidence_fixture(129), 8)
             .expect_err("one evidence item beyond bounded claim capacity must fail");
         assert_eq!(error.code, "SYNTHESIS_EVIDENCE_COVERAGE_UNSATISFIABLE");
+    }
+
+    #[test]
+    fn ocr_text_pages_enter_claim_budget_and_analysis_plan() {
+        let (mut normalized, _) = sparse_page_scope_fixture(3, 400);
+        for page in &mut normalized.pages {
+            for block in &mut page.content {
+                block.source.source_type = crate::pipeline::contracts::SourceType::OcrText;
+            }
+        }
+
+        assert_eq!(document_claim_budget(&normalized).unwrap(), 8);
+        assert_eq!(
+            analysis_selected_pages(&normalized).unwrap(),
+            HashSet::from([1, 2, 3])
+        );
+        assert_eq!(pages::plan(&normalized).unwrap(), (vec![1, 2, 3], 3));
+        assert!(delivery_page_coverage_satisfied(
+            &HashSet::from([1, 2, 3]),
+            &[],
+            &normalized
+        ));
     }
 
     #[test]

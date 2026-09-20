@@ -486,10 +486,9 @@ fn versioned_plan(
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
-                    && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .map(|page| page.page_number)
         .collect::<Vec<_>>();

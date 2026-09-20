@@ -869,6 +869,7 @@ mod tests {
                 document_id: document.document_id.clone(),
                 parser_id: self.id().to_string(),
                 parser_version: self.version().to_string(),
+                source_type: document.source_type,
                 pages: self.pages.clone(),
                 warnings: Vec::new(),
             })
