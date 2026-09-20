@@ -2052,8 +2052,9 @@ record it requires a no-follow regular root-owned 0600 file with one link, exact
 canonical fields, matching source and target versions, a valid phase, and a
 matching SHA-256 digest. The record binds the legacy executable device, inode,
 and digest. Preinstall copies that exact executable into a private fixed
-generation quarantine, atomically replaces the installed path with a launcher
-that exits closed, validates published registrations, and stops every process
+generation quarantine, removes the exact installed pathname, atomically
+installs a launcher that exits closed, validates published registrations, and
+stops every process
 still executing the bound inode with bounded TERM and KILL waits. The wrapper
 blocks legacy restarts before unpack; after unpack, the quiesce record blocks the
 new binary until adoption. Every mutation is replayable from `quarantining` or
