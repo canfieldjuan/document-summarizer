@@ -204,9 +204,7 @@ impl ProviderWorkerOwner {
                 "Connect provider is shutting down",
             ));
         }
-        let cancellation = self
-            .cancellation
-            .child_with_deadline(CONNECT_JOB_REQUEST_TIMEOUT);
+        let cancellation = self.cancellation.clone();
         let handle = thread::Builder::new()
             .name(name)
             .spawn(move || worker(cancellation))?;
@@ -489,7 +487,6 @@ pub enum ProviderStartError {
     #[cfg(target_os = "linux")]
     #[error("Connect background lifecycle transition blocks provider startup")]
     LifecycleTransitionActive,
-    #[cfg(target_os = "linux")]
     #[error("Connect background provider startup was cancelled")]
     StartupCancelled,
 }
@@ -3310,6 +3307,7 @@ mod tests {
         PipelineStage, PipelineState, SourceSpan, SourceType, SummaryArtifact,
     };
     use crate::pipeline::control::ExecutionControl;
+    #[cfg(target_os = "linux")]
     use crate::pipeline::ingest::ingest_pdf;
     use crate::pipeline::normalize::normalize_document;
     use crate::pipeline::parser::parse_document;
@@ -3480,7 +3478,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_workers_carry_job_deadline_and_shutdown_is_bounded() {
+    fn provider_workers_preserve_normal_job_budget_and_shutdown_is_bounded() {
         let workers = ProviderWorkerOwner::new();
         let (observed_tx, observed_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
@@ -3490,9 +3488,7 @@ mod tests {
                 let _ = release_rx.recv();
             })
             .unwrap();
-        let observed_timeout = observed_rx.recv().unwrap().unwrap();
-        assert!(observed_timeout <= CONNECT_JOB_REQUEST_TIMEOUT);
-        assert!(observed_timeout > Duration::from_secs(29));
+        assert_eq!(observed_rx.recv().unwrap(), None);
 
         let started = Instant::now();
         workers.shutdown_until(Instant::now() + Duration::from_millis(25));
