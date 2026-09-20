@@ -143,6 +143,15 @@ fn first_upgrade_bootstrap_never_executes_the_legacy_binary() {
     assert!(status.success());
     assert!(!legacy_marker.exists());
     let bootstrap = package_root.join("package-quiesce-v1.record");
+    let first_bootstrap = std::fs::read(&bootstrap).unwrap();
+    let replay = Command::new("sh")
+        .arg(&script_path)
+        .args(["upgrade", "0.0.9"])
+        .status()
+        .unwrap();
+    assert!(replay.success());
+    assert!(!legacy_marker.exists());
+    assert_eq!(std::fs::read(&bootstrap).unwrap(), first_bootstrap);
     let metadata = std::fs::symlink_metadata(&bootstrap).unwrap();
     assert_eq!(metadata.mode() & 0o777, 0o600);
     assert!(std::fs::read_to_string(bootstrap)

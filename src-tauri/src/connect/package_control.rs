@@ -2892,7 +2892,22 @@ mod tests {
         assert_eq!(intent.source_version, "0.0.9");
         assert_eq!(intent.target_version, env!("CARGO_PKG_VERSION"));
         let path = store.quiesce_path();
-        let mut bytes = fs::read(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        assert!(Command::new("sh")
+            .arg(&script_path)
+            .args(["upgrade", "0.0.9"])
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let mut effects = MockEffects::default();
+        prepare_from_intent(&store, &intent, &mut effects).unwrap();
+        prepare_from_intent(&store, &intent, &mut effects).unwrap();
+        let record = store.read().unwrap().unwrap();
+        assert_eq!(record.generation, intent.generation);
+        assert_eq!(record.phase, PackagePhase::PublishersStopped);
+
+        let mut bytes = original;
         let source = bytes
             .windows(b"source_version=0.0.9".len())
             .position(|window| window == b"source_version=0.0.9")
