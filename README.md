@@ -166,22 +166,36 @@ RPM, macOS, and an installed NSIS lifecycle remain deferred until they can be
 built and exercised on their target platforms.
 
 The Debian package installs a disabled systemd user unit for the Connect
-provider. A user can explicitly keep Connect available without an open Document
-Summarizer window with:
+provider. Use the application lifecycle controller to keep Connect available
+without an open Document Summarizer window:
 
 ```bash
-systemctl --user enable --now document-summarizer-connect.service
+document-summarizer --connect-background enable
 ```
 
-The unit runs the package's headless `--connect-provider` entry point against
-the same per-user database and provider identity as the desktop. Connect startup
-failure exits nonzero so systemd applies its bounded restart policy; desktop
-startup continues in standalone mode when Connect is unavailable. Stop the
-owner and remove automatic startup with:
+The controller writes an owner-private, crash-recoverable transition record
+before stopping a foreground owner or changing the systemd choice. That record
+blocks new job admission until the exact generation either publishes its ready
+successor or restores the prior choice. The unit runs the package's headless
+`--connect-provider` entry point against the same per-user database and provider
+identity as the desktop. A headless owner waits for a foreground owner to leave
+and takes over without cycling through systemd's restart limit. Terminal server
+failure exits nonzero so systemd restarts it. Desktop startup continues in
+standalone mode when Connect is unavailable.
+
+Stop the owner and remove automatic startup through the same controller:
 
 ```bash
-systemctl --user disable --now document-summarizer-connect.service
+document-summarizer --connect-background disable
 ```
+
+`document-summarizer --connect-background status` reports the stable manager
+choice or an incomplete transition. `recover` resumes the exact incomplete
+generation. Debian upgrade and removal hooks use a root-owned package operation
+record to stop foreground and background owners across active user sessions,
+clean exact dead registrations, preserve each explicit enablement choice across
+upgrade, and use a generation-bound root-only controller copy to finish cleanup
+after dpkg removes the installed executable.
 
 A raw `cargo build --release` is intentionally rejected because it can produce a
 desktop executable that points at the development server instead of embedding

@@ -557,9 +557,11 @@ impl LlamaCppRuntime {
         request: &ModelRequest,
         prompt: &[u32],
         schema: Option<serde_json::Value>,
+        timeout: Duration,
     ) -> Result<CompletionResponse, ModelRuntimeFailure> {
         let response = self
             .authorize(self.client.post(self.endpoint("/completion")))
+            .timeout(timeout)
             .json(&CompletionRequest {
                 prompt,
                 n_predict: request.max_output_tokens,
@@ -643,7 +645,11 @@ impl LlamaCppRuntime {
         &self,
         control: &dyn ExecutionControl,
     ) -> Result<MutexGuard<'_, ()>, ModelRuntimeFailure> {
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let deadline = Instant::now()
+            + control
+                .request_timeout()
+                .unwrap_or(REQUEST_TIMEOUT)
+                .min(REQUEST_TIMEOUT);
         loop {
             if control.cancellation_requested() {
                 return Err(cancelled_model_request());
@@ -727,7 +733,15 @@ impl ModelRuntime for LlamaCppRuntime {
                     false,
                 ));
             }
-            let completed = self.completion(request, &prompt, schema)?;
+            let completed = self.completion(
+                request,
+                &prompt,
+                schema,
+                control
+                    .request_timeout()
+                    .unwrap_or(REQUEST_TIMEOUT)
+                    .min(REQUEST_TIMEOUT),
+            )?;
             observed_usage.prompt_tokens = completed.tokens_evaluated;
             observed_usage.completion_tokens = completed.tokens_predicted;
             observed_usage.total_tokens = completed

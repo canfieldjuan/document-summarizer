@@ -647,6 +647,53 @@ pub fn run_background_connect_provider() -> Result<(), Box<dyn Error>> {
     connect::lifecycle::run().map_err(Into::into)
 }
 
+#[cfg(target_os = "linux")]
+pub fn run_background_control(command: &str) -> Result<&'static str, Box<dyn Error>> {
+    use connect::lifecycle_control::{run_control, ControlAction, ControlStatus};
+    let action = match command {
+        "enable" => ControlAction::Enable,
+        "disable" => ControlAction::Disable,
+        "recover" => ControlAction::Recover,
+        "status" => ControlAction::Status,
+        _ => return Err("unknown Connect background control command".into()),
+    };
+    let status = run_control(action)?;
+    Ok(match status {
+        ControlStatus::Enabled => "enabled",
+        ControlStatus::Disabled => "disabled",
+        ControlStatus::TransitionPending => "transition-pending",
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_package_control(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+    use connect::package_control::{self, PackageAction};
+
+    let action = match arguments {
+        [command, source, target] if command == "prepare-upgrade" => {
+            PackageAction::PrepareUpgrade { source, target }
+        }
+        [command, target] if command == "finish-upgrade" => PackageAction::FinishUpgrade { target },
+        [command, target] if command == "prepare-remove" => PackageAction::PrepareRemove { target },
+        [command, target] if command == "finish-remove" => PackageAction::FinishRemove { target },
+        [command, target] if command == "recover-install" => {
+            PackageAction::RecoverInstall { target }
+        }
+        _ => return Err("invalid package lifecycle control command".into()),
+    };
+    package_control::run(action).map_err(Into::into)
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_package_user_stop(app_data: &str, runtime_root: &str) -> Result<(), Box<dyn Error>> {
+    connect::provider::stop_and_cleanup_registered_provider(
+        std::path::Path::new(app_data),
+        std::path::Path::new(runtime_root),
+        std::time::Instant::now() + std::time::Duration::from_secs(45),
+    )
+    .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod capability_tests {
     use crate::pipeline::contracts::{

@@ -6,6 +6,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+EnvironmentFile=-%h/.config/com.juan-canfield.docsum/connect-background.env
 ExecStart=/usr/bin/document-summarizer --connect-provider
 Restart=on-failure
 RestartSec=5s

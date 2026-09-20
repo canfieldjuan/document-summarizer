@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "upgrade" ] && [ -x /usr/bin/document-summarizer ]; then
+  /usr/bin/document-summarizer --connect-package prepare-upgrade "${2:-unknown}" "0.1.0"
+fi

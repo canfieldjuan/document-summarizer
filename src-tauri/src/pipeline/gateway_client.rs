@@ -12,6 +12,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -31,6 +32,24 @@ const MIN_TOKEN_BYTES: usize = 32;
 const MAX_TOKEN_BYTES: usize = 512;
 const MAX_CA_BYTES: usize = 1_000_000;
 const MAX_RETRY_AFTER_SECONDS: u64 = 3_600;
+
+thread_local! {
+    static CONTROLLED_REQUEST_TIMEOUT: Cell<Option<Duration>> = const { Cell::new(None) };
+}
+
+pub(crate) fn with_request_timeout<T>(
+    timeout: Option<Duration>,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let previous = CONTROLLED_REQUEST_TIMEOUT.with(|slot| slot.replace(timeout));
+    let result = operation();
+    CONTROLLED_REQUEST_TIMEOUT.with(|slot| slot.set(previous));
+    result
+}
+
+fn effective_timeout(configured: Duration) -> Duration {
+    CONTROLLED_REQUEST_TIMEOUT.with(|slot| slot.get().unwrap_or(configured).min(configured))
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct GatewayClientConfig {
@@ -343,7 +362,7 @@ impl GatewayClient {
             "/v1/inference",
             &token,
             Some(&request_body),
-            self.timeout,
+            effective_timeout(self.timeout),
         ) {
             Ok(response) => response,
             Err(error) => return self.reconcile_or_propagate(conn, key, error),
@@ -434,7 +453,7 @@ impl GatewayClient {
             &format!("/v1/inference/{request_id}/ack"),
             token,
             Some(&body),
-            self.timeout,
+            effective_timeout(self.timeout),
         )?;
         let acknowledgement = parse_acknowledgement(&response)?;
         if acknowledgement.protocol_version != PROTOCOL_VERSION

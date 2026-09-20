@@ -1900,11 +1900,31 @@ model settings, v2 durable identity, and registration paths as the desktop.
 Closing the visible window therefore does not stop a provider owned by the user
 service manager.
 
+The operator changes this manager choice through
+`document-summarizer --connect-background enable|disable`. Before stopping an
+owner or changing systemd state, the controller durably writes one immutable,
+owner-private generation under the per-user configuration root. Its monotonic
+enable phases are `intent_recorded`, `source_stopped`, `manager_enabled`, and
+`successor_ready`; disable uses `intent_recorded`, `publisher_stopped`, and
+`manager_disabled`. An enable readiness failure durably changes to rollback and
+restores the recorded prior choice. `status` reports an incomplete generation
+and `recover` resumes only that exact generation. A shared admission lock plus
+the record blocks job creation through commit while a transition is incomplete.
+The systemd child receives the exact generation through an owner-only
+environment file and revalidates it immediately before each registration
+publication.
+
 Foreground startup preserves standalone recovery: a Connect startup failure is
 logged and the desktop continues without a provider. Headless startup is a
 Connect owner, so the same failure exits nonzero and is visible to systemd's
 bounded restart policy. Neither path changes Connect wire schemas or copies
 provider state.
+
+If a foreground owner already holds the provider lock, the headless process
+waits in place and retries after release instead of exiting through systemd's
+start limiter. A terminal HTTP-server result is propagated to the headless main
+function as an error, after exact registration cleanup, so systemd supervises a
+real server failure.
 
 On Linux, every foreground and headless provider takes the same nonblocking,
 owner-private application-state lock before stale-registration cleanup,
@@ -1914,6 +1934,11 @@ background owner holds that lock, foreground startup continues as standalone
 without running interrupted-state recovery against the live owner's work.
 Standalone recovery runs only while the same lock proves there is no Connect
 owner.
+
+Startup observes blocked shutdown signals before owner acquisition, after
+recovery and server readiness, and immediately before publication. A stop at
+any of those boundaries shuts down the unpublished server and leaves no JSON
+registration.
 
 On Unix, it atomically writes owner-only registrations under
 `$XDG_RUNTIME_DIR/local-connect/v1/providers/` and
@@ -1952,16 +1977,34 @@ provider lifetime. An existing live owner therefore fails startup closed; a
 safe stale fixed registration may be replaced only after its ownership lock is
 held.
 
-Provider shutdown first closes new-job admission, requests cooperative
-cancellation from every retained Connect worker, joins every worker, requests
-endpoint shutdown, joins the server thread, and only then removes both exact
-protocol registrations. The foreground invokes this sequence on Tauri's final
-`RunEvent::Exit`; the headless owner invokes it after blocked `SIGTERM` or
-`SIGINT` is synchronously received. A completed or cancelled worker handle is
-never detached. If graceful shutdown exceeds the service budget, systemd owns
-the complete process tree and force-terminates it at 40 seconds; the next owner
-uses the existing stale-registration and interrupted-job recovery before it
-publishes fresh process credentials.
+Provider shutdown first closes new-job admission and requests cooperative
+cancellation from every retained Connect worker. Each admitted Connect job gets
+one absolute 30-second deadline; Ollama, llama.cpp completion, and
+inference-gateway transports receive only its remaining time. Shutdown reaps
+finished worker handles during
+steady admission and drains remaining handles through the 35-second graceful
+deadline. It then requests endpoint shutdown, joins the server thread, and
+removes both exact protocol registrations. The foreground invokes this sequence
+on Tauri's final `RunEvent::Exit`; the headless owner invokes it after blocked
+`SIGTERM` or `SIGINT` is synchronously received. If a noncooperating worker
+survives the graceful deadline, process shutdown owns that thread and systemd
+force-terminates the complete service control group at 40 seconds. The next
+owner uses stale-registration and interrupted-job recovery before publishing
+fresh process credentials.
+
+Debian maintainer scripts call the app-owned `--connect-package` controller.
+Before upgrade or removal mutation, it writes a root-owned durable package
+generation under `/var/lib/document-summarizer`, discovers active user runtime
+roots, records each explicit enablement choice, stops the systemd unit, and runs
+the authenticated provider stop and registration cleanup path under that user's
+UID. The package record is also a provider-start and job-admission barrier.
+Upgrade recovery restores only the recorded choices and then clears the exact
+generation. Removal stops and cleans every participant without restoring a
+worker. Prepare writes a root-only controller copy named by the generation;
+`postrm` uses that copy to recheck cleanup, unlink the controller, and clear the
+exact record after package removal. A crash before exact clear leaves the
+recorded barrier for the next package controller to resume. Malformed,
+wrong-kind, wrong-target, or changed-generation records fail closed.
 
 On Unix, publication, startup scavenging, and removal share an owner-only
 lifecycle-file lock. Windows publication writes a fixed same-directory

@@ -4,6 +4,10 @@
     "targets": ["deb"],
     "linux": {
       "deb": {
+        "preInstallScript": "linux/debian/preinst",
+        "postInstallScript": "linux/debian/postinst",
+        "preRemoveScript": "linux/debian/prerm",
+        "postRemoveScript": "linux/debian/postrm",
         "files": {
           "/usr/lib/systemd/user/document-summarizer-connect.service": "linux/document-summarizer-connect.service"
         }

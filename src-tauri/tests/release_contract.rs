@@ -63,8 +63,43 @@ fn linux_bundle_installs_disabled_background_provider_unit_with_bounded_supervis
     assert!(unit.contains("StartLimitBurst=5"));
     assert!(unit.contains("TimeoutStopSec=40s"));
     assert!(unit.contains("KillMode=control-group"));
+    assert!(unit
+        .contains("EnvironmentFile=-%h/.config/com.juan-canfield.docsum/connect-background.env"));
     assert!(unit.contains("WantedBy=default.target"));
     assert!(!unit.contains("Alias="));
+}
+
+#[test]
+fn debian_package_hooks_coordinate_provider_ownership() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config: Value = serde_json::from_str(include_str!("../tauri.linux.conf.json"))
+        .expect("Linux Tauri config must be valid JSON");
+    let deb = &config["bundle"]["linux"]["deb"];
+    let scripts = [
+        ("preInstallScript", "linux/debian/preinst"),
+        ("postInstallScript", "linux/debian/postinst"),
+        ("preRemoveScript", "linux/debian/prerm"),
+        ("postRemoveScript", "linux/debian/postrm"),
+    ];
+    for (field, relative) in scripts {
+        assert_eq!(deb[field], relative);
+        let body = std::fs::read_to_string(manifest_dir.join(relative))
+            .expect("Debian lifecycle script must be packaged");
+        assert!(body.starts_with("#!/bin/sh\nset -eu\n"));
+    }
+
+    let preinst = include_str!("../linux/debian/preinst");
+    let postinst = include_str!("../linux/debian/postinst");
+    let prerm = include_str!("../linux/debian/prerm");
+    let postrm = include_str!("../linux/debian/postrm");
+    assert!(preinst.contains("--connect-package prepare-upgrade"));
+    assert!(postinst.contains("--connect-package recover-install"));
+    assert!(prerm.contains("--connect-package prepare-remove"));
+    assert!(postrm.contains("--connect-package finish-remove"));
+    for script in [preinst, postinst, prerm, postrm] {
+        assert!(script.contains(env!("CARGO_PKG_VERSION")));
+        assert!(!script.contains("systemctl"));
+    }
 }
 
 #[test]
