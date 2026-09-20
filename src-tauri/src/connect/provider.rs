@@ -52,9 +52,9 @@ use std::fs::TryLockError;
 use std::fs::{self, File, OpenOptions};
 #[cfg(windows)]
 use std::future::IntoFuture;
-#[cfg(unix)]
-use std::io::Read;
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -688,7 +688,7 @@ impl ConnectProvider {
         #[cfg(unix)]
         let registration_lock_path = providers_dir_v1.join(format!(".{APP_ID}.lifecycle.lock"));
         #[cfg(unix)]
-        let registration_lock = acquire_registration_lock(&registration_lock_path, None)?;
+        let registration_lock = acquire_registration_lock(&registration_lock_path, None, None)?;
         #[cfg(unix)]
         let removed_registrations = scavenge_stale_registrations(
             &registration_lock,
@@ -696,6 +696,7 @@ impl ConnectProvider {
                 (&providers_dir_v1, WireVersion::V1),
                 (&providers_dir_v2, WireVersion::V2),
             ],
+            None,
         )?;
         #[cfg(unix)]
         if removed_registrations > 0 {
@@ -744,12 +745,14 @@ impl ConnectProvider {
         let registration_lock_v1 = acquire_registration_lock(
             &locks_dir_v1.join(format!(".local-connect-v1-{APP_ID}.lock")),
             Some(&runtime_root),
+            None,
         )
         .map_err(map_windows_registration_lock_error)?;
         #[cfg(windows)]
         let registration_lock_v2 = acquire_registration_lock(
             &locks_dir_v2.join(format!(".local-connect-v2-{instance_id_v2}.lock")),
             Some(&runtime_root),
+            None,
         )
         .map_err(map_windows_registration_lock_error)?;
 
@@ -1080,14 +1083,14 @@ impl ConnectProvider {
 
     pub(crate) fn unregister(&self) {
         #[cfg(unix)]
-        let registration_lock = match acquire_registration_lock(&self.registration_lock_path, None)
-        {
-            Ok(lock) => lock,
-            Err(error) => {
-                eprintln!("Connect registration cleanup lock failed: {error}");
-                return;
-            }
-        };
+        let registration_lock =
+            match acquire_registration_lock(&self.registration_lock_path, None, None) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    eprintln!("Connect registration cleanup lock failed: {error}");
+                    return;
+                }
+            };
         #[cfg(unix)]
         let cleanup_lock_v1 = &registration_lock;
         #[cfg(unix)]
@@ -2294,9 +2297,11 @@ impl IntoResponse for ProviderHttpError {
 fn acquire_registration_lock(
     path: &Path,
     private_root: Option<&Path>,
+    absolute_deadline: Option<Instant>,
 ) -> Result<RegistrationLifecycleLock, io::Error> {
     #[cfg(windows)]
     {
+        let _ = absolute_deadline;
         let private_root = private_root.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -2325,12 +2330,17 @@ fn acquire_registration_lock(
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
 
-        let deadline = Instant::now() + REGISTRATION_LOCK_TIMEOUT;
+        let deadline =
+            absolute_deadline.unwrap_or_else(|| Instant::now() + REGISTRATION_LOCK_TIMEOUT);
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(RegistrationLifecycleLock { file }),
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    thread::sleep(REGISTRATION_LOCK_RETRY);
+                    thread::sleep(
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(REGISTRATION_LOCK_RETRY),
+                    );
                 }
                 Err(TryLockError::WouldBlock) => {
                     return Err(io::Error::new(
@@ -2438,17 +2448,20 @@ fn write_registration<T: Serialize>(
 fn scavenge_stale_registrations(
     _registration_lock: &RegistrationLifecycleLock,
     provider_directories: [(&Path, WireVersion); 2],
+    absolute_deadline: Option<Instant>,
 ) -> Result<usize, ProviderStartError> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(REGISTRATION_PROBE_TIMEOUT)
-        .timeout(REGISTRATION_PROBE_TIMEOUT)
         .build()
         .map_err(|error| ProviderStartError::Server(error.to_string()))?;
     let mut candidates = Vec::new();
     for (directory, version) in provider_directories {
         for entry in fs::read_dir(directory)? {
+            if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(readiness_deadline_error());
+            }
             let path = entry?.path();
             if let Some(instance_id) = owned_registration_instance_id(&path) {
                 candidates.push((path, version, instance_id));
@@ -2456,17 +2469,34 @@ fn scavenge_stale_registrations(
         }
     }
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(readiness_deadline_error());
+    }
 
     for (path, version, instance_id) in &candidates {
-        if registration_proves_live(&client, path, *version, instance_id, None, None) {
+        let deadline =
+            absolute_deadline.unwrap_or_else(|| Instant::now() + REGISTRATION_PROBE_TIMEOUT);
+        if Instant::now() >= deadline {
+            return Err(readiness_deadline_error());
+        }
+        if registration_proves_live(&client, path, *version, instance_id, None, None, deadline) {
             return Err(ProviderStartError::ProviderAlreadyRunning);
+        }
+        if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(readiness_deadline_error());
         }
     }
     for (path, _, _) in &candidates {
+        if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(readiness_deadline_error());
+        }
         fs::remove_file(path)?;
     }
     if !candidates.is_empty() {
         for (directory, _) in provider_directories {
+            if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(readiness_deadline_error());
+            }
             File::open(directory)?.sync_all()?;
         }
     }
@@ -2483,12 +2513,70 @@ fn owned_registration_instance_id(path: &Path) -> Option<String> {
     valid_uuid_v4(instance_id).then(|| instance_id.to_string())
 }
 
+#[cfg(unix)]
+fn probe_time_remaining(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    (!remaining.is_zero()).then_some(remaining.min(REGISTRATION_PROBE_TIMEOUT))
+}
+
+#[cfg(unix)]
+fn readiness_deadline_error() -> ProviderStartError {
+    ProviderStartError::Server("provider readiness deadline expired".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn openat_file(directory: &File, name: &std::ffi::CStr, flags: i32) -> Option<File> {
+    let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+    (descriptor >= 0).then(|| unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(target_os = "linux")]
+fn network_namespace_identity(directory: &File) -> Option<(u64, u64)> {
+    let namespace = openat_file(directory, c"ns/net", libc::O_RDONLY | libc::O_CLOEXEC)?;
+    let metadata = namespace.metadata().ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(target_os = "linux")]
+fn current_network_namespace_identity() -> Option<(u64, u64)> {
+    let namespace = File::open("/proc/self/ns/net").ok()?;
+    let metadata = namespace.metadata().ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(target_os = "linux")]
+fn loopback_listener_inode(base_url: &str, version: WireVersion, deadline: Instant) -> Option<u64> {
+    probe_time_remaining(deadline)?;
+    let port = validated_manifest_url(base_url, version)?.port()?;
+    let local_endpoint = format!("0100007F:{port:04X}");
+    let reader = BufReader::new(File::open("/proc/net/tcp").ok()?);
+    let mut found = None;
+    for line in reader.lines() {
+        probe_time_remaining(deadline)?;
+        let line = line.ok()?;
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() < 10
+            || !fields[1].eq_ignore_ascii_case(&local_endpoint)
+            || fields[3] != "0A"
+        {
+            continue;
+        }
+        let inode = fields[9].parse::<u64>().ok()?;
+        if found.replace(inode).is_some() {
+            return None;
+        }
+    }
+    found
+}
+
 #[cfg(target_os = "linux")]
 struct RegisteredProcessGuard {
     process_directory: File,
     process_path: PathBuf,
     process_device: u64,
     process_inode: u64,
+    network_device: u64,
+    network_inode: u64,
     expected: ExpectedProviderProcess,
 }
 
@@ -2513,33 +2601,66 @@ impl RegisteredProcessGuard {
         {
             return None;
         }
+        let (network_device, network_inode) = network_namespace_identity(&process_directory)?;
+        if current_network_namespace_identity()? != (network_device, network_inode) {
+            return None;
+        }
         let guard = Self {
             process_directory,
             process_path,
             process_device: opened.dev(),
             process_inode: opened.ino(),
+            network_device,
+            network_inode,
             expected,
         };
         guard.executable_matches().then_some(guard)
     }
 
     fn executable_matches(&self) -> bool {
-        let descriptor = unsafe {
-            libc::openat(
-                self.process_directory.as_raw_fd(),
-                c"exe".as_ptr(),
-                libc::O_PATH | libc::O_CLOEXEC,
-            )
-        };
-        if descriptor < 0 {
+        let Some(executable) = openat_file(
+            &self.process_directory,
+            c"exe",
+            libc::O_PATH | libc::O_CLOEXEC,
+        ) else {
             return false;
-        }
-        let executable = unsafe { File::from_raw_fd(descriptor) };
+        };
         executable.metadata().is_ok_and(|metadata| {
             metadata.file_type().is_file()
                 && metadata.dev() == self.expected.executable_device
                 && metadata.ino() == self.expected.executable_inode
         })
+    }
+
+    fn owns_socket(&self, socket_inode: u64, deadline: Instant) -> bool {
+        if probe_time_remaining(deadline).is_none() {
+            return false;
+        }
+        let Some(descriptors) = openat_file(
+            &self.process_directory,
+            c"fd",
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        ) else {
+            return false;
+        };
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", descriptors.as_raw_fd()));
+        let expected = format!("socket:[{socket_inode}]");
+        let Ok(entries) = fs::read_dir(descriptor_path) else {
+            return false;
+        };
+        for entry in entries {
+            if probe_time_remaining(deadline).is_none() {
+                return false;
+            }
+            if entry
+                .ok()
+                .and_then(|entry| fs::read_link(entry.path()).ok())
+                .is_some_and(|target| target.as_os_str() == expected.as_str())
+            {
+                return true;
+            }
+        }
+        false
     }
 
     fn revalidate(&self) -> bool {
@@ -2549,6 +2670,10 @@ impl RegisteredProcessGuard {
                 && current.dev() == self.process_device
                 && current.ino() == self.process_inode
         }) && self.executable_matches()
+            && network_namespace_identity(&self.process_directory)
+                == Some((self.network_device, self.network_inode))
+            && current_network_namespace_identity()
+                == Some((self.network_device, self.network_inode))
     }
 }
 
@@ -2560,7 +2685,12 @@ fn registration_proves_live(
     expected_instance_id: &str,
     private_root: Option<&Path>,
     expected_process: Option<&ExpectedProviderProcess>,
+    deadline: Instant,
 ) -> bool {
+    #[cfg(target_os = "linux")]
+    if probe_time_remaining(deadline).is_none() {
+        return false;
+    }
     let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES, private_root) else {
         return false;
     };
@@ -2582,11 +2712,27 @@ fn registration_proves_live(
     if expected_process.is_some() {
         return false;
     }
+    #[cfg(target_os = "linux")]
+    let listener_inode = match process_guard.as_ref() {
+        Some(guard) => {
+            let Some(inode) =
+                loopback_listener_inode(&registration.transport.base_url, version, deadline)
+            else {
+                return false;
+            };
+            if !guard.owns_socket(inode, deadline) {
+                return false;
+            }
+            Some(inode)
+        }
+        None => None,
+    };
     let Some(probe) = probe_manifest(
         client,
         &registration.transport.base_url,
         &registration.auth.token,
         version,
+        deadline,
     ) else {
         return false;
     };
@@ -2600,9 +2746,14 @@ fn registration_proves_live(
     };
     #[cfg(target_os = "linux")]
     return manifest_matches
-        && process_guard
-            .as_ref()
-            .is_none_or(RegisteredProcessGuard::revalidate);
+        && process_guard.as_ref().is_none_or(|guard| {
+            guard.revalidate()
+                && listener_inode.is_some_and(|inode| {
+                    loopback_listener_inode(&registration.transport.base_url, version, deadline)
+                        == Some(inode)
+                        && guard.owns_socket(inode, deadline)
+                })
+        });
     #[cfg(not(target_os = "linux"))]
     manifest_matches
 }
@@ -2627,23 +2778,31 @@ pub(crate) fn stop_and_cleanup_registered_provider(
     runtime_root: &Path,
     deadline: Instant,
 ) -> Result<(), ProviderStartError> {
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
     let providers_dir_v1 = runtime_root.join("local-connect/v1/providers");
     let providers_dir_v2 = runtime_root.join("local-connect/v2/providers");
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
     ensure_private_directory(&providers_dir_v1)?;
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
     ensure_private_directory(&providers_dir_v2)?;
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(REGISTRATION_PROBE_TIMEOUT)
-        .timeout(REGISTRATION_PROBE_TIMEOUT)
         .build()
         .map_err(|error| ProviderStartError::Server(error.to_string()))?;
+    let expected_process = expected_provider_process(
+        unsafe { libc::geteuid() },
+        &env::current_exe().map_err(ProviderStartError::Io)?,
+    )?;
     let mut signaled = std::collections::BTreeSet::new();
     for (directory, version) in [
         (&providers_dir_v1, WireVersion::V1),
         (&providers_dir_v2, WireVersion::V2),
     ] {
         for entry in fs::read_dir(directory)? {
+            probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
             let path = entry?.path();
             let Some(instance_id) = owned_registration_instance_id(&path) else {
                 continue;
@@ -2655,9 +2814,18 @@ pub(crate) fn stop_and_cleanup_registered_provider(
                 continue;
             };
             if registration_matches_candidate(&registration, version, &instance_id)
-                && registration_proves_live(&client, &path, version, &instance_id, None, None)
+                && registration_proves_live(
+                    &client,
+                    &path,
+                    version,
+                    &instance_id,
+                    None,
+                    Some(&expected_process),
+                    deadline,
+                )
                 && signaled.insert(registration.pid)
             {
+                probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
                 let pid = i32::try_from(registration.pid).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "provider pid is invalid")
                 })?;
@@ -2674,20 +2842,29 @@ pub(crate) fn stop_and_cleanup_registered_provider(
     let owner_path = app_data_dir.join(".connect-provider-owner.lock");
     let registration_lock_path = providers_dir_v1.join(format!(".{APP_ID}.lifecycle.lock"));
     loop {
+        probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
         match acquire_provider_ownership_lock(&owner_path) {
             Ok(_owner) => {
-                let registration_lock = acquire_registration_lock(&registration_lock_path, None)?;
+                probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+                let registration_lock =
+                    acquire_registration_lock(&registration_lock_path, None, Some(deadline))?;
+                probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
                 scavenge_stale_registrations(
                     &registration_lock,
                     [
                         (&providers_dir_v1, WireVersion::V1),
                         (&providers_dir_v2, WireVersion::V2),
                     ],
+                    Some(deadline),
                 )?;
                 return Ok(());
             }
             Err(ProviderStartError::ProviderAlreadyRunning) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50)),
+                );
             }
             Err(ProviderStartError::ProviderAlreadyRunning) => {
                 return Err(ProviderStartError::Server(
@@ -2724,11 +2901,14 @@ fn registered_provider_state_with_client(
     runtime_root: &Path,
     expected_v2_instance_id: Option<&str>,
     expected_process: &ExpectedProviderProcess,
+    deadline: Instant,
 ) -> Result<RegisteredProviderState, ProviderStartError> {
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
     let directory_v2 = runtime_root.join("local-connect/v2/providers");
     ensure_private_directory(&directory_v2)?;
     let mut present = false;
     for entry in fs::read_dir(&directory_v2)? {
+        probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
         let path = entry?.path();
         let name_is_provider = path
             .file_name()
@@ -2751,21 +2931,29 @@ fn registered_provider_state_with_client(
             &instance_id,
             None,
             Some(expected_process),
+            deadline,
         ) {
             return Ok(RegisteredProviderState::Ready);
         }
+        probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
     }
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
     let directory_v1 = runtime_root.join("local-connect/v1/providers");
     ensure_private_directory(&directory_v1)?;
     if !present {
-        present = fs::read_dir(directory_v1)?.any(|entry| {
-            entry.ok().is_some_and(|entry| {
+        for entry in fs::read_dir(directory_v1)? {
+            probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+            if entry.ok().is_some_and(|entry| {
                 entry.file_name().to_str().is_some_and(|name| {
                     name.starts_with(&format!("{APP_ID}-")) && name.ends_with(".json")
                 })
-            })
-        });
+            }) {
+                present = true;
+                break;
+            }
+        }
     }
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
     Ok(if present {
         RegisteredProviderState::PresentUnready
     } else {
@@ -2778,6 +2966,7 @@ pub(crate) fn registered_provider_state(
     runtime_root: &Path,
     expected_v2_instance_id: Option<&str>,
     expected_process: &ExpectedProviderProcess,
+    deadline: Instant,
 ) -> Result<RegisteredProviderState, ProviderStartError> {
     let client = provider_probe_client()?;
     registered_provider_state_with_client(
@@ -2785,6 +2974,7 @@ pub(crate) fn registered_provider_state(
         runtime_root,
         expected_v2_instance_id,
         expected_process,
+        deadline,
     )
 }
 
@@ -2802,11 +2992,16 @@ pub(crate) fn wait_for_registered_provider(
             runtime_root,
             expected_v2_instance_id,
             expected_process,
+            deadline,
         )? == RegisteredProviderState::Ready
         {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(50)),
+        );
     }
     Err(ProviderStartError::Server(
         "provider readiness deadline expired".to_string(),
@@ -2836,12 +3031,15 @@ fn probe_manifest(
     base_url: &str,
     token: &str,
     version: WireVersion,
+    deadline: Instant,
 ) -> Option<ManifestProbe> {
     let url = validated_manifest_url(base_url, version)?;
+    let timeout = probe_time_remaining(deadline)?;
     let response = client
         .get(url.clone())
         .header(header::ACCEPT, "application/json")
         .bearer_auth(token)
+        .timeout(timeout)
         .send()
         .ok()?;
     let status = response.status();
@@ -2857,6 +3055,7 @@ fn probe_manifest(
         .take(MAX_PROBED_MANIFEST_BYTES + 1)
         .read_to_end(&mut bytes)
         .ok()?;
+    probe_time_remaining(deadline)?;
     if bytes.len() as u64 > MAX_PROBED_MANIFEST_BYTES {
         return None;
     }
@@ -2868,7 +3067,7 @@ fn probe_manifest(
     let envelope: ErrorEnvelope = serde_json::from_slice(&bytes).ok()?;
     if envelope.protocol_version != version.protocol_version()
         || envelope.error.code != "CONNECT_ENTITLEMENT_REQUIRED"
-        || !probe_rejects_invalid_token(client, url, token, version)
+        || !probe_rejects_invalid_token(client, url, token, version, deadline)
     {
         return None;
     }
@@ -2881,11 +3080,16 @@ fn probe_rejects_invalid_token(
     url: reqwest::Url,
     token: &str,
     version: WireVersion,
+    deadline: Instant,
 ) -> bool {
+    let Some(timeout) = probe_time_remaining(deadline) else {
+        return false;
+    };
     let response = match client
         .get(url)
         .header(header::ACCEPT, "application/json")
         .bearer_auth(format!("{token}-invalid"))
+        .timeout(timeout)
         .send()
     {
         Ok(response) => response,
@@ -2905,6 +3109,9 @@ fn probe_rejects_invalid_token(
         .is_err()
         || bytes.len() as u64 > MAX_PROBED_MANIFEST_BYTES
     {
+        return false;
+    }
+    if probe_time_remaining(deadline).is_none() {
         return false;
     }
     serde_json::from_slice::<ErrorEnvelope>(&bytes).is_ok_and(|envelope| {
@@ -3115,7 +3322,7 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::collections::BTreeMap;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -3551,6 +3758,97 @@ mod tests {
             .expect("test client should build")
     }
 
+    #[cfg(target_os = "linux")]
+    struct SlowLoopbackServer {
+        port: u16,
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl SlowLoopbackServer {
+        fn start() -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = stop.clone();
+            let thread = thread::spawn(move || {
+                let mut accepted = Vec::new();
+                while !thread_stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => accepted.push(stream),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                port,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://127.0.0.1:{}/", self.port)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for SlowLoopbackServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_slow_v2_registrations(runtime_root: &Path, count: usize) -> Vec<SlowLoopbackServer> {
+        let providers_v1 = runtime_root.join("local-connect/v1/providers");
+        let providers_v2 = runtime_root.join("local-connect/v2/providers");
+        ensure_private_directory(&providers_v1).unwrap();
+        ensure_private_directory(&providers_v2).unwrap();
+        let lock = acquire_registration_lock(
+            &providers_v1.join(format!(".{APP_ID}.lifecycle.lock")),
+            None,
+            None,
+        )
+        .unwrap();
+        (0..count)
+            .map(|_| {
+                let server = SlowLoopbackServer::start();
+                let instance_id = Uuid::new_v4().to_string();
+                write_registration(
+                    &lock,
+                    &providers_v2.join(format!("{APP_ID}-{instance_id}.json")),
+                    &v2::RuntimeRegistration {
+                        protocol_version: v2::PROTOCOL_VERSION,
+                        instance_id,
+                        app_id: APP_ID.to_string(),
+                        pid: std::process::id(),
+                        started_at: Utc::now(),
+                        transport: TransportRegistration {
+                            kind: v2::TRANSPORT_KIND.to_string(),
+                            base_url: server.base_url(),
+                        },
+                        auth: AuthRegistration {
+                            scheme: "bearer".to_string(),
+                            token: "slow-probe-token".to_string(),
+                        },
+                    },
+                    None,
+                )
+                .unwrap();
+                server
+            })
+            .collect()
+    }
+
     fn fixture_request(bytes: &[u8]) -> JobRequest {
         JobRequest {
             protocol_version: PROTOCOL_VERSION,
@@ -3962,6 +4260,7 @@ mod tests {
             provider.base_url(),
             "not-the-registered-token",
             WireVersion::V1,
+            Instant::now() + Duration::from_secs(5),
         )
         .is_none());
 
@@ -4182,6 +4481,7 @@ mod tests {
         let registration_lock = acquire_registration_lock(
             &providers_v1.join(format!(".{APP_ID}.lifecycle.lock")),
             None,
+            None,
         )
         .unwrap();
 
@@ -4340,7 +4640,7 @@ mod tests {
         replacement.transport.base_url = replacement_base_url.to_string();
         replacement.auth.token = replacement_token.to_string();
         let publication_lock =
-            acquire_registration_lock(&first.registration_lock_path, None).unwrap();
+            acquire_registration_lock(&first.registration_lock_path, None, None).unwrap();
         let cleanup_provider = Arc::clone(&first);
         let (cleanup_started_tx, cleanup_started_rx) = mpsc::sync_channel(1);
         let (cleanup_finished_tx, cleanup_finished_rx) = mpsc::sync_channel(1);
@@ -4363,7 +4663,8 @@ mod tests {
 
         assert!(!registration_path_v1.exists());
         assert!(registration_path_v2.exists());
-        let removal_lock = acquire_registration_lock(&first.registration_lock_path, None).unwrap();
+        let removal_lock =
+            acquire_registration_lock(&first.registration_lock_path, None, None).unwrap();
         assert!(remove_registration_if_owned(
             &removal_lock,
             &registration_path_v2,
@@ -4375,6 +4676,117 @@ mod tests {
         )
         .unwrap());
         assert!(!registration_path_v2.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provider_identity_helper_process() {
+        if env::var_os("DOC_SUM_PROVIDER_IDENTITY_HELPER").is_some() {
+            thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_rejects_correct_executable_pid_with_foreign_listener() {
+        let root = TestDirectory::new("doc-sum-connect-readiness-socket-owner");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let path = provider.registration_path_v2();
+        let actual: v2::RuntimeRegistration =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let mut helper = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "connect::provider::tests::provider_identity_helper_process",
+                "--nocapture",
+            ])
+            .env("DOC_SUM_PROVIDER_IDENTITY_HELPER", "1")
+            .spawn()
+            .unwrap();
+        let mut fake = actual.clone();
+        fake.pid = helper.id();
+        fs::write(path, serde_json::to_vec_pretty(&fake).unwrap()).unwrap();
+        assert_eq!(unsafe { libc::kill(helper.id() as i32, libc::SIGSTOP) }, 0);
+        let expected =
+            expected_provider_process(unsafe { libc::geteuid() }, &env::current_exe().unwrap())
+                .unwrap();
+
+        let accepted = registration_proves_live(
+            &client(),
+            path,
+            WireVersion::V2,
+            &fake.instance_id,
+            None,
+            Some(&expected),
+            Instant::now() + Duration::from_secs(5),
+        );
+
+        helper.kill().unwrap();
+        helper.wait().unwrap();
+        assert!(!accepted);
+        fs::write(path, serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
+        assert!(registration_proves_live(
+            &client(),
+            path,
+            WireVersion::V2,
+            &actual.instance_id,
+            None,
+            Some(&expected),
+            Instant::now() + Duration::from_secs(5),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_deadline_bounds_many_slow_candidates() {
+        let root = TestDirectory::new("doc-sum-connect-readiness-deadline");
+        let runtime_root = root.0.join("runtime");
+        ensure_private_directory(&runtime_root).unwrap();
+        let _servers = write_slow_v2_registrations(&runtime_root, 4);
+        let expected =
+            expected_provider_process(unsafe { libc::geteuid() }, &env::current_exe().unwrap())
+                .unwrap();
+        let started = Instant::now();
+
+        assert!(wait_for_registered_provider(
+            &runtime_root,
+            None,
+            &expected,
+            started + Duration::from_millis(120),
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_millis(350));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_deadline_bounds_many_slow_candidates() {
+        let root = TestDirectory::new("doc-sum-connect-cleanup-deadline");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let _servers = write_slow_v2_registrations(&runtime_root, 4);
+        let started = Instant::now();
+
+        assert!(stop_and_cleanup_registered_provider(
+            &app_data,
+            &runtime_root,
+            started + Duration::from_millis(120),
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_millis(350));
     }
 
     #[cfg(target_os = "linux")]
@@ -4411,9 +4823,16 @@ mod tests {
             &fake.instance_id,
             None,
             Some(&expected),
+            Instant::now() + Duration::from_secs(5),
         ));
         assert_eq!(
-            registered_provider_state(&runtime_root, Some(&fake.instance_id), &expected).unwrap(),
+            registered_provider_state(
+                &runtime_root,
+                Some(&fake.instance_id),
+                &expected,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap(),
             RegisteredProviderState::PresentUnready
         );
 
@@ -4425,9 +4844,16 @@ mod tests {
             &actual.instance_id,
             None,
             Some(&expected),
+            Instant::now() + Duration::from_secs(5),
         ));
         assert_eq!(
-            registered_provider_state(&runtime_root, Some(&actual.instance_id), &expected).unwrap(),
+            registered_provider_state(
+                &runtime_root,
+                Some(&actual.instance_id),
+                &expected,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap(),
             RegisteredProviderState::Ready
         );
     }
@@ -4450,6 +4876,68 @@ mod tests {
         child.wait().unwrap();
 
         assert!(!guard.revalidate());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_identity_probes_release_held_process_descriptors() {
+        if env::var_os("DOC_SUM_PROVIDER_FD_PROBE_HELPER").is_none() {
+            let status = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "connect::provider::tests::socket_identity_probes_release_held_process_descriptors",
+                    "--nocapture",
+                ])
+                .env("DOC_SUM_PROVIDER_FD_PROBE_HELPER", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = TestDirectory::new("doc-sum-connect-readiness-fd-lifetime");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let path = provider.registration_path_v2();
+        let registration: v2::RuntimeRegistration =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let expected =
+            expected_provider_process(unsafe { libc::geteuid() }, &env::current_exe().unwrap())
+                .unwrap();
+        let http = client();
+        assert!(registration_proves_live(
+            &http,
+            path,
+            WireVersion::V2,
+            &registration.instance_id,
+            None,
+            Some(&expected),
+            Instant::now() + Duration::from_secs(5),
+        ));
+        let baseline = fs::read_dir("/proc/self/fd").unwrap().count();
+
+        for _ in 0..20 {
+            assert!(registration_proves_live(
+                &http,
+                path,
+                WireVersion::V2,
+                &registration.instance_id,
+                None,
+                Some(&expected),
+                Instant::now() + Duration::from_secs(5),
+            ));
+        }
+
+        assert_eq!(fs::read_dir("/proc/self/fd").unwrap().count(), baseline);
     }
 
     #[cfg(windows)]

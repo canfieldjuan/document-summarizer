@@ -1924,6 +1924,7 @@ impl PackageEffects for SystemEffects {
             Path::new(&participant.runtime_root),
             None,
             &expected_process,
+            Instant::now() + Duration::from_secs(2),
         )
         .map_err(|_| PackageControlError::Manager)?
         {
