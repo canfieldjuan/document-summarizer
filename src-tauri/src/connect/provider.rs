@@ -4,6 +4,10 @@ use crate::connect::contracts::{
     DEFAULT_MAX_INPUT_BYTES, MAX_REQUEST_JSON_BYTES, PROTOCOL_VERSION,
 };
 use crate::connect::entitlement::{EntitlementConfigurationError, EntitlementGate};
+#[cfg(target_os = "linux")]
+use crate::connect::lifecycle_control::{LifecycleControlError, TransitionStore};
+#[cfg(target_os = "linux")]
+use crate::connect::package_control;
 use crate::connect::store::{self, ConnectStoreError, StoredConnectJob};
 use crate::connect::v2;
 #[cfg(windows)]
@@ -15,6 +19,7 @@ use crate::pipeline::contracts::{
 };
 #[cfg(test)]
 use crate::pipeline::contracts::{ModelProfileSnapshot, ModelStageProfileSnapshot};
+use crate::pipeline::control::CancellationToken;
 use crate::pipeline::db;
 use crate::pipeline::ingest::prepare_pdf_ingestion;
 #[cfg(feature = "connect-proof-runtime")]
@@ -22,8 +27,10 @@ use crate::pipeline::model_settings::connect_proof_runtime_from_environment;
 use crate::pipeline::model_settings::{runtime_from_settings, settings_path};
 use crate::pipeline::normalize::CanonicalNormalizer;
 use crate::pipeline::parser::PdfExtractParser;
+#[cfg(any(unix, windows))]
+use crate::pipeline::recovery::reconcile_interrupted_runs;
 use crate::pipeline::service::{
-    process_ingested_to_summary_with_delivery_policy, SummaryComponents,
+    process_ingested_to_summary_with_delivery_policy_controlled, SummaryComponents,
 };
 use crate::pipeline::structure::DeterministicStructureInterpreter;
 use crate::pipeline::summary::{
@@ -45,16 +52,18 @@ use std::fs::TryLockError;
 use std::fs::{self, File, OpenOptions};
 #[cfg(windows)]
 use std::future::IntoFuture;
-#[cfg(unix)]
-use std::io::Read;
 use std::io::{self, Write};
-use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
 #[cfg(unix)]
-use std::time::Instant;
+use std::io::{BufRead, BufReader, Read};
+use std::net::TcpListener;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
@@ -75,6 +84,8 @@ const REGISTRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const REGISTRATION_LOCK_RETRY: Duration = Duration::from_millis(10);
 const CONNECT_PROOF_MODE_ENV: &str = "DOC_SUM_CONNECT_PROOF_MODE";
 const CONNECT_PROOF_MODE_V1: &str = "local-fixture-v1";
+const CONNECT_JOB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(35);
 #[cfg(windows)]
 const WINDOWS_SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
@@ -149,6 +160,135 @@ fn connect_proof_runtime(
 }
 
 #[derive(Clone)]
+struct ProviderWorkerOwner {
+    state: Arc<Mutex<ProviderWorkerState>>,
+    cancellation: CancellationToken,
+}
+
+struct ProviderWorkerState {
+    accepting: bool,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl ProviderWorkerOwner {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ProviderWorkerState {
+                accepting: true,
+                handles: Vec::new(),
+            })),
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    fn accepting(&self) -> bool {
+        self.reap_finished();
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .accepting
+    }
+
+    fn spawn<F>(&self, name: String, worker: F) -> io::Result<()>
+    where
+        F: FnOnce(CancellationToken) + Send + 'static,
+    {
+        self.reap_finished();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.accepting {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Connect provider is shutting down",
+            ));
+        }
+        let cancellation = self.cancellation.clone();
+        let handle = thread::Builder::new()
+            .name(name)
+            .spawn(move || worker(cancellation))?;
+        state.handles.push(handle);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn shutdown(&self) {
+        self.shutdown_until(Instant::now() + CONNECT_GRACEFUL_SHUTDOWN_TIMEOUT);
+    }
+
+    fn shutdown_until(&self, deadline: Instant) {
+        let mut handles = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.accepting = false;
+            std::mem::take(&mut state.handles)
+        };
+        self.cancellation.request();
+        while !handles.is_empty() {
+            let mut ordinal = 0;
+            while ordinal < handles.len() {
+                if handles[ordinal].is_finished() {
+                    let handle = handles.swap_remove(ordinal);
+                    if handle.join().is_err() {
+                        eprintln!("Connect provider worker panicked during shutdown");
+                    }
+                } else {
+                    ordinal += 1;
+                }
+            }
+            if handles.is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                eprintln!(
+                    "Connect provider graceful deadline expired with {} worker(s); process shutdown will terminate them",
+                    handles.len()
+                );
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn reap_finished(&self) {
+        let finished = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut finished = Vec::new();
+            let mut ordinal = 0;
+            while ordinal < state.handles.len() {
+                if state.handles[ordinal].is_finished() {
+                    finished.push(state.handles.swap_remove(ordinal));
+                } else {
+                    ordinal += 1;
+                }
+            }
+            finished
+        };
+        for handle in finished {
+            if handle.join().is_err() {
+                eprintln!("Connect provider worker panicked after completion");
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn retained_worker_count(&self) -> usize {
+        self.reap_finished();
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .handles
+            .len()
+    }
+}
+
+#[derive(Clone)]
 struct ProviderState {
     db_path: PathBuf,
     imports_dir: PathBuf,
@@ -160,6 +300,113 @@ struct ProviderState {
     max_input_bytes: u64,
     runtime_factory: RuntimeFactory,
     entitlement: EntitlementGate,
+    workers: ProviderWorkerOwner,
+    admission_authority: Arc<ProviderAdmissionAuthority>,
+    #[cfg(target_os = "linux")]
+    transition_store: Arc<TransitionStore>,
+    #[cfg(all(target_os = "linux", test))]
+    package_control_root: PathBuf,
+}
+
+#[derive(Default)]
+struct ProviderAdmissionAuthority {
+    stopped: Mutex<bool>,
+}
+
+impl ProviderAdmissionAuthority {
+    fn enter(&self) -> Result<std::sync::MutexGuard<'_, bool>, ()> {
+        let guard = self
+            .stopped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *guard {
+            Err(())
+        } else {
+            Ok(guard)
+        }
+    }
+
+    fn begin_stop(&self) {
+        *self
+            .stopped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stopped(&self) -> bool {
+        *self
+            .stopped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct ProviderStopControl {
+    authority: Arc<ProviderAdmissionAuthority>,
+}
+
+#[cfg(target_os = "linux")]
+impl ProviderStopControl {
+    pub(crate) fn new() -> Self {
+        Self {
+            authority: Arc::new(ProviderAdmissionAuthority::default()),
+        }
+    }
+
+    pub(crate) fn request_stop(&self) {
+        self.authority.begin_stop();
+    }
+
+    pub(crate) fn requested(&self) -> bool {
+        self.authority.stopped()
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderMode {
+    Foreground,
+    Background,
+}
+
+struct ProviderStartup<'a> {
+    #[cfg(target_os = "linux")]
+    mode: ProviderMode,
+    #[cfg(target_os = "linux")]
+    stop_requested: &'a dyn Fn() -> bool,
+    #[cfg(target_os = "linux")]
+    stop_control: Option<ProviderStopControl>,
+    #[cfg(not(target_os = "linux"))]
+    _marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl ProviderStartup<'static> {
+    fn foreground() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            mode: ProviderMode::Foreground,
+            #[cfg(target_os = "linux")]
+            stop_requested: &|| false,
+            #[cfg(target_os = "linux")]
+            stop_control: None,
+            #[cfg(not(target_os = "linux"))]
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<'a> ProviderStartup<'a> {
+    fn background(stop_requested: &'a dyn Fn() -> bool, stop_control: ProviderStopControl) -> Self {
+        Self {
+            mode: ProviderMode::Background,
+            stop_requested,
+            stop_control: Some(stop_control),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -187,8 +434,42 @@ struct RegistrationIdentity {
     protocol_version: u32,
     instance_id: String,
     app_id: String,
+    #[cfg(unix)]
+    pid: u32,
     transport: RegistrationTransportIdentity,
     auth: RegistrationAuthIdentity,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+pub(crate) struct ExpectedProviderProcess {
+    uid: u32,
+    executable_device: u64,
+    executable_inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn expected_provider_process(
+    uid: u32,
+    executable: &Path,
+) -> Result<ExpectedProviderProcess, ProviderStartError> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options.open(executable)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.nlink() == 0 {
+        return Err(ProviderStartError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "provider executable identity is invalid",
+        )));
+    }
+    Ok(ExpectedProviderProcess {
+        uid,
+        executable_device: metadata.dev(),
+        executable_inode: metadata.ino(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -239,9 +520,16 @@ pub enum ProviderStartError {
     Contract(#[from] crate::connect::contracts::ContractBuildError),
     #[error("Connect provider server failed to initialize: {0}")]
     Server(String),
+    #[cfg(target_os = "linux")]
+    #[error("Connect background lifecycle transition blocks provider startup")]
+    LifecycleTransitionActive,
+    #[error("Connect background provider startup was cancelled")]
+    StartupCancelled,
 }
 
 pub struct ConnectProvider {
+    #[cfg(unix)]
+    _provider_owner_lock: RegistrationLifecycleLock,
     #[cfg(unix)]
     registration_lock_path: PathBuf,
     #[cfg(windows)]
@@ -256,12 +544,42 @@ pub struct ConnectProvider {
     instance_id_v1: String,
     instance_id_v2: String,
     token: String,
+    workers: ProviderWorkerOwner,
+    admission_authority: Arc<ProviderAdmissionAuthority>,
     shutdown: Option<watch::Sender<bool>>,
+    #[cfg(target_os = "linux")]
+    terminal_result: Mutex<mpsc::Receiver<Result<(), String>>>,
+    #[cfg(all(target_os = "linux", test))]
+    terminal_result_probe: mpsc::SyncSender<Result<(), String>>,
     server_thread: Option<JoinHandle<()>>,
+    stopped: bool,
 }
 
 impl ConnectProvider {
     pub fn start(db_path: PathBuf, app_data_dir: PathBuf) -> Result<Self, ProviderStartError> {
+        Self::start_in_mode(db_path, app_data_dir, ProviderStartup::foreground())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_background_with_control(
+        db_path: PathBuf,
+        app_data_dir: PathBuf,
+        stop_control: ProviderStopControl,
+    ) -> Result<Self, ProviderStartError> {
+        let probe_control = stop_control.clone();
+        let stop_probe = || probe_control.requested();
+        Self::start_in_mode(
+            db_path,
+            app_data_dir,
+            ProviderStartup::background(&stop_probe, stop_control),
+        )
+    }
+
+    fn start_in_mode(
+        db_path: PathBuf,
+        app_data_dir: PathBuf,
+        startup: ProviderStartup<'_>,
+    ) -> Result<Self, ProviderStartError> {
         #[cfg(unix)]
         let runtime_root = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
@@ -280,13 +598,14 @@ impl ConnectProvider {
         let runtime_factory =
             provider_runtime_factory(settings_path(&app_data_dir), db_path.clone());
         let entitlement = EntitlementGate::from_installation()?;
-        Self::start_at_with_entitlement(
+        Self::start_at_with_entitlement_mode(
             db_path,
             app_data_dir,
             runtime_root,
             max_input_bytes,
             runtime_factory,
             entitlement,
+            startup,
         )
     }
 
@@ -310,6 +629,7 @@ impl ConnectProvider {
         )
     }
 
+    #[cfg(test)]
     fn start_at_with_entitlement(
         db_path: PathBuf,
         app_data_dir: PathBuf,
@@ -318,7 +638,60 @@ impl ConnectProvider {
         runtime_factory: RuntimeFactory,
         entitlement: EntitlementGate,
     ) -> Result<Self, ProviderStartError> {
+        Self::start_at_with_entitlement_mode(
+            db_path,
+            app_data_dir,
+            runtime_root,
+            max_input_bytes,
+            runtime_factory,
+            entitlement,
+            ProviderStartup::foreground(),
+        )
+    }
+
+    fn start_at_with_entitlement_mode(
+        db_path: PathBuf,
+        app_data_dir: PathBuf,
+        runtime_root: PathBuf,
+        max_input_bytes: u64,
+        runtime_factory: RuntimeFactory,
+        entitlement: EntitlementGate,
+        _startup: ProviderStartup<'_>,
+    ) -> Result<Self, ProviderStartError> {
+        #[cfg(target_os = "linux")]
+        let startup = _startup;
+        #[cfg(target_os = "linux")]
+        if (startup.stop_requested)() {
+            return Err(ProviderStartError::StartupCancelled);
+        }
         ensure_private_directory(&app_data_dir)?;
+        #[cfg(target_os = "linux")]
+        let _package_admission = package_admission_for_start(&app_data_dir, &runtime_root)?;
+        #[cfg(target_os = "linux")]
+        let transition_store = transition_store_for_start(&app_data_dir)?;
+        #[cfg(target_os = "linux")]
+        let transition_generation = if startup.mode == ProviderMode::Background {
+            transition_store
+                .current()
+                .map_err(map_lifecycle_control_error)?
+                .map(|record| record.generation)
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        if !transition_store
+            .admitted_transition_child(transition_generation.as_deref())
+            .map_err(map_lifecycle_control_error)?
+        {
+            return Err(ProviderStartError::LifecycleTransitionActive);
+        }
+        #[cfg(unix)]
+        let provider_owner_lock =
+            acquire_provider_ownership_lock(&app_data_dir.join(".connect-provider-owner.lock"))?;
+        #[cfg(target_os = "linux")]
+        if (startup.stop_requested)() {
+            return Err(ProviderStartError::StartupCancelled);
+        }
         let imports_dir = app_data_dir.join("connect-imports");
         ensure_private_directory(&imports_dir)?;
 
@@ -333,7 +706,7 @@ impl ConnectProvider {
         #[cfg(unix)]
         let registration_lock_path = providers_dir_v1.join(format!(".{APP_ID}.lifecycle.lock"));
         #[cfg(unix)]
-        let registration_lock = acquire_registration_lock(&registration_lock_path, None)?;
+        let registration_lock = acquire_registration_lock(&registration_lock_path, None, None)?;
         #[cfg(unix)]
         let removed_registrations = scavenge_stale_registrations(
             &registration_lock,
@@ -341,6 +714,7 @@ impl ConnectProvider {
                 (&providers_dir_v1, WireVersion::V1),
                 (&providers_dir_v2, WireVersion::V2),
             ],
+            None,
         )?;
         #[cfg(unix)]
         if removed_registrations > 0 {
@@ -367,7 +741,20 @@ impl ConnectProvider {
             windows_storage::ensure_private_directory(directory, &runtime_root)?;
         }
 
-        let conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
+        #[cfg(unix)]
+        let mut conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
+        #[cfg(not(unix))]
+        let mut conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
+        #[cfg(unix)]
+        let recovered_runs =
+            reconcile_interrupted_runs(&mut conn).map_err(ConnectStoreError::from)?;
+        #[cfg(unix)]
+        if !recovered_runs.is_empty() {
+            eprintln!(
+                "Reconciled {} interrupted pipeline run(s) before Connect publication",
+                recovered_runs.len()
+            );
+        }
         let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
         let instance_id_v2 =
             load_or_create_v2_instance_id(&app_data_dir, active_v2_instance_id.as_deref())?;
@@ -376,14 +763,27 @@ impl ConnectProvider {
         let registration_lock_v1 = acquire_registration_lock(
             &locks_dir_v1.join(format!(".local-connect-v1-{APP_ID}.lock")),
             Some(&runtime_root),
+            None,
         )
         .map_err(map_windows_registration_lock_error)?;
         #[cfg(windows)]
         let registration_lock_v2 = acquire_registration_lock(
             &locks_dir_v2.join(format!(".local-connect-v2-{instance_id_v2}.lock")),
             Some(&runtime_root),
+            None,
         )
         .map_err(map_windows_registration_lock_error)?;
+
+        #[cfg(windows)]
+        let recovered_runs =
+            reconcile_interrupted_runs(&mut conn).map_err(ConnectStoreError::from)?;
+        #[cfg(windows)]
+        if !recovered_runs.is_empty() {
+            eprintln!(
+                "Reconciled {} interrupted pipeline run(s) after acquiring provider ownership",
+                recovered_runs.len()
+            );
+        }
 
         store::mark_interrupted_jobs_failed(
             &conn,
@@ -403,6 +803,15 @@ impl ConnectProvider {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let manifest_v1 = AppManifest::new(&instance_id_v1, max_input_bytes);
         let manifest_v2 = v2::AppManifest::new(&instance_id_v2, max_input_bytes);
+        let workers = ProviderWorkerOwner::new();
+        #[cfg(target_os = "linux")]
+        let admission_authority = startup
+            .stop_control
+            .as_ref()
+            .map(|control| Arc::clone(&control.authority))
+            .unwrap_or_else(|| Arc::new(ProviderAdmissionAuthority::default()));
+        #[cfg(not(target_os = "linux"))]
+        let admission_authority = Arc::new(ProviderAdmissionAuthority::default());
         let state = ProviderState {
             db_path,
             imports_dir,
@@ -414,6 +823,12 @@ impl ConnectProvider {
             max_input_bytes,
             runtime_factory,
             entitlement,
+            workers: workers.clone(),
+            admission_authority: Arc::clone(&admission_authority),
+            #[cfg(target_os = "linux")]
+            transition_store: Arc::clone(&transition_store),
+            #[cfg(all(target_os = "linux", test))]
+            package_control_root: app_data_dir.join("test-package-control"),
         };
         let body_limit = usize::try_from(max_input_bytes)
             .unwrap_or(usize::MAX)
@@ -431,6 +846,12 @@ impl ConnectProvider {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        #[cfg(target_os = "linux")]
+        let (terminal_tx, terminal_rx) = mpsc::sync_channel(1);
+        #[cfg(not(target_os = "linux"))]
+        let (terminal_tx, _terminal_rx) = mpsc::sync_channel(1);
+        #[cfg(all(target_os = "linux", test))]
+        let terminal_result_probe = terminal_tx.clone();
         let server_thread = thread::Builder::new()
             .name("document-summarizer-connect".to_string())
             .spawn(move || {
@@ -441,6 +862,7 @@ impl ConnectProvider {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         let _ = ready_tx.send(Err(error.to_string()));
+                        let _ = terminal_tx.send(Err(error.to_string()));
                         return;
                     }
                 };
@@ -449,6 +871,7 @@ impl ConnectProvider {
                         Ok(listener) => listener,
                         Err(error) => {
                             let _ = ready_tx.send(Err(error.to_string()));
+                            let _ = terminal_tx.send(Err(error.to_string()));
                             return;
                         }
                     };
@@ -481,6 +904,9 @@ impl ConnectProvider {
                     let result = server.await;
                     if let Err(error) = result {
                         eprintln!("Connect provider stopped with an error: {error}");
+                        let _ = terminal_tx.send(Err(error.to_string()));
+                    } else {
+                        let _ = terminal_tx.send(Ok(()));
                     }
                 });
             })?;
@@ -495,6 +921,13 @@ impl ConnectProvider {
                 let _ = server_thread.join();
                 return Err(ProviderStartError::Server(error.to_string()));
             }
+        }
+
+        #[cfg(target_os = "linux")]
+        if (startup.stop_requested)() {
+            let _ = shutdown_tx.send(true);
+            let _ = server_thread.join();
+            return Err(ProviderStartError::StartupCancelled);
         }
 
         let started_at = Utc::now();
@@ -549,6 +982,25 @@ impl ConnectProvider {
         let publication_root = None;
         #[cfg(windows)]
         let publication_root = Some(runtime_root.as_path());
+        let publication_authority = admission_authority
+            .enter()
+            .map_err(|()| ProviderStartError::StartupCancelled)?;
+        #[cfg(target_os = "linux")]
+        let cancellation_requested = startup.stop_control.is_none() && (startup.stop_requested)();
+        #[cfg(target_os = "linux")]
+        if cancellation_requested
+            || !transition_store
+                .admitted_transition_child(transition_generation.as_deref())
+                .map_err(map_lifecycle_control_error)?
+        {
+            let _ = shutdown_tx.send(true);
+            let _ = server_thread.join();
+            return Err(if cancellation_requested {
+                ProviderStartError::StartupCancelled
+            } else {
+                ProviderStartError::LifecycleTransitionActive
+            });
+        }
         if let Err(error) = write_registration(
             publication_lock_v1,
             &registration_path_v1,
@@ -558,6 +1010,23 @@ impl ConnectProvider {
             let _ = shutdown_tx.send(true);
             let _ = server_thread.join();
             return Err(error);
+        }
+        #[cfg(target_os = "linux")]
+        let cancellation_requested = startup.stop_control.is_none() && (startup.stop_requested)();
+        #[cfg(target_os = "linux")]
+        if cancellation_requested
+            || !transition_store
+                .admitted_transition_child(transition_generation.as_deref())
+                .map_err(map_lifecycle_control_error)?
+        {
+            let _ = fs::remove_file(&registration_path_v1);
+            let _ = shutdown_tx.send(true);
+            let _ = server_thread.join();
+            return Err(if cancellation_requested {
+                ProviderStartError::StartupCancelled
+            } else {
+                ProviderStartError::LifecycleTransitionActive
+            });
         }
         if let Err(error) = write_registration(
             publication_lock_v2,
@@ -573,8 +1042,11 @@ impl ConnectProvider {
             let _ = server_thread.join();
             return Err(error);
         }
+        drop(publication_authority);
 
         Ok(Self {
+            #[cfg(unix)]
+            _provider_owner_lock: provider_owner_lock,
             #[cfg(unix)]
             registration_lock_path,
             #[cfg(windows)]
@@ -589,8 +1061,15 @@ impl ConnectProvider {
             instance_id_v1,
             instance_id_v2,
             token,
+            workers,
+            admission_authority,
             shutdown: Some(shutdown_tx),
+            #[cfg(target_os = "linux")]
+            terminal_result: Mutex::new(terminal_rx),
+            #[cfg(all(target_os = "linux", test))]
+            terminal_result_probe,
             server_thread: Some(server_thread),
+            stopped: false,
         })
     }
 
@@ -614,16 +1093,41 @@ impl ConnectProvider {
         &self.registration_path_v2
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn terminal_failure(&self) -> Option<ProviderStartError> {
+        let receiver = self
+            .terminal_result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match receiver.try_recv() {
+            Ok(Err(error)) => Some(ProviderStartError::Server(error)),
+            Ok(Ok(())) => Some(ProviderStartError::Server(
+                "Connect provider server stopped unexpectedly".to_string(),
+            )),
+            Err(mpsc::TryRecvError::Disconnected) => Some(ProviderStartError::Server(
+                "Connect provider server result channel closed".to_string(),
+            )),
+            Err(mpsc::TryRecvError::Empty) => None,
+        }
+    }
+
+    #[cfg(all(target_os = "linux", test))]
+    fn force_terminal_failure(&self) {
+        let _ = self
+            .terminal_result_probe
+            .send(Err("forced server failure".to_string()));
+    }
+
     pub(crate) fn unregister(&self) {
         #[cfg(unix)]
-        let registration_lock = match acquire_registration_lock(&self.registration_lock_path, None)
-        {
-            Ok(lock) => lock,
-            Err(error) => {
-                eprintln!("Connect registration cleanup lock failed: {error}");
-                return;
-            }
-        };
+        let registration_lock =
+            match acquire_registration_lock(&self.registration_lock_path, None, None) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    eprintln!("Connect registration cleanup lock failed: {error}");
+                    return;
+                }
+            };
         #[cfg(unix)]
         let cleanup_lock_v1 = &registration_lock;
         #[cfg(unix)]
@@ -665,28 +1169,220 @@ impl ConnectProvider {
             }
         }
     }
+
+    fn shutdown_inner(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        self.admission_authority.begin_stop();
+        let deadline = Instant::now() + CONNECT_GRACEFUL_SHUTDOWN_TIMEOUT;
+        self.workers.shutdown_until(deadline);
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(true);
+        }
+        if let Some(server_thread) = self.server_thread.take() {
+            while !server_thread.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if server_thread.is_finished() {
+                if server_thread.join().is_err() {
+                    eprintln!("Connect provider server panicked during shutdown");
+                }
+            } else {
+                eprintln!(
+                    "Connect provider server exceeded the graceful deadline; process shutdown will terminate it"
+                );
+            }
+        }
+        self.unregister();
+    }
+
+    pub fn shutdown(mut self) {
+        self.shutdown_inner();
+    }
+
+    #[cfg(test)]
+    fn simulate_process_loss(mut self) {
+        self.workers.shutdown();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(true);
+        }
+        if let Some(server_thread) = self.server_thread.take() {
+            let _ = server_thread.join();
+        }
+        self.stopped = true;
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn reconcile_standalone_state_if_unowned(
+    db_path: &Path,
+    app_data_dir: &Path,
+) -> Result<Option<usize>, ProviderStartError> {
+    ensure_private_directory(app_data_dir)?;
+    let _owner =
+        match acquire_provider_ownership_lock(&app_data_dir.join(".connect-provider-owner.lock")) {
+            Ok(owner) => owner,
+            Err(ProviderStartError::ProviderAlreadyRunning) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+    let mut conn = db::init_db(db_path).map_err(ConnectStoreError::from)?;
+    Ok(Some(
+        reconcile_interrupted_runs(&mut conn)
+            .map_err(ConnectStoreError::from)?
+            .len(),
+    ))
+}
+
+#[cfg(windows)]
+pub(crate) fn reconcile_standalone_state_if_unowned(
+    db_path: &Path,
+    app_data_dir: &Path,
+) -> Result<Option<usize>, ProviderStartError> {
+    let runtime_root = windows_storage::local_app_data_root(env::var_os("LOCALAPPDATA"))
+        .map_err(|_| ProviderStartError::RuntimeDirectoryUnavailable)?;
+    reconcile_standalone_state_if_unowned_at(db_path, app_data_dir, &runtime_root)
+}
+
+#[cfg(windows)]
+fn standalone_v2_instance_id_without_writes(
+    db_path: &Path,
+    app_data_dir: &Path,
+) -> Result<String, ProviderStartError> {
+    let identity_path = app_data_dir.join(V2_INSTANCE_ID_FILE);
+    match fs::read_to_string(&identity_path) {
+        Ok(value) => return parse_v2_instance_id(&value),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    if !db_path.exists() {
+        return Ok(Uuid::new_v4().to_string());
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(ConnectStoreError::from)?;
+    let has_connect_jobs: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'connect_jobs'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ConnectStoreError::from)?;
+    if !has_connect_jobs {
+        return Ok(Uuid::new_v4().to_string());
+    }
+    Ok(store::active_v2_provider_instance_id(&conn)?.unwrap_or_else(|| Uuid::new_v4().to_string()))
+}
+
+#[cfg(windows)]
+fn reconcile_standalone_state_if_unowned_at(
+    db_path: &Path,
+    app_data_dir: &Path,
+    runtime_root: &Path,
+) -> Result<Option<usize>, ProviderStartError> {
+    ensure_private_directory(app_data_dir)?;
+    let private_connect_root = windows_storage::prepare_local_connect_root(runtime_root)?;
+    let locks_dir_v1 = private_connect_root.join("runtime/v1/locks");
+    let locks_dir_v2 = private_connect_root.join("runtime/v2/locks");
+    for directory in [&locks_dir_v1, &locks_dir_v2] {
+        windows_storage::ensure_private_directory(directory, runtime_root)?;
+    }
+
+    let _registration_lock_v1 = match acquire_registration_lock(
+        &locks_dir_v1.join(format!(".local-connect-v1-{APP_ID}.lock")),
+        Some(runtime_root),
+        None,
+    ) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(map_windows_registration_lock_error(error)),
+    };
+    let candidate_instance_id = standalone_v2_instance_id_without_writes(db_path, app_data_dir)?;
+    let _registration_lock_v2 = match acquire_registration_lock(
+        &locks_dir_v2.join(format!(".local-connect-v2-{candidate_instance_id}.lock")),
+        Some(runtime_root),
+        None,
+    ) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(map_windows_registration_lock_error(error)),
+    };
+
+    let mut conn = db::init_db(db_path).map_err(ConnectStoreError::from)?;
+    let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
+    if active_v2_instance_id
+        .as_deref()
+        .is_some_and(|active| active != candidate_instance_id)
+    {
+        return Err(ProviderStartError::InvalidInstanceIdentity);
+    }
+    let instance_id = load_or_create_v2_instance_id(app_data_dir, Some(&candidate_instance_id))?;
+    if instance_id != candidate_instance_id {
+        return Err(ProviderStartError::InvalidInstanceIdentity);
+    }
+    Ok(Some(
+        reconcile_interrupted_runs(&mut conn)
+            .map_err(ConnectStoreError::from)?
+            .len(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn transition_store_for_start(
+    app_data_dir: &Path,
+) -> Result<Arc<TransitionStore>, ProviderStartError> {
+    #[cfg(test)]
+    let store = TransitionStore::new(app_data_dir.join("test-lifecycle-control"));
+    #[cfg(not(test))]
+    let store = {
+        let _ = app_data_dir;
+        TransitionStore::from_environment()
+    };
+    store.map(Arc::new).map_err(map_lifecycle_control_error)
+}
+
+#[cfg(target_os = "linux")]
+fn package_admission_for_start(
+    app_data_dir: &Path,
+    runtime_root: &Path,
+) -> Result<package_control::PackageAdmissionGuard, ProviderStartError> {
+    #[cfg(test)]
+    let guard = package_control::enter_startup_admission_at(
+        &app_data_dir.join("test-package-control"),
+        app_data_dir,
+        runtime_root,
+    );
+    #[cfg(not(test))]
+    let guard = { package_control::enter_startup_admission(app_data_dir, runtime_root) };
+    guard.map_err(|_| ProviderStartError::LifecycleTransitionActive)
+}
+
+#[cfg(target_os = "linux")]
+fn package_admission_for_job(
+    state: &ProviderState,
+) -> Result<package_control::PackageAdmissionGuard, package_control::PackageControlError> {
+    #[cfg(test)]
+    return package_control::enter_admission_at(&state.package_control_root);
+    #[cfg(not(test))]
+    {
+        let _ = state;
+        package_control::enter_admission()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn map_lifecycle_control_error(_error: LifecycleControlError) -> ProviderStartError {
+    ProviderStartError::LifecycleTransitionActive
 }
 
 impl Drop for ConnectProvider {
     fn drop(&mut self) {
-        #[cfg(windows)]
-        {
-            if let Some(shutdown) = self.shutdown.take() {
-                let _ = shutdown.send(true);
-            }
-            if let Some(server_thread) = self.server_thread.take() {
-                let _ = server_thread.join();
-            }
-            self.unregister();
-        }
-        #[cfg(unix)]
-        {
-            self.unregister();
-            if let Some(shutdown) = self.shutdown.take() {
-                let _ = shutdown.send(true);
-            }
-            self.server_thread.take();
-        }
+        self.shutdown_inner();
     }
 }
 
@@ -796,6 +1492,7 @@ async fn get_job_status(
 ) -> Result<Json<JobStatus>, ProviderHttpError> {
     authorize(&state, &headers)?;
     require_entitlement(&state)?;
+    state.workers.reap_finished();
     if !valid_uuid_v4(&job_id) {
         return Err(ProviderHttpError::bad_request(
             "JOB_ID_INVALID",
@@ -825,6 +1522,7 @@ async fn get_job_status_v2(
     let result = (|| {
         authorize(&state, &headers)?;
         require_entitlement(&state)?;
+        state.workers.reap_finished();
         if !valid_uuid_v4(&job_id) {
             return Err(ProviderHttpError::bad_request(
                 "JOB_ID_INVALID",
@@ -871,10 +1569,29 @@ async fn create_job_for_request(
 ) -> Result<Response, ProviderHttpError> {
     authorize(&state, request.headers())?;
     require_entitlement(&state)?;
-    let multipart = Multipart::from_request(request, &state)
-        .await
-        .map_err(ProviderHttpError::multipart)?;
-    create_job_for(version, state, multipart).await
+    if !state.workers.accepting() {
+        return Err(ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is shutting down.",
+            true,
+        ));
+    }
+    tokio::time::timeout(CONNECT_JOB_REQUEST_TIMEOUT, async {
+        let multipart = Multipart::from_request(request, &state)
+            .await
+            .map_err(ProviderHttpError::multipart)?;
+        create_job_for(version, state, multipart).await
+    })
+    .await
+    .map_err(|_| {
+        ProviderHttpError::new(
+            StatusCode::REQUEST_TIMEOUT,
+            "REQUEST_TIMEOUT",
+            "The provider request body did not arrive within the allowed time.",
+            true,
+        )
+    })?
 }
 
 async fn create_job_for(
@@ -899,19 +1616,13 @@ async fn create_job_for(
     let (request, request_hash, summary_profile) =
         parse_job_request(&request_bytes, version, state.max_input_bytes)?;
 
-    let mut conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
-    if let Some(existing) =
-        store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
     {
-        return idempotent_response(existing, &request_hash, version);
-    }
-    if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
-        return Err(ProviderHttpError::new(
-            StatusCode::CONFLICT,
-            "PROVIDER_BUSY",
-            "The provider is processing another job.",
-            true,
-        ));
+        let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+        if let Some(existing) =
+            store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
+        {
+            return idempotent_response(existing, &request_hash, version);
+        }
     }
 
     let artifact_field = multipart
@@ -930,24 +1641,23 @@ async fn create_job_for(
         ));
     }
     let input = request.inputs[0].clone();
-    let import_path = receive_artifact(&state, &request.job_id, &input, artifact_field).await?;
+    let mut pending_import =
+        receive_artifact(&state, &request.job_id, &input, artifact_field).await?;
     if multipart
         .next_field()
         .await
         .map_err(ProviderHttpError::multipart)?
         .is_some()
     {
-        remove_file_quietly(&import_path).await;
         return Err(ProviderHttpError::bad_request(
             "MULTIPART_FIELDS_INVALID",
             "Unexpected multipart fields were provided.",
         ));
     }
 
-    let import_path_text = match import_path.to_str() {
+    let staging_path_text = match pending_import.staging().to_str() {
         Some(path) => path,
         None => {
-            remove_file_quietly(&import_path).await;
             return Err(ProviderHttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "PROVIDER_STORAGE_INVALID",
@@ -956,15 +1666,14 @@ async fn create_job_for(
             ));
         }
     };
-    let (document, run) = match prepare_pdf_ingestion(import_path_text, Some(&input.display_name)) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            remove_file_quietly(&import_path).await;
-            return Err(ProviderHttpError::domain(error.code()));
-        }
-    };
+    let (mut document, run) =
+        match prepare_pdf_ingestion(staging_path_text, Some(&input.display_name)) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(ProviderHttpError::domain(error.code()));
+            }
+        };
     if document.byte_size != input.byte_size || document.content_hash != input.sha256 {
-        remove_file_quietly(&import_path).await;
         return Err(ProviderHttpError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "ARTIFACT_IDENTITY_MISMATCH",
@@ -975,34 +1684,34 @@ async fn create_job_for(
     let mut runtime = match (state.runtime_factory)() {
         Ok(runtime) => runtime,
         Err(error) => {
+            let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
             if let Some(response) = idempotent_response_after_admission_race(
                 store::get_job(&conn, &request.job_id),
                 &request_hash,
                 version,
-                &import_path,
+                pending_import.staging(),
             )
             .await?
             {
                 return Ok(response);
             }
-            remove_file_quietly(&import_path).await;
             return Err(ProviderHttpError::runtime(error));
         }
     };
     let profile_snapshot = match runtime.profile_snapshot() {
         Some(snapshot) => snapshot,
         None => {
+            let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
             if let Some(response) = idempotent_response_after_admission_race(
                 store::get_job(&conn, &request.job_id),
                 &request_hash,
                 version,
-                &import_path,
+                pending_import.staging(),
             )
             .await?
             {
                 return Ok(response);
             }
-            remove_file_quietly(&import_path).await;
             return Err(ProviderHttpError::runtime(ModelRuntimeFailure {
                 code: "MODEL_CONFIG_INVALID".to_string(),
                 message: "Connect runtime is missing its immutable model profile".to_string(),
@@ -1015,7 +1724,74 @@ async fn create_job_for(
         WireVersion::V1 => &state.instance_id_v1,
         WireVersion::V2 => &state.instance_id_v2,
     };
-    let accepted = store::accept_job_with_ingestion_guarded(
+    #[cfg(target_os = "linux")]
+    let _package_admission = package_admission_for_job(&state).map_err(|_| {
+        ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider package is changing lifecycle state.",
+            true,
+        )
+    })?;
+    #[cfg(target_os = "linux")]
+    let _transition_admission = state.transition_store.enter_job_admission().map_err(|_| {
+        ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is changing background lifecycle state.",
+            true,
+        )
+    })?;
+    let _provider_admission = state.admission_authority.enter().map_err(|()| {
+        ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is shutting down.",
+            true,
+        )
+    })?;
+    if !state.workers.accepting() {
+        drop(_provider_admission);
+        return Err(ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is shutting down.",
+            true,
+        ));
+    }
+    let (import_path, owns_import) = promote_staged_artifact(
+        pending_import.staging(),
+        pending_import.final_path(),
+        &input,
+        &state.imports_dir,
+    )?;
+    pending_import.mark_promoted(owns_import);
+    let import_path_text = import_path.to_str().ok_or_else(|| {
+        ProviderHttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PROVIDER_STORAGE_INVALID",
+            "Provider storage path is unavailable.",
+            true,
+        )
+    })?;
+    document.local_source_path = import_path_text.to_string();
+    let mut conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+    if let Some(existing) =
+        store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
+    {
+        drop(_provider_admission);
+        return idempotent_response(existing, &request_hash, version);
+    }
+    if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
+        drop(_provider_admission);
+        return Err(ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is processing another job.",
+            true,
+        ));
+    }
+    let accepted_result = store::accept_job_with_ingestion_guarded(
         &mut conn,
         &request,
         &request_hash,
@@ -1027,10 +1803,10 @@ async fn create_job_for(
         Some(&profile_snapshot),
         || state.entitlement.decision().is_active(),
     );
-    let accepted = match accepted {
+    drop(_provider_admission);
+    let accepted = match accepted_result {
         Ok(Some((_, accepted))) => accepted,
         Ok(None) => {
-            remove_file_quietly(&import_path).await;
             return Err(entitlement_required_error());
         }
         Err(error) => {
@@ -1044,7 +1820,6 @@ async fn create_job_for(
             {
                 return Ok(response);
             }
-            remove_file_quietly(&import_path).await;
             if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
                 return Err(ProviderHttpError::new(
                     StatusCode::CONFLICT,
@@ -1056,14 +1831,15 @@ async fn create_job_for(
             return Err(ProviderHttpError::store(error));
         }
     };
+    pending_import.commit();
     runtime.bind_run(&accepted.pipeline_run_id);
 
     let worker_state = state.clone();
     let worker_job_id = request.job_id.clone();
-    if let Err(error) = thread::Builder::new()
-        .name(format!("connect-job-{}", &worker_job_id[..8]))
-        .spawn(move || process_job(worker_state, worker_job_id, runtime))
-    {
+    if let Err(error) = state.workers.spawn(
+        format!("connect-job-{}", &worker_job_id[..8]),
+        move |cancellation| process_job(worker_state, worker_job_id, runtime, cancellation),
+    ) {
         eprintln!("Connect provider worker could not start: {error}");
         let worker_error = job_error(
             "PROVIDER_WORKER_UNAVAILABLE",
@@ -1081,7 +1857,12 @@ async fn create_job_for(
     job_response(version, StatusCode::ACCEPTED, &accepted)
 }
 
-fn process_job(state: ProviderState, job_id: String, runtime: Box<dyn ModelRuntime>) {
+fn process_job(
+    state: ProviderState,
+    job_id: String,
+    runtime: Box<dyn ModelRuntime>,
+    cancellation: CancellationToken,
+) {
     let result = (|| -> Result<(), ProcessJobError> {
         let conn = db::init_db(&state.db_path)?;
         let job = store::mark_processing(&conn, &job_id)?;
@@ -1090,7 +1871,7 @@ fn process_job(state: ProviderState, job_id: String, runtime: Box<dyn ModelRunti
         let normalizer = CanonicalNormalizer::new();
         let interpreter = DeterministicStructureInterpreter::new();
         let chunker = DeterministicDocumentChunker::new();
-        let summary = process_ingested_to_summary_with_delivery_policy(
+        let summary = process_ingested_to_summary_with_delivery_policy_controlled(
             &mut pipeline_conn,
             &job.pipeline_run_id,
             SummaryComponents {
@@ -1101,6 +1882,7 @@ fn process_job(state: ProviderState, job_id: String, runtime: Box<dyn ModelRunti
                 runtime: runtime.as_ref(),
             },
             SummaryDeliveryPolicy::connect(),
+            &cancellation,
         )?;
         let analyzed = db::get_analyzed_document(&pipeline_conn, &job.pipeline_run_id)?
             .ok_or_else(
@@ -1214,6 +1996,7 @@ fn retryable_pipeline_code(code: &str) -> bool {
             | "PIPELINE_STORE_ERROR"
             | "DATABASE_ERROR"
             | "SUMMARY_ARTIFACT_PERSISTENCE_FAILED"
+            | "PIPELINE_CANCELLATION_OBSERVED"
     )
 }
 
@@ -1222,20 +2005,21 @@ async fn receive_artifact(
     job_id: &str,
     input: &InputArtifact,
     mut field: axum::extract::multipart::Field<'_>,
-) -> Result<PathBuf, ProviderHttpError> {
+) -> Result<PendingImport, ProviderHttpError> {
     let (staging, final_path) = allocate_import_paths(
         &state.imports_dir,
         job_id,
         &input.artifact_id,
         Uuid::new_v4(),
     );
+    let pending = PendingImport::new(staging, final_path);
     let mut file = tokio::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&staging)
+        .open(pending.staging())
         .await
         .map_err(ProviderHttpError::io)?;
-    set_private_file_permissions(&staging)
+    set_private_file_permissions(pending.staging())
         .await
         .map_err(ProviderHttpError::io)?;
 
@@ -1279,12 +2063,54 @@ async fn receive_artifact(
     }
     .await;
     drop(file);
-    if let Err(error) = receive_result {
-        remove_file_quietly(&staging).await;
-        return Err(error);
+    receive_result?;
+    Ok(pending)
+}
+
+struct PendingImport {
+    staging: PathBuf,
+    final_path: PathBuf,
+    promoted: bool,
+    committed: bool,
+}
+
+impl PendingImport {
+    fn new(staging: PathBuf, final_path: PathBuf) -> Self {
+        Self {
+            staging,
+            final_path,
+            promoted: false,
+            committed: false,
+        }
     }
 
-    promote_staged_artifact(&staging, &final_path, input, &state.imports_dir).await
+    fn staging(&self) -> &Path {
+        &self.staging
+    }
+
+    fn final_path(&self) -> &Path {
+        &self.final_path
+    }
+
+    fn mark_promoted(&mut self, owns_import: bool) {
+        self.promoted = owns_import;
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingImport {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = fs::remove_file(&self.staging);
+        if self.promoted {
+            let _ = fs::remove_file(&self.final_path);
+        }
+    }
 }
 
 fn allocate_import_paths(
@@ -1298,28 +2124,26 @@ fn allocate_import_paths(
     // another request accepted for the same job and artifact identities.
     let stem = format!("{job_id}-{artifact_id}-{transfer_id}");
     (
-        imports_dir.join(format!(".{stem}.part")),
+        imports_dir.join(format!(".{stem}.pdf")),
         imports_dir.join(format!("{stem}.pdf")),
     )
 }
 
-async fn promote_staged_artifact(
+fn promote_staged_artifact(
     staging: &Path,
     final_path: &Path,
     input: &InputArtifact,
     imports_dir: &Path,
-) -> Result<PathBuf, ProviderHttpError> {
-    match tokio::fs::hard_link(staging, final_path).await {
+) -> Result<(PathBuf, bool), ProviderHttpError> {
+    match fs::hard_link(staging, final_path) {
         Ok(()) => {
-            remove_file_quietly(staging).await;
-            sync_directory(imports_dir)
-                .await
-                .map_err(ProviderHttpError::io)?;
-            Ok(final_path.to_path_buf())
+            let _ = fs::remove_file(staging);
+            sync_directory_now(imports_dir).map_err(ProviderHttpError::io)?;
+            Ok((final_path.to_path_buf(), true))
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let existing = hash_file(final_path).await;
-            remove_file_quietly(staging).await;
+            let existing = hash_file_now(final_path);
+            let _ = fs::remove_file(staging);
             let (existing_size, existing_hash) = existing?;
             if existing_size != input.byte_size || existing_hash != input.sha256 {
                 return Err(ProviderHttpError::new(
@@ -1329,16 +2153,49 @@ async fn promote_staged_artifact(
                     false,
                 ));
             }
-            sync_directory(imports_dir)
-                .await
-                .map_err(ProviderHttpError::io)?;
-            Ok(final_path.to_path_buf())
+            sync_directory_now(imports_dir).map_err(ProviderHttpError::io)?;
+            Ok((final_path.to_path_buf(), false))
         }
         Err(error) => {
-            remove_file_quietly(staging).await;
+            let _ = fs::remove_file(staging);
             Err(ProviderHttpError::io(error))
         }
     }
+}
+
+fn sync_directory_now(path: &Path) -> Result<(), io::Error> {
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+}
+
+fn hash_file_now(path: &Path) -> Result<(u64, String), ProviderHttpError> {
+    let mut file = File::open(path).map_err(ProviderHttpError::io)?;
+    let mut buffer = [0u8; 8192];
+    let mut size = 0u64;
+    let mut hasher = Sha256::new();
+    loop {
+        let count = std::io::Read::read(&mut file, &mut buffer).map_err(ProviderHttpError::io)?;
+        if count == 0 {
+            break;
+        }
+        size = size.checked_add(count as u64).ok_or_else(|| {
+            ProviderHttpError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "ARTIFACT_TOO_LARGE",
+                "The stored artifact exceeds provider limits.",
+                false,
+            )
+        })?;
+        hasher.update(&buffer[..count]);
+    }
+    Ok((size, format!("{:x}", hasher.finalize())))
 }
 
 async fn read_field_limited(
@@ -1574,9 +2431,11 @@ impl IntoResponse for ProviderHttpError {
 fn acquire_registration_lock(
     path: &Path,
     private_root: Option<&Path>,
+    absolute_deadline: Option<Instant>,
 ) -> Result<RegistrationLifecycleLock, io::Error> {
     #[cfg(windows)]
     {
+        let _ = absolute_deadline;
         let private_root = private_root.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1605,12 +2464,17 @@ fn acquire_registration_lock(
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
 
-        let deadline = Instant::now() + REGISTRATION_LOCK_TIMEOUT;
+        let deadline =
+            absolute_deadline.unwrap_or_else(|| Instant::now() + REGISTRATION_LOCK_TIMEOUT);
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(RegistrationLifecycleLock { file }),
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    thread::sleep(REGISTRATION_LOCK_RETRY);
+                    thread::sleep(
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(REGISTRATION_LOCK_RETRY),
+                    );
                 }
                 Err(TryLockError::WouldBlock) => {
                     return Err(io::Error::new(
@@ -1621,6 +2485,24 @@ fn acquire_registration_lock(
                 Err(TryLockError::Error(error)) => return Err(error),
             }
         }
+    }
+}
+
+#[cfg(unix)]
+fn acquire_provider_ownership_lock(
+    path: &Path,
+) -> Result<RegistrationLifecycleLock, ProviderStartError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(0o600);
+    let file = options.open(path)?;
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    match file.try_lock() {
+        Ok(()) => Ok(RegistrationLifecycleLock { file }),
+        Err(TryLockError::WouldBlock) => Err(ProviderStartError::ProviderAlreadyRunning),
+        Err(TryLockError::Error(error)) => Err(ProviderStartError::Io(error)),
     }
 }
 
@@ -1700,17 +2582,20 @@ fn write_registration<T: Serialize>(
 fn scavenge_stale_registrations(
     _registration_lock: &RegistrationLifecycleLock,
     provider_directories: [(&Path, WireVersion); 2],
+    absolute_deadline: Option<Instant>,
 ) -> Result<usize, ProviderStartError> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(REGISTRATION_PROBE_TIMEOUT)
-        .timeout(REGISTRATION_PROBE_TIMEOUT)
         .build()
         .map_err(|error| ProviderStartError::Server(error.to_string()))?;
     let mut candidates = Vec::new();
     for (directory, version) in provider_directories {
         for entry in fs::read_dir(directory)? {
+            if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(readiness_deadline_error());
+            }
             let path = entry?.path();
             if let Some(instance_id) = owned_registration_instance_id(&path) {
                 candidates.push((path, version, instance_id));
@@ -1718,17 +2603,34 @@ fn scavenge_stale_registrations(
         }
     }
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(readiness_deadline_error());
+    }
 
     for (path, version, instance_id) in &candidates {
-        if registration_proves_live(&client, path, *version, instance_id, None) {
+        let deadline =
+            absolute_deadline.unwrap_or_else(|| Instant::now() + REGISTRATION_PROBE_TIMEOUT);
+        if Instant::now() >= deadline {
+            return Err(readiness_deadline_error());
+        }
+        if registration_proves_live(&client, path, *version, instance_id, None, None, deadline) {
             return Err(ProviderStartError::ProviderAlreadyRunning);
+        }
+        if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(readiness_deadline_error());
         }
     }
     for (path, _, _) in &candidates {
+        if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(readiness_deadline_error());
+        }
         fs::remove_file(path)?;
     }
     if !candidates.is_empty() {
         for (directory, _) in provider_directories {
+            if absolute_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(readiness_deadline_error());
+            }
             File::open(directory)?.sync_all()?;
         }
     }
@@ -1746,13 +2648,183 @@ fn owned_registration_instance_id(path: &Path) -> Option<String> {
 }
 
 #[cfg(unix)]
+fn probe_time_remaining(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    (!remaining.is_zero()).then_some(remaining.min(REGISTRATION_PROBE_TIMEOUT))
+}
+
+#[cfg(unix)]
+fn readiness_deadline_error() -> ProviderStartError {
+    ProviderStartError::Server("provider readiness deadline expired".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn openat_file(directory: &File, name: &std::ffi::CStr, flags: i32) -> Option<File> {
+    let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+    (descriptor >= 0).then(|| unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(target_os = "linux")]
+fn network_namespace_identity(directory: &File) -> Option<(u64, u64)> {
+    let namespace = openat_file(directory, c"ns/net", libc::O_RDONLY | libc::O_CLOEXEC)?;
+    let metadata = namespace.metadata().ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(target_os = "linux")]
+fn current_network_namespace_identity() -> Option<(u64, u64)> {
+    let namespace = File::open("/proc/self/ns/net").ok()?;
+    let metadata = namespace.metadata().ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(target_os = "linux")]
+fn loopback_listener_inode(base_url: &str, version: WireVersion, deadline: Instant) -> Option<u64> {
+    probe_time_remaining(deadline)?;
+    let port = validated_manifest_url(base_url, version)?.port()?;
+    let local_endpoint = format!("0100007F:{port:04X}");
+    let reader = BufReader::new(File::open("/proc/net/tcp").ok()?);
+    let mut found = None;
+    for line in reader.lines() {
+        probe_time_remaining(deadline)?;
+        let line = line.ok()?;
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() < 10
+            || !fields[1].eq_ignore_ascii_case(&local_endpoint)
+            || fields[3] != "0A"
+        {
+            continue;
+        }
+        let inode = fields[9].parse::<u64>().ok()?;
+        if found.replace(inode).is_some() {
+            return None;
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "linux")]
+struct RegisteredProcessGuard {
+    process_directory: File,
+    process_path: PathBuf,
+    process_device: u64,
+    process_inode: u64,
+    network_device: u64,
+    network_inode: u64,
+    expected: ExpectedProviderProcess,
+}
+
+#[cfg(target_os = "linux")]
+impl RegisteredProcessGuard {
+    fn open(pid: u32, expected: ExpectedProviderProcess) -> Option<Self> {
+        if pid == 0 {
+            return None;
+        }
+        let process_path = PathBuf::from(format!("/proc/{pid}"));
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let process_directory = options.open(&process_path).ok()?;
+        let opened = process_directory.metadata().ok()?;
+        let current = fs::symlink_metadata(&process_path).ok()?;
+        if !opened.file_type().is_dir()
+            || opened.uid() != expected.uid
+            || opened.dev() != current.dev()
+            || opened.ino() != current.ino()
+        {
+            return None;
+        }
+        let (network_device, network_inode) = network_namespace_identity(&process_directory)?;
+        if current_network_namespace_identity()? != (network_device, network_inode) {
+            return None;
+        }
+        let guard = Self {
+            process_directory,
+            process_path,
+            process_device: opened.dev(),
+            process_inode: opened.ino(),
+            network_device,
+            network_inode,
+            expected,
+        };
+        guard.executable_matches().then_some(guard)
+    }
+
+    fn executable_matches(&self) -> bool {
+        let Some(executable) = openat_file(
+            &self.process_directory,
+            c"exe",
+            libc::O_PATH | libc::O_CLOEXEC,
+        ) else {
+            return false;
+        };
+        executable.metadata().is_ok_and(|metadata| {
+            metadata.file_type().is_file()
+                && metadata.dev() == self.expected.executable_device
+                && metadata.ino() == self.expected.executable_inode
+        })
+    }
+
+    fn owns_socket(&self, socket_inode: u64, deadline: Instant) -> bool {
+        if probe_time_remaining(deadline).is_none() {
+            return false;
+        }
+        let Some(descriptors) = openat_file(
+            &self.process_directory,
+            c"fd",
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        ) else {
+            return false;
+        };
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", descriptors.as_raw_fd()));
+        let expected = format!("socket:[{socket_inode}]");
+        let Ok(entries) = fs::read_dir(descriptor_path) else {
+            return false;
+        };
+        for entry in entries {
+            if probe_time_remaining(deadline).is_none() {
+                return false;
+            }
+            if entry
+                .ok()
+                .and_then(|entry| fs::read_link(entry.path()).ok())
+                .is_some_and(|target| target.as_os_str() == expected.as_str())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn revalidate(&self) -> bool {
+        fs::symlink_metadata(&self.process_path).is_ok_and(|current| {
+            current.file_type().is_dir()
+                && current.uid() == self.expected.uid
+                && current.dev() == self.process_device
+                && current.ino() == self.process_inode
+        }) && self.executable_matches()
+            && network_namespace_identity(&self.process_directory)
+                == Some((self.network_device, self.network_inode))
+            && current_network_namespace_identity()
+                == Some((self.network_device, self.network_inode))
+    }
+}
+
+#[cfg(unix)]
 fn registration_proves_live(
     client: &reqwest::blocking::Client,
     path: &Path,
     version: WireVersion,
     expected_instance_id: &str,
     private_root: Option<&Path>,
+    expected_process: Option<&ExpectedProviderProcess>,
+    deadline: Instant,
 ) -> bool {
+    #[cfg(target_os = "linux")]
+    if probe_time_remaining(deadline).is_none() {
+        return false;
+    }
     let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES, private_root) else {
         return false;
     };
@@ -1762,22 +2834,62 @@ fn registration_proves_live(
     if !registration_matches_candidate(&registration, version, expected_instance_id) {
         return false;
     }
+    #[cfg(target_os = "linux")]
+    let process_guard = match expected_process {
+        Some(expected) => match RegisteredProcessGuard::open(registration.pid, *expected) {
+            Some(guard) => Some(guard),
+            None => return false,
+        },
+        None => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    if expected_process.is_some() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    let listener_inode = match process_guard.as_ref() {
+        Some(guard) => {
+            let Some(inode) =
+                loopback_listener_inode(&registration.transport.base_url, version, deadline)
+            else {
+                return false;
+            };
+            if !guard.owns_socket(inode, deadline) {
+                return false;
+            }
+            Some(inode)
+        }
+        None => None,
+    };
     let Some(probe) = probe_manifest(
         client,
         &registration.transport.base_url,
         &registration.auth.token,
         version,
+        deadline,
     ) else {
         return false;
     };
-    match probe {
+    let manifest_matches = match probe {
         ManifestProbe::Manifest(manifest) => {
             manifest.protocol_version == version.protocol_version()
                 && manifest.instance_id == expected_instance_id
                 && manifest.app.id == APP_ID
         }
         ManifestProbe::EntitlementRequired => true,
-    }
+    };
+    #[cfg(target_os = "linux")]
+    return manifest_matches
+        && process_guard.as_ref().is_none_or(|guard| {
+            guard.revalidate()
+                && listener_inode.is_some_and(|inode| {
+                    loopback_listener_inode(&registration.transport.base_url, version, deadline)
+                        == Some(inode)
+                        && guard.owns_socket(inode, deadline)
+                })
+        });
+    #[cfg(not(target_os = "linux"))]
+    manifest_matches
 }
 
 fn registration_matches_candidate(
@@ -1792,6 +2904,242 @@ fn registration_matches_candidate(
         && registration.auth.scheme == "bearer"
         && !registration.auth.token.is_empty()
         && validated_manifest_url(&registration.transport.base_url, version).is_some()
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn stop_and_cleanup_registered_provider(
+    app_data_dir: &Path,
+    runtime_root: &Path,
+    deadline: Instant,
+) -> Result<(), ProviderStartError> {
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+    let providers_dir_v1 = runtime_root.join("local-connect/v1/providers");
+    let providers_dir_v2 = runtime_root.join("local-connect/v2/providers");
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+    ensure_private_directory(&providers_dir_v1)?;
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+    ensure_private_directory(&providers_dir_v2)?;
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(REGISTRATION_PROBE_TIMEOUT)
+        .build()
+        .map_err(|error| ProviderStartError::Server(error.to_string()))?;
+    let expected_process = expected_provider_process(
+        unsafe { libc::geteuid() },
+        &env::current_exe().map_err(ProviderStartError::Io)?,
+    )?;
+    let mut signaled = std::collections::BTreeSet::new();
+    for (directory, version) in [
+        (&providers_dir_v1, WireVersion::V1),
+        (&providers_dir_v2, WireVersion::V2),
+    ] {
+        for entry in fs::read_dir(directory)? {
+            probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+            let path = entry?.path();
+            let Some(instance_id) = owned_registration_instance_id(&path) else {
+                continue;
+            };
+            let Some(bytes) = read_bounded_regular_file(&path, MAX_REGISTRATION_BYTES, None) else {
+                continue;
+            };
+            let Ok(registration) = serde_json::from_slice::<RegistrationIdentity>(&bytes) else {
+                continue;
+            };
+            if registration_matches_candidate(&registration, version, &instance_id)
+                && registration_proves_live(
+                    &client,
+                    &path,
+                    version,
+                    &instance_id,
+                    None,
+                    Some(&expected_process),
+                    deadline,
+                )
+                && signaled.insert(registration.pid)
+            {
+                probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+                let pid = i32::try_from(registration.pid).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "provider pid is invalid")
+                })?;
+                if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(ProviderStartError::Io(error));
+                    }
+                }
+            }
+        }
+    }
+
+    let owner_path = app_data_dir.join(".connect-provider-owner.lock");
+    let registration_lock_path = providers_dir_v1.join(format!(".{APP_ID}.lifecycle.lock"));
+    loop {
+        probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+        match acquire_provider_ownership_lock(&owner_path) {
+            Ok(_owner) => {
+                probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+                let registration_lock =
+                    acquire_registration_lock(&registration_lock_path, None, Some(deadline))?;
+                probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+                scavenge_stale_registrations(
+                    &registration_lock,
+                    [
+                        (&providers_dir_v1, WireVersion::V1),
+                        (&providers_dir_v2, WireVersion::V2),
+                    ],
+                    Some(deadline),
+                )?;
+                return Ok(());
+            }
+            Err(ProviderStartError::ProviderAlreadyRunning) if Instant::now() < deadline => {
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50)),
+                );
+            }
+            Err(ProviderStartError::ProviderAlreadyRunning) => {
+                return Err(ProviderStartError::Server(
+                    "provider stop deadline expired".to_string(),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegisteredProviderState {
+    Absent,
+    Ready,
+    PresentUnready,
+}
+
+#[cfg(target_os = "linux")]
+fn provider_probe_client() -> Result<reqwest::blocking::Client, ProviderStartError> {
+    reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(REGISTRATION_PROBE_TIMEOUT)
+        .timeout(REGISTRATION_PROBE_TIMEOUT)
+        .build()
+        .map_err(|error| ProviderStartError::Server(error.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn registered_provider_state_with_client(
+    client: &reqwest::blocking::Client,
+    runtime_root: &Path,
+    expected_v2_instance_id: Option<&str>,
+    expected_process: &ExpectedProviderProcess,
+    deadline: Instant,
+) -> Result<RegisteredProviderState, ProviderStartError> {
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+    let directory_v2 = runtime_root.join("local-connect/v2/providers");
+    ensure_private_directory(&directory_v2)?;
+    let mut present = false;
+    for entry in fs::read_dir(&directory_v2)? {
+        probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+        let path = entry?.path();
+        let name_is_provider = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(&format!("{APP_ID}-")) && name.ends_with(".json"));
+        if !name_is_provider {
+            continue;
+        }
+        present = true;
+        let Some(instance_id) = owned_registration_instance_id(&path) else {
+            continue;
+        };
+        if expected_v2_instance_id.is_some_and(|expected| expected != instance_id) {
+            continue;
+        }
+        if registration_proves_live(
+            client,
+            &path,
+            WireVersion::V2,
+            &instance_id,
+            None,
+            Some(expected_process),
+            deadline,
+        ) {
+            return Ok(RegisteredProviderState::Ready);
+        }
+        probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+    }
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+    let directory_v1 = runtime_root.join("local-connect/v1/providers");
+    ensure_private_directory(&directory_v1)?;
+    if !present {
+        for entry in fs::read_dir(directory_v1)? {
+            probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+            if entry.ok().is_some_and(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with(&format!("{APP_ID}-")) && name.ends_with(".json")
+                })
+            }) {
+                present = true;
+                break;
+            }
+        }
+    }
+    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+    Ok(if present {
+        RegisteredProviderState::PresentUnready
+    } else {
+        RegisteredProviderState::Absent
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn registered_provider_state(
+    runtime_root: &Path,
+    expected_v2_instance_id: Option<&str>,
+    expected_process: &ExpectedProviderProcess,
+    deadline: Instant,
+) -> Result<RegisteredProviderState, ProviderStartError> {
+    let client = provider_probe_client()?;
+    registered_provider_state_with_client(
+        &client,
+        runtime_root,
+        expected_v2_instance_id,
+        expected_process,
+        deadline,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn wait_for_registered_provider(
+    runtime_root: &Path,
+    expected_v2_instance_id: Option<&str>,
+    expected_process: &ExpectedProviderProcess,
+    deadline: Instant,
+) -> Result<(), ProviderStartError> {
+    let client = provider_probe_client()?;
+    while Instant::now() < deadline {
+        if registered_provider_state_with_client(
+            &client,
+            runtime_root,
+            expected_v2_instance_id,
+            expected_process,
+            deadline,
+        )? == RegisteredProviderState::Ready
+        {
+            return Ok(());
+        }
+        thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(50)),
+        );
+    }
+    Err(ProviderStartError::Server(
+        "provider readiness deadline expired".to_string(),
+    ))
 }
 
 fn validated_manifest_url(base_url: &str, version: WireVersion) -> Option<reqwest::Url> {
@@ -1817,12 +3165,15 @@ fn probe_manifest(
     base_url: &str,
     token: &str,
     version: WireVersion,
+    deadline: Instant,
 ) -> Option<ManifestProbe> {
     let url = validated_manifest_url(base_url, version)?;
+    let timeout = probe_time_remaining(deadline)?;
     let response = client
         .get(url.clone())
         .header(header::ACCEPT, "application/json")
         .bearer_auth(token)
+        .timeout(timeout)
         .send()
         .ok()?;
     let status = response.status();
@@ -1838,6 +3189,7 @@ fn probe_manifest(
         .take(MAX_PROBED_MANIFEST_BYTES + 1)
         .read_to_end(&mut bytes)
         .ok()?;
+    probe_time_remaining(deadline)?;
     if bytes.len() as u64 > MAX_PROBED_MANIFEST_BYTES {
         return None;
     }
@@ -1849,7 +3201,7 @@ fn probe_manifest(
     let envelope: ErrorEnvelope = serde_json::from_slice(&bytes).ok()?;
     if envelope.protocol_version != version.protocol_version()
         || envelope.error.code != "CONNECT_ENTITLEMENT_REQUIRED"
-        || !probe_rejects_invalid_token(client, url, token, version)
+        || !probe_rejects_invalid_token(client, url, token, version, deadline)
     {
         return None;
     }
@@ -1862,11 +3214,16 @@ fn probe_rejects_invalid_token(
     url: reqwest::Url,
     token: &str,
     version: WireVersion,
+    deadline: Instant,
 ) -> bool {
+    let Some(timeout) = probe_time_remaining(deadline) else {
+        return false;
+    };
     let response = match client
         .get(url)
         .header(header::ACCEPT, "application/json")
         .bearer_auth(format!("{token}-invalid"))
+        .timeout(timeout)
         .send()
     {
         Ok(response) => response,
@@ -1886,6 +3243,9 @@ fn probe_rejects_invalid_token(
         .is_err()
         || bytes.len() as u64 > MAX_PROBED_MANIFEST_BYTES
     {
+        return false;
+    }
+    if probe_time_remaining(deadline).is_none() {
         return false;
     }
     serde_json::from_slice::<ErrorEnvelope>(&bytes).is_ok_and(|envelope| {
@@ -2064,53 +3424,6 @@ async fn set_private_file_permissions(_path: &Path) -> Result<(), io::Error> {
     Ok(())
 }
 
-async fn sync_directory(path: &Path) -> Result<(), io::Error> {
-    #[cfg(windows)]
-    {
-        let _ = path;
-        // Rust's standard Windows file API cannot open a directory for sync.
-        // Callers flush file contents before completing the metadata operation.
-        Ok(())
-    }
-    #[cfg(unix)]
-    {
-        let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || File::open(path)?.sync_all())
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?
-    }
-}
-
-async fn hash_file(path: &Path) -> Result<(u64, String), ProviderHttpError> {
-    use tokio::io::AsyncReadExt;
-
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(ProviderHttpError::io)?;
-    let mut buffer = [0u8; 8192];
-    let mut size = 0u64;
-    let mut hasher = Sha256::new();
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .await
-            .map_err(ProviderHttpError::io)?;
-        if count == 0 {
-            break;
-        }
-        size = size.checked_add(count as u64).ok_or_else(|| {
-            ProviderHttpError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "ARTIFACT_TOO_LARGE",
-                "The stored artifact exceeds provider limits.",
-                false,
-            )
-        })?;
-        hasher.update(&buffer[..count]);
-    }
-    Ok((size, format!("{:x}", hasher.finalize())))
-}
-
 async fn remove_file_quietly(path: &Path) {
     if let Err(error) = tokio::fs::remove_file(path).await {
         if error.kind() != io::ErrorKind::NotFound {
@@ -2128,8 +3441,11 @@ mod tests {
     use crate::connect::entitlement::{EntitlementGate, ENTITLEMENT_FILE_NAME, FEATURE_ID};
     use crate::pipeline::contracts::{
         CitationArtifact, CitedClaim, EvidenceItem, ModelRequest, ModelResponse, PipelineFailure,
-        PipelineStage, SourceSpan, SourceType, SummaryArtifact,
+        PipelineStage, PipelineState, SourceSpan, SourceType, SummaryArtifact,
     };
+    use crate::pipeline::control::ExecutionControl;
+    #[cfg(any(unix, windows))]
+    use crate::pipeline::ingest::ingest_pdf;
     use crate::pipeline::normalize::normalize_document;
     use crate::pipeline::parser::parse_document;
     use base64::{
@@ -2141,7 +3457,7 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::collections::BTreeMap;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -2222,7 +3538,7 @@ mod tests {
         assert!(first.1.starts_with(&imports));
         assert_eq!(
             first.0.extension().and_then(|value| value.to_str()),
-            Some("part")
+            Some("pdf")
         );
         assert_eq!(
             first.1.extension().and_then(|value| value.to_str()),
@@ -2249,18 +3565,7 @@ mod tests {
             display_name: "report.pdf".to_string(),
             source_app_id: "email-watcher".to_string(),
         };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let error = runtime
-            .block_on(promote_staged_artifact(
-                &staging,
-                &final_path,
-                &input,
-                &imports,
-            ))
+        let error = promote_staged_artifact(&staging, &final_path, &input, &imports)
             .expect_err("conflicting promotion should fail");
 
         assert_eq!(error.error.code, "ARTIFACT_STORAGE_CONFLICT");
@@ -2274,17 +3579,18 @@ mod tests {
             sha256: format!("{:x}", Sha256::digest(winner)),
             ..input
         };
-        let promoted = match runtime.block_on(promote_staged_artifact(
+        let (promoted, owns_import) = match promote_staged_artifact(
             &matching_staging,
             &final_path,
             &matching_input,
             &imports,
-        )) {
-            Ok(path) => path,
+        ) {
+            Ok(result) => result,
             Err(_) => panic!("matching promotion should reuse the existing import"),
         };
 
         assert_eq!(promoted, final_path);
+        assert!(!owns_import);
         assert_eq!(fs::read(&promoted).unwrap(), winner);
         assert!(!matching_staging.exists());
     }
@@ -2306,6 +3612,179 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn provider_workers_preserve_normal_job_budget_and_shutdown_is_bounded() {
+        let workers = ProviderWorkerOwner::new();
+        let (observed_tx, observed_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        workers
+            .spawn("blocked-provider-worker".to_string(), move |control| {
+                observed_tx.send(control.request_timeout()).unwrap();
+                let _ = release_rx.recv();
+            })
+            .unwrap();
+        assert_eq!(observed_rx.recv().unwrap(), None);
+
+        let started = Instant::now();
+        workers.shutdown_until(Instant::now() + Duration::from_millis(25));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(!workers.accepting());
+        release_tx.send(()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn slow_authenticated_body_does_not_block_package_quiesce_or_commit_a_job() {
+        let root = TestDirectory::new("doc-sum-connect-slow-body-quiesce");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(source).unwrap();
+        let request = fixture_request(&bytes);
+        let request_json = serde_json::to_vec(&request).unwrap();
+        let boundary = "stalled";
+        let mut body = Vec::new();
+        write!(
+            body,
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n"
+        )
+        .unwrap();
+        let request_start = body.len();
+        body.extend_from_slice(&request_json);
+        write!(
+            body,
+            "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"artifact\"; filename=\"attachment.pdf\"\r\nContent-Type: application/pdf\r\n\r\n"
+        )
+        .unwrap();
+        body.extend_from_slice(&bytes);
+        write!(body, "\r\n--{boundary}--\r\n").unwrap();
+        let address = provider
+            .base_url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+        let mut stalled = std::net::TcpStream::connect(address).unwrap();
+        write!(
+            stalled,
+            "POST /v1/jobs HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            registration.auth.token,
+            body.len(),
+        )
+        .unwrap();
+        stalled.write_all(&body[..request_start + 1]).unwrap();
+        stalled.flush().unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        let started = Instant::now();
+        package_control::begin_quiesce_at(&app_data.join("test-package-control")).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        stalled.write_all(&body[request_start + 1..]).unwrap();
+        stalled
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        stalled.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 409 Conflict"),
+            "unexpected response: {response:?}"
+        );
+        let conn = db::init_db(&db_path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM connect_jobs", [], |row| row
+                .get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        assert!(fs::read_dir(app_data.join("connect-imports"))
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_cancellation_before_publication_leaves_no_registration() {
+        let root = TestDirectory::new("doc-sum-connect-startup-cancel");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let checks = AtomicUsize::new(0);
+        let result = ConnectProvider::start_at_with_entitlement_mode(
+            app_data.join("summarizer.db"),
+            app_data.clone(),
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+            EntitlementGate::always_active_for_test(),
+            ProviderStartup {
+                mode: ProviderMode::Foreground,
+                stop_requested: &|| checks.fetch_add(1, Ordering::SeqCst) >= 2,
+                stop_control: None,
+            },
+        );
+        assert!(matches!(result, Err(ProviderStartError::StartupCancelled)));
+        for version in ["v1", "v2"] {
+            let providers = runtime_root.join(format!("local-connect/{version}/providers"));
+            if providers.exists() {
+                assert_eq!(
+                    fs::read_dir(providers)
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .filter(|entry| {
+                            entry.path().extension().and_then(OsStr::to_str) == Some("json")
+                        })
+                        .count(),
+                    0
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_server_failure_is_observable_and_cleanup_removes_registration() {
+        let root = TestDirectory::new("doc-sum-connect-terminal-server");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        #[cfg(unix)]
+        ensure_private_directory(&runtime_root).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let registration_v1 = provider.registration_path().to_path_buf();
+        let registration_v2 = provider.registration_path_v2().to_path_buf();
+        provider.force_terminal_failure();
+        assert!(matches!(
+            provider.terminal_failure(),
+            Some(ProviderStartError::Server(message)) if message == "forced server failure"
+        ));
+        provider.shutdown();
+        assert!(!registration_v1.exists());
+        assert!(!registration_v2.exists());
     }
 
     struct FixtureRuntime;
@@ -2411,6 +3890,97 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .expect("test client should build")
+    }
+
+    #[cfg(target_os = "linux")]
+    struct SlowLoopbackServer {
+        port: u16,
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl SlowLoopbackServer {
+        fn start() -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = stop.clone();
+            let thread = thread::spawn(move || {
+                let mut accepted = Vec::new();
+                while !thread_stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => accepted.push(stream),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                port,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://127.0.0.1:{}/", self.port)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for SlowLoopbackServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_slow_v2_registrations(runtime_root: &Path, count: usize) -> Vec<SlowLoopbackServer> {
+        let providers_v1 = runtime_root.join("local-connect/v1/providers");
+        let providers_v2 = runtime_root.join("local-connect/v2/providers");
+        ensure_private_directory(&providers_v1).unwrap();
+        ensure_private_directory(&providers_v2).unwrap();
+        let lock = acquire_registration_lock(
+            &providers_v1.join(format!(".{APP_ID}.lifecycle.lock")),
+            None,
+            None,
+        )
+        .unwrap();
+        (0..count)
+            .map(|_| {
+                let server = SlowLoopbackServer::start();
+                let instance_id = Uuid::new_v4().to_string();
+                write_registration(
+                    &lock,
+                    &providers_v2.join(format!("{APP_ID}-{instance_id}.json")),
+                    &v2::RuntimeRegistration {
+                        protocol_version: v2::PROTOCOL_VERSION,
+                        instance_id,
+                        app_id: APP_ID.to_string(),
+                        pid: std::process::id(),
+                        started_at: Utc::now(),
+                        transport: TransportRegistration {
+                            kind: v2::TRANSPORT_KIND.to_string(),
+                            base_url: server.base_url(),
+                        },
+                        auth: AuthRegistration {
+                            scheme: "bearer".to_string(),
+                            token: "slow-probe-token".to_string(),
+                        },
+                    },
+                    None,
+                )
+                .unwrap();
+                server
+            })
+            .collect()
     }
 
     fn fixture_request(bytes: &[u8]) -> JobRequest {
@@ -2824,6 +4394,7 @@ mod tests {
             provider.base_url(),
             "not-the-registered-token",
             WireVersion::V1,
+            Instant::now() + Duration::from_secs(5),
         )
         .is_none());
 
@@ -3044,6 +4615,7 @@ mod tests {
         let registration_lock = acquire_registration_lock(
             &providers_v1.join(format!(".{APP_ID}.lifecycle.lock")),
             None,
+            None,
         )
         .unwrap();
 
@@ -3202,7 +4774,7 @@ mod tests {
         replacement.transport.base_url = replacement_base_url.to_string();
         replacement.auth.token = replacement_token.to_string();
         let publication_lock =
-            acquire_registration_lock(&first.registration_lock_path, None).unwrap();
+            acquire_registration_lock(&first.registration_lock_path, None, None).unwrap();
         let cleanup_provider = Arc::clone(&first);
         let (cleanup_started_tx, cleanup_started_rx) = mpsc::sync_channel(1);
         let (cleanup_finished_tx, cleanup_finished_rx) = mpsc::sync_channel(1);
@@ -3225,7 +4797,8 @@ mod tests {
 
         assert!(!registration_path_v1.exists());
         assert!(registration_path_v2.exists());
-        let removal_lock = acquire_registration_lock(&first.registration_lock_path, None).unwrap();
+        let removal_lock =
+            acquire_registration_lock(&first.registration_lock_path, None, None).unwrap();
         assert!(remove_registration_if_owned(
             &removal_lock,
             &registration_path_v2,
@@ -3237,6 +4810,268 @@ mod tests {
         )
         .unwrap());
         assert!(!registration_path_v2.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provider_identity_helper_process() {
+        if env::var_os("DOC_SUM_PROVIDER_IDENTITY_HELPER").is_some() {
+            thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_rejects_correct_executable_pid_with_foreign_listener() {
+        let root = TestDirectory::new("doc-sum-connect-readiness-socket-owner");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let path = provider.registration_path_v2();
+        let actual: v2::RuntimeRegistration =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let mut helper = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "connect::provider::tests::provider_identity_helper_process",
+                "--nocapture",
+            ])
+            .env("DOC_SUM_PROVIDER_IDENTITY_HELPER", "1")
+            .spawn()
+            .unwrap();
+        let mut fake = actual.clone();
+        fake.pid = helper.id();
+        fs::write(path, serde_json::to_vec_pretty(&fake).unwrap()).unwrap();
+        assert_eq!(unsafe { libc::kill(helper.id() as i32, libc::SIGSTOP) }, 0);
+        let expected =
+            expected_provider_process(unsafe { libc::geteuid() }, &env::current_exe().unwrap())
+                .unwrap();
+
+        let accepted = registration_proves_live(
+            &client(),
+            path,
+            WireVersion::V2,
+            &fake.instance_id,
+            None,
+            Some(&expected),
+            Instant::now() + Duration::from_secs(5),
+        );
+
+        helper.kill().unwrap();
+        helper.wait().unwrap();
+        assert!(!accepted);
+        fs::write(path, serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
+        assert!(registration_proves_live(
+            &client(),
+            path,
+            WireVersion::V2,
+            &actual.instance_id,
+            None,
+            Some(&expected),
+            Instant::now() + Duration::from_secs(5),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_deadline_bounds_many_slow_candidates() {
+        let root = TestDirectory::new("doc-sum-connect-readiness-deadline");
+        let runtime_root = root.0.join("runtime");
+        ensure_private_directory(&runtime_root).unwrap();
+        let _servers = write_slow_v2_registrations(&runtime_root, 4);
+        let expected =
+            expected_provider_process(unsafe { libc::geteuid() }, &env::current_exe().unwrap())
+                .unwrap();
+        let started = Instant::now();
+
+        assert!(wait_for_registered_provider(
+            &runtime_root,
+            None,
+            &expected,
+            started + Duration::from_millis(120),
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_millis(350));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_deadline_bounds_many_slow_candidates() {
+        let root = TestDirectory::new("doc-sum-connect-cleanup-deadline");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let _servers = write_slow_v2_registrations(&runtime_root, 4);
+        let started = Instant::now();
+
+        assert!(stop_and_cleanup_registered_provider(
+            &app_data,
+            &runtime_root,
+            started + Duration::from_millis(120),
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_millis(350));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_rejects_live_manifest_with_wrong_process_executable() {
+        let root = TestDirectory::new("doc-sum-connect-readiness-process-identity");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let path = provider.registration_path_v2();
+        let actual: v2::RuntimeRegistration =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let mut fake = actual.clone();
+        fake.pid = unsafe { libc::getppid() as u32 };
+        fs::write(path, serde_json::to_vec_pretty(&fake).unwrap()).unwrap();
+        let client = client();
+        let expected =
+            expected_provider_process(unsafe { libc::geteuid() }, &env::current_exe().unwrap())
+                .unwrap();
+
+        assert!(!registration_proves_live(
+            &client,
+            path,
+            WireVersion::V2,
+            &fake.instance_id,
+            None,
+            Some(&expected),
+            Instant::now() + Duration::from_secs(5),
+        ));
+        assert_eq!(
+            registered_provider_state(
+                &runtime_root,
+                Some(&fake.instance_id),
+                &expected,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap(),
+            RegisteredProviderState::PresentUnready
+        );
+
+        fs::write(path, serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
+        assert!(registration_proves_live(
+            &client,
+            path,
+            WireVersion::V2,
+            &actual.instance_id,
+            None,
+            Some(&expected),
+            Instant::now() + Duration::from_secs(5),
+        ));
+        assert_eq!(
+            registered_provider_state(
+                &runtime_root,
+                Some(&actual.instance_id),
+                &expected,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap(),
+            RegisteredProviderState::Ready
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_process_guard_rejects_process_exit_after_identity_capture() {
+        let root = TestDirectory::new("doc-sum-connect-process-exit-race");
+        let executable = root.0.join("provider-process");
+        fs::copy("/usr/bin/sleep", &executable).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = std::process::Command::new(&executable)
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let expected = expected_provider_process(unsafe { libc::geteuid() }, &executable).unwrap();
+        let guard = RegisteredProcessGuard::open(child.id(), expected).unwrap();
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert!(!guard.revalidate());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_identity_probes_release_held_process_descriptors() {
+        if env::var_os("DOC_SUM_PROVIDER_FD_PROBE_HELPER").is_none() {
+            let status = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "connect::provider::tests::socket_identity_probes_release_held_process_descriptors",
+                    "--nocapture",
+                ])
+                .env("DOC_SUM_PROVIDER_FD_PROBE_HELPER", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = TestDirectory::new("doc-sum-connect-readiness-fd-lifetime");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let path = provider.registration_path_v2();
+        let registration: v2::RuntimeRegistration =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let expected =
+            expected_provider_process(unsafe { libc::geteuid() }, &env::current_exe().unwrap())
+                .unwrap();
+        let http = client();
+        assert!(registration_proves_live(
+            &http,
+            path,
+            WireVersion::V2,
+            &registration.instance_id,
+            None,
+            Some(&expected),
+            Instant::now() + Duration::from_secs(5),
+        ));
+        let baseline = fs::read_dir("/proc/self/fd").unwrap().count();
+
+        for _ in 0..20 {
+            assert!(registration_proves_live(
+                &http,
+                path,
+                WireVersion::V2,
+                &registration.instance_id,
+                None,
+                Some(&expected),
+                Instant::now() + Duration::from_secs(5),
+            ));
+        }
+
+        assert_eq!(fs::read_dir("/proc/self/fd").unwrap().count(), baseline);
     }
 
     #[cfg(windows)]
@@ -3427,7 +5262,7 @@ mod tests {
     }
 
     #[test]
-    fn restarted_v2_provider_reuses_identity_and_exposes_interrupted_failure() {
+    fn supervised_restart_reuses_v2_identity_and_exposes_interrupted_failure() {
         let root = TestDirectory::new("doc-sum-connect-v2-restart");
         let runtime_root = root.0.join("runtime");
         let app_data = root.0.join("app-data");
@@ -3469,8 +5304,14 @@ mod tests {
             &run,
         )
         .unwrap();
+        let persisted = db::get_pipeline_run(&conn, &run.run_id).unwrap().unwrap();
+        db::start_parsing(&mut conn, &run.run_id, persisted.state_version).unwrap();
         drop(conn);
-        drop(first);
+        let stale_v1 = first.registration_path().to_path_buf();
+        let stale_v2 = first.registration_path_v2().to_path_buf();
+        first.simulate_process_loss();
+        assert!(stale_v1.exists());
+        assert!(stale_v2.exists());
         fs::remove_file(app_data.join(V2_INSTANCE_ID_FILE)).unwrap();
 
         let second = ConnectProvider::start_at(
@@ -3518,6 +5359,228 @@ mod tests {
         assert_eq!(status.provider.instance_id, first_v2.instance_id);
         assert_eq!(status.status, JobState::Failed);
         assert_eq!(status.error.unwrap().code, "PROVIDER_RESTARTED");
+        let recovered_run = db::get_pipeline_run(
+            &db::init_db(app_data.join("summarizer.db")).unwrap(),
+            &run.run_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered_run.state, PipelineState::Failed);
+        assert_eq!(
+            recovered_run.failure.unwrap().code,
+            crate::pipeline::recovery::INTERRUPTION_FAILURE_CODE
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connect_owned_provider_remains_available_after_foreground_exit() {
+        let root = TestDirectory::new("doc-sum-connect-background-owner");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let registration_v1 = provider.registration_path().to_path_buf();
+        let registration_v2 = provider.registration_path_v2().to_path_buf();
+        let server_address = provider
+            .base_url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let mut conn = db::init_db(&db_path).unwrap();
+        let (_, active_run) = ingest_pdf(&mut conn, source.to_str().unwrap()).unwrap();
+        let (active_run, _) =
+            db::start_parsing(&mut conn, &active_run.run_id, active_run.state_version).unwrap();
+        drop(conn);
+
+        let foreground = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        );
+        assert!(matches!(
+            foreground,
+            Err(ProviderStartError::ProviderAlreadyRunning)
+        ));
+        assert_eq!(
+            reconcile_standalone_state_if_unowned(&db_path, &app_data).unwrap(),
+            None
+        );
+        let conn = db::init_db(&db_path).unwrap();
+        assert_eq!(
+            db::get_pipeline_run(&conn, &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Parsing
+        );
+
+        assert_eq!(
+            client()
+                .get(format!("{}v1/manifest", provider.base_url()))
+                .bearer_auth(registration.auth.token)
+                .send()
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        provider.shutdown();
+        assert!(std::net::TcpStream::connect(server_address).is_err());
+        assert!(!registration_v1.exists());
+        assert!(!registration_v2.exists());
+        assert_eq!(
+            reconcile_standalone_state_if_unowned(&db_path, &app_data).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            db::get_pipeline_run(&db::init_db(&db_path).unwrap(), &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Failed
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn standalone_recovery_waits_for_windows_provider_ownership() {
+        let root = TestDirectory::new("doc-sum-connect-windows-standalone-recovery");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let mut conn = db::init_db(&db_path).unwrap();
+        let (_, active_run) = ingest_pdf(&mut conn, source.to_str().unwrap()).unwrap();
+        let (active_run, _) =
+            db::start_parsing(&mut conn, &active_run.run_id, active_run.state_version).unwrap();
+        drop(conn);
+
+        assert_eq!(
+            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root).unwrap(),
+            None
+        );
+        assert_eq!(
+            db::get_pipeline_run(&db::init_db(&db_path).unwrap(), &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Parsing
+        );
+
+        provider.shutdown();
+        assert_eq!(
+            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            db::get_pipeline_run(&db::init_db(&db_path).unwrap(), &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Failed
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_standalone_recovery_persists_the_locked_v2_identity() {
+        let root = TestDirectory::new("doc-sum-connect-windows-first-standalone-recovery");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let mut conn = db::init_db(&db_path).unwrap();
+        let (_, active_run) = ingest_pdf(&mut conn, source.to_str().unwrap()).unwrap();
+        let (active_run, _) =
+            db::start_parsing(&mut conn, &active_run.run_id, active_run.state_version).unwrap();
+        drop(conn);
+        assert!(!app_data.join(V2_INSTANCE_ID_FILE).exists());
+
+        assert_eq!(
+            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root).unwrap(),
+            Some(1)
+        );
+        assert!(app_data.join(V2_INSTANCE_ID_FILE).is_file());
+        assert_eq!(
+            db::get_pipeline_run(&db::init_db(&db_path).unwrap(), &active_run.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Failed
+        );
+    }
+
+    #[test]
+    fn deliberate_owner_shutdown_cancels_and_joins_every_worker() {
+        use crate::pipeline::control::ExecutionControl;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let workers = ProviderWorkerOwner::new();
+        let worker_exited = Arc::new(AtomicBool::new(false));
+        let exited = Arc::clone(&worker_exited);
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        workers
+            .spawn("lifecycle-test".to_string(), move |cancellation| {
+                started_tx.send(()).unwrap();
+                while !cancellation.cancellation_requested() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                exited.store(true, Ordering::Release);
+            })
+            .unwrap();
+        started_rx.recv().unwrap();
+
+        workers.shutdown();
+
+        assert!(worker_exited.load(Ordering::Acquire));
+        assert_eq!(workers.retained_worker_count(), 0);
+        assert!(workers.spawn("late-worker".to_string(), |_| {}).is_err());
+    }
+
+    #[test]
+    fn completed_workers_are_reaped_during_steady_state() {
+        let workers = ProviderWorkerOwner::new();
+        for ordinal in 0..64 {
+            workers
+                .spawn(format!("completed-worker-{ordinal}"), |_| {})
+                .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while workers.retained_worker_count() != 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(workers.retained_worker_count(), 0);
     }
 
     #[test]
@@ -4187,4 +6250,23 @@ mod tests {
         let imports = app_data.join("connect-imports");
         assert_eq!(fs::read_dir(imports).unwrap().count(), 0);
     }
+}
+#[test]
+fn stop_authority_linearizes_publication_and_job_commit() {
+    let authority = Arc::new(ProviderAdmissionAuthority::default());
+    let commit = authority.enter().unwrap();
+    let stopping = Arc::clone(&authority);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (stopped_tx, stopped_rx) = std::sync::mpsc::sync_channel(1);
+    let stop = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        stopping.begin_stop();
+        stopped_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(stopped_rx.try_recv().is_err());
+    drop(commit);
+    stopped_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    stop.join().unwrap();
+    assert!(authority.enter().is_err());
 }

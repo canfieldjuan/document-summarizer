@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "remove" ] && [ -x /usr/bin/document-summarizer ]; then
+  /usr/bin/document-summarizer --connect-package prepare-remove "0.1.0"
+fi

@@ -12,11 +12,12 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -31,6 +32,34 @@ const MIN_TOKEN_BYTES: usize = 32;
 const MAX_TOKEN_BYTES: usize = 512;
 const MAX_CA_BYTES: usize = 1_000_000;
 const MAX_RETRY_AFTER_SECONDS: u64 = 3_600;
+
+thread_local! {
+    static CONTROLLED_REQUEST_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+pub(crate) fn with_request_timeout<T>(
+    timeout: Option<Duration>,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let deadline = timeout.map(|remaining| Instant::now() + remaining);
+    let previous = CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.replace(deadline));
+    let result = operation();
+    CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.set(previous));
+    result
+}
+
+fn effective_timeout(configured: Duration) -> Result<Duration, GatewayClientError> {
+    let remaining = CONTROLLED_REQUEST_DEADLINE.with(|slot| {
+        slot.get()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(configured)
+            .min(configured)
+    });
+    if remaining.is_zero() {
+        return Err(GatewayClientError::Expired);
+    }
+    Ok(remaining)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct GatewayClientConfig {
@@ -343,7 +372,7 @@ impl GatewayClient {
             "/v1/inference",
             &token,
             Some(&request_body),
-            self.timeout,
+            effective_timeout(self.timeout)?,
         ) {
             Ok(response) => response,
             Err(error) => return self.reconcile_or_propagate(conn, key, error),
@@ -434,7 +463,7 @@ impl GatewayClient {
             &format!("/v1/inference/{request_id}/ack"),
             token,
             Some(&body),
-            self.timeout,
+            effective_timeout(self.timeout)?,
         )?;
         let acknowledgement = parse_acknowledgement(&response)?;
         if acknowledgement.protocol_version != PROTOCOL_VERSION
@@ -2597,4 +2626,25 @@ mod tests {
             ))
         ));
     }
+}
+#[test]
+fn one_control_deadline_shrinks_before_each_gateway_effect() {
+    let first = with_request_timeout(Some(Duration::from_millis(80)), || {
+        let first = effective_timeout(Duration::from_secs(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(25));
+        let second = effective_timeout(Duration::from_secs(1)).unwrap();
+        (first, second)
+    });
+
+    assert!(
+        first.1 < first.0.saturating_sub(Duration::from_millis(10)),
+        "later gateway inference or acknowledgement must receive the remaining absolute deadline"
+    );
+
+    assert!(matches!(
+        with_request_timeout(Some(Duration::ZERO), || effective_timeout(
+            Duration::from_secs(1)
+        )),
+        Err(GatewayClientError::Expired)
+    ));
 }

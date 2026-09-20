@@ -7,6 +7,7 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -33,6 +34,31 @@ const MIN_SUPPORTED_CONTEXT_TOKENS: u32 = 4_096;
 const MAX_SUPPORTED_CONTEXT_TOKENS: u32 = 1_048_576;
 const CHAT_RUNNER_KEEP_ALIVE: &str = "30s";
 pub(super) const MAX_DECODER_STRING_LENGTH: u64 = 1_536;
+
+thread_local! {
+    static CONTROLLED_REQUEST_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+fn controlled_request_timeout() -> Option<Duration> {
+    CONTROLLED_REQUEST_DEADLINE.with(|slot| {
+        slot.get()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    })
+}
+
+fn controlled_effect_timeout(configured: Duration) -> Result<Duration, ModelRuntimeFailure> {
+    let remaining = controlled_request_timeout()
+        .unwrap_or(configured)
+        .min(configured);
+    if remaining.is_zero() {
+        return Err(runtime_failure(
+            "MODEL_REQUEST_CANCELLED",
+            "Model request deadline expired before the next local model effect",
+            true,
+        ));
+    }
+    Ok(remaining)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -606,15 +632,18 @@ impl OllamaRuntime {
         format: Option<serde_json::Value>,
     ) -> Result<Response, ModelRuntimeFailure> {
         let payload = self.chat_payload(request, format);
-        self.authorize(self.client.post(self.endpoint("api/chat")?).json(&payload))
-            .send()
-            .map_err(|_| {
-                runtime_failure(
-                    "MODEL_RUNTIME_UNAVAILABLE",
-                    "Local model request failed",
-                    true,
-                )
-            })
+        let request = self.authorize(self.client.post(self.endpoint("api/chat")?).json(&payload));
+        let request = match controlled_request_timeout() {
+            Some(_) => request.timeout(controlled_effect_timeout(Duration::MAX)?),
+            None => request,
+        };
+        request.send().map_err(|_| {
+            runtime_failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Local model request failed",
+                true,
+            )
+        })
     }
 
     fn send_chat_attempt(
@@ -742,12 +771,9 @@ impl OllamaRuntime {
         let Some(expected) = self.expected_digest.as_ref() else {
             return Ok(());
         };
+        let timeout = controlled_effect_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS))?;
         let response = self
-            .authorize(
-                self.client
-                    .get(self.endpoint("api/ps")?)
-                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
-            )
+            .authorize(self.client.get(self.endpoint("api/ps")?).timeout(timeout))
             .send()
             .map_err(|_| {
                 runtime_failure(
@@ -1118,6 +1144,27 @@ impl ModelRuntime for OllamaRuntime {
             model_id: self.model_id.clone(),
             request_attempts: attempts,
         })
+    }
+
+    fn generate_with_control(
+        &self,
+        request: &ModelRequest,
+        control: &dyn crate::pipeline::control::ExecutionControl,
+    ) -> Result<ModelResponse, ModelRuntimeFailure> {
+        if control.cancellation_requested() {
+            return Err(runtime_failure(
+                "MODEL_REQUEST_CANCELLED",
+                "Model request was cancelled before inference",
+                true,
+            ));
+        }
+        let deadline = control
+            .request_timeout()
+            .map(|timeout| Instant::now() + timeout);
+        let previous = CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.replace(deadline));
+        let result = self.generate(request);
+        CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.set(previous));
+        result
     }
 
     fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
@@ -1647,9 +1694,26 @@ fn qwen_tokenizer_family_for_architecture(architecture: &str) -> Option<QwenToke
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::control::CancellationToken;
     use std::io::{Cursor, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
+
+    #[test]
+    fn ollama_fallback_recomputes_the_same_absolute_deadline() {
+        let deadline = Some(Instant::now() + Duration::from_millis(80));
+        let previous = CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.replace(deadline));
+        let first = controlled_request_timeout().unwrap();
+        thread::sleep(Duration::from_millis(25));
+        let fallback = controlled_request_timeout().unwrap();
+        CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.set(previous));
+        assert!(fallback < first.saturating_sub(Duration::from_millis(10)));
+
+        let previous = CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.replace(Some(Instant::now())));
+        let expired = controlled_effect_timeout(Duration::from_secs(1));
+        CONTROLLED_REQUEST_DEADLINE.with(|slot| slot.set(previous));
+        assert!(expired.is_err_and(|failure| failure.code == "MODEL_REQUEST_CANCELLED"));
+    }
 
     fn empty_installed_descriptor() -> InstalledModelDescriptor {
         InstalledModelDescriptor {
@@ -2080,6 +2144,34 @@ mod tests {
             max_output_tokens: 64,
             output_format: ModelOutputFormat::Text,
         }
+    }
+
+    #[test]
+    fn controlled_ollama_request_times_out_before_runtime_default() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let base_url = format!(
+            "http://{}/",
+            listener
+                .local_addr()
+                .expect("loopback address should resolve")
+        );
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("model request should arrive");
+            let _ = read_json_request(&mut stream);
+            let _ = release_rx.recv();
+        });
+        let runtime = OllamaRuntime::new(&base_url, "fixture-model", Duration::from_secs(5), None)
+            .expect("loopback runtime should configure");
+        let control = CancellationToken::with_request_timeout(Duration::from_millis(50));
+        let started = Instant::now();
+        let error = runtime
+            .generate_with_control(&digest_guard_request(), &control)
+            .expect_err("blocked transport must honor the controlled timeout");
+        assert_eq!(error.code, "MODEL_RUNTIME_UNAVAILABLE");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
     }
 
     #[test]

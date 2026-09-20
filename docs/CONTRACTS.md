@@ -1888,7 +1888,64 @@ the executable contracts committed in the separate `connect-contracts`
 repository. Protocol, application, capability, and summary versions are
 separate fields.
 
-The Tauri process binds an ephemeral exact IPv4-loopback HTTP endpoint.
+The foreground Tauri process or Linux headless provider process binds an
+ephemeral exact IPv4-loopback HTTP endpoint. The Debian package installs a
+disabled systemd user unit whose exact entry point is
+`/usr/bin/document-summarizer --connect-provider`. Enabling that unit is an
+explicit per-user operator action; installation and entitlement do not enable
+it. The unit uses restart-on-failure with a five-second delay, five starts per
+five-minute window, control-group termination, and a 40-second stop timeout.
+The headless entry point opens the same per-user database, imports directory,
+model settings, v2 durable identity, and registration paths as the desktop.
+Closing the visible window therefore does not stop a provider owned by the user
+service manager.
+
+The operator changes this manager choice through
+`document-summarizer --connect-background enable|disable`. Before stopping an
+owner or changing systemd state, the controller durably writes one immutable,
+owner-private generation under the per-user configuration root. Its monotonic
+enable phases are `intent_recorded`, `source_stopped`, `manager_enabled`, and
+`successor_ready`; disable uses `intent_recorded`, `publisher_stopped`, and
+`manager_disabled`. An enable readiness failure durably changes to rollback and
+restores the recorded prior choice. `status` reports an incomplete generation
+and `recover` resumes only that exact generation. A shared admission lock plus
+the record blocks job creation through commit while a transition is incomplete.
+The controller atomically writes an owner-only launch receipt and environment
+file at the fixed, non-XDG-dependent
+`$HOME/.local/state/document-summarizer/` path before systemd start. The unit
+loads that exact file. The child validates its owner, mode, link count,
+generation, byte-exact environment content, XDG configuration, data, and
+runtime paths, plus the opened application-data, lifecycle-control, and runtime
+directory identities before provider startup. The existing transition checks
+still revalidate the admitted generation immediately before each registration
+publication.
+
+Foreground startup preserves standalone recovery: a Connect startup failure is
+logged and the desktop continues without a provider. Headless startup is a
+Connect owner, so the same failure exits nonzero and is visible to systemd's
+bounded restart policy. Neither path changes Connect wire schemas or copies
+provider state.
+
+If a foreground owner already holds the provider lock, the headless process
+waits in place and retries after release instead of exiting through systemd's
+start limiter. A terminal HTTP-server result is propagated to the headless main
+function as an error, after exact registration cleanup, so systemd supervises a
+real server failure.
+
+On Linux, every foreground and headless provider takes the same nonblocking,
+owner-private application-state lock before stale-registration cleanup,
+interrupted pipeline or Connect-job recovery, endpoint binding, or publication,
+and holds it through ordered shutdown and registration removal. If a live
+background owner holds that lock, foreground startup continues as standalone
+without running interrupted-state recovery against the live owner's work.
+Standalone recovery runs only while the same lock proves there is no Connect
+owner.
+
+Startup observes blocked shutdown signals before owner acquisition, after
+recovery and server readiness, and immediately before publication. A stop at
+any of those boundaries shuts down the unpublished server and leaves no JSON
+registration.
+
 On Unix, it atomically writes owner-only registrations under
 `$XDG_RUNTIME_DIR/local-connect/v1/providers/` and
 `$XDG_RUNTIME_DIR/local-connect/v2/providers/`. On Windows, it publishes the
@@ -1926,7 +1983,87 @@ provider lifetime. An existing live owner therefore fails startup closed; a
 safe stale fixed registration may be replaced only after its ownership lock is
 held.
 
-On Tauri's final `RunEvent::Exit`, the provider unregisters both protocol files.
+Provider shutdown first closes new-job admission and requests cooperative
+cancellation from every retained Connect worker. Each admitted Connect job gets
+one absolute 30-second deadline; Ollama, llama.cpp completion, and
+inference-gateway transports receive only its remaining time. Ollama recomputes
+before primary and fallback chat calls, llama.cpp recomputes before each
+tokenizer call and completion, and the gateway recomputes before inference and
+acknowledgement. Shutdown reaps
+finished worker handles during
+steady admission and drains remaining handles through the 35-second graceful
+deadline. It then requests endpoint shutdown, joins the server thread, and
+removes both exact protocol registrations. The headless owner also clears its
+managed llama runtime registry so the owned child is terminated. The foreground invokes this sequence
+on Tauri's final `RunEvent::Exit`; the headless owner invokes it after blocked
+`SIGTERM` or `SIGINT` is synchronously received. If a noncooperating worker
+survives the graceful deadline, process shutdown owns that thread and systemd
+force-terminates the complete service control group at 40 seconds. The next
+owner uses stale-registration and interrupted-job recovery before publishing
+fresh process credentials.
+
+Debian maintainer scripts call the app-owned `--connect-package` controller.
+The production package authority is the fixed root-owned
+`/var/lib/document-summarizer` tree and cannot be redirected by an environment
+variable. Provider startup and each final artifact promotion plus accepted-job
+commit hold its shared lock. Authenticated multipart bodies stream into a
+private bounded staging file without package or per-user authority; cancellation
+and the absolute request timeout remove that file. The controller first holds a
+separate quiesce authority, persists a generation-bound SHA-256 intent, and
+stops all recorded publishers. It then waits for the package lock exclusively
+before package mutation and takes recorded per-user control and admission locks
+in ascending UID order. Enable and disable record an
+owner-authenticated 0600 participant acknowledgement before manager mutation
+and update it after settlement while the per-user barrier is still held. That acknowledgement carries the exact runtime,
+application data, lifecycle control, and systemd enablement paths, so package
+discovery does not enumerate `/etc/passwd` or guess XDG locations.
+
+Upgrade, removal, and reinstall suppress every recorded manager, stop and clean
+each exact provider, and keep the package record as an admission barrier while
+each participant is settled. An enabled participant with an available user
+manager is restored only after the controller releases quiesce, package, and
+per-user startup authorities. The package record remains the admission barrier
+while that successor starts. After authenticated readiness, the controller
+reacquires quiesce, package, and per-user authorities in canonical order and
+revalidates the exact generation, phase, participant snapshot, runtime identity,
+and provider registration before recording settlement. An
+enabled participant without a service session is durably recorded
+`deferred_enabled`; a disabled participant remains disabled. Removal writes a
+generation-bound receipt and retains its root-only controller. A later install
+first completes any interrupted removal, then durably writes a distinct
+reinstall generation before package admission. Successful reinstall writes an
+install receipt that copies the preserved choices and enters a durable
+`finalizing` phase before retiring the old controller and removal receipt. The
+admission barrier is cleared only after those idempotent finalization effects.
+Malformed, wrong-kind, wrong-target, changed
+generation, unowned participant receipt, or incomplete per-user transition
+fails closed.
+
+When a package participant was captured with no runtime directory, a runtime
+created by a later login remains untrusted until the system manager reports the
+exact runtime path, the named user manager reports the same
+`XDG_RUNTIME_DIR`, NSS still binds the recorded UID and name, and the directory
+is owner-private. The controller persists that authenticated device and inode in
+the same package generation before restoration. A participant captured with an
+existing runtime never accepts a replacement inode. For the first upgrade from
+a legacy package, preinstall writes the fixed root-owned quiesce record directly
+and never invokes the installed desktop executable. Before accepting an existing
+record it requires a no-follow regular root-owned 0600 file with one link, exact
+canonical fields, matching source and target versions, a valid phase, and a
+matching SHA-256 digest. The record binds the legacy executable device, inode,
+and digest. Preinstall copies that exact executable into a private fixed
+generation quarantine, removes the exact installed pathname, atomically
+installs a launcher that exits closed, validates published registrations, and
+stops every process
+still executing the bound inode with bounded TERM and KILL waits. The wrapper
+blocks legacy restarts before unpack; after unpack, the quiesce record blocks the
+new binary until adoption. Every mutation is replayable from `quarantining` or
+`quiesced` without executing the old binary. Postinstall's new controller
+validates the same record and quarantine, creates the exact package operation,
+durably advances the marker to `adopted`, and removes only the matching private
+quarantine. A crash before or after removal resumes from that phase. Malformed,
+replayed-different, or tampered bootstrap state remains a barrier.
+
 On Unix, publication, startup scavenging, and removal share an owner-only
 lifecycle-file lock. Windows publication writes a fixed same-directory
 temporary file, applies and validates its private DACL, writes and flushes the

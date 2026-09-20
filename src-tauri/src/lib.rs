@@ -33,7 +33,6 @@ use pipeline::profile_suggestion::{
     suggest_summary_profile as suggest_profile_from_document, SummaryProfileSuggestion,
     PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
 };
-use pipeline::recovery::reconcile_interrupted_runs;
 use pipeline::service::DocumentServiceError;
 use pipeline::structure::{
     structure_document as structure_pipeline_document, DeterministicStructureInterpreter,
@@ -549,15 +548,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             ensure_private_app_data_directory(&app_data_dir)?;
             let db_path = app_data_dir.join("summarizer.db");
             let settings_path = model_settings_path(&app_data_dir);
-            let mut conn = init_db(&db_path)?;
-            let recovered = reconcile_interrupted_runs(&mut conn)?;
-            if !recovered.is_empty() {
-                eprintln!(
-                    "Reconciled {} interrupted pipeline run(s) after restart",
-                    recovered.len()
-                );
-            }
-            drop(conn);
 
             let entitlement = match EntitlementGate::from_installation() {
                 Ok(gate) => Some(gate),
@@ -571,12 +561,27 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 model_settings_path: settings_path,
                 entitlement,
             });
-            match ConnectProvider::start(db_path, app_data_dir) {
+            match ConnectProvider::start(db_path.clone(), app_data_dir.clone()) {
                 Ok(provider) => {
                     app.manage(Mutex::new(Some(provider)));
                 }
                 Err(error) => {
                     eprintln!("Connect provider unavailable; standalone mode continues: {error}");
+                    #[cfg(any(target_os = "linux", windows))]
+                    match connect::provider::reconcile_standalone_state_if_unowned(
+                        &db_path,
+                        &app_data_dir,
+                    ) {
+                        Ok(Some(count)) if count > 0 => {
+                            eprintln!(
+                                "Reconciled {count} interrupted pipeline run(s) in standalone mode"
+                            );
+                        }
+                        Ok(Some(_) | None) => {}
+                        Err(recovery_error) => {
+                            eprintln!("Standalone recovery unavailable: {recovery_error}");
+                        }
+                    }
                 }
             }
             Ok(())
@@ -620,6 +625,63 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
     });
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_background_connect_provider() -> Result<(), Box<dyn Error>> {
+    connect::lifecycle::run().map_err(Into::into)
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_background_control(command: &str) -> Result<&'static str, Box<dyn Error>> {
+    use connect::lifecycle_control::{run_control, ControlAction, ControlStatus};
+    let action = match command {
+        "enable" => ControlAction::Enable,
+        "disable" => ControlAction::Disable,
+        "recover" => ControlAction::Recover,
+        "status" => ControlAction::Status,
+        _ => return Err("unknown Connect background control command".into()),
+    };
+    let status = run_control(action)?;
+    Ok(match status {
+        ControlStatus::Enabled => "enabled",
+        ControlStatus::Disabled => "disabled",
+        ControlStatus::TransitionPending => "transition-pending",
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_package_control(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+    use connect::package_control::{self, PackageAction};
+
+    let action = match arguments {
+        [command] if command == "initialize" => PackageAction::Initialize,
+        [command, source, target] if command == "prepare-upgrade" => {
+            PackageAction::PrepareUpgrade { source, target }
+        }
+        [command, target] if command == "finish-upgrade" => PackageAction::FinishUpgrade { target },
+        [command, target] if command == "prepare-remove" => PackageAction::PrepareRemove { target },
+        [command, target] if command == "finish-remove" => PackageAction::FinishRemove { target },
+        [command, target] if command == "recover-install" => {
+            PackageAction::RecoverInstall { target }
+        }
+        [command, target] if command == "prepare-reinstall" => {
+            PackageAction::PrepareReinstall { target }
+        }
+        [command] if command == "adopt-bootstrap" => PackageAction::AdoptBootstrap,
+        _ => return Err("invalid package lifecycle control command".into()),
+    };
+    package_control::run(action).map_err(Into::into)
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_package_user_stop(app_data: &str, runtime_root: &str) -> Result<(), Box<dyn Error>> {
+    connect::provider::stop_and_cleanup_registered_provider(
+        std::path::Path::new(app_data),
+        std::path::Path::new(runtime_root),
+        std::time::Instant::now() + std::time::Duration::from_secs(45),
+    )
+    .map_err(Into::into)
 }
 
 #[cfg(test)]

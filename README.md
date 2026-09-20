@@ -165,6 +165,60 @@ source revisions; the installed-app lifecycle is proven for the MSI. AppImage,
 RPM, macOS, and an installed NSIS lifecycle remain deferred until they can be
 built and exercised on their target platforms.
 
+The Debian package installs a disabled systemd user unit for the Connect
+provider. Use the application lifecycle controller to keep Connect available
+without an open Document Summarizer window:
+
+```bash
+document-summarizer --connect-background enable
+```
+
+The controller writes an owner-private, crash-recoverable transition record
+before stopping a foreground owner or changing the systemd choice. That record
+blocks new job admission until the exact generation either publishes its ready
+successor or restores the prior choice. The unit runs the package's headless
+`--connect-provider` entry point against the same per-user database and provider
+identity as the desktop. Enablement also writes an owner-only launch receipt and
+systemd environment at the fixed
+`$HOME/.local/state/document-summarizer/connect-provider.env` path. The child
+fails closed unless that file and receipt retain the exact generation, owner,
+mode, XDG configuration, data, runtime, and opened directory identities recorded
+by the controller. A headless owner waits for a foreground owner to leave
+and takes over without cycling through systemd's restart limit. Terminal server
+failure exits nonzero so systemd restarts it. Desktop startup continues in
+standalone mode when Connect is unavailable.
+
+Stop the owner and remove automatic startup through the same controller:
+
+```bash
+document-summarizer --connect-background disable
+```
+
+`document-summarizer --connect-background status` reports the stable manager
+choice or an incomplete transition. `recover` resumes the exact incomplete
+generation. Debian hooks coordinate through the fixed root-owned package
+authority. Each enabled or disabled user records exact XDG runtime, data,
+control, and manager paths during the lifecycle operation. Upgrade suppresses
+all recorded managers and restores an active user only after authenticated
+provider readiness; logged-out enabled users are durably deferred until their
+next service session. If that session appears during settlement, the root
+controller accepts its new runtime inode only when login and user-manager proofs
+bind the exact recorded user and path, then durably updates the same package
+generation. Removal preserves choices in a generation-bound receipt.
+Reinstall completes any interrupted removal, creates a new install generation
+before admission, and settles the preserved choices without starting a provider
+against partial package artifacts.
+The first upgrade from a package without this controller is closed by a
+root-owned, SHA-256-bound preinstall quiesce record. Preinstall validates an
+existing record as a no-follow regular 0600 file with exact canonical fields,
+versions, generation, phase, and digest. It binds the installed executable by
+device, inode, and digest, moves a private verified copy into the package tree,
+installs a fail-closed launcher, and stops only matching legacy processes with a
+bounded wait. It never executes the legacy desktop binary. After unpack, the new
+binary remains barred by the durable record until postinstall adopts the exact
+generation into the package record. Adoption durably marks cleanup, removes only
+the verified quarantine copy, and can resume before or after that removal.
+
 A raw `cargo build --release` is intentionally rejected because it can produce a
 desktop executable that points at the development server instead of embedding
 `dist`.

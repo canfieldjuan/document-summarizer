@@ -477,32 +477,54 @@ pub fn process_ingested_to_summary_with_delivery_policy(
     components: SummaryComponents<'_>,
     delivery_policy: SummaryDeliveryPolicy,
 ) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    process_ingested_to_summary_with_delivery_policy_controlled(
+        conn,
+        run_id,
+        components,
+        delivery_policy,
+        &UNCONTROLLED_EXECUTION,
+    )
+}
+
+pub(crate) fn process_ingested_to_summary_with_delivery_policy_controlled(
+    conn: &mut Connection,
+    run_id: &str,
+    components: SummaryComponents<'_>,
+    delivery_policy: SummaryDeliveryPolicy,
+    control: &dyn ExecutionControl,
+) -> Result<crate::pipeline::contracts::SummaryArtifacts, DocumentServiceError> {
+    cancellation_checkpoint(control)?;
     parse_document(conn, components.parser, run_id)?;
+    cancellation_checkpoint(control)?;
     normalize_document(conn, components.normalizer, run_id)?;
+    cancellation_checkpoint(control)?;
     structure_document(conn, components.interpreter, run_id)?;
+    cancellation_checkpoint(control)?;
     chunk_document(conn, components.chunker, run_id)?;
+    cancellation_checkpoint(control)?;
     ensure_runtime_profile(conn, run_id, components.runtime)?;
     analyze_chunked_document_controlled_with_delivery(
         conn,
         components.runtime,
         run_id,
-        &UNCONTROLLED_EXECUTION,
+        control,
         Some(delivery_policy),
     )?;
     synthesize_analyzed_document_controlled_with_delivery(
         conn,
         components.runtime,
         run_id,
-        &UNCONTROLLED_EXECUTION,
+        control,
         Some(delivery_policy),
     )?;
     verify_synthesized_document_controlled_with_delivery(
         conn,
         components.runtime,
         run_id,
-        &UNCONTROLLED_EXECUTION,
+        control,
         Some(delivery_policy),
     )?;
+    cancellation_checkpoint(control)?;
     Ok(complete_verified_document_with_delivery(
         conn,
         run_id,
