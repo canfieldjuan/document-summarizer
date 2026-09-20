@@ -110,6 +110,32 @@ PDF ingestion performs candidate validation only: the selected path must have a
 `.pdf` extension and the opened bytes must begin with `%PDF-`. Structural PDF
 validation belongs to the parser stage.
 
+### OCR-derived input
+
+Every ingested document carries a durable `SourceType`. Existing rows and
+ordinary `application/pdf` inputs are `NativeText`. Only the v2
+`application/vnd.local-connect.ocr-pdf` input path may create `OcrText`; v1
+remains `application/pdf` only. The multipart content type and declared input
+media type must agree in both directions.
+
+An OCR-derived input is admitted only after its PDF structure matches the
+ADR-0009 tagged profile and its logical text is non-empty. Admission persists
+the document, run, exact input artifact identity, media type, and `OcrText`
+source type in one transaction. Reopen, retry, parsing, normalization,
+analysis selection, evidence, and citations preserve that source type. Legacy
+serialized parsed artifacts default to `NativeText`.
+
+For a scan selected in the desktop, the desktop is the consumer of
+`document.ocr`. A person selects an exact live `document-ocr` instance; the app
+does not choose among multiple providers. Before dispatch, it durably records
+the original scan identity, selected provider identity, producer job and
+request identity, and the intended derived document admission. Uncertain
+submission is reconciled by querying that exact job. A validated OCR output and
+its source-to-derived relation commit with the derived pipeline run, so restart
+cannot create two children or lose the retained original. Provider inputs that
+already carry the vendor OCR media type do not create local scan lineage because
+their original-scan edge is owned by the upstream consumer.
+
 ## Durable transition boundary
 
 Normal pipeline code changes state only through the SQLite-backed transition
