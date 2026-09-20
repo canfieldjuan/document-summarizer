@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions};
@@ -19,10 +20,13 @@ const PACKAGE_ROOT: &str = "/var/lib/document-summarizer";
 const RECORD_FILE: &str = "package-operation-v1.json";
 const LOCK_FILE: &str = ".package-operation-v1.lock";
 const CONTROLLER_LOCK_FILE: &str = ".package-controller-v1.lock";
+const QUIESCE_LOCK_FILE: &str = ".package-quiesce-v1.lock";
+const QUIESCE_FILE: &str = "package-quiesce-v1.record";
 const PARTICIPANTS_DIRECTORY: &str = "participants-v1";
 const REMOVAL_RECEIPT_FILE: &str = "package-removal-receipt-v1.json";
 const INSTALL_RECEIPT_FILE: &str = "package-install-receipt-v1.json";
 const MAX_RECORD_BYTES: u64 = 256 * 1024;
+const QUIESCE_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub(crate) enum PackageControlError {
@@ -68,8 +72,8 @@ struct Participant {
     uid: u32,
     user: String,
     runtime_root: String,
-    runtime_device: u64,
-    runtime_inode: u64,
+    runtime_device: Option<u64>,
+    runtime_inode: Option<u64>,
     app_data_root: String,
     app_data_device: u64,
     app_data_inode: u64,
@@ -142,6 +146,14 @@ struct InstallReceipt {
     participants: Vec<Participant>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuiesceIntent {
+    generation: String,
+    kind: PackageKind,
+    source_version: String,
+    target_version: String,
+}
+
 pub(crate) enum PackageAction<'a> {
     Initialize,
     PrepareUpgrade { source: &'a str, target: &'a str },
@@ -150,6 +162,7 @@ pub(crate) enum PackageAction<'a> {
     FinishRemove { target: &'a str },
     RecoverInstall { target: &'a str },
     PrepareReinstall { target: &'a str },
+    AdoptBootstrap,
 }
 
 trait PackageEffects {
@@ -162,6 +175,10 @@ trait PackageEffects {
         package_generation: &str,
     ) -> Result<ParticipantSettlement, PackageControlError>;
     fn cleanup(&mut self, participant: &Participant) -> Result<(), PackageControlError>;
+    fn refresh_runtime_identity(
+        &mut self,
+        participant: &Participant,
+    ) -> Result<Option<(u64, u64)>, PackageControlError>;
     fn prepare_controller(&mut self, record: &PackageRecord) -> Result<(), PackageControlError>;
     fn retire_controller(&mut self, record: &PackageRecord) -> Result<(), PackageControlError>;
 }
@@ -231,6 +248,10 @@ impl PackageStore {
         self.root.join(RECORD_FILE)
     }
 
+    fn quiesce_path(&self) -> PathBuf {
+        self.root.join(QUIESCE_FILE)
+    }
+
     fn removal_receipt_path(&self) -> PathBuf {
         self.root.join(REMOVAL_RECEIPT_FILE)
     }
@@ -275,6 +296,41 @@ impl PackageStore {
         Ok(file)
     }
 
+    fn quiesce_lock(&self, exclusive: bool) -> Result<File, PackageControlError> {
+        if exclusive {
+            self.prepare_root()?;
+        }
+        let mut options = OpenOptions::new();
+        options.read(true);
+        if exclusive {
+            options.write(true).create(true).mode(0o644);
+        }
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let file = options
+            .open(self.root.join(QUIESCE_LOCK_FILE))
+            .map_err(|_| PackageControlError::Storage)?;
+        if exclusive {
+            file.set_permissions(fs::Permissions::from_mode(0o644))
+                .map_err(|_| PackageControlError::Storage)?;
+        }
+        let metadata = file.metadata().map_err(|_| PackageControlError::Storage)?;
+        let root = fs::symlink_metadata(&self.root).map_err(|_| PackageControlError::Storage)?;
+        if !metadata.file_type().is_file()
+            || metadata.uid() != root.uid()
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o777 != 0o644
+        {
+            return Err(PackageControlError::Conflict);
+        }
+        if exclusive {
+            file.lock().map_err(|_| PackageControlError::Storage)?;
+        } else {
+            file.lock_shared()
+                .map_err(|_| PackageControlError::Storage)?;
+        }
+        Ok(file)
+    }
+
     fn lock_shared(&self) -> Result<File, PackageControlError> {
         let mut options = OpenOptions::new();
         options
@@ -303,6 +359,45 @@ impl PackageStore {
 
     fn read(&self) -> Result<Option<PackageRecord>, PackageControlError> {
         read_record(&self.record_path())
+    }
+
+    fn read_quiesce(&self) -> Result<Option<QuiesceIntent>, PackageControlError> {
+        read_quiesce_intent(&self.quiesce_path(), &self.root)
+    }
+
+    fn write_quiesce(&self, intent: &QuiesceIntent) -> Result<(), PackageControlError> {
+        let bytes = encode_quiesce_intent(intent)?;
+        let temporary = self
+            .root
+            .join(format!(".{QUIESCE_FILE}.{}.tmp", intent.generation));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&temporary)
+                .map_err(|_| PackageControlError::Storage)?;
+            file.write_all(&bytes)
+                .map_err(|_| PackageControlError::Storage)?;
+            file.sync_all().map_err(|_| PackageControlError::Storage)?;
+            fs::rename(&temporary, self.quiesce_path())
+                .map_err(|_| PackageControlError::Storage)?;
+            sync_directory(&self.root)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn clear_quiesce(&self, generation: &str) -> Result<(), PackageControlError> {
+        let current = self.read_quiesce()?.ok_or(PackageControlError::Conflict)?;
+        if current.generation != generation {
+            return Err(PackageControlError::Conflict);
+        }
+        fs::remove_file(self.quiesce_path()).map_err(|_| PackageControlError::Storage)?;
+        sync_directory(&self.root)
     }
 
     fn write(&self, record: &PackageRecord) -> Result<(), PackageControlError> {
@@ -360,11 +455,125 @@ pub(crate) fn run(action: PackageAction<'_>) -> Result<(), PackageControlError> 
     }
     let store = PackageStore::production();
     let _controller = store.controller_lock()?;
-    let lock = store.lock()?;
+    let _quiesce_authority = store.quiesce_lock(true)?;
     let mut effects = SystemEffects {
         package_root: store.root.clone(),
     };
-    run_with(&store, action, &mut effects, Some(&lock))
+    match action {
+        PackageAction::PrepareUpgrade { source, target } => {
+            let intent = ensure_quiesce_intent(&store, PackageKind::Upgrade, source, target, None)?;
+            prepare_from_intent(&store, &intent, &mut effects)?;
+            let _package_authority = store.lock()?;
+            store.clear_quiesce(&intent.generation)
+        }
+        PackageAction::PrepareRemove { target } => {
+            let intent = ensure_quiesce_intent(&store, PackageKind::Remove, target, target, None)?;
+            prepare_from_intent(&store, &intent, &mut effects)?;
+            let _package_authority = store.lock()?;
+            store.clear_quiesce(&intent.generation)
+        }
+        PackageAction::AdoptBootstrap => {
+            let intent = store.read_quiesce()?.ok_or(PackageControlError::Conflict)?;
+            if intent.kind != PackageKind::Upgrade {
+                return Err(PackageControlError::Conflict);
+            }
+            prepare_from_intent(&store, &intent, &mut effects)?;
+            let _package_authority = store.lock()?;
+            store.clear_quiesce(&intent.generation)
+        }
+        action => {
+            let lock = store.lock()?;
+            run_with(&store, action, &mut effects, Some(&lock))
+        }
+    }
+}
+
+fn ensure_quiesce_intent(
+    store: &PackageStore,
+    kind: PackageKind,
+    source: &str,
+    target: &str,
+    generation: Option<&str>,
+) -> Result<QuiesceIntent, PackageControlError> {
+    validate_version(source)?;
+    validate_version(target)?;
+    let expected_generation = generation
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let expected = QuiesceIntent {
+        generation: expected_generation,
+        kind,
+        source_version: source.to_string(),
+        target_version: target.to_string(),
+    };
+    if let Some(existing) = store.read_quiesce()? {
+        return (existing == expected
+            || generation.is_none()
+                && existing.kind == kind
+                && existing.source_version == source
+                && existing.target_version == target)
+            .then_some(existing)
+            .ok_or(PackageControlError::Conflict);
+    }
+    store.write_quiesce(&expected)?;
+    Ok(expected)
+}
+
+fn prepare_from_intent(
+    store: &PackageStore,
+    intent: &QuiesceIntent,
+    effects: &mut dyn PackageEffects,
+) -> Result<(), PackageControlError> {
+    let (mut record, is_new) = match store.read()? {
+        Some(record) => {
+            validate(&record, intent.kind, &intent.target_version)?;
+            if record.generation != intent.generation
+                || record.source_version != intent.source_version
+            {
+                return Err(PackageControlError::Conflict);
+            }
+            (record, false)
+        }
+        None => (
+            PackageRecord {
+                format_version: FORMAT_VERSION,
+                package_id: PACKAGE_ID.to_string(),
+                generation: intent.generation.clone(),
+                kind: intent.kind,
+                phase: PackagePhase::IntentRecorded,
+                source_version: intent.source_version.clone(),
+                target_version: intent.target_version.clone(),
+                predecessor_removal_generation: None,
+                participants: effects.discover()?,
+            },
+            true,
+        ),
+    };
+    let _participant_authorities =
+        lock_participant_authorities(&record.participants, store.root == Path::new(PACKAGE_ROOT))?;
+    if is_new {
+        store.write(&record)?;
+    }
+    effects.prepare_controller(&record)?;
+    if record.phase == PackagePhase::IntentRecorded {
+        for index in 0..record.participants.len() {
+            if record.participants[index].runtime_device.is_none() {
+                if let Some((device, inode)) =
+                    effects.refresh_runtime_identity(&record.participants[index])?
+                {
+                    record.participants[index].runtime_device = Some(device);
+                    record.participants[index].runtime_inode = Some(inode);
+                    store.write(&record)?;
+                }
+            }
+            effects.stop(&record.participants[index])?;
+            effects.suppress(&record.participants[index])?;
+            effects.cleanup(&record.participants[index])?;
+        }
+        record.phase = PackagePhase::PublishersStopped;
+        store.write(&record)?;
+    }
+    Ok(())
 }
 
 fn run_with(
@@ -424,6 +633,7 @@ fn run_with(
             }
             prepare_reinstall(store, target)
         }
+        PackageAction::AdoptBootstrap => Err(PackageControlError::Conflict),
     }
 }
 
@@ -497,6 +707,15 @@ fn finish(
         for index in 0..record.participants.len() {
             if record.participants[index].settlement != ParticipantSettlement::Pending {
                 continue;
+            }
+            if record.participants[index].runtime_device.is_none() {
+                if let Some((device, inode)) =
+                    effects.refresh_runtime_identity(&record.participants[index])?
+                {
+                    record.participants[index].runtime_device = Some(device);
+                    record.participants[index].runtime_inode = Some(inode);
+                    store.write(&record)?;
+                }
             }
             let participant = record.participants[index].clone();
             effects.cleanup(&participant)?;
@@ -731,6 +950,7 @@ fn validate_install_receipt(receipt: &InstallReceipt) -> Result<(), PackageContr
             .participants
             .windows(2)
             .any(|pair| pair[0].uid >= pair[1].uid)
+        || receipt.participants.iter().any(invalid_runtime_identity)
     {
         return Err(PackageControlError::Conflict);
     }
@@ -762,6 +982,7 @@ fn validate_removal_receipt(receipt: &RemovalReceipt) -> Result<(), PackageContr
             .participants
             .windows(2)
             .any(|pair| pair[0].uid >= pair[1].uid)
+        || receipt.participants.iter().any(invalid_runtime_identity)
     {
         return Err(PackageControlError::Conflict);
     }
@@ -821,13 +1042,19 @@ fn validate(
             .participants
             .windows(2)
             .any(|pair| pair[0].uid >= pair[1].uid)
+        || record.participants.iter().any(invalid_runtime_identity)
     {
         return Err(PackageControlError::Conflict);
     }
     Ok(())
 }
 
+fn invalid_runtime_identity(participant: &Participant) -> bool {
+    participant.runtime_device.is_some() != participant.runtime_inode.is_some()
+}
+
 pub(crate) struct PackageAdmissionGuard {
+    _quiesce: File,
     _lock: File,
 }
 
@@ -855,6 +1082,7 @@ pub(crate) fn enter_admission_at(
     let store = PackageStore::for_test(root.to_path_buf());
     if !store.root.exists() {
         store.prepare_root()?;
+        drop(store.quiesce_lock(true)?);
         drop(store.lock()?);
     }
     enter_admission_store(&store)
@@ -869,6 +1097,7 @@ pub(crate) fn enter_startup_admission_at(
     let store = PackageStore::for_test(root.to_path_buf());
     if !store.root.exists() {
         store.prepare_root()?;
+        drop(store.quiesce_lock(true)?);
         drop(store.lock()?);
     }
     enter_startup_admission_store(
@@ -879,15 +1108,48 @@ pub(crate) fn enter_startup_admission_at(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn begin_quiesce_at(root: &Path) -> Result<(), PackageControlError> {
+    let store = PackageStore::for_test(root.to_path_buf());
+    if !store.root.exists() {
+        store.prepare_root()?;
+        drop(store.lock()?);
+    }
+    let _authority = store.quiesce_lock(true)?;
+    let intent = ensure_quiesce_intent(&store, PackageKind::Upgrade, "0.0.9", "0.1.0", None)?;
+    if store.read()?.is_none() {
+        store.write(&PackageRecord {
+            format_version: FORMAT_VERSION,
+            package_id: PACKAGE_ID.to_string(),
+            generation: intent.generation.clone(),
+            kind: intent.kind,
+            phase: PackagePhase::PublishersStopped,
+            source_version: intent.source_version.clone(),
+            target_version: intent.target_version.clone(),
+            predecessor_removal_generation: None,
+            participants: Vec::new(),
+        })?;
+    }
+    let _package_authority = store.lock()?;
+    store.clear_quiesce(&intent.generation)
+}
+
 fn enter_admission_store(
     store: &PackageStore,
 ) -> Result<PackageAdmissionGuard, PackageControlError> {
+    let quiesce = store.quiesce_lock(false)?;
+    if store.read_quiesce()?.is_some() {
+        return Err(PackageControlError::Conflict);
+    }
     let lock = store.lock_shared()?;
     if let Some(record) = store.read()? {
         validate(&record, record.kind, &record.target_version)?;
         return Err(PackageControlError::Conflict);
     }
-    Ok(PackageAdmissionGuard { _lock: lock })
+    Ok(PackageAdmissionGuard {
+        _quiesce: quiesce,
+        _lock: lock,
+    })
 }
 
 fn enter_startup_admission_store(
@@ -896,9 +1158,16 @@ fn enter_startup_admission_store(
     app_data_root: &Path,
     runtime_root: &Path,
 ) -> Result<PackageAdmissionGuard, PackageControlError> {
+    let quiesce = store.quiesce_lock(false)?;
+    if store.read_quiesce()?.is_some() {
+        return Err(PackageControlError::Conflict);
+    }
     let lock = store.lock_shared()?;
     let Some(record) = store.read()? else {
-        return Ok(PackageAdmissionGuard { _lock: lock });
+        return Ok(PackageAdmissionGuard {
+            _quiesce: quiesce,
+            _lock: lock,
+        });
     };
     validate(&record, record.kind, &record.target_version)?;
     let app_data_root = absolute_path_text(app_data_root)?;
@@ -926,10 +1195,15 @@ fn enter_startup_admission_store(
         .ok_or(PackageControlError::Conflict)?;
     validate_participant_directories(participant)?;
     let runtime = safe_directory_identity(Path::new(&participant.runtime_root), uid, true)?;
-    if runtime.dev() != participant.runtime_device || runtime.ino() != participant.runtime_inode {
+    if Some(runtime.dev()) != participant.runtime_device
+        || Some(runtime.ino()) != participant.runtime_inode
+    {
         return Err(PackageControlError::Conflict);
     }
-    Ok(PackageAdmissionGuard { _lock: lock })
+    Ok(PackageAdmissionGuard {
+        _quiesce: quiesce,
+        _lock: lock,
+    })
 }
 
 pub(crate) fn record_participant_acknowledgement(
@@ -1024,6 +1298,124 @@ fn absolute_path_text(path: &Path) -> Result<String, PackageControlError> {
     path.to_str()
         .map(str::to_string)
         .ok_or(PackageControlError::Conflict)
+}
+
+fn validate_version(value: &str) -> Result<(), PackageControlError> {
+    (!value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b':' | b'~' | b'_' | b'-')
+        }))
+    .then_some(())
+    .ok_or(PackageControlError::Conflict)
+}
+
+fn package_kind_text(kind: PackageKind) -> &'static str {
+    match kind {
+        PackageKind::Upgrade => "upgrade",
+        PackageKind::Remove => "remove",
+        PackageKind::Reinstall => "reinstall",
+    }
+}
+
+fn encode_quiesce_intent(intent: &QuiesceIntent) -> Result<Vec<u8>, PackageControlError> {
+    if Uuid::parse_str(&intent.generation).is_err() || intent.kind == PackageKind::Reinstall {
+        return Err(PackageControlError::Conflict);
+    }
+    validate_version(&intent.source_version)?;
+    validate_version(&intent.target_version)?;
+    let payload = format!(
+        "format_version={QUIESCE_FORMAT_VERSION}\npackage_id={PACKAGE_ID}\nartifact_scope=shared-debian\ngeneration={}\nkind={}\nsource_version={}\ntarget_version={}\n",
+        intent.generation,
+        package_kind_text(intent.kind),
+        intent.source_version,
+        intent.target_version,
+    );
+    let digest = format!("{:x}", Sha256::digest(payload.as_bytes()));
+    Ok(format!("{payload}sha256={digest}\n").into_bytes())
+}
+
+fn read_quiesce_intent(
+    path: &Path,
+    root: &Path,
+) -> Result<Option<QuiesceIntent>, PackageControlError> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(PackageControlError::Storage),
+    };
+    let metadata = file.metadata().map_err(|_| PackageControlError::Storage)?;
+    let root_metadata = fs::symlink_metadata(root).map_err(|_| PackageControlError::Storage)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != root_metadata.uid()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.len() == 0
+        || metadata.len() > MAX_RECORD_BYTES
+    {
+        return Err(PackageControlError::Conflict);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| PackageControlError::Storage)?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err(PackageControlError::Conflict);
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| PackageControlError::Conflict)?;
+    let (payload, digest_line) = text
+        .rsplit_once("sha256=")
+        .ok_or(PackageControlError::Conflict)?;
+    let digest = digest_line
+        .strip_suffix('\n')
+        .ok_or(PackageControlError::Conflict)?;
+    if digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || format!("{:x}", Sha256::digest(payload.as_bytes())) != digest
+    {
+        return Err(PackageControlError::Conflict);
+    }
+    let mut values = std::collections::BTreeMap::new();
+    for line in payload.lines() {
+        let (key, value) = line.split_once('=').ok_or(PackageControlError::Conflict)?;
+        if values.insert(key, value).is_some() {
+            return Err(PackageControlError::Conflict);
+        }
+    }
+    if values.len() != 7
+        || values.get("format_version") != Some(&"1")
+        || values.get("package_id") != Some(&PACKAGE_ID)
+        || values.get("artifact_scope") != Some(&"shared-debian")
+    {
+        return Err(PackageControlError::Conflict);
+    }
+    let generation = values
+        .get("generation")
+        .filter(|value| Uuid::parse_str(value).is_ok())
+        .ok_or(PackageControlError::Conflict)?;
+    let kind = match values.get("kind") {
+        Some(&"upgrade") => PackageKind::Upgrade,
+        Some(&"remove") => PackageKind::Remove,
+        _ => return Err(PackageControlError::Conflict),
+    };
+    let source_version = *values
+        .get("source_version")
+        .ok_or(PackageControlError::Conflict)?;
+    let target_version = *values
+        .get("target_version")
+        .ok_or(PackageControlError::Conflict)?;
+    validate_version(source_version)?;
+    validate_version(target_version)?;
+    Ok(Some(QuiesceIntent {
+        generation: (*generation).to_string(),
+        kind,
+        source_version: source_version.to_string(),
+        target_version: target_version.to_string(),
+    }))
 }
 
 fn safe_directory_identity(
@@ -1141,6 +1533,7 @@ impl PackageEffects for SystemEffects {
             let acknowledgement = read_participant_acknowledgement(&entry.path(), &metadata)?;
             validate_participant_acknowledgement(&acknowledgement, uid)?;
             validate_acknowledged_directories(&acknowledgement)?;
+            let runtime_present = Path::new(&acknowledgement.runtime_root).is_dir();
             if Path::new(&acknowledgement.control_root)
                 .join("background-mode-transition-v1.json")
                 .exists()
@@ -1151,8 +1544,8 @@ impl PackageEffects for SystemEffects {
                 uid,
                 user: acknowledgement.user,
                 runtime_root: acknowledgement.runtime_root,
-                runtime_device: acknowledgement.runtime_device,
-                runtime_inode: acknowledgement.runtime_inode,
+                runtime_device: runtime_present.then_some(acknowledgement.runtime_device),
+                runtime_inode: runtime_present.then_some(acknowledgement.runtime_inode),
                 app_data_root: acknowledgement.app_data_root,
                 app_data_device: acknowledgement.app_data_device,
                 app_data_inode: acknowledgement.app_data_inode,
@@ -1257,6 +1650,39 @@ impl PackageEffects for SystemEffects {
         Ok(())
     }
 
+    fn refresh_runtime_identity(
+        &mut self,
+        participant: &Participant,
+    ) -> Result<Option<(u64, u64)>, PackageControlError> {
+        let runtime_path = Path::new(&participant.runtime_root);
+        if !runtime_path.exists() {
+            return Ok(None);
+        }
+        if nss_user_name(participant.uid).as_deref() != Some(participant.user.as_str()) {
+            return Err(PackageControlError::Conflict);
+        }
+        let runtime = safe_directory_identity(runtime_path, participant.uid, true)?;
+        let loginctl = bounded_stdout(
+            Command::new("loginctl")
+                .arg("show-user")
+                .arg(participant.uid.to_string())
+                .arg("--property=RuntimePath")
+                .arg("--value"),
+            Duration::from_secs(10),
+        )?;
+        let manager = bounded_stdout(
+            Command::new("systemctl")
+                .arg("--user")
+                .arg(format!("--machine={}@", participant.user))
+                .arg("show-environment"),
+            Duration::from_secs(10),
+        )?;
+        if !runtime_session_proof_matches(participant, &loginctl, &manager) {
+            return Err(PackageControlError::Conflict);
+        }
+        Ok(Some((runtime.dev(), runtime.ino())))
+    }
+
     fn prepare_controller(&mut self, record: &PackageRecord) -> Result<(), PackageControlError> {
         let source = env::current_exe().map_err(|_| PackageControlError::Storage)?;
         let destination = controller_path(record);
@@ -1330,6 +1756,22 @@ impl PackageEffects for SystemEffects {
     }
 }
 
+fn runtime_session_proof_matches(
+    participant: &Participant,
+    loginctl: &[u8],
+    manager: &[u8],
+) -> bool {
+    let Ok(runtime_text) = std::str::from_utf8(loginctl) else {
+        return false;
+    };
+    let Ok(manager_text) = std::str::from_utf8(manager) else {
+        return false;
+    };
+    let expected = format!("XDG_RUNTIME_DIR={}", participant.runtime_root);
+    runtime_text.trim() == participant.runtime_root
+        && manager_text.lines().any(|line| line == expected)
+}
+
 fn validate_participant_directories(participant: &Participant) -> Result<(), PackageControlError> {
     let matches = |path: &str, device: u64, inode: u64, private: bool| {
         safe_directory_identity(Path::new(path), participant.uid, private)
@@ -1339,12 +1781,10 @@ fn validate_participant_directories(participant: &Participant) -> Result<(), Pac
         .parent()
         .ok_or(PackageControlError::Conflict)?;
     let runtime_matches_or_is_absent = match fs::symlink_metadata(&participant.runtime_root) {
-        Ok(_) => matches(
-            &participant.runtime_root,
-            participant.runtime_device,
-            participant.runtime_inode,
-            true,
-        ),
+        Ok(_) => participant
+            .runtime_device
+            .zip(participant.runtime_inode)
+            .is_some_and(|(device, inode)| matches(&participant.runtime_root, device, inode, true)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => true,
         Err(_) => false,
     };
@@ -1658,6 +2098,55 @@ fn bounded_command(
     }
 }
 
+fn bounded_stdout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<Vec<u8>, PackageControlError> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| PackageControlError::Manager)?;
+    let mut stdout = child.stdout.take().ok_or(PackageControlError::Manager)?;
+    let reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let count = stdout.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            if output.len() <= 8192 {
+                let remaining = 8193usize.saturating_sub(output.len());
+                output.extend_from_slice(&buffer[..count.min(remaining)]);
+            }
+        }
+        Ok::<_, io::Error>(output)
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|_| PackageControlError::Manager)? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(PackageControlError::Manager);
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let output = reader
+        .join()
+        .map_err(|_| PackageControlError::Manager)?
+        .map_err(|_| PackageControlError::Manager)?;
+    if !status.success() || output.len() > 8192 {
+        return Err(PackageControlError::Manager);
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1670,6 +2159,7 @@ mod tests {
         defer_enabled: bool,
         fail_restore_once: bool,
         controller_root: Option<PathBuf>,
+        refreshed_runtime: Option<(u64, u64)>,
     }
 
     impl PackageEffects for MockEffects {
@@ -1718,6 +2208,16 @@ mod tests {
                 .push(format!("cleanup:{}", participant.uid));
             Ok(())
         }
+        fn refresh_runtime_identity(
+            &mut self,
+            participant: &Participant,
+        ) -> Result<Option<(u64, u64)>, PackageControlError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("refresh:{}", participant.uid));
+            Ok(self.refreshed_runtime)
+        }
         fn prepare_controller(
             &mut self,
             _record: &PackageRecord,
@@ -1743,6 +2243,7 @@ mod tests {
         let root = env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
         let store = PackageStore::for_test(root.clone());
         store.prepare_root().unwrap();
+        drop(store.quiesce_lock(true).unwrap());
         drop(store.lock().unwrap());
         (store, root)
     }
@@ -1752,8 +2253,8 @@ mod tests {
             uid,
             user: format!("user-{uid}"),
             runtime_root: format!("/run/user/{uid}"),
-            runtime_device: 0,
-            runtime_inode: 0,
+            runtime_device: Some(0),
+            runtime_inode: Some(0),
             app_data_root: format!("/home/user-{uid}/.local/share/com.juan-canfield.docsum"),
             app_data_device: 0,
             app_data_inode: 0,
@@ -2034,8 +2535,8 @@ mod tests {
         recorded.app_data_inode = app_data_metadata.ino();
         recorded.runtime_root = runtime.to_string_lossy().into_owned();
         let runtime_metadata = fs::metadata(&runtime).unwrap();
-        recorded.runtime_device = runtime_metadata.dev();
-        recorded.runtime_inode = runtime_metadata.ino();
+        recorded.runtime_device = Some(runtime_metadata.dev());
+        recorded.runtime_inode = Some(runtime_metadata.ino());
         recorded.control_root = control.to_string_lossy().into_owned();
         let control_metadata = fs::metadata(&control).unwrap();
         recorded.control_device = control_metadata.dev();
@@ -2240,6 +2741,168 @@ mod tests {
         finish(&store, PackageKind::Reinstall, "0.2.0", &mut effects, None).unwrap();
         assert!(store.read().unwrap().is_none());
         assert!(!store.removal_receipt_path().exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quiesce_intent_bars_admission_before_package_exclusive_and_replays_exact_generation() {
+        let (store, root) = store("doc-sum-package-quiesce");
+        let generation = Uuid::new_v4().to_string();
+        let intent = ensure_quiesce_intent(
+            &store,
+            PackageKind::Upgrade,
+            "0.0.9",
+            "0.1.0",
+            Some(&generation),
+        )
+        .unwrap();
+        assert!(enter_admission_store(&store).is_err());
+        let mut effects = MockEffects::default();
+        prepare_from_intent(&store, &intent, &mut effects).unwrap();
+        let record = store.read().unwrap().unwrap();
+        assert_eq!(record.generation, generation);
+        assert_eq!(record.phase, PackagePhase::PublishersStopped);
+        let package = store.lock().unwrap();
+        store.clear_quiesce(&generation).unwrap();
+        drop(package);
+        assert!(enter_admission_store(&store).is_err());
+        fs::write(store.quiesce_path(), b"tampered\n").unwrap();
+        fs::set_permissions(store.quiesce_path(), fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            store.read_quiesce(),
+            Err(PackageControlError::Conflict)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn absent_runtime_is_refreshed_only_before_exact_generation_settlement() {
+        let (store, root) = store("doc-sum-runtime-refresh");
+        let mut missing = participant(1000, true);
+        missing.runtime_device = None;
+        missing.runtime_inode = None;
+        let intent = QuiesceIntent {
+            generation: Uuid::new_v4().to_string(),
+            kind: PackageKind::Upgrade,
+            source_version: "0.0.9".to_string(),
+            target_version: "0.1.0".to_string(),
+        };
+        store.write_quiesce(&intent).unwrap();
+        let mut effects = MockEffects {
+            participants: vec![missing],
+            refreshed_runtime: Some((41, 42)),
+            ..MockEffects::default()
+        };
+        prepare_from_intent(&store, &intent, &mut effects).unwrap();
+        let record = store.read().unwrap().unwrap();
+        assert_eq!(record.participants[0].runtime_device, Some(41));
+        assert_eq!(record.participants[0].runtime_inode, Some(42));
+        assert_eq!(
+            effects.calls.lock().unwrap().first().map(String::as_str),
+            Some("refresh:1000")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unproven_runtime_path_replacement_is_never_accepted() {
+        let root = env::temp_dir().join(format!("doc-sum-runtime-spoof-{}", Uuid::new_v4()));
+        let runtime = root.join("runtime");
+        let app_data = root.join("data");
+        let control = root.join("control");
+        let manager = root.join("manager");
+        for path in [&runtime, &app_data, &control] {
+            fs::create_dir_all(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::create_dir_all(&manager).unwrap();
+        fs::set_permissions(&manager, fs::Permissions::from_mode(0o755)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let mut recorded = participant(uid, true);
+        recorded.runtime_root = runtime.to_string_lossy().into_owned();
+        recorded.runtime_device = None;
+        recorded.runtime_inode = None;
+        recorded.app_data_root = app_data.to_string_lossy().into_owned();
+        let metadata = fs::metadata(&app_data).unwrap();
+        recorded.app_data_device = metadata.dev();
+        recorded.app_data_inode = metadata.ino();
+        recorded.control_root = control.to_string_lossy().into_owned();
+        let metadata = fs::metadata(&control).unwrap();
+        recorded.control_device = metadata.dev();
+        recorded.control_inode = metadata.ino();
+        recorded.manager_link = manager
+            .join("document-summarizer-connect.service")
+            .to_string_lossy()
+            .into_owned();
+        let metadata = fs::metadata(&manager).unwrap();
+        recorded.manager_parent_device = metadata.dev();
+        recorded.manager_parent_inode = metadata.ino();
+        assert!(matches!(
+            validate_participant_directories(&recorded),
+            Err(PackageControlError::Conflict)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn login_runtime_refresh_requires_matching_system_and_user_manager_proofs() {
+        let recorded = participant(1000, true);
+        let loginctl = format!("{}\n", recorded.runtime_root);
+        let manager = format!("LANG=C\nXDG_RUNTIME_DIR={}\n", recorded.runtime_root);
+        assert!(runtime_session_proof_matches(
+            &recorded,
+            loginctl.as_bytes(),
+            manager.as_bytes(),
+        ));
+        assert!(!runtime_session_proof_matches(
+            &recorded,
+            b"/run/user/9999\n",
+            manager.as_bytes(),
+        ));
+        assert!(!runtime_session_proof_matches(
+            &recorded,
+            loginctl.as_bytes(),
+            b"XDG_RUNTIME_DIR=/run/user/9999\n",
+        ));
+    }
+
+    #[test]
+    fn preinst_bootstrap_is_cryptographically_adoptable_and_tamper_closed() {
+        let root = env::temp_dir().join(format!("doc-sum-preinst-bootstrap-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let package_root = root.join("package-root");
+        let script = include_str!("../../linux/debian/preinst")
+            .replace(
+                "/var/lib/document-summarizer",
+                package_root.to_str().unwrap(),
+            )
+            .replace(" -o root -g root", "");
+        let script_path = root.join("preinst");
+        fs::write(&script_path, script).unwrap();
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(Command::new("sh")
+            .arg(&script_path)
+            .args(["upgrade", "0.0.9"])
+            .status()
+            .unwrap()
+            .success());
+        let store = PackageStore::for_test(package_root.clone());
+        let intent = store.read_quiesce().unwrap().unwrap();
+        assert_eq!(intent.kind, PackageKind::Upgrade);
+        assert_eq!(intent.source_version, "0.0.9");
+        assert_eq!(intent.target_version, env!("CARGO_PKG_VERSION"));
+        let path = store.quiesce_path();
+        let mut bytes = fs::read(&path).unwrap();
+        let source = bytes
+            .windows(b"source_version=0.0.9".len())
+            .position(|window| window == b"source_version=0.0.9")
+            .unwrap();
+        bytes[source + "source_version=".len()] = b'9';
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            store.read_quiesce(),
+            Err(PackageControlError::Conflict)
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 }

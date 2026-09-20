@@ -1,8 +1,43 @@
 #!/bin/sh
 set -eu
 
-if [ "${1:-}" = "upgrade" ] && [ -x /usr/bin/document-summarizer ]; then
-  /usr/bin/document-summarizer --connect-package prepare-upgrade "${2:-unknown}" "0.1.0"
+if [ "${1:-}" = "upgrade" ]; then
+  source_version=${2:-unknown}
+  case "$source_version" in
+    ''|*[!A-Za-z0-9.+:~_-]*) exit 1 ;;
+  esac
+  install -d -m 0755 -o root -g root /var/lib/document-summarizer
+  umask 077
+  exec 9>/var/lib/document-summarizer/.package-controller-v1.lock
+  chmod 0600 /var/lib/document-summarizer/.package-controller-v1.lock
+  flock -x 9
+  exec 8>/var/lib/document-summarizer/.package-quiesce-v1.lock
+  chmod 0644 /var/lib/document-summarizer/.package-quiesce-v1.lock
+  flock -x 8
+  quiesce=/var/lib/document-summarizer/package-quiesce-v1.record
+  if [ ! -e "$quiesce" ]; then
+    generation=$(cat /proc/sys/kernel/random/uuid)
+    temporary=$(mktemp /var/lib/document-summarizer/.package-quiesce-v1.XXXXXX)
+    payload=$(mktemp /var/lib/document-summarizer/.package-quiesce-payload-v1.XXXXXX)
+    trap 'rm -f "$temporary" "$payload"' EXIT HUP INT TERM
+    {
+      printf '%s\n' 'format_version=1'
+      printf '%s\n' 'package_id=document-summarizer'
+      printf '%s\n' 'artifact_scope=shared-debian'
+      printf 'generation=%s\n' "$generation"
+      printf '%s\n' 'kind=upgrade'
+      printf 'source_version=%s\n' "$source_version"
+      printf '%s\n' 'target_version=0.1.0'
+    } >"$payload"
+    cat "$payload" >"$temporary"
+    printf 'sha256=%s\n' "$(sha256sum "$payload" | cut -d ' ' -f 1)" >>"$temporary"
+    chmod 0600 "$temporary"
+    sync -f "$temporary"
+    mv -T "$temporary" "$quiesce"
+    sync -f /var/lib/document-summarizer
+    rm -f "$payload"
+    trap - EXIT HUP INT TERM
+  fi
 fi
 
 if [ "${1:-}" = "install" ] && { [ -f /var/lib/document-summarizer/package-operation-v1.json ] || [ -f /var/lib/document-summarizer/package-removal-receipt-v1.json ]; }; then

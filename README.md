@@ -178,7 +178,12 @@ before stopping a foreground owner or changing the systemd choice. That record
 blocks new job admission until the exact generation either publishes its ready
 successor or restores the prior choice. The unit runs the package's headless
 `--connect-provider` entry point against the same per-user database and provider
-identity as the desktop. A headless owner waits for a foreground owner to leave
+identity as the desktop. Enablement also writes an owner-only launch receipt and
+systemd environment at the fixed
+`$HOME/.local/state/document-summarizer/connect-provider.env` path. The child
+fails closed unless that file and receipt retain the exact generation, owner,
+mode, XDG configuration, data, runtime, and opened directory identities recorded
+by the controller. A headless owner waits for a foreground owner to leave
 and takes over without cycling through systemd's restart limit. Terminal server
 failure exits nonzero so systemd restarts it. Desktop startup continues in
 standalone mode when Connect is unavailable.
@@ -196,10 +201,17 @@ authority. Each enabled or disabled user records exact XDG runtime, data,
 control, and manager paths during the lifecycle operation. Upgrade suppresses
 all recorded managers and restores an active user only after authenticated
 provider readiness; logged-out enabled users are durably deferred until their
-next service session. Removal preserves choices in a generation-bound receipt.
+next service session. If that session appears during settlement, the root
+controller accepts its new runtime inode only when login and user-manager proofs
+bind the exact recorded user and path, then durably updates the same package
+generation. Removal preserves choices in a generation-bound receipt.
 Reinstall completes any interrupted removal, creates a new install generation
 before admission, and settles the preserved choices without starting a provider
 against partial package artifacts.
+The first upgrade from a package without this controller is closed by a
+root-owned, SHA-256-bound preinstall quiesce record. The preinstall script never
+executes the legacy desktop binary; the unpacked controller validates and adopts
+the exact bootstrap generation before provider restoration.
 
 A raw `cargo build --release` is intentionally rejected because it can produce a
 desktop executable that points at the development server instead of embedding

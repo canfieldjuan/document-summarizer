@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::path::Path;
+use std::process::Command;
 
 fn contains_rust_source(path: &Path) -> bool {
     if path.is_file() {
@@ -63,7 +64,9 @@ fn linux_bundle_installs_disabled_background_provider_unit_with_bounded_supervis
     assert!(unit.contains("StartLimitBurst=5"));
     assert!(unit.contains("TimeoutStopSec=40s"));
     assert!(unit.contains("KillMode=control-group"));
-    assert!(!unit.contains("EnvironmentFile="));
+    assert!(
+        unit.contains("EnvironmentFile=%h/.local/state/document-summarizer/connect-provider.env")
+    );
     assert!(unit.contains("WantedBy=default.target"));
     assert!(!unit.contains("Alias="));
 }
@@ -91,8 +94,11 @@ fn debian_package_hooks_coordinate_provider_ownership() {
     let postinst = include_str!("../linux/debian/postinst");
     let prerm = include_str!("../linux/debian/prerm");
     let postrm = include_str!("../linux/debian/postrm");
-    assert!(preinst.contains("--connect-package prepare-upgrade"));
+    assert!(preinst.contains("package-quiesce-v1.record"));
+    assert!(preinst.contains("sha256sum"));
+    assert!(!preinst.contains("/usr/bin/document-summarizer --connect-package prepare-upgrade"));
     assert!(preinst.contains("--connect-package prepare-reinstall"));
+    assert!(postinst.contains("--connect-package adopt-bootstrap"));
     assert!(postinst.contains("--connect-package initialize"));
     assert!(postinst.contains("--connect-package recover-install"));
     assert!(prerm.contains("--connect-package prepare-remove"));
@@ -101,6 +107,66 @@ fn debian_package_hooks_coordinate_provider_ownership() {
         assert!(script.contains(env!("CARGO_PKG_VERSION")));
         assert!(!script.contains("systemctl"));
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn first_upgrade_bootstrap_never_executes_the_legacy_binary() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let package_root = temporary.path().join("package-root");
+    let legacy_marker = temporary.path().join("legacy-invoked");
+    let legacy = temporary.path().join("legacy-document-summarizer");
+    std::fs::write(
+        &legacy,
+        format!("#!/bin/sh\ntouch '{}'\nexit 99\n", legacy_marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = include_str!("../linux/debian/preinst")
+        .replace(
+            "/var/lib/document-summarizer",
+            package_root.to_str().unwrap(),
+        )
+        .replace("/usr/bin/document-summarizer", legacy.to_str().unwrap())
+        .replace(" -o root -g root", "");
+    let script_path = temporary.path().join("preinst");
+    std::fs::write(&script_path, script).unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let status = Command::new("sh")
+        .arg(&script_path)
+        .args(["upgrade", "0.0.9"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(!legacy_marker.exists());
+    let bootstrap = package_root.join("package-quiesce-v1.record");
+    let metadata = std::fs::symlink_metadata(&bootstrap).unwrap();
+    assert_eq!(metadata.mode() & 0o777, 0o600);
+    assert!(std::fs::read_to_string(bootstrap)
+        .unwrap()
+        .contains("kind=upgrade\n"));
+}
+
+#[test]
+fn authenticated_request_body_is_consumed_before_lifecycle_admission() {
+    let provider = include_str!("../src/connect/provider.rs");
+    let request_start = provider
+        .find("async fn create_job_for_request")
+        .expect("request handler must exist");
+    let request_path = &provider[request_start..];
+    let stream = request_path
+        .find("Multipart::from_request")
+        .expect("request body must be authenticated before streaming");
+    let package = request_path
+        .find("package_admission_for_job")
+        .expect("job commit must acquire package admission");
+    assert!(
+        stream < package,
+        "package admission must not cover body streaming"
+    );
 }
 
 #[test]

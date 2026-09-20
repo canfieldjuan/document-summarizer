@@ -1910,8 +1910,14 @@ enable phases are `intent_recorded`, `source_stopped`, `manager_enabled`, and
 restores the recorded prior choice. `status` reports an incomplete generation
 and `recover` resumes only that exact generation. A shared admission lock plus
 the record blocks job creation through commit while a transition is incomplete.
-The systemd child receives the exact generation through an owner-only
-environment file and revalidates it immediately before each registration
+The controller atomically writes an owner-only launch receipt and environment
+file at the fixed, non-XDG-dependent
+`$HOME/.local/state/document-summarizer/` path before systemd start. The unit
+loads that exact file. The child validates its owner, mode, link count,
+generation, byte-exact environment content, XDG configuration, data, and
+runtime paths, plus the opened application-data, lifecycle-control, and runtime
+directory identities before provider startup. The existing transition checks
+still revalidate the admitted generation immediately before each registration
 publication.
 
 Foreground startup preserves standalone recovery: a Connect startup failure is
@@ -1999,9 +2005,14 @@ fresh process credentials.
 Debian maintainer scripts call the app-owned `--connect-package` controller.
 The production package authority is the fixed root-owned
 `/var/lib/document-summarizer` tree and cannot be redirected by an environment
-variable. Provider startup and each accepted-job commit hold its shared lock;
-dpkg transitions hold it exclusively before taking recorded per-user control
-and admission locks in ascending UID order. Enable and disable record an
+variable. Provider startup and each final artifact promotion plus accepted-job
+commit hold its shared lock. Authenticated multipart bodies stream into a
+private bounded staging file without package or per-user authority; cancellation
+and the absolute request timeout remove that file. The controller first holds a
+separate quiesce authority, persists a generation-bound SHA-256 intent, and
+stops all recorded publishers. It then waits for the package lock exclusively
+before package mutation and takes recorded per-user control and admission locks
+in ascending UID order. Enable and disable record an
 owner-authenticated 0600 participant acknowledgement before manager mutation
 and update it after settlement while the per-user barrier is still held. That acknowledgement carries the exact runtime,
 application data, lifecycle control, and systemd enablement paths, so package
@@ -2022,6 +2033,19 @@ admission barrier is cleared only after those idempotent finalization effects.
 Malformed, wrong-kind, wrong-target, changed
 generation, unowned participant receipt, or incomplete per-user transition
 fails closed.
+
+When a package participant was captured with no runtime directory, a runtime
+created by a later login remains untrusted until the system manager reports the
+exact runtime path, the named user manager reports the same
+`XDG_RUNTIME_DIR`, NSS still binds the recorded UID and name, and the directory
+is owner-private. The controller persists that authenticated device and inode in
+the same package generation before restoration. A participant captured with an
+existing runtime never accepts a replacement inode. For the first upgrade from
+a legacy package, preinstall writes the fixed root-owned quiesce record directly
+and never invokes the installed desktop executable. Postinstall's new controller
+validates the record checksum, ownership, mode, generation, kind, and versions,
+adopts it as the package operation, and resumes idempotently; malformed or
+replayed-different bootstrap state remains a barrier.
 
 On Unix, publication, startup scavenging, and removal share an owner-only
 lifecycle-file lock. Windows publication writes a fixed same-directory

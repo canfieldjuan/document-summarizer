@@ -683,6 +683,7 @@ pub fn run_package_control(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         [command, target] if command == "prepare-reinstall" => {
             PackageAction::PrepareReinstall { target }
         }
+        [command] if command == "adopt-bootstrap" => PackageAction::AdoptBootstrap,
         _ => return Err("invalid package lifecycle control command".into()),
     };
     package_control::run(action).map_err(Into::into)

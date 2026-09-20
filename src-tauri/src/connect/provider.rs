@@ -1396,24 +1396,6 @@ async fn create_job_for_request(
 ) -> Result<Response, ProviderHttpError> {
     authorize(&state, request.headers())?;
     require_entitlement(&state)?;
-    #[cfg(target_os = "linux")]
-    let _package_admission = package_admission_for_job(&state).map_err(|_| {
-        ProviderHttpError::new(
-            StatusCode::CONFLICT,
-            "PROVIDER_BUSY",
-            "The provider package is changing lifecycle state.",
-            true,
-        )
-    })?;
-    #[cfg(target_os = "linux")]
-    let _transition_admission = state.transition_store.enter_job_admission().map_err(|_| {
-        ProviderHttpError::new(
-            StatusCode::CONFLICT,
-            "PROVIDER_BUSY",
-            "The provider is changing background lifecycle state.",
-            true,
-        )
-    })?;
     if !state.workers.accepting() {
         return Err(ProviderHttpError::new(
             StatusCode::CONFLICT,
@@ -1422,10 +1404,21 @@ async fn create_job_for_request(
             true,
         ));
     }
-    let multipart = Multipart::from_request(request, &state)
-        .await
-        .map_err(ProviderHttpError::multipart)?;
-    create_job_for(version, state, multipart).await
+    tokio::time::timeout(CONNECT_JOB_REQUEST_TIMEOUT, async {
+        let multipart = Multipart::from_request(request, &state)
+            .await
+            .map_err(ProviderHttpError::multipart)?;
+        create_job_for(version, state, multipart).await
+    })
+    .await
+    .map_err(|_| {
+        ProviderHttpError::new(
+            StatusCode::REQUEST_TIMEOUT,
+            "REQUEST_TIMEOUT",
+            "The provider request body did not arrive within the allowed time.",
+            true,
+        )
+    })?
 }
 
 async fn create_job_for(
@@ -1450,19 +1443,13 @@ async fn create_job_for(
     let (request, request_hash, summary_profile) =
         parse_job_request(&request_bytes, version, state.max_input_bytes)?;
 
-    let mut conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
-    if let Some(existing) =
-        store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
     {
-        return idempotent_response(existing, &request_hash, version);
-    }
-    if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
-        return Err(ProviderHttpError::new(
-            StatusCode::CONFLICT,
-            "PROVIDER_BUSY",
-            "The provider is processing another job.",
-            true,
-        ));
+        let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+        if let Some(existing) =
+            store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
+        {
+            return idempotent_response(existing, &request_hash, version);
+        }
     }
 
     let artifact_field = multipart
@@ -1481,24 +1468,23 @@ async fn create_job_for(
         ));
     }
     let input = request.inputs[0].clone();
-    let import_path = receive_artifact(&state, &request.job_id, &input, artifact_field).await?;
+    let mut pending_import =
+        receive_artifact(&state, &request.job_id, &input, artifact_field).await?;
     if multipart
         .next_field()
         .await
         .map_err(ProviderHttpError::multipart)?
         .is_some()
     {
-        remove_file_quietly(&import_path).await;
         return Err(ProviderHttpError::bad_request(
             "MULTIPART_FIELDS_INVALID",
             "Unexpected multipart fields were provided.",
         ));
     }
 
-    let import_path_text = match import_path.to_str() {
+    let staging_path_text = match pending_import.staging().to_str() {
         Some(path) => path,
         None => {
-            remove_file_quietly(&import_path).await;
             return Err(ProviderHttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "PROVIDER_STORAGE_INVALID",
@@ -1507,15 +1493,14 @@ async fn create_job_for(
             ));
         }
     };
-    let (document, run) = match prepare_pdf_ingestion(import_path_text, Some(&input.display_name)) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            remove_file_quietly(&import_path).await;
-            return Err(ProviderHttpError::domain(error.code()));
-        }
-    };
+    let (mut document, run) =
+        match prepare_pdf_ingestion(staging_path_text, Some(&input.display_name)) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(ProviderHttpError::domain(error.code()));
+            }
+        };
     if document.byte_size != input.byte_size || document.content_hash != input.sha256 {
-        remove_file_quietly(&import_path).await;
         return Err(ProviderHttpError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "ARTIFACT_IDENTITY_MISMATCH",
@@ -1526,34 +1511,34 @@ async fn create_job_for(
     let mut runtime = match (state.runtime_factory)() {
         Ok(runtime) => runtime,
         Err(error) => {
+            let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
             if let Some(response) = idempotent_response_after_admission_race(
                 store::get_job(&conn, &request.job_id),
                 &request_hash,
                 version,
-                &import_path,
+                pending_import.staging(),
             )
             .await?
             {
                 return Ok(response);
             }
-            remove_file_quietly(&import_path).await;
             return Err(ProviderHttpError::runtime(error));
         }
     };
     let profile_snapshot = match runtime.profile_snapshot() {
         Some(snapshot) => snapshot,
         None => {
+            let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
             if let Some(response) = idempotent_response_after_admission_race(
                 store::get_job(&conn, &request.job_id),
                 &request_hash,
                 version,
-                &import_path,
+                pending_import.staging(),
             )
             .await?
             {
                 return Ok(response);
             }
-            remove_file_quietly(&import_path).await;
             return Err(ProviderHttpError::runtime(ModelRuntimeFailure {
                 code: "MODEL_CONFIG_INVALID".to_string(),
                 message: "Connect runtime is missing its immutable model profile".to_string(),
@@ -1566,6 +1551,24 @@ async fn create_job_for(
         WireVersion::V1 => &state.instance_id_v1,
         WireVersion::V2 => &state.instance_id_v2,
     };
+    #[cfg(target_os = "linux")]
+    let _package_admission = package_admission_for_job(&state).map_err(|_| {
+        ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider package is changing lifecycle state.",
+            true,
+        )
+    })?;
+    #[cfg(target_os = "linux")]
+    let _transition_admission = state.transition_store.enter_job_admission().map_err(|_| {
+        ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is changing background lifecycle state.",
+            true,
+        )
+    })?;
     let _provider_admission = state.admission_authority.enter().map_err(|()| {
         ProviderHttpError::new(
             StatusCode::CONFLICT,
@@ -1576,11 +1579,42 @@ async fn create_job_for(
     })?;
     if !state.workers.accepting() {
         drop(_provider_admission);
-        remove_file_quietly(&import_path).await;
         return Err(ProviderHttpError::new(
             StatusCode::CONFLICT,
             "PROVIDER_BUSY",
             "The provider is shutting down.",
+            true,
+        ));
+    }
+    let (import_path, owns_import) = promote_staged_artifact(
+        pending_import.staging(),
+        pending_import.final_path(),
+        &input,
+        &state.imports_dir,
+    )?;
+    pending_import.mark_promoted(owns_import);
+    let import_path_text = import_path.to_str().ok_or_else(|| {
+        ProviderHttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PROVIDER_STORAGE_INVALID",
+            "Provider storage path is unavailable.",
+            true,
+        )
+    })?;
+    document.local_source_path = import_path_text.to_string();
+    let mut conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+    if let Some(existing) =
+        store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
+    {
+        drop(_provider_admission);
+        return idempotent_response(existing, &request_hash, version);
+    }
+    if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
+        drop(_provider_admission);
+        return Err(ProviderHttpError::new(
+            StatusCode::CONFLICT,
+            "PROVIDER_BUSY",
+            "The provider is processing another job.",
             true,
         ));
     }
@@ -1600,7 +1634,6 @@ async fn create_job_for(
     let accepted = match accepted_result {
         Ok(Some((_, accepted))) => accepted,
         Ok(None) => {
-            remove_file_quietly(&import_path).await;
             return Err(entitlement_required_error());
         }
         Err(error) => {
@@ -1614,7 +1647,6 @@ async fn create_job_for(
             {
                 return Ok(response);
             }
-            remove_file_quietly(&import_path).await;
             if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
                 return Err(ProviderHttpError::new(
                     StatusCode::CONFLICT,
@@ -1626,6 +1658,7 @@ async fn create_job_for(
             return Err(ProviderHttpError::store(error));
         }
     };
+    pending_import.commit();
     runtime.bind_run(&accepted.pipeline_run_id);
 
     let worker_state = state.clone();
@@ -1799,20 +1832,21 @@ async fn receive_artifact(
     job_id: &str,
     input: &InputArtifact,
     mut field: axum::extract::multipart::Field<'_>,
-) -> Result<PathBuf, ProviderHttpError> {
+) -> Result<PendingImport, ProviderHttpError> {
     let (staging, final_path) = allocate_import_paths(
         &state.imports_dir,
         job_id,
         &input.artifact_id,
         Uuid::new_v4(),
     );
+    let pending = PendingImport::new(staging, final_path);
     let mut file = tokio::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&staging)
+        .open(pending.staging())
         .await
         .map_err(ProviderHttpError::io)?;
-    set_private_file_permissions(&staging)
+    set_private_file_permissions(pending.staging())
         .await
         .map_err(ProviderHttpError::io)?;
 
@@ -1856,12 +1890,54 @@ async fn receive_artifact(
     }
     .await;
     drop(file);
-    if let Err(error) = receive_result {
-        remove_file_quietly(&staging).await;
-        return Err(error);
+    receive_result?;
+    Ok(pending)
+}
+
+struct PendingImport {
+    staging: PathBuf,
+    final_path: PathBuf,
+    promoted: bool,
+    committed: bool,
+}
+
+impl PendingImport {
+    fn new(staging: PathBuf, final_path: PathBuf) -> Self {
+        Self {
+            staging,
+            final_path,
+            promoted: false,
+            committed: false,
+        }
     }
 
-    promote_staged_artifact(&staging, &final_path, input, &state.imports_dir).await
+    fn staging(&self) -> &Path {
+        &self.staging
+    }
+
+    fn final_path(&self) -> &Path {
+        &self.final_path
+    }
+
+    fn mark_promoted(&mut self, owns_import: bool) {
+        self.promoted = owns_import;
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingImport {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = fs::remove_file(&self.staging);
+        if self.promoted {
+            let _ = fs::remove_file(&self.final_path);
+        }
+    }
 }
 
 fn allocate_import_paths(
@@ -1875,28 +1951,26 @@ fn allocate_import_paths(
     // another request accepted for the same job and artifact identities.
     let stem = format!("{job_id}-{artifact_id}-{transfer_id}");
     (
-        imports_dir.join(format!(".{stem}.part")),
+        imports_dir.join(format!(".{stem}.pdf")),
         imports_dir.join(format!("{stem}.pdf")),
     )
 }
 
-async fn promote_staged_artifact(
+fn promote_staged_artifact(
     staging: &Path,
     final_path: &Path,
     input: &InputArtifact,
     imports_dir: &Path,
-) -> Result<PathBuf, ProviderHttpError> {
-    match tokio::fs::hard_link(staging, final_path).await {
+) -> Result<(PathBuf, bool), ProviderHttpError> {
+    match fs::hard_link(staging, final_path) {
         Ok(()) => {
-            remove_file_quietly(staging).await;
-            sync_directory(imports_dir)
-                .await
-                .map_err(ProviderHttpError::io)?;
-            Ok(final_path.to_path_buf())
+            let _ = fs::remove_file(staging);
+            sync_directory_now(imports_dir).map_err(ProviderHttpError::io)?;
+            Ok((final_path.to_path_buf(), true))
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let existing = hash_file(final_path).await;
-            remove_file_quietly(staging).await;
+            let existing = hash_file_now(final_path);
+            let _ = fs::remove_file(staging);
             let (existing_size, existing_hash) = existing?;
             if existing_size != input.byte_size || existing_hash != input.sha256 {
                 return Err(ProviderHttpError::new(
@@ -1906,16 +1980,49 @@ async fn promote_staged_artifact(
                     false,
                 ));
             }
-            sync_directory(imports_dir)
-                .await
-                .map_err(ProviderHttpError::io)?;
-            Ok(final_path.to_path_buf())
+            sync_directory_now(imports_dir).map_err(ProviderHttpError::io)?;
+            Ok((final_path.to_path_buf(), false))
         }
         Err(error) => {
-            remove_file_quietly(staging).await;
+            let _ = fs::remove_file(staging);
             Err(ProviderHttpError::io(error))
         }
     }
+}
+
+fn sync_directory_now(path: &Path) -> Result<(), io::Error> {
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+}
+
+fn hash_file_now(path: &Path) -> Result<(u64, String), ProviderHttpError> {
+    let mut file = File::open(path).map_err(ProviderHttpError::io)?;
+    let mut buffer = [0u8; 8192];
+    let mut size = 0u64;
+    let mut hasher = Sha256::new();
+    loop {
+        let count = std::io::Read::read(&mut file, &mut buffer).map_err(ProviderHttpError::io)?;
+        if count == 0 {
+            break;
+        }
+        size = size.checked_add(count as u64).ok_or_else(|| {
+            ProviderHttpError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "ARTIFACT_TOO_LARGE",
+                "The stored artifact exceeds provider limits.",
+                false,
+            )
+        })?;
+        hasher.update(&buffer[..count]);
+    }
+    Ok((size, format!("{:x}", hasher.finalize())))
 }
 
 async fn read_field_limited(
@@ -2772,53 +2879,6 @@ async fn set_private_file_permissions(_path: &Path) -> Result<(), io::Error> {
     Ok(())
 }
 
-async fn sync_directory(path: &Path) -> Result<(), io::Error> {
-    #[cfg(windows)]
-    {
-        let _ = path;
-        // Rust's standard Windows file API cannot open a directory for sync.
-        // Callers flush file contents before completing the metadata operation.
-        Ok(())
-    }
-    #[cfg(unix)]
-    {
-        let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || File::open(path)?.sync_all())
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?
-    }
-}
-
-async fn hash_file(path: &Path) -> Result<(u64, String), ProviderHttpError> {
-    use tokio::io::AsyncReadExt;
-
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(ProviderHttpError::io)?;
-    let mut buffer = [0u8; 8192];
-    let mut size = 0u64;
-    let mut hasher = Sha256::new();
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .await
-            .map_err(ProviderHttpError::io)?;
-        if count == 0 {
-            break;
-        }
-        size = size.checked_add(count as u64).ok_or_else(|| {
-            ProviderHttpError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "ARTIFACT_TOO_LARGE",
-                "The stored artifact exceeds provider limits.",
-                false,
-            )
-        })?;
-        hasher.update(&buffer[..count]);
-    }
-    Ok((size, format!("{:x}", hasher.finalize())))
-}
-
 async fn remove_file_quietly(path: &Path) {
     if let Err(error) = tokio::fs::remove_file(path).await {
         if error.kind() != io::ErrorKind::NotFound {
@@ -2932,7 +2992,7 @@ mod tests {
         assert!(first.1.starts_with(&imports));
         assert_eq!(
             first.0.extension().and_then(|value| value.to_str()),
-            Some("part")
+            Some("pdf")
         );
         assert_eq!(
             first.1.extension().and_then(|value| value.to_str()),
@@ -2959,18 +3019,7 @@ mod tests {
             display_name: "report.pdf".to_string(),
             source_app_id: "email-watcher".to_string(),
         };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let error = runtime
-            .block_on(promote_staged_artifact(
-                &staging,
-                &final_path,
-                &input,
-                &imports,
-            ))
+        let error = promote_staged_artifact(&staging, &final_path, &input, &imports)
             .expect_err("conflicting promotion should fail");
 
         assert_eq!(error.error.code, "ARTIFACT_STORAGE_CONFLICT");
@@ -2984,17 +3033,18 @@ mod tests {
             sha256: format!("{:x}", Sha256::digest(winner)),
             ..input
         };
-        let promoted = match runtime.block_on(promote_staged_artifact(
+        let (promoted, owns_import) = match promote_staged_artifact(
             &matching_staging,
             &final_path,
             &matching_input,
             &imports,
-        )) {
-            Ok(path) => path,
+        ) {
+            Ok(result) => result,
             Err(_) => panic!("matching promotion should reuse the existing import"),
         };
 
         assert_eq!(promoted, final_path);
+        assert!(!owns_import);
         assert_eq!(fs::read(&promoted).unwrap(), winner);
         assert!(!matching_staging.exists());
     }
@@ -3038,6 +3088,91 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(250));
         assert!(!workers.accepting());
         release_tx.send(()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn slow_authenticated_body_does_not_block_package_quiesce_or_commit_a_job() {
+        let root = TestDirectory::new("doc-sum-connect-slow-body-quiesce");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let bytes = fs::read(source).unwrap();
+        let request = fixture_request(&bytes);
+        let request_json = serde_json::to_vec(&request).unwrap();
+        let boundary = "stalled";
+        let mut body = Vec::new();
+        write!(
+            body,
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n"
+        )
+        .unwrap();
+        let request_start = body.len();
+        body.extend_from_slice(&request_json);
+        write!(
+            body,
+            "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"artifact\"; filename=\"attachment.pdf\"\r\nContent-Type: application/pdf\r\n\r\n"
+        )
+        .unwrap();
+        body.extend_from_slice(&bytes);
+        write!(body, "\r\n--{boundary}--\r\n").unwrap();
+        let address = provider
+            .base_url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+        let mut stalled = std::net::TcpStream::connect(address).unwrap();
+        write!(
+            stalled,
+            "POST /v1/jobs HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            registration.auth.token,
+            body.len(),
+        )
+        .unwrap();
+        stalled.write_all(&body[..request_start + 1]).unwrap();
+        stalled.flush().unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        let started = Instant::now();
+        package_control::begin_quiesce_at(&app_data.join("test-package-control")).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        stalled.write_all(&body[request_start + 1..]).unwrap();
+        stalled
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        stalled.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 409 Conflict"),
+            "unexpected response: {response:?}"
+        );
+        let conn = db::init_db(&db_path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM connect_jobs", [], |row| row
+                .get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        assert!(fs::read_dir(app_data.join("connect-imports"))
+            .unwrap()
+            .next()
+            .is_none());
     }
 
     #[cfg(target_os = "linux")]

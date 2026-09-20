@@ -2,9 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::ffi::CStr;
 use std::fs::TryLockError;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -20,6 +22,10 @@ const MAX_RECORD_BYTES: u64 = 32 * 1024;
 const TRANSITION_FILE: &str = "background-mode-transition-v1.json";
 const CONTROL_LOCK_FILE: &str = ".background-control-v1.lock";
 const ADMISSION_LOCK_FILE: &str = ".background-admission-v1.lock";
+const LAUNCH_DIRECTORY: &str = ".local/state/document-summarizer";
+const LAUNCH_RECORD_FILE: &str = "connect-provider-launch-v1.json";
+const LAUNCH_ENVIRONMENT_FILE: &str = "connect-provider.env";
+pub(crate) const LAUNCH_GENERATION_ENV: &str = "DOC_SUM_CONNECT_LAUNCH_GENERATION";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -54,6 +60,28 @@ struct StateIdentity {
     path: String,
     device: u64,
     inode: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchIdentity {
+    path: String,
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchRecord {
+    format_version: u32,
+    package_id: String,
+    generation: String,
+    uid: u32,
+    config_home: String,
+    data_home: String,
+    runtime: LaunchIdentity,
+    control: LaunchIdentity,
+    app_data: LaunchIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,6 +500,202 @@ fn ensure_private_directory(path: &Path) -> Result<(), LifecycleControlError> {
     Ok(())
 }
 
+fn fixed_launch_root() -> Result<PathBuf, LifecycleControlError> {
+    let uid = unsafe { libc::geteuid() };
+    let mut password: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result = std::ptr::null_mut();
+    let mut buffer = vec![0u8; 16 * 1024];
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut password,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() || password.pw_dir.is_null() {
+        return Err(LifecycleControlError::Storage);
+    }
+    let home = PathBuf::from(std::ffi::OsString::from_vec(
+        unsafe { CStr::from_ptr(password.pw_dir) }
+            .to_bytes()
+            .to_vec(),
+    ));
+    if !home.is_absolute() {
+        return Err(LifecycleControlError::Storage);
+    }
+    Ok(home.join(LAUNCH_DIRECTORY))
+}
+
+fn launch_identity(path: &Path) -> Result<LaunchIdentity, LifecycleControlError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| LifecycleControlError::Storage)?;
+    if !path.is_absolute()
+        || !metadata.file_type().is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700
+    {
+        return Err(LifecycleControlError::Storage);
+    }
+    Ok(LaunchIdentity {
+        path: path
+            .to_str()
+            .filter(|value| !value.contains(['\n', '\r', '\0']))
+            .ok_or(LifecycleControlError::Storage)?
+            .to_string(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+fn environment_quote(value: &str) -> Result<String, LifecycleControlError> {
+    if value.contains(['\n', '\r', '\0']) {
+        return Err(LifecycleControlError::Storage);
+    }
+    Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn persist_launch_environment(
+    launch_root: &Path,
+    generation: &str,
+    app_data: &Path,
+    runtime: &Path,
+    control: &Path,
+) -> Result<(), LifecycleControlError> {
+    if Uuid::parse_str(generation).is_err() {
+        return Err(LifecycleControlError::InvalidRecord);
+    }
+    ensure_private_directory(launch_root)?;
+    let config_home = control.parent().ok_or(LifecycleControlError::Storage)?;
+    let data_home = app_data.parent().ok_or(LifecycleControlError::Storage)?;
+    let record = LaunchRecord {
+        format_version: FORMAT_VERSION,
+        package_id: PACKAGE_ID.to_string(),
+        generation: generation.to_string(),
+        uid: unsafe { libc::geteuid() },
+        config_home: config_home
+            .to_str()
+            .ok_or(LifecycleControlError::Storage)?
+            .to_string(),
+        data_home: data_home
+            .to_str()
+            .ok_or(LifecycleControlError::Storage)?
+            .to_string(),
+        runtime: launch_identity(runtime)?,
+        control: launch_identity(control)?,
+        app_data: launch_identity(app_data)?,
+    };
+    let record_bytes = serde_json::to_vec(&record).map_err(|_| LifecycleControlError::Storage)?;
+    atomic_write_private(&launch_root.join(LAUNCH_RECORD_FILE), &record_bytes)?;
+    let environment = render_launch_environment(&record)?;
+    atomic_write_private(&launch_root.join(LAUNCH_ENVIRONMENT_FILE), &environment)
+}
+
+fn render_launch_environment(record: &LaunchRecord) -> Result<Vec<u8>, LifecycleControlError> {
+    Ok(format!(
+        "XDG_CONFIG_HOME=\"{}\"\nXDG_DATA_HOME=\"{}\"\nXDG_RUNTIME_DIR=\"{}\"\n{LAUNCH_GENERATION_ENV}=\"{}\"\n",
+        environment_quote(&record.config_home)?,
+        environment_quote(&record.data_home)?,
+        environment_quote(&record.runtime.path)?,
+        record.generation,
+    )
+    .into_bytes())
+}
+
+fn read_private_bytes(path: &Path) -> Result<Vec<u8>, LifecycleControlError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| LifecycleControlError::Storage)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| LifecycleControlError::Storage)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.len() == 0
+        || metadata.len() > MAX_RECORD_BYTES
+    {
+        return Err(LifecycleControlError::InvalidRecord);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| LifecycleControlError::Storage)?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err(LifecycleControlError::InvalidRecord);
+    }
+    Ok(bytes)
+}
+
+fn read_launch_record(launch_root: &Path) -> Result<LaunchRecord, LifecycleControlError> {
+    let bytes = read_private_bytes(&launch_root.join(LAUNCH_RECORD_FILE))?;
+    serde_json::from_slice(&bytes).map_err(|_| LifecycleControlError::InvalidRecord)
+}
+
+fn validate_launch_record(
+    launch_root: &Path,
+    generation: &str,
+    app_data: &Path,
+    runtime: &Path,
+    control: &Path,
+) -> Result<(), LifecycleControlError> {
+    let record = read_launch_record(launch_root)?;
+    let config_home = control.parent().ok_or(LifecycleControlError::Storage)?;
+    let data_home = app_data.parent().ok_or(LifecycleControlError::Storage)?;
+    if record.format_version != FORMAT_VERSION
+        || record.package_id != PACKAGE_ID
+        || record.generation != generation
+        || Uuid::parse_str(&record.generation).is_err()
+        || record.uid != unsafe { libc::geteuid() }
+        || record.config_home != config_home.to_string_lossy()
+        || record.data_home != data_home.to_string_lossy()
+        || record.runtime != launch_identity(runtime)?
+        || record.control != launch_identity(control)?
+        || record.app_data != launch_identity(app_data)?
+    {
+        return Err(LifecycleControlError::InvalidRecord);
+    }
+    let environment = read_private_bytes(&launch_root.join(LAUNCH_ENVIRONMENT_FILE))?;
+    if environment != render_launch_environment(&record)? {
+        return Err(LifecycleControlError::InvalidRecord);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_background_launch_environment() -> Result<(), LifecycleControlError> {
+    let generation = env::var(LAUNCH_GENERATION_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or(LifecycleControlError::InvalidRecord)?;
+    let store = TransitionStore::from_environment()?;
+    let app_data = app_data_directory()?;
+    let runtime = env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or(LifecycleControlError::Storage)?;
+    validate_launch_record(
+        &fixed_launch_root()?,
+        &generation,
+        &app_data,
+        &runtime,
+        store.root(),
+    )
+}
+
+fn remove_launch_environment(launch_root: &Path) -> Result<(), LifecycleControlError> {
+    for name in [LAUNCH_ENVIRONMENT_FILE, LAUNCH_RECORD_FILE] {
+        match fs::remove_file(launch_root.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(LifecycleControlError::Storage),
+        }
+    }
+    sync_directory(launch_root)
+}
+
 fn open_private_lock(
     path: &Path,
     exclusive: bool,
@@ -559,12 +783,20 @@ fn atomic_write(
     path: &Path,
     transition: &BackgroundTransition,
 ) -> Result<(), LifecycleControlError> {
-    let parent = path.parent().ok_or(LifecycleControlError::Storage)?;
     let bytes = serde_json::to_vec(transition).map_err(|_| LifecycleControlError::Storage)?;
+    atomic_write_private(path, &bytes)
+}
+
+fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<(), LifecycleControlError> {
+    let parent = path.parent().ok_or(LifecycleControlError::Storage)?;
     if bytes.is_empty() || bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(LifecycleControlError::Storage);
     }
-    let temporary = parent.join(format!(".{TRANSITION_FILE}.{}.tmp", Uuid::new_v4()));
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(LifecycleControlError::Storage)?;
+    let temporary = parent.join(format!(".{name}.{}.tmp", Uuid::new_v4()));
     let result = (|| {
         let mut options = OpenOptions::new();
         options
@@ -575,7 +807,7 @@ fn atomic_write(
         let mut file = options
             .open(&temporary)
             .map_err(|_| LifecycleControlError::Storage)?;
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .map_err(|_| LifecycleControlError::Storage)?;
         file.sync_all()
             .map_err(|_| LifecycleControlError::Storage)?;
@@ -651,11 +883,20 @@ pub(crate) fn run_control(action: ControlAction) -> Result<ControlStatus, Lifecy
         runtime_root,
         control_root: store.root().to_path_buf(),
         manager_link,
+        launch_root: fixed_launch_root()?,
     };
     if action == ControlAction::Status {
         return if store.current()?.is_some() {
             Ok(ControlStatus::TransitionPending)
         } else if effects.manager_enabled()? {
+            let record = read_launch_record(&effects.launch_root)?;
+            validate_launch_record(
+                &effects.launch_root,
+                &record.generation,
+                &effects.app_data_dir,
+                &effects.runtime_root,
+                &effects.control_root,
+            )?;
             Ok(ControlStatus::Enabled)
         } else {
             Ok(ControlStatus::Disabled)
@@ -695,6 +936,7 @@ struct SystemdUserEffects {
     runtime_root: PathBuf,
     control_root: PathBuf,
     manager_link: PathBuf,
+    launch_root: PathBuf,
 }
 
 impl SystemdUserEffects {}
@@ -726,7 +968,13 @@ impl TransitionEffects for SystemdUserEffects {
         &mut self,
         transition: &BackgroundTransition,
     ) -> Result<(), LifecycleControlError> {
-        let _ = transition;
+        persist_launch_environment(
+            &self.launch_root,
+            &transition.generation,
+            &self.app_data_dir,
+            &self.runtime_root,
+            &self.control_root,
+        )?;
         require_success(systemctl(&["enable", "--now", service_unit()])?)
     }
 
@@ -756,13 +1004,14 @@ impl TransitionEffects for SystemdUserEffects {
         if transition.prior_enabled {
             require_success(systemctl(&["enable", service_unit()])?)
         } else {
-            require_success(systemctl(&["disable", "--now", service_unit()])?)
+            require_success(systemctl(&["disable", "--now", service_unit()])?)?;
+            remove_launch_environment(&self.launch_root)
         }
     }
 
     fn before_clear(
         &mut self,
-        _transition: &BackgroundTransition,
+        transition: &BackgroundTransition,
     ) -> Result<(), LifecycleControlError> {
         crate::connect::package_control::record_participant_acknowledgement(
             self.manager_enabled()?,
@@ -771,7 +1020,11 @@ impl TransitionEffects for SystemdUserEffects {
             &self.control_root,
             &self.manager_link,
         )
-        .map_err(|_| LifecycleControlError::Storage)
+        .map_err(|_| LifecycleControlError::Storage)?;
+        if transition.kind == TransitionKind::Disable {
+            remove_launch_environment(&self.launch_root)?;
+        }
+        Ok(())
     }
 }
 
@@ -1027,5 +1280,66 @@ mod tests {
         assert!(!effects.enabled);
         assert!(store.current().unwrap().is_none());
         assert!(effects.calls.lock().unwrap().contains(&"restore"));
+    }
+
+    #[test]
+    fn launch_environment_is_exact_generation_owner_private_and_tamper_closed() {
+        let root = TestDirectory::new("doc-sum-launch-environment");
+        let launch = root.0.join("fixed-launch");
+        let config = root.0.join("custom-config");
+        let data = root.0.join("custom-data");
+        let runtime = root.0.join("custom-runtime");
+        let control = config.join(APP_DIRECTORY);
+        let app_data = data.join(APP_DIRECTORY);
+        for path in [&control, &app_data, &runtime] {
+            fs::create_dir_all(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let generation = Uuid::new_v4().to_string();
+        persist_launch_environment(&launch, &generation, &app_data, &runtime, &control).unwrap();
+        validate_launch_record(&launch, &generation, &app_data, &runtime, &control).unwrap();
+        for name in [LAUNCH_RECORD_FILE, LAUNCH_ENVIRONMENT_FILE] {
+            let metadata = fs::symlink_metadata(launch.join(name)).unwrap();
+            assert_eq!(metadata.mode() & 0o777, 0o600);
+            assert_eq!(metadata.nlink(), 1);
+        }
+        let environment = fs::read_to_string(launch.join(LAUNCH_ENVIRONMENT_FILE)).unwrap();
+        assert!(environment.contains(&format!("XDG_CONFIG_HOME=\"{}\"", config.display())));
+        assert!(environment.contains(&format!("XDG_DATA_HOME=\"{}\"", data.display())));
+        assert!(environment.contains(&format!("XDG_RUNTIME_DIR=\"{}\"", runtime.display())));
+        assert!(environment.contains(&format!("{LAUNCH_GENERATION_ENV}=\"{generation}\"")));
+        assert!(validate_launch_record(
+            &launch,
+            &Uuid::new_v4().to_string(),
+            &app_data,
+            &runtime,
+            &control,
+        )
+        .is_err());
+        fs::write(
+            launch.join(LAUNCH_ENVIRONMENT_FILE),
+            b"XDG_RUNTIME_DIR=\"/tmp/spoof\"\n",
+        )
+        .unwrap();
+        assert!(
+            validate_launch_record(&launch, &generation, &app_data, &runtime, &control).is_err()
+        );
+        persist_launch_environment(&launch, &generation, &app_data, &runtime, &control).unwrap();
+        fs::set_permissions(
+            launch.join(LAUNCH_ENVIRONMENT_FILE),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(
+            validate_launch_record(&launch, &generation, &app_data, &runtime, &control).is_err()
+        );
+        persist_launch_environment(&launch, &generation, &app_data, &runtime, &control).unwrap();
+        let moved = root.0.join("old-runtime");
+        fs::rename(&runtime, moved).unwrap();
+        fs::create_dir(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            validate_launch_record(&launch, &generation, &app_data, &runtime, &control).is_err()
+        );
     }
 }

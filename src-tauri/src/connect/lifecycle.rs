@@ -19,6 +19,8 @@ pub(crate) enum BackgroundProviderError {
 }
 
 pub(crate) fn run() -> Result<(), BackgroundProviderError> {
+    super::lifecycle_control::validate_background_launch_environment()
+        .map_err(|_| BackgroundProviderError::DataDirectoryUnavailable)?;
     let signals = BlockedShutdownSignals::new()?;
     let stop_control = ProviderStopControl::new();
     signals.spawn_stop_notifier(stop_control.clone())?;
