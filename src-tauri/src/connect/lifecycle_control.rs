@@ -982,9 +982,15 @@ impl TransitionEffects for SystemdUserEffects {
         &mut self,
         transition: &BackgroundTransition,
     ) -> Result<(), LifecycleControlError> {
+        let expected_process = crate::connect::provider::expected_provider_process(
+            unsafe { libc::geteuid() },
+            &env::current_exe().map_err(|_| LifecycleControlError::Storage)?,
+        )
+        .map_err(|_| LifecycleControlError::Readiness)?;
         crate::connect::provider::wait_for_registered_provider(
             &self.runtime_root,
             transition.expected_v2_instance_id.as_deref(),
+            &expected_process,
             instant_for_unix_deadline(transition.control_deadline_unix_ms)?,
         )
         .map_err(|_| LifecycleControlError::Readiness)

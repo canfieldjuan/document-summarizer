@@ -56,6 +56,10 @@ use std::future::IntoFuture;
 use std::io::Read;
 use std::io::{self, Write};
 use std::net::TcpListener;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -400,6 +404,38 @@ struct RegistrationIdentity {
     pid: u32,
     transport: RegistrationTransportIdentity,
     auth: RegistrationAuthIdentity,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+pub(crate) struct ExpectedProviderProcess {
+    uid: u32,
+    executable_device: u64,
+    executable_inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn expected_provider_process(
+    uid: u32,
+    executable: &Path,
+) -> Result<ExpectedProviderProcess, ProviderStartError> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options.open(executable)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.nlink() == 0 {
+        return Err(ProviderStartError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "provider executable identity is invalid",
+        )));
+    }
+    Ok(ExpectedProviderProcess {
+        uid,
+        executable_device: metadata.dev(),
+        executable_inode: metadata.ino(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -2422,7 +2458,7 @@ fn scavenge_stale_registrations(
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
 
     for (path, version, instance_id) in &candidates {
-        if registration_proves_live(&client, path, *version, instance_id, None) {
+        if registration_proves_live(&client, path, *version, instance_id, None, None) {
             return Err(ProviderStartError::ProviderAlreadyRunning);
         }
     }
@@ -2447,6 +2483,75 @@ fn owned_registration_instance_id(path: &Path) -> Option<String> {
     valid_uuid_v4(instance_id).then(|| instance_id.to_string())
 }
 
+#[cfg(target_os = "linux")]
+struct RegisteredProcessGuard {
+    process_directory: File,
+    process_path: PathBuf,
+    process_device: u64,
+    process_inode: u64,
+    expected: ExpectedProviderProcess,
+}
+
+#[cfg(target_os = "linux")]
+impl RegisteredProcessGuard {
+    fn open(pid: u32, expected: ExpectedProviderProcess) -> Option<Self> {
+        if pid == 0 {
+            return None;
+        }
+        let process_path = PathBuf::from(format!("/proc/{pid}"));
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let process_directory = options.open(&process_path).ok()?;
+        let opened = process_directory.metadata().ok()?;
+        let current = fs::symlink_metadata(&process_path).ok()?;
+        if !opened.file_type().is_dir()
+            || opened.uid() != expected.uid
+            || opened.dev() != current.dev()
+            || opened.ino() != current.ino()
+        {
+            return None;
+        }
+        let guard = Self {
+            process_directory,
+            process_path,
+            process_device: opened.dev(),
+            process_inode: opened.ino(),
+            expected,
+        };
+        guard.executable_matches().then_some(guard)
+    }
+
+    fn executable_matches(&self) -> bool {
+        let descriptor = unsafe {
+            libc::openat(
+                self.process_directory.as_raw_fd(),
+                c"exe".as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return false;
+        }
+        let executable = unsafe { File::from_raw_fd(descriptor) };
+        executable.metadata().is_ok_and(|metadata| {
+            metadata.file_type().is_file()
+                && metadata.dev() == self.expected.executable_device
+                && metadata.ino() == self.expected.executable_inode
+        })
+    }
+
+    fn revalidate(&self) -> bool {
+        fs::symlink_metadata(&self.process_path).is_ok_and(|current| {
+            current.file_type().is_dir()
+                && current.uid() == self.expected.uid
+                && current.dev() == self.process_device
+                && current.ino() == self.process_inode
+        }) && self.executable_matches()
+    }
+}
+
 #[cfg(unix)]
 fn registration_proves_live(
     client: &reqwest::blocking::Client,
@@ -2454,6 +2559,7 @@ fn registration_proves_live(
     version: WireVersion,
     expected_instance_id: &str,
     private_root: Option<&Path>,
+    expected_process: Option<&ExpectedProviderProcess>,
 ) -> bool {
     let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES, private_root) else {
         return false;
@@ -2464,6 +2570,18 @@ fn registration_proves_live(
     if !registration_matches_candidate(&registration, version, expected_instance_id) {
         return false;
     }
+    #[cfg(target_os = "linux")]
+    let process_guard = match expected_process {
+        Some(expected) => match RegisteredProcessGuard::open(registration.pid, *expected) {
+            Some(guard) => Some(guard),
+            None => return false,
+        },
+        None => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    if expected_process.is_some() {
+        return false;
+    }
     let Some(probe) = probe_manifest(
         client,
         &registration.transport.base_url,
@@ -2472,14 +2590,21 @@ fn registration_proves_live(
     ) else {
         return false;
     };
-    match probe {
+    let manifest_matches = match probe {
         ManifestProbe::Manifest(manifest) => {
             manifest.protocol_version == version.protocol_version()
                 && manifest.instance_id == expected_instance_id
                 && manifest.app.id == APP_ID
         }
         ManifestProbe::EntitlementRequired => true,
-    }
+    };
+    #[cfg(target_os = "linux")]
+    return manifest_matches
+        && process_guard
+            .as_ref()
+            .is_none_or(RegisteredProcessGuard::revalidate);
+    #[cfg(not(target_os = "linux"))]
+    manifest_matches
 }
 
 fn registration_matches_candidate(
@@ -2530,7 +2655,7 @@ pub(crate) fn stop_and_cleanup_registered_provider(
                 continue;
             };
             if registration_matches_candidate(&registration, version, &instance_id)
-                && registration_proves_live(&client, &path, version, &instance_id, None)
+                && registration_proves_live(&client, &path, version, &instance_id, None, None)
                 && signaled.insert(registration.pid)
             {
                 let pid = i32::try_from(registration.pid).map_err(|_| {
@@ -2575,32 +2700,111 @@ pub(crate) fn stop_and_cleanup_registered_provider(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn wait_for_registered_provider(
-    runtime_root: &Path,
-    expected_v2_instance_id: Option<&str>,
-    deadline: Instant,
-) -> Result<(), ProviderStartError> {
-    let directory = runtime_root.join("local-connect/v2/providers");
-    ensure_private_directory(&directory)?;
-    let client = reqwest::blocking::Client::builder()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegisteredProviderState {
+    Absent,
+    Ready,
+    PresentUnready,
+}
+
+#[cfg(target_os = "linux")]
+fn provider_probe_client() -> Result<reqwest::blocking::Client, ProviderStartError> {
+    reqwest::blocking::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(REGISTRATION_PROBE_TIMEOUT)
         .timeout(REGISTRATION_PROBE_TIMEOUT)
         .build()
-        .map_err(|error| ProviderStartError::Server(error.to_string()))?;
+        .map_err(|error| ProviderStartError::Server(error.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn registered_provider_state_with_client(
+    client: &reqwest::blocking::Client,
+    runtime_root: &Path,
+    expected_v2_instance_id: Option<&str>,
+    expected_process: &ExpectedProviderProcess,
+) -> Result<RegisteredProviderState, ProviderStartError> {
+    let directory_v2 = runtime_root.join("local-connect/v2/providers");
+    ensure_private_directory(&directory_v2)?;
+    let mut present = false;
+    for entry in fs::read_dir(&directory_v2)? {
+        let path = entry?.path();
+        let name_is_provider = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(&format!("{APP_ID}-")) && name.ends_with(".json"));
+        if !name_is_provider {
+            continue;
+        }
+        present = true;
+        let Some(instance_id) = owned_registration_instance_id(&path) else {
+            continue;
+        };
+        if expected_v2_instance_id.is_some_and(|expected| expected != instance_id) {
+            continue;
+        }
+        if registration_proves_live(
+            client,
+            &path,
+            WireVersion::V2,
+            &instance_id,
+            None,
+            Some(expected_process),
+        ) {
+            return Ok(RegisteredProviderState::Ready);
+        }
+    }
+    let directory_v1 = runtime_root.join("local-connect/v1/providers");
+    ensure_private_directory(&directory_v1)?;
+    if !present {
+        present = fs::read_dir(directory_v1)?.any(|entry| {
+            entry.ok().is_some_and(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with(&format!("{APP_ID}-")) && name.ends_with(".json")
+                })
+            })
+        });
+    }
+    Ok(if present {
+        RegisteredProviderState::PresentUnready
+    } else {
+        RegisteredProviderState::Absent
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn registered_provider_state(
+    runtime_root: &Path,
+    expected_v2_instance_id: Option<&str>,
+    expected_process: &ExpectedProviderProcess,
+) -> Result<RegisteredProviderState, ProviderStartError> {
+    let client = provider_probe_client()?;
+    registered_provider_state_with_client(
+        &client,
+        runtime_root,
+        expected_v2_instance_id,
+        expected_process,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn wait_for_registered_provider(
+    runtime_root: &Path,
+    expected_v2_instance_id: Option<&str>,
+    expected_process: &ExpectedProviderProcess,
+    deadline: Instant,
+) -> Result<(), ProviderStartError> {
+    let client = provider_probe_client()?;
     while Instant::now() < deadline {
-        for entry in fs::read_dir(&directory)? {
-            let path = entry?.path();
-            let Some(instance_id) = owned_registration_instance_id(&path) else {
-                continue;
-            };
-            if expected_v2_instance_id.is_some_and(|expected| expected != instance_id) {
-                continue;
-            }
-            if registration_proves_live(&client, &path, WireVersion::V2, &instance_id, None) {
-                return Ok(());
-            }
+        if registered_provider_state_with_client(
+            &client,
+            runtime_root,
+            expected_v2_instance_id,
+            expected_process,
+        )? == RegisteredProviderState::Ready
+        {
+            return Ok(());
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -4171,6 +4375,81 @@ mod tests {
         )
         .unwrap());
         assert!(!registration_path_v2.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_rejects_live_manifest_with_wrong_process_executable() {
+        let root = TestDirectory::new("doc-sum-connect-readiness-process-identity");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime_root.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let path = provider.registration_path_v2();
+        let actual: v2::RuntimeRegistration =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let mut fake = actual.clone();
+        fake.pid = unsafe { libc::getppid() as u32 };
+        fs::write(path, serde_json::to_vec_pretty(&fake).unwrap()).unwrap();
+        let client = client();
+        let expected =
+            expected_provider_process(unsafe { libc::geteuid() }, &env::current_exe().unwrap())
+                .unwrap();
+
+        assert!(!registration_proves_live(
+            &client,
+            path,
+            WireVersion::V2,
+            &fake.instance_id,
+            None,
+            Some(&expected),
+        ));
+        assert_eq!(
+            registered_provider_state(&runtime_root, Some(&fake.instance_id), &expected).unwrap(),
+            RegisteredProviderState::PresentUnready
+        );
+
+        fs::write(path, serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
+        assert!(registration_proves_live(
+            &client,
+            path,
+            WireVersion::V2,
+            &actual.instance_id,
+            None,
+            Some(&expected),
+        ));
+        assert_eq!(
+            registered_provider_state(&runtime_root, Some(&actual.instance_id), &expected).unwrap(),
+            RegisteredProviderState::Ready
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_process_guard_rejects_process_exit_after_identity_capture() {
+        let root = TestDirectory::new("doc-sum-connect-process-exit-race");
+        let executable = root.0.join("provider-process");
+        fs::copy("/usr/bin/sleep", &executable).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = std::process::Command::new(&executable)
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let expected = expected_provider_process(unsafe { libc::geteuid() }, &executable).unwrap();
+        let guard = RegisteredProcessGuard::open(child.id(), expected).unwrap();
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert!(!guard.revalidate());
     }
 
     #[cfg(windows)]

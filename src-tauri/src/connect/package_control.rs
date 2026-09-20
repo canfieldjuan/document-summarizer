@@ -67,6 +67,13 @@ enum ParticipantSettlement {
     SuccessorReady,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingRestoreRecovery {
+    Absent,
+    Ready(ParticipantSettlement),
+    StopAndRetry,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Participant {
@@ -191,6 +198,11 @@ trait PackageEffects {
         participant: &Participant,
         package_generation: &str,
     ) -> Result<ParticipantSettlement, PackageControlError>;
+    fn recover_pending_restore(
+        &mut self,
+        participant: &Participant,
+        package_generation: &str,
+    ) -> Result<PendingRestoreRecovery, PackageControlError>;
     fn validate_restored(
         &mut self,
         participant: &Participant,
@@ -810,6 +822,18 @@ fn finish(
                 }
             }
             let participant = record.participants[index].clone();
+            if matches!(kind, PackageKind::Upgrade | PackageKind::Reinstall) {
+                match effects.recover_pending_restore(&participant, &record.generation)? {
+                    PendingRestoreRecovery::Absent => {}
+                    PendingRestoreRecovery::StopAndRetry => effects.stop(&participant)?,
+                    PendingRestoreRecovery::Ready(settlement) => {
+                        effects.validate_restored(&participant, &record.generation, settlement)?;
+                        record.participants[index].settlement = settlement;
+                        store.write(&record)?;
+                        continue;
+                    }
+                }
+            }
             effects.cleanup(&participant)?;
             if matches!(kind, PackageKind::Upgrade | PackageKind::Reinstall) {
                 drop(participant_authorities);
@@ -1752,6 +1776,14 @@ struct SystemEffects {
     package_root: PathBuf,
 }
 
+fn expected_successor_process(
+    participant: &Participant,
+) -> Result<crate::connect::provider::ExpectedProviderProcess, PackageControlError> {
+    let executable = env::current_exe().map_err(|_| PackageControlError::Storage)?;
+    crate::connect::provider::expected_provider_process(participant.uid, &executable)
+        .map_err(|_| PackageControlError::Storage)
+}
+
 fn controller_path(record: &PackageRecord) -> PathBuf {
     PackageStore::production()
         .root
@@ -1867,14 +1899,44 @@ impl PackageEffects for SystemEffects {
             manager_success(&participant.user, &["disable", "--now"])?;
             return Ok(ParticipantSettlement::Disabled);
         }
+        let expected_process = expected_successor_process(participant)?;
         manager_success(&participant.user, &["enable", "--now"])?;
         crate::connect::provider::wait_for_registered_provider(
             Path::new(&participant.runtime_root),
             None,
+            &expected_process,
             Instant::now() + Duration::from_secs(35),
         )
         .map_err(|_| PackageControlError::Manager)?;
         Ok(ParticipantSettlement::SuccessorReady)
+    }
+
+    fn recover_pending_restore(
+        &mut self,
+        participant: &Participant,
+        _package_generation: &str,
+    ) -> Result<PendingRestoreRecovery, PackageControlError> {
+        if !participant.enabled || !Path::new(&participant.runtime_root).is_dir() {
+            return Ok(PendingRestoreRecovery::Absent);
+        }
+        let expected_process = expected_successor_process(participant)?;
+        match crate::connect::provider::registered_provider_state(
+            Path::new(&participant.runtime_root),
+            None,
+            &expected_process,
+        )
+        .map_err(|_| PackageControlError::Manager)?
+        {
+            crate::connect::provider::RegisteredProviderState::Absent => {
+                Ok(PendingRestoreRecovery::Absent)
+            }
+            crate::connect::provider::RegisteredProviderState::Ready => Ok(
+                PendingRestoreRecovery::Ready(ParticipantSettlement::SuccessorReady),
+            ),
+            crate::connect::provider::RegisteredProviderState::PresentUnready => {
+                Ok(PendingRestoreRecovery::StopAndRetry)
+            }
+        }
     }
 
     fn validate_restored(
@@ -1896,9 +1958,11 @@ impl PackageEffects for SystemEffects {
                 {
                     return Err(PackageControlError::Conflict);
                 }
+                let expected_process = expected_successor_process(participant)?;
                 crate::connect::provider::wait_for_registered_provider(
                     Path::new(&participant.runtime_root),
                     None,
+                    &expected_process,
                     Instant::now() + Duration::from_secs(2),
                 )
                 .map_err(|_| PackageControlError::Manager)
@@ -2496,6 +2560,9 @@ mod tests {
         calls: Arc<Mutex<Vec<String>>>,
         defer_enabled: bool,
         fail_restore_once: bool,
+        publish_late_on_restore_timeout: bool,
+        late_registration_present: bool,
+        late_registration_ready: bool,
         controller_root: Option<PathBuf>,
         refreshed_runtime: Option<(u64, u64)>,
         restore_flock_paths: Option<(PathBuf, PathBuf)>,
@@ -2511,6 +2578,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("stop:{}", participant.uid));
+            self.late_registration_present = false;
             Ok(())
         }
         fn restore(
@@ -2520,6 +2588,9 @@ mod tests {
         ) -> Result<ParticipantSettlement, PackageControlError> {
             if self.fail_restore_once {
                 self.fail_restore_once = false;
+                if self.publish_late_on_restore_timeout {
+                    self.late_registration_present = true;
+                }
                 return Err(PackageControlError::Manager);
             }
             if let Some((quiesce, package)) = &self.restore_flock_paths {
@@ -2558,6 +2629,23 @@ mod tests {
                 ParticipantSettlement::Disabled
             })
         }
+        fn recover_pending_restore(
+            &mut self,
+            participant: &Participant,
+            _package_generation: &str,
+        ) -> Result<PendingRestoreRecovery, PackageControlError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("recover:{}", participant.uid));
+            Ok(if !self.late_registration_present {
+                PendingRestoreRecovery::Absent
+            } else if self.late_registration_ready {
+                PendingRestoreRecovery::Ready(ParticipantSettlement::SuccessorReady)
+            } else {
+                PendingRestoreRecovery::StopAndRetry
+            })
+        }
         fn validate_restored(
             &mut self,
             participant: &Participant,
@@ -2582,6 +2670,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("cleanup:{}", participant.uid));
+            if self.late_registration_present {
+                return Err(PackageControlError::Conflict);
+            }
             Ok(())
         }
         fn refresh_runtime_identity(
@@ -2676,9 +2767,11 @@ mod tests {
                 "stop:1001".to_string(),
                 "suppress:1001".to_string(),
                 "cleanup:1001".to_string(),
+                "recover:1000".to_string(),
                 "cleanup:1000".to_string(),
                 "restore:1000:true".to_string(),
                 format!("validate:1000:{generation}:SuccessorReady"),
+                "recover:1001".to_string(),
                 "cleanup:1001".to_string(),
                 "restore:1001:false".to_string(),
                 format!("validate:1001:{generation}:Disabled"),
@@ -3013,6 +3106,104 @@ mod tests {
         )
         .unwrap();
         assert!(store.read().unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn late_successor_after_restore_timeout_converges_on_retry() {
+        let (store, root) = store("doc-sum-package-late-successor-recovery");
+        let mut effects = MockEffects {
+            participants: vec![participant(1000, true)],
+            fail_restore_once: true,
+            publish_late_on_restore_timeout: true,
+            late_registration_ready: true,
+            ..Default::default()
+        };
+        prepare(&store, PackageKind::Upgrade, "0.0.9", "0.1.0", &mut effects).unwrap();
+        assert!(matches!(
+            finish(
+                &store,
+                PackageKind::Upgrade,
+                "0.1.0",
+                &mut effects,
+                None,
+                None,
+            ),
+            Err(PackageControlError::Manager)
+        ));
+        let interrupted = store.read().unwrap().unwrap();
+        assert_eq!(interrupted.phase, PackagePhase::Settling);
+        assert_eq!(
+            interrupted.participants[0].settlement,
+            ParticipantSettlement::Pending
+        );
+
+        finish(
+            &store,
+            PackageKind::Upgrade,
+            "0.1.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(store.read().unwrap().is_none());
+        assert_eq!(
+            effects
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.as_str() == "restore:1000:true")
+                .count(),
+            0
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unready_late_successor_is_stopped_before_retrying_launch() {
+        let (store, root) = store("doc-sum-package-unready-late-successor-recovery");
+        let mut effects = MockEffects {
+            participants: vec![participant(1000, true)],
+            fail_restore_once: true,
+            publish_late_on_restore_timeout: true,
+            ..Default::default()
+        };
+        prepare(&store, PackageKind::Upgrade, "0.0.9", "0.1.0", &mut effects).unwrap();
+        assert!(matches!(
+            finish(
+                &store,
+                PackageKind::Upgrade,
+                "0.1.0",
+                &mut effects,
+                None,
+                None,
+            ),
+            Err(PackageControlError::Manager)
+        ));
+
+        finish(
+            &store,
+            PackageKind::Upgrade,
+            "0.1.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(store.read().unwrap().is_none());
+        let calls = effects.calls.lock().unwrap();
+        let retry_recovery = calls
+            .iter()
+            .rposition(|call| call == "recover:1000")
+            .unwrap();
+        assert_eq!(calls[retry_recovery + 1], "stop:1000");
+        assert_eq!(calls[retry_recovery + 2], "cleanup:1000");
+        assert_eq!(calls[retry_recovery + 3], "restore:1000:true");
+        drop(calls);
         fs::remove_dir_all(root).unwrap();
     }
 
