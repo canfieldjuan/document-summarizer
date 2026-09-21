@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 18;
+pub const CURRENT_SCHEMA_VERSION: u32 = 19;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -723,6 +723,12 @@ BEGIN
 END;
 "#;
 
+const V18_TO_V19: &str = r#"
+ALTER TABLE documents
+ADD COLUMN source_type TEXT NOT NULL DEFAULT 'native_text'
+CHECK (source_type IN ('native_text', 'ocr_text'));
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -911,6 +917,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V15_TO_V16)?;
         tx.execute_batch(V16_TO_V17)?;
         tx.execute_batch(V17_TO_V18)?;
+        tx.execute_batch(V18_TO_V19)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -982,6 +989,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 17 {
         migrate_v17_to_v18(conn)?;
+        current_version = 18;
+    }
+    if current_version == 18 {
+        migrate_v18_to_v19(conn)?;
     }
     validate(conn)
 }
@@ -1083,6 +1094,10 @@ fn migrate_v17_to_v18(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V17_TO_V18, 18)
 }
 
+fn migrate_v18_to_v19(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V18_TO_V19, 19)
+}
+
 fn migrate_additive(
     conn: &mut Connection,
     statements: &str,
@@ -1101,6 +1116,27 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         return Err(MigrationError::Invariant(format!(
             "quick_check returned {quick_check}"
         )));
+    }
+
+    let source_type_columns: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name = 'source_type'",
+        [],
+        |row| row.get(0),
+    )?;
+    if source_type_columns != 1 {
+        return Err(MigrationError::Invariant(
+            "documents.source_type is missing".to_string(),
+        ));
+    }
+    let invalid_source_types: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM documents WHERE source_type NOT IN ('native_text', 'ocr_text')",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_source_types != 0 {
+        return Err(MigrationError::Invariant(
+            "documents contains an invalid source_type".to_string(),
+        ));
     }
 
     let event_sequence_columns: u32 = conn.query_row(
@@ -2503,6 +2539,21 @@ mod tests {
             .unwrap(),
             "pipeline_run"
         );
+        assert_eq!(
+            conn.query_row(
+                "SELECT source_type FROM documents WHERE document_id = 'owner-document'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "native_text"
+        );
+        assert!(conn
+            .execute(
+                "UPDATE documents SET source_type = 'unknown' WHERE document_id = 'owner-document'",
+                [],
+            )
+            .is_err());
         assert!(conn
             .execute(
                 "UPDATE model_request_owners SET created_at = 'changed' WHERE owner_id = 'owner-run'",
@@ -2533,7 +2584,10 @@ mod tests {
         migrate(&mut conn).expect("current schema should initialize");
         conn.execute_batch(
             r#"
-            INSERT INTO documents VALUES (
+            INSERT INTO documents (
+                document_id, original_filename, file_type, byte_size, content_hash,
+                local_source_path, created_at
+            ) VALUES (
                 'missing-owner-document', 'missing-owner.pdf', 'pdf', 12, 'hash',
                 '/missing-owner.pdf', '2026-09-11T18:00:00Z'
             );

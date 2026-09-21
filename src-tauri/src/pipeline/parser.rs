@@ -1,14 +1,22 @@
 use crate::pipeline::contracts::{
     DocumentParser, IngestedDocument, ParsedDocument, ParsedPage, PipelineFailure, PipelineStage,
-    PipelineWarning,
+    PipelineWarning, SourceType,
 };
 use crate::pipeline::db::{self, StoreError};
+use lopdf::{
+    content::Content, decode_text_string, Dictionary as PdfDictionary, Object as PdfObject,
+    ObjectId,
+};
 use pdf_extract::{output_doc_page, Document as PdfDocument, Error as LopdfError, PlainTextOutput};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use thiserror::Error;
+
+const MAX_TAGGED_OCR_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct PdfExtractParser;
@@ -39,6 +47,25 @@ impl DocumentParser for PdfExtractParser {
     }
 }
 
+#[derive(Default)]
+pub struct SourceParserSet {
+    native: PdfExtractParser,
+    ocr: TaggedOcrParser,
+}
+
+impl SourceParserSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn select(&self, source_type: SourceType) -> &dyn DocumentParser {
+        match source_type {
+            SourceType::NativeText => &self.native,
+            SourceType::OcrText => &self.ocr,
+        }
+    }
+}
+
 impl PdfExtractParser {
     fn parse_inner(&self, document: &IngestedDocument) -> Result<ParsedDocument, PipelineFailure> {
         if document.file_type != "pdf" {
@@ -49,28 +76,7 @@ impl PdfExtractParser {
             ));
         }
 
-        let source_bytes = fs::read(&document.local_source_path).map_err(|error| {
-            parse_failure(
-                "SOURCE_IO_ERROR",
-                format!("The ingested source could not be reopened: {error}"),
-                true,
-            )
-        })?;
-        let source_size = u64::try_from(source_bytes.len()).map_err(|_| {
-            parse_failure(
-                "SOURCE_CONTENT_CHANGED",
-                "The source no longer matches the ingested document identity",
-                true,
-            )
-        })?;
-        let source_hash = format!("{:x}", Sha256::digest(&source_bytes));
-        if source_size != document.byte_size || source_hash != document.content_hash {
-            return Err(parse_failure(
-                "SOURCE_CONTENT_CHANGED",
-                "The source no longer matches the ingested document identity",
-                true,
-            ));
-        }
+        let source_bytes = verified_source_bytes(document)?;
 
         let pdf = PdfDocument::load_mem(&source_bytes).map_err(map_load_error)?;
         if pdf.was_encrypted() || pdf.is_encrypted() {
@@ -138,10 +144,663 @@ impl PdfExtractParser {
             document_id: document.document_id.clone(),
             parser_id: self.id().to_string(),
             parser_version: self.version().to_string(),
+            source_type: document.source_type,
             pages: parsed_pages,
             warnings: document_warnings,
         })
     }
+}
+
+fn verified_source_bytes(document: &IngestedDocument) -> Result<Vec<u8>, PipelineFailure> {
+    let source_bytes = fs::read(&document.local_source_path).map_err(|error| {
+        parse_failure(
+            "SOURCE_IO_ERROR",
+            format!("The ingested source could not be reopened: {error}"),
+            true,
+        )
+    })?;
+    let source_size = u64::try_from(source_bytes.len()).map_err(|_| {
+        parse_failure(
+            "SOURCE_CONTENT_CHANGED",
+            "The source no longer matches the ingested document identity",
+            true,
+        )
+    })?;
+    let source_hash = format!("{:x}", Sha256::digest(&source_bytes));
+    if source_size != document.byte_size || source_hash != document.content_hash {
+        return Err(parse_failure(
+            "SOURCE_CONTENT_CHANGED",
+            "The source no longer matches the ingested document identity",
+            true,
+        ));
+    }
+    Ok(source_bytes)
+}
+
+#[derive(Default)]
+pub struct TaggedOcrParser;
+
+impl TaggedOcrParser {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn parse_inner(&self, document: &IngestedDocument) -> Result<ParsedDocument, PipelineFailure> {
+        if document.file_type != "pdf"
+            || document.source_type != crate::pipeline::contracts::SourceType::OcrText
+        {
+            return Err(parse_failure(
+                "UNSUPPORTED_PARSER_INPUT",
+                "The tagged OCR parser only accepts admitted OCR PDF documents",
+                false,
+            ));
+        }
+        let source_bytes = verified_source_bytes(document)?;
+        let pdf = load_bounded_tagged_ocr_pdf(&source_bytes).map_err(|_| {
+            parse_failure(
+                "OCR_STRUCTURE_INVALID",
+                "The OCR PDF does not match the required tagged profile",
+                false,
+            )
+        })?;
+        if pdf.was_encrypted() || pdf.is_encrypted() {
+            return Err(parse_failure(
+                "ENCRYPTED_PDF_UNSUPPORTED",
+                "Encrypted PDFs are not supported in the tagged OCR parser",
+                false,
+            ));
+        }
+        let pages = parse_tagged_ocr_pages(&pdf).map_err(|_| {
+            parse_failure(
+                "OCR_STRUCTURE_INVALID",
+                "The OCR PDF does not match the required tagged profile",
+                false,
+            )
+        })?;
+        let text_bytes = pages
+            .iter()
+            .map(|page| page.text.len())
+            .try_fold(0usize, |total, length| total.checked_add(length + 1))
+            .ok_or_else(|| {
+                parse_failure(
+                    "OCR_TEXT_LIMIT_EXCEEDED",
+                    "The OCR text exceeds the supported size",
+                    false,
+                )
+            })?;
+        if text_bytes > 256 * 1024 || pages.iter().all(|page| page.text.trim().is_empty()) {
+            return Err(parse_failure(
+                "OCR_TEXT_LIMIT_EXCEEDED",
+                "The OCR text is empty or exceeds the supported size",
+                false,
+            ));
+        }
+        Ok(ParsedDocument {
+            document_id: document.document_id.clone(),
+            parser_id: self.id().to_string(),
+            parser_version: self.version().to_string(),
+            source_type: document.source_type,
+            pages,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+fn load_bounded_tagged_ocr_pdf(source: &[u8]) -> Result<PdfDocument, ()> {
+    require_classic_tagged_ocr_xref(source)?;
+    PdfDocument::load_mem(source).map_err(|_| ())
+}
+
+fn require_classic_tagged_ocr_xref(source: &[u8]) -> Result<(), ()> {
+    const STARTXREF: &[u8] = b"startxref";
+    const EOF_MARKER: &[u8] = b"%%EOF";
+
+    let marker_offset = source
+        .windows(STARTXREF.len())
+        .rposition(|window| window == STARTXREF)
+        .ok_or(())?;
+    let mut cursor = marker_offset + STARTXREF.len();
+    skip_pdf_whitespace(source, &mut cursor);
+    let number_start = cursor;
+    let mut xref_offset = 0usize;
+    while let Some(digit) = source.get(cursor).filter(|byte| byte.is_ascii_digit()) {
+        xref_offset = xref_offset
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(usize::from(*digit - b'0')))
+            .ok_or(())?;
+        cursor += 1;
+    }
+    if cursor == number_start {
+        return Err(());
+    }
+    skip_pdf_whitespace(source, &mut cursor);
+    if !source
+        .get(cursor..)
+        .is_some_and(|tail| tail.starts_with(EOF_MARKER))
+    {
+        return Err(());
+    }
+    cursor += EOF_MARKER.len();
+    skip_pdf_whitespace(source, &mut cursor);
+    if cursor != source.len() || xref_offset >= marker_offset {
+        return Err(());
+    }
+
+    let xref = source.get(xref_offset..marker_offset).ok_or(())?;
+    if !xref.starts_with(b"xref")
+        || !xref.get(4).is_some_and(|byte| is_pdf_whitespace(*byte))
+        || xref
+            .windows(b"/Prev".len())
+            .any(|window| window == b"/Prev")
+        || xref
+            .windows(b"/XRefStm".len())
+            .any(|window| window == b"/XRefStm")
+        || xref.contains(&b'#')
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn skip_pdf_whitespace(source: &[u8], cursor: &mut usize) {
+    while source
+        .get(*cursor)
+        .is_some_and(|byte| is_pdf_whitespace(*byte))
+    {
+        *cursor += 1;
+    }
+}
+
+fn is_pdf_whitespace(byte: u8) -> bool {
+    matches!(byte, 0 | b'\t' | b'\n' | 12 | b'\r' | b' ')
+}
+
+impl DocumentParser for TaggedOcrParser {
+    fn parse(&self, document: &IngestedDocument) -> Result<ParsedDocument, PipelineFailure> {
+        catch_unwind(AssertUnwindSafe(|| self.parse_inner(document))).unwrap_or_else(|_| {
+            Err(parse_failure(
+                "OCR_PARSER_PANIC",
+                "The tagged OCR parser aborted while reading malformed page data",
+                false,
+            ))
+        })
+    }
+
+    fn id(&self) -> &'static str {
+        "local-connect-tagged-ocr"
+    }
+
+    fn version(&self) -> &'static str {
+        "1.0"
+    }
+}
+
+type TaggedResult<T> = Result<T, ()>;
+
+fn tagged_object<'a>(pdf: &'a PdfDocument, object: &'a PdfObject) -> TaggedResult<&'a PdfObject> {
+    pdf.dereference(object)
+        .map(|(_, value)| value)
+        .map_err(|_| ())
+}
+
+fn tagged_dictionary<'a>(
+    pdf: &'a PdfDocument,
+    object: &'a PdfObject,
+) -> TaggedResult<&'a PdfDictionary> {
+    tagged_object(pdf, object)?.as_dict().map_err(|_| ())
+}
+
+fn tagged_array<'a>(
+    pdf: &'a PdfDocument,
+    object: &'a PdfObject,
+) -> TaggedResult<&'a Vec<PdfObject>> {
+    tagged_object(pdf, object)?.as_array().map_err(|_| ())
+}
+
+fn tagged_reference(object: &PdfObject) -> TaggedResult<ObjectId> {
+    object.as_reference().map_err(|_| ())
+}
+
+fn tagged_child_ids(pdf: &PdfDocument, dictionary: &PdfDictionary) -> TaggedResult<Vec<ObjectId>> {
+    tagged_array(pdf, dictionary.get(b"K").map_err(|_| ())?)?
+        .iter()
+        .map(tagged_reference)
+        .collect()
+}
+
+fn tagged_role(dictionary: &PdfDictionary) -> TaggedResult<&[u8]> {
+    dictionary
+        .get(b"S")
+        .map_err(|_| ())?
+        .as_name()
+        .map_err(|_| ())
+}
+
+fn tagged_binding(dictionary: &PdfDictionary, key: &[u8], expected: ObjectId) -> TaggedResult<()> {
+    if tagged_reference(dictionary.get(key).map_err(|_| ())?)? == expected {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+fn tagged_number(object: &PdfObject) -> TaggedResult<f64> {
+    match object {
+        PdfObject::Integer(value) => Ok(*value as f64),
+        PdfObject::Real(value) => Ok(f64::from(*value)),
+        _ => Err(()),
+    }
+}
+
+fn inherited_page_object<'a>(
+    pdf: &'a PdfDocument,
+    mut page_id: ObjectId,
+    key: &[u8],
+) -> TaggedResult<&'a PdfObject> {
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(page_id) {
+            return Err(());
+        }
+        let page = pdf.get_dictionary(page_id).map_err(|_| ())?;
+        if let Ok(value) = page.get(key) {
+            return tagged_object(pdf, value);
+        }
+        page_id = tagged_reference(page.get(b"Parent").map_err(|_| ())?)?;
+    }
+}
+
+fn tagged_page_box(pdf: &PdfDocument, page_id: ObjectId) -> TaggedResult<[f64; 4]> {
+    let values = tagged_array(pdf, inherited_page_object(pdf, page_id, b"MediaBox")?)?;
+    if values.len() != 4 {
+        return Err(());
+    }
+    let result = [
+        tagged_number(&values[0])?,
+        tagged_number(&values[1])?,
+        tagged_number(&values[2])?,
+        tagged_number(&values[3])?,
+    ];
+    if !result.iter().all(|value| value.is_finite())
+        || result[2] <= result[0]
+        || result[3] <= result[1]
+    {
+        return Err(());
+    }
+    Ok(result)
+}
+
+fn tagged_bbox(pdf: &PdfDocument, span: &PdfDictionary, page_box: [f64; 4]) -> TaggedResult<()> {
+    let attributes = tagged_dictionary(pdf, span.get(b"A").map_err(|_| ())?)?;
+    if attributes
+        .get(b"O")
+        .map_err(|_| ())?
+        .as_name()
+        .map_err(|_| ())?
+        != b"Layout"
+    {
+        return Err(());
+    }
+    let box_values = tagged_array(pdf, attributes.get(b"BBox").map_err(|_| ())?)?;
+    if box_values.len() != 4 {
+        return Err(());
+    }
+    let values = [
+        tagged_number(&box_values[0])?,
+        tagged_number(&box_values[1])?,
+        tagged_number(&box_values[2])?,
+        tagged_number(&box_values[3])?,
+    ];
+    let tolerance = 0.5;
+    if !values.iter().all(|value| value.is_finite())
+        || values[2] < values[0]
+        || values[3] < values[1]
+        || values[0] < page_box[0] - tolerance
+        || values[1] < page_box[1] - tolerance
+        || values[2] > page_box[2] + tolerance
+        || values[3] > page_box[3] + tolerance
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn tagged_parent_maps(
+    pdf: &PdfDocument,
+    root: &PdfDictionary,
+    page_count: usize,
+) -> TaggedResult<BTreeMap<i64, Vec<ObjectId>>> {
+    let parent_tree = tagged_dictionary(pdf, root.get(b"ParentTree").map_err(|_| ())?)?;
+    let numbers = tagged_array(pdf, parent_tree.get(b"Nums").map_err(|_| ())?)?;
+    let (pairs, remainder) = numbers.as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(());
+    }
+    let mut result = BTreeMap::new();
+    for pair in pairs {
+        let key = pair[0].as_i64().map_err(|_| ())?;
+        let values = tagged_array(pdf, &pair[1])?
+            .iter()
+            .map(tagged_reference)
+            .collect::<TaggedResult<Vec<_>>>()?;
+        if result.insert(key, values).is_some() {
+            return Err(());
+        }
+    }
+    if result.keys().copied().collect::<Vec<_>>()
+        != (0..i64::try_from(page_count).map_err(|_| ())?).collect::<Vec<_>>()
+    {
+        return Err(());
+    }
+    Ok(result)
+}
+
+fn tagged_stream_content(
+    stream: &lopdf::Stream,
+    decoded_bytes: &mut usize,
+) -> TaggedResult<Vec<u8>> {
+    let remaining = MAX_TAGGED_OCR_CONTENT_BYTES
+        .checked_sub(*decoded_bytes)
+        .ok_or(())?;
+    let bytes = if stream.dict.get(b"Filter").is_err() {
+        if stream.content.len() > remaining {
+            return Err(());
+        }
+        stream.content.clone()
+    } else {
+        let filters = stream.filters().map_err(|_| ())?;
+        if filters.as_slice() != [b"FlateDecode"] || stream.dict.get(b"DecodeParms").is_ok() {
+            return Err(());
+        }
+        let read_limit = u64::try_from(remaining).map_err(|_| ())? + 1;
+        let mut decoder =
+            flate2::read::ZlibDecoder::new(stream.content.as_slice()).take(read_limit);
+        let mut output = Vec::new();
+        decoder.read_to_end(&mut output).map_err(|_| ())?;
+        if output.len() > remaining {
+            return Err(());
+        }
+        output
+    };
+    *decoded_bytes = decoded_bytes.checked_add(bytes.len()).ok_or(())?;
+    Ok(bytes)
+}
+
+fn tagged_content_mcids(
+    pdf: &PdfDocument,
+    page_id: ObjectId,
+    decoded_bytes: &mut usize,
+) -> TaggedResult<HashSet<usize>> {
+    let contents = pdf.get_page_contents(page_id);
+    if contents.len() < 3 {
+        return Err(());
+    }
+    let mut decode = |id: ObjectId| -> TaggedResult<Content<Vec<lopdf::content::Operation>>> {
+        let stream = pdf
+            .get_object(id)
+            .map_err(|_| ())?
+            .as_stream()
+            .map_err(|_| ())?;
+        let bytes = tagged_stream_content(stream, decoded_bytes)?;
+        Content::decode_strict(&bytes).map_err(|_| ())
+    };
+    let opening = decode(contents[0])?;
+    let closing = decode(contents[contents.len() - 2])?;
+    if opening.operations.len() != 1
+        || opening.operations[0].operator != "BMC"
+        || opening.operations[0].operands.as_slice() != [PdfObject::Name(b"Artifact".to_vec())]
+        || closing.operations.len() != 1
+        || closing.operations[0].operator != "EMC"
+        || !closing.operations[0].operands.is_empty()
+    {
+        return Err(());
+    }
+    let mut found = HashSet::new();
+    let mut span_open = false;
+    for operation in decode(*contents.last().ok_or(())?)?.operations {
+        match operation.operator.as_str() {
+            "EMC" => {
+                if !operation.operands.is_empty() || !span_open {
+                    return Err(());
+                }
+                span_open = false;
+                continue;
+            }
+            "BMC" => return Err(()),
+            "BDC" => {}
+            _ => continue,
+        }
+        if span_open
+            || operation.operands.len() != 2
+            || operation.operands[0].as_name().map_err(|_| ())? != b"Span"
+        {
+            return Err(());
+        }
+        let properties = operation.operands[1].as_dict().map_err(|_| ())?;
+        let mcid = usize::try_from(
+            properties
+                .get(b"MCID")
+                .map_err(|_| ())?
+                .as_i64()
+                .map_err(|_| ())?,
+        )
+        .map_err(|_| ())?;
+        if !found.insert(mcid) {
+            return Err(());
+        }
+        span_open = true;
+    }
+    if span_open {
+        return Err(());
+    }
+    Ok(found)
+}
+
+fn tagged_span_text(
+    pdf: &PdfDocument,
+    span_id: ObjectId,
+    parent_id: ObjectId,
+    page_id: ObjectId,
+    parent_map: &[ObjectId],
+    seen: &mut HashSet<usize>,
+    page_box: [f64; 4],
+) -> TaggedResult<String> {
+    let span = pdf.get_dictionary(span_id).map_err(|_| ())?;
+    if tagged_role(span)? != b"Span" {
+        return Err(());
+    }
+    tagged_binding(span, b"P", parent_id)?;
+    tagged_binding(span, b"Pg", page_id)?;
+    let actual = span.get(b"ActualText").map_err(|_| ())?;
+    if !matches!(actual, PdfObject::String(_, _)) {
+        return Err(());
+    }
+    let text = decode_text_string(actual).map_err(|_| ())?;
+    if text.trim().is_empty() || text.contains('\u{000c}') {
+        return Err(());
+    }
+    tagged_bbox(pdf, span, page_box)?;
+    let marked = tagged_dictionary(pdf, span.get(b"K").map_err(|_| ())?)?;
+    if marked
+        .get(b"Type")
+        .map_err(|_| ())?
+        .as_name()
+        .map_err(|_| ())?
+        != b"MCR"
+    {
+        return Err(());
+    }
+    tagged_binding(marked, b"Pg", page_id)?;
+    let mcid = usize::try_from(
+        marked
+            .get(b"MCID")
+            .map_err(|_| ())?
+            .as_i64()
+            .map_err(|_| ())?,
+    )
+    .map_err(|_| ())?;
+    if mcid >= parent_map.len() || parent_map[mcid] != span_id || !seen.insert(mcid) {
+        return Err(());
+    }
+    Ok(text)
+}
+
+fn tagged_page_text(
+    pdf: &PdfDocument,
+    section_id: ObjectId,
+    document_id: ObjectId,
+    page_id: ObjectId,
+    parent_map: &[ObjectId],
+    decoded_bytes: &mut usize,
+) -> TaggedResult<String> {
+    let section = pdf.get_dictionary(section_id).map_err(|_| ())?;
+    if tagged_role(section)? != b"Sect" {
+        return Err(());
+    }
+    tagged_binding(section, b"P", document_id)?;
+    tagged_binding(section, b"Pg", page_id)?;
+    let page_box = tagged_page_box(pdf, page_id)?;
+    let mut seen = HashSet::new();
+    let mut text = String::new();
+    for block_id in tagged_child_ids(pdf, section)? {
+        let block = pdf.get_dictionary(block_id).map_err(|_| ())?;
+        tagged_binding(block, b"P", section_id)?;
+        tagged_binding(block, b"Pg", page_id)?;
+        match tagged_role(block)? {
+            b"P" => {
+                let spans = tagged_child_ids(pdf, block)?;
+                if spans.is_empty() {
+                    return Err(());
+                }
+                for span_id in spans {
+                    text.push_str(&tagged_span_text(
+                        pdf, span_id, block_id, page_id, parent_map, &mut seen, page_box,
+                    )?);
+                }
+            }
+            b"Table" => {
+                let rows = tagged_child_ids(pdf, block)?;
+                if rows.is_empty() {
+                    return Err(());
+                }
+                for row_id in rows {
+                    let row = pdf.get_dictionary(row_id).map_err(|_| ())?;
+                    if tagged_role(row)? != b"TR" {
+                        return Err(());
+                    }
+                    tagged_binding(row, b"P", block_id)?;
+                    tagged_binding(row, b"Pg", page_id)?;
+                    let cells = tagged_child_ids(pdf, row)?;
+                    if cells.is_empty() {
+                        return Err(());
+                    }
+                    for cell_id in cells {
+                        let cell = pdf.get_dictionary(cell_id).map_err(|_| ())?;
+                        if !matches!(tagged_role(cell)?, b"TH" | b"TD") {
+                            return Err(());
+                        }
+                        tagged_binding(cell, b"P", row_id)?;
+                        tagged_binding(cell, b"Pg", page_id)?;
+                        let spans = tagged_child_ids(pdf, cell)?;
+                        if spans.len() != 1 {
+                            return Err(());
+                        }
+                        text.push_str(&tagged_span_text(
+                            pdf, spans[0], cell_id, page_id, parent_map, &mut seen, page_box,
+                        )?);
+                    }
+                }
+            }
+            _ => return Err(()),
+        }
+    }
+    let expected = (0..parent_map.len()).collect::<HashSet<_>>();
+    if text.trim().is_empty()
+        || seen != expected
+        || tagged_content_mcids(pdf, page_id, decoded_bytes)? != expected
+    {
+        return Err(());
+    }
+    Ok(text)
+}
+
+fn bounded_tagged_ocr_pages<I>(page_ids: I) -> TaggedResult<Vec<ObjectId>>
+where
+    I: Iterator<Item = ObjectId>,
+{
+    let mut pages = Vec::with_capacity(100);
+    for page_id in page_ids {
+        if pages.len() == 100 {
+            return Err(());
+        }
+        pages.push(page_id);
+    }
+    if pages.is_empty() {
+        return Err(());
+    }
+    Ok(pages)
+}
+
+fn parse_tagged_ocr_pages(pdf: &PdfDocument) -> TaggedResult<Vec<ParsedPage>> {
+    let pages = bounded_tagged_ocr_pages(pdf.page_iter())?;
+    let catalog = tagged_dictionary(pdf, pdf.trailer.get(b"Root").map_err(|_| ())?)?;
+    let mark_info = tagged_dictionary(pdf, catalog.get(b"MarkInfo").map_err(|_| ())?)?;
+    if !mark_info
+        .get(b"Marked")
+        .map_err(|_| ())?
+        .as_bool()
+        .map_err(|_| ())?
+    {
+        return Err(());
+    }
+    let root_id = tagged_reference(catalog.get(b"StructTreeRoot").map_err(|_| ())?)?;
+    let root = pdf.get_dictionary(root_id).map_err(|_| ())?;
+    let top = tagged_child_ids(pdf, root)?;
+    if top.len() != 1 {
+        return Err(());
+    }
+    let document_id = top[0];
+    let document = pdf.get_dictionary(document_id).map_err(|_| ())?;
+    if tagged_role(document)? != b"Document" {
+        return Err(());
+    }
+    tagged_binding(document, b"P", root_id)?;
+    let sections = tagged_child_ids(pdf, document)?;
+    if sections.len() != pages.len() {
+        return Err(());
+    }
+    let parent_maps = tagged_parent_maps(pdf, root, pages.len())?;
+    let mut decoded_bytes = 0usize;
+    pages
+        .into_iter()
+        .enumerate()
+        .map(|(index, page_id)| {
+            let page = pdf.get_dictionary(page_id).map_err(|_| ())?;
+            let struct_parent = page
+                .get(b"StructParents")
+                .map_err(|_| ())?
+                .as_i64()
+                .map_err(|_| ())?;
+            if struct_parent != i64::try_from(index).map_err(|_| ())? {
+                return Err(());
+            }
+            let parent_map = parent_maps.get(&struct_parent).ok_or(())?;
+            let text = tagged_page_text(
+                pdf,
+                sections[index],
+                document_id,
+                page_id,
+                parent_map,
+                &mut decoded_bytes,
+            )?;
+            Ok(ParsedPage {
+                page_number: u32::try_from(index + 1).map_err(|_| ())?,
+                text,
+                warnings: Vec::new(),
+                requires_visual_processing: false,
+            })
+        })
+        .collect()
 }
 
 fn map_load_error(error: LopdfError) -> PipelineFailure {
@@ -303,6 +962,13 @@ fn validate_parsed_document(
             false,
         ));
     }
+    if parsed.source_type != document.source_type {
+        return Err(parse_failure(
+            "INVALID_PARSED_ARTIFACT",
+            "The parser changed the document source provenance",
+            false,
+        ));
+    }
 
     for (index, page) in parsed.pages.iter().enumerate() {
         let expected_page_number = u32::try_from(index + 1).map_err(|_| {
@@ -339,8 +1005,8 @@ fn validate_parsed_document(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::contracts::PipelineState;
-    use crate::pipeline::ingest::ingest_pdf;
+    use crate::pipeline::contracts::{PipelineState, SourceType};
+    use crate::pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion_with_source_type};
     use pdf_extract::content::{Content, Operation};
     use pdf_extract::{
         dictionary, EncryptionState, EncryptionVersion, Object, Permissions, Stream, StringFormat,
@@ -353,6 +1019,49 @@ mod tests {
         Text(Vec<u8>),
         Empty,
         ImageOnly,
+    }
+
+    #[test]
+    fn tagged_ocr_parser_bounds_structural_streams_before_lopdf_load() {
+        let source = include_str!("parser.rs");
+        let tagged = &source[source.find("impl TaggedOcrParser").unwrap()
+            ..source
+                .find("impl DocumentParser for TaggedOcrParser")
+                .unwrap()];
+
+        assert!(tagged.contains("load_bounded_tagged_ocr_pdf(&source_bytes)"));
+        assert!(!tagged.contains("PdfDocument::load_mem(&source_bytes)"));
+    }
+
+    fn classic_xref_source(trailer_entries: &[u8]) -> Vec<u8> {
+        let mut source = b"%PDF-1.4\n".to_vec();
+        let xref_offset = source.len();
+        source.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 1 ");
+        source.extend_from_slice(trailer_entries);
+        source.extend_from_slice(format!(">>\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes());
+        source
+    }
+
+    #[test]
+    fn tagged_ocr_xref_profile_accepts_only_one_classic_revision() {
+        assert!(require_classic_tagged_ocr_xref(&classic_xref_source(b"")).is_ok());
+        assert!(require_classic_tagged_ocr_xref(&classic_xref_source(b"/Prev 9")).is_err());
+        assert!(require_classic_tagged_ocr_xref(&classic_xref_source(b"/XRefStm 9")).is_err());
+        assert!(require_classic_tagged_ocr_xref(&classic_xref_source(b"/Pr#65v 9")).is_err());
+
+        let xref_stream = b"%PDF-1.5\n1 0 obj\n<< /Type /XRef >>\nstream\n\nendstream\nendobj\nstartxref\n9\n%%EOF\n";
+        assert!(require_classic_tagged_ocr_xref(xref_stream).is_err());
+    }
+
+    #[test]
+    fn source_parser_set_dispatches_both_durable_source_types() {
+        let parsers = SourceParserSet::new();
+
+        assert_eq!(parsers.select(SourceType::NativeText).id(), "pdf-extract");
+        assert_eq!(
+            parsers.select(SourceType::OcrText).id(),
+            "local-connect-tagged-ocr"
+        );
     }
 
     struct TestPath(PathBuf);
@@ -476,6 +1185,343 @@ mod tests {
         let (_, run) = ingest_pdf(conn, path.to_str().expect("UTF-8 path"))
             .expect("PDF candidate should ingest");
         run
+    }
+
+    #[test]
+    fn tagged_ocr_parser_preserves_logical_page_text_and_source_type() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let fixture_bytes = fs::read(&path).expect("OCR fixture should be readable");
+        assert!(
+            require_classic_tagged_ocr_xref(&fixture_bytes).is_ok(),
+            "producer fixture must satisfy the bounded structural profile"
+        );
+        let mut conn = db::init_db(":memory:").expect("schema should initialize");
+        let (document, run) = prepare_pdf_ingestion_with_source_type(
+            path.to_str().expect("UTF-8 path"),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .expect("OCR fixture should prepare");
+        db::persist_ingestion(&mut conn, &document, &run).expect("OCR fixture should persist");
+
+        let parsed = parse_document(&mut conn, &TaggedOcrParser::new(), &run.run_id)
+            .expect("tagged OCR fixture should parse");
+
+        assert_eq!(parsed.source_type, SourceType::OcrText);
+        assert_eq!(parsed.parser_id, "local-connect-tagged-ocr");
+        assert_eq!(parsed.pages.len(), 2);
+        assert_eq!(parsed.pages[0].text, "OCR page one evidence.");
+        assert_eq!(parsed.pages[1].text, "Amount$125.00");
+        assert!(parsed
+            .pages
+            .iter()
+            .all(|page| !page.requires_visual_processing && page.warnings.is_empty()));
+    }
+
+    fn persist_tagged_fixture(
+        conn: &mut Connection,
+        path: &Path,
+    ) -> crate::pipeline::contracts::PipelineRun {
+        let (document, run) = prepare_pdf_ingestion_with_source_type(
+            path.to_str().expect("UTF-8 path"),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .expect("OCR fixture should prepare");
+        db::persist_ingestion(conn, &document, &run).expect("OCR fixture should persist");
+        run
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_comment_spoofed_mcid_operator() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let first_page = *pdf
+            .get_pages()
+            .values()
+            .next()
+            .expect("OCR fixture should have a page");
+        let content_ids = pdf.get_page_contents(first_page);
+        pdf.get_object_mut(*content_ids.last().expect("OCR stream should exist"))
+            .expect("OCR stream should load")
+            .as_stream_mut()
+            .expect("OCR content should be a stream")
+            .set_plain_content(b"% /Span <</MCID 0>> BDC\n".to_vec());
+        let changed = TestPath::new("pdf");
+        pdf.save(&changed.0)
+            .expect("changed OCR fixture should save");
+        let mut conn = db::init_db(":memory:").expect("schema should initialize");
+        let run = persist_tagged_fixture(&mut conn, &changed.0);
+
+        let error = parse_document(&mut conn, &TaggedOcrParser::new(), &run.run_id)
+            .expect_err("comment-spoofed MCID must fail");
+
+        assert_eq!(error.code(), "OCR_STRUCTURE_INVALID");
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_unbalanced_marked_content() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        for mutation in ["missing-emc", "extra-emc"] {
+            let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+            let first_page = *pdf
+                .get_pages()
+                .values()
+                .next()
+                .expect("OCR fixture should have a page");
+            let content_ids = pdf.get_page_contents(first_page);
+            let stream = pdf
+                .get_object_mut(*content_ids.last().expect("OCR stream should exist"))
+                .expect("OCR stream should load")
+                .as_stream_mut()
+                .expect("OCR content should be a stream");
+            let mut content = stream
+                .get_plain_content()
+                .expect("OCR stream should decode");
+            if mutation == "missing-emc" {
+                let position = content
+                    .windows(3)
+                    .rposition(|window| window == b"EMC")
+                    .expect("OCR stream should contain EMC");
+                content.drain(position..position + 3);
+            } else {
+                content.extend_from_slice(b"\nEMC");
+            }
+            stream.set_plain_content(content);
+            let changed = TestPath::new("pdf");
+            pdf.save(&changed.0)
+                .expect("changed OCR fixture should save");
+            let mut conn = db::init_db(":memory:").expect("schema should initialize");
+            let run = persist_tagged_fixture(&mut conn, &changed.0);
+
+            let error = parse_document(&mut conn, &TaggedOcrParser::new(), &run.run_id)
+                .expect_err("unbalanced marked content must fail");
+
+            assert_eq!(error.code(), "OCR_STRUCTURE_INVALID", "{mutation}");
+        }
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_non_string_actual_text() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let catalog = tagged_dictionary(&pdf, pdf.trailer.get(b"Root").unwrap()).unwrap();
+        let root_id = tagged_reference(catalog.get(b"StructTreeRoot").unwrap()).unwrap();
+        let document_id = tagged_child_ids(&pdf, pdf.get_dictionary(root_id).unwrap()).unwrap()[0];
+        let section_id =
+            tagged_child_ids(&pdf, pdf.get_dictionary(document_id).unwrap()).unwrap()[0];
+        let block_id = tagged_child_ids(&pdf, pdf.get_dictionary(section_id).unwrap()).unwrap()[0];
+        let span_id = tagged_child_ids(&pdf, pdf.get_dictionary(block_id).unwrap()).unwrap()[0];
+        pdf.get_dictionary_mut(span_id)
+            .expect("span should load")
+            .set("ActualText", PdfObject::Name(b"invalid".to_vec()));
+        let changed = TestPath::new("pdf");
+        pdf.save(&changed.0)
+            .expect("changed OCR fixture should save");
+        let mut conn = db::init_db(":memory:").expect("schema should initialize");
+        let run = persist_tagged_fixture(&mut conn, &changed.0);
+
+        let error = parse_document(&mut conn, &TaggedOcrParser::new(), &run.run_id)
+            .expect_err("non-string ActualText must fail");
+
+        assert_eq!(error.code(), "OCR_STRUCTURE_INVALID");
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_a_blank_page_at_admission() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let catalog = tagged_dictionary(&pdf, pdf.trailer.get(b"Root").unwrap()).unwrap();
+        let root_id = tagged_reference(catalog.get(b"StructTreeRoot").unwrap()).unwrap();
+        let root = pdf.get_dictionary(root_id).unwrap();
+        let document_id = tagged_child_ids(&pdf, root).unwrap()[0];
+        let sections = tagged_child_ids(&pdf, pdf.get_dictionary(document_id).unwrap()).unwrap();
+        let parent_tree_id = tagged_reference(root.get(b"ParentTree").unwrap()).unwrap();
+        let parent_tree = pdf.get_dictionary(parent_tree_id).unwrap();
+        let numbers = tagged_array(&pdf, parent_tree.get(b"Nums").unwrap()).unwrap();
+        let first_parent_map = numbers[1].clone();
+        let second_page = pdf.get_pages().into_values().nth(1).unwrap();
+        let content_ids = pdf.get_page_contents(second_page);
+
+        pdf.get_dictionary_mut(sections[1])
+            .unwrap()
+            .set("K", PdfObject::Array(Vec::new()));
+        pdf.get_dictionary_mut(parent_tree_id).unwrap().set(
+            "Nums",
+            PdfObject::Array(vec![
+                0.into(),
+                first_parent_map,
+                1.into(),
+                PdfObject::Array(Vec::new()),
+            ]),
+        );
+        pdf.get_object_mut(*content_ids.last().unwrap())
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(Vec::new());
+        let changed = TestPath::new("pdf");
+        pdf.save(&changed.0)
+            .expect("blank-page fixture should save");
+        let (document, _) = prepare_pdf_ingestion_with_source_type(
+            changed.0.to_str().unwrap(),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .expect("blank-page fixture should prepare");
+
+        let error = TaggedOcrParser::new()
+            .parse(&document)
+            .expect_err("blank OCR page must fail during admission");
+
+        assert_eq!(error.code, "OCR_STRUCTURE_INVALID");
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_content_decompression_over_budget() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let first_page = *pdf.get_pages().values().next().unwrap();
+        let content_ids = pdf.get_page_contents(first_page);
+        let stream = pdf
+            .get_object_mut(*content_ids.last().unwrap())
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        let mut content = stream.get_plain_content().unwrap();
+        content.extend(std::iter::repeat_n(b' ', 2 * 1024 * 1024 + 1));
+        stream.set_plain_content(content);
+        stream
+            .compress()
+            .expect("oversized content should compress");
+        let changed = TestPath::new("pdf");
+        pdf.save(&changed.0)
+            .expect("compressed-content fixture should save");
+        let (document, _) = prepare_pdf_ingestion_with_source_type(
+            changed.0.to_str().unwrap(),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .expect("compressed-content fixture should prepare");
+
+        let error = TaggedOcrParser::new()
+            .parse(&document)
+            .expect_err("decoded OCR content over budget must fail during admission");
+
+        assert_eq!(error.code, "OCR_STRUCTURE_INVALID");
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_cyclic_inherited_page_tree() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let first_page = *pdf
+            .get_pages()
+            .values()
+            .next()
+            .expect("OCR fixture should have a page");
+        let page = pdf
+            .get_dictionary_mut(first_page)
+            .expect("OCR page should load");
+        page.remove(b"MediaBox");
+        page.set("Parent", PdfObject::Reference(first_page));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            sender
+                .send(tagged_page_box(&pdf, first_page).is_err())
+                .expect("cycle result should be received");
+        });
+
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(true),
+            "cyclic inherited page lookup must terminate and fail closed"
+        );
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_cyclic_generic_reference() {
+        let mut pdf = PdfDocument::new();
+        let object_id = pdf.new_object_id();
+        pdf.objects
+            .insert(object_id, PdfObject::Reference(object_id));
+        let reference = PdfObject::Reference(object_id);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            sender
+                .send(tagged_object(&pdf, &reference).is_err())
+                .expect("cycle result should be received");
+        });
+
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(true),
+            "cyclic generic dereferencing must terminate and fail closed"
+        );
+    }
+
+    #[test]
+    fn tagged_ocr_page_bound_does_not_consult_or_exhaust_the_tail() {
+        struct Pages {
+            yielded: usize,
+        }
+
+        impl Iterator for Pages {
+            type Item = ObjectId;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.yielded += 1;
+                if self.yielded > 101 {
+                    panic!("page enumeration crossed the rejecting boundary");
+                }
+                Some((self.yielded as u32, 0))
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                panic!("bounded page admission must not enumerate the page tree for a hint");
+            }
+        }
+
+        assert!(bounded_tagged_ocr_pages(Pages { yielded: 0 }).is_err());
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_a_cyclic_pages_hierarchy() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let catalog = tagged_dictionary(&pdf, pdf.trailer.get(b"Root").unwrap()).unwrap();
+        let pages_id = tagged_reference(catalog.get(b"Pages").unwrap()).unwrap();
+        pdf.get_dictionary_mut(pages_id)
+            .unwrap()
+            .get_mut(b"Kids")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(PdfObject::Reference(pages_id));
+        let changed = TestPath::new("pdf");
+        pdf.save(&changed.0)
+            .expect("cyclic OCR fixture should save");
+        let (document, _) = prepare_pdf_ingestion_with_source_type(
+            changed.0.to_str().unwrap(),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .expect("cyclic OCR fixture should prepare");
+
+        let error = TaggedOcrParser::new()
+            .parse(&document)
+            .expect_err("a cyclic page hierarchy must fail during admission");
+
+        assert_eq!(error.code, "OCR_STRUCTURE_INVALID");
     }
 
     #[test]
@@ -803,6 +1849,7 @@ mod tests {
                 document_id: document.document_id.clone(),
                 parser_id: self.id().to_string(),
                 parser_version: self.version().to_string(),
+                source_type: document.source_type,
                 pages: vec![ParsedPage {
                     page_number: 2,
                     text: "wrong ordinal".to_string(),

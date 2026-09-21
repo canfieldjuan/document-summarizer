@@ -1,7 +1,7 @@
 use crate::pipeline::contracts::{
     AnalyzedDocument, ChunkedDocument, CitationArtifact, IngestedDocument, ModelProfileSnapshot,
     NormalizedDocument, ParsedDocument, PipelineEvent, PipelineFailure, PipelineRun, PipelineStage,
-    PipelineState, PipelineWarning, RetryCheckpoint, RetryLineage, StructuredDocument,
+    PipelineState, PipelineWarning, RetryCheckpoint, RetryLineage, SourceType, StructuredDocument,
     SummaryArtifact, SummaryProfile, SynthesizedDocument, VerifiedDocument,
 };
 use crate::pipeline::schema::{self, MigrationError};
@@ -44,6 +44,8 @@ pub enum StoreError {
     ChunkedArtifactNotFound(String),
     #[error("Invalid new ingestion: {0}")]
     InvalidIngestion(String),
+    #[error("Invalid persisted document source type: {0}")]
+    InvalidDocumentSourceType(String),
     #[error("Invalid model request owner: {0}")]
     InvalidRequestOwner(String),
     #[error("Parsed artifact document {artifact_document_id} does not match run document {run_document_id}")]
@@ -399,13 +401,14 @@ fn insert_document(conn: &Connection, document: &IngestedDocument) -> Result<(),
     })?;
     conn.execute(
         "INSERT INTO documents (
-            document_id, original_filename, file_type, byte_size, content_hash,
+            document_id, original_filename, file_type, source_type, byte_size, content_hash,
             local_source_path, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             document.document_id,
             document.original_filename,
             document.file_type,
+            source_type_to_storage(document.source_type),
             byte_size,
             document.content_hash,
             document.local_source_path,
@@ -421,7 +424,7 @@ pub fn get_document(
 ) -> Result<Option<IngestedDocument>, StoreError> {
     let row = conn
         .query_row(
-            "SELECT document_id, original_filename, file_type, byte_size, content_hash,
+            "SELECT document_id, original_filename, file_type, source_type, byte_size, content_hash,
                     local_source_path, created_at
              FROM documents WHERE document_id = ?1",
             [document_id],
@@ -430,10 +433,11 @@ pub fn get_document(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             },
         )
@@ -444,6 +448,7 @@ pub fn get_document(
             document_id,
             original_filename,
             file_type,
+            source_type,
             byte_size,
             content_hash,
             local_source_path,
@@ -456,6 +461,7 @@ pub fn get_document(
                 document_id,
                 original_filename,
                 file_type,
+                source_type: source_type_from_storage(&source_type)?,
                 byte_size,
                 content_hash,
                 local_source_path,
@@ -464,6 +470,21 @@ pub fn get_document(
         },
     )
     .transpose()
+}
+
+fn source_type_to_storage(source_type: SourceType) -> &'static str {
+    match source_type {
+        SourceType::NativeText => "native_text",
+        SourceType::OcrText => "ocr_text",
+    }
+}
+
+fn source_type_from_storage(value: &str) -> Result<SourceType, StoreError> {
+    match value {
+        "native_text" => Ok(SourceType::NativeText),
+        "ocr_text" => Ok(SourceType::OcrText),
+        _ => Err(StoreError::InvalidDocumentSourceType(value.to_string())),
+    }
 }
 
 fn insert_pipeline_run(conn: &Connection, run: &PipelineRun) -> Result<(), StoreError> {
@@ -2796,7 +2817,10 @@ fn transition_in_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::ingest::{ingest_pdf, ingest_pdf_with_profiles};
+    use crate::pipeline::contracts::SourceType;
+    use crate::pipeline::ingest::{
+        ingest_pdf, ingest_pdf_with_profiles, prepare_pdf_ingestion_with_source_type,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier};
@@ -2820,6 +2844,25 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
         }
+    }
+
+    #[test]
+    fn ocr_source_type_survives_ingestion_persistence_and_reopen() {
+        let source = TestFile::new("pdf", b"%PDF-1.4\nOCR_TEXT_LAYER");
+        let mut conn = init_db(":memory:").expect("schema should initialize");
+        let (document, run) = prepare_pdf_ingestion_with_source_type(
+            source.0.to_str().expect("UTF-8 path"),
+            Some("ocr-derived.pdf"),
+            SourceType::OcrText,
+        )
+        .expect("OCR-derived PDF should prepare");
+
+        persist_ingestion(&mut conn, &document, &run).expect("ingestion should persist");
+
+        let reopened = get_document(&conn, &document.document_id)
+            .expect("document should load")
+            .expect("document should exist");
+        assert_eq!(reopened.source_type, SourceType::OcrText);
     }
 
     fn model_profile_snapshot() -> ModelProfileSnapshot {

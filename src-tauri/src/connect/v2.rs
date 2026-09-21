@@ -16,6 +16,7 @@ use crate::pipeline::contracts::SummaryProfile;
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const TRANSPORT_KIND: &str = "http-loopback-v2";
 pub const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+pub const OCR_INPUT_MEDIA_TYPE: &str = "application/vnd.local-connect.ocr-pdf";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,10 +159,16 @@ impl AppManifest {
                     label: "Summarize".to_string(),
                     description: "Create a local plain-text summary of this document.".to_string(),
                 },
-                accepts: vec![AcceptedMediaType {
-                    media_type: INPUT_MEDIA_TYPE.to_string(),
-                    max_bytes: max_input_bytes,
-                }],
+                accepts: vec![
+                    AcceptedMediaType {
+                        media_type: INPUT_MEDIA_TYPE.to_string(),
+                        max_bytes: max_input_bytes,
+                    },
+                    AcceptedMediaType {
+                        media_type: OCR_INPUT_MEDIA_TYPE.to_string(),
+                        max_bytes: max_input_bytes,
+                    },
+                ],
                 produces: vec![OUTPUT_MEDIA_TYPE.to_string()],
                 parameters: vec![ParameterDeclaration {
                     name: "mode".to_string(),
@@ -190,8 +197,10 @@ impl JobRequest {
             ));
         }
         self.summary_profile()?;
-        self.as_internal()
-            .validate_v2_input_descriptor(max_input_bytes)
+        self.as_internal().validate_v2_input_descriptor(
+            max_input_bytes,
+            &[INPUT_MEDIA_TYPE, OCR_INPUT_MEDIA_TYPE],
+        )
     }
 
     pub fn summary_profile(&self) -> Result<SummaryProfile, JobError> {
@@ -351,6 +360,19 @@ mod tests {
         let capability = &manifest.capabilities[0];
         assert_eq!(manifest.protocol_version, PROTOCOL_VERSION);
         assert_eq!(capability.action.label, "Summarize");
+        assert_eq!(
+            capability.accepts,
+            vec![
+                AcceptedMediaType {
+                    media_type: INPUT_MEDIA_TYPE.to_string(),
+                    max_bytes: v1::DEFAULT_MAX_INPUT_BYTES,
+                },
+                AcceptedMediaType {
+                    media_type: OCR_INPUT_MEDIA_TYPE.to_string(),
+                    max_bytes: v1::DEFAULT_MAX_INPUT_BYTES,
+                },
+            ]
+        );
         assert_eq!(capability.parameters.len(), 1);
         assert!(!capability.effects.external);
         assert!(!capability.effects.confirmation_required);
@@ -490,6 +512,23 @@ mod tests {
 
         extensionless.inputs[0].display_name = "../scan".to_string();
         assert!(extensionless.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_err());
+    }
+
+    #[test]
+    fn v2_accepts_exact_ocr_vendor_media_without_changing_v1() {
+        let mut ocr = request();
+        ocr.inputs[0].media_type = OCR_INPUT_MEDIA_TYPE.to_string();
+        assert!(ocr.validate(v1::DEFAULT_MAX_INPUT_BYTES).is_ok());
+        assert!(ocr
+            .as_internal()
+            .validate(v1::DEFAULT_MAX_INPUT_BYTES)
+            .is_err());
+
+        ocr.inputs[0].media_type = "application/vnd.local-connect.ocr-pdf+wrong".to_string();
+        assert_eq!(
+            ocr.validate(v1::DEFAULT_MAX_INPUT_BYTES).unwrap_err().code,
+            "INPUT_ARTIFACT_INVALID"
+        );
     }
 
     #[test]

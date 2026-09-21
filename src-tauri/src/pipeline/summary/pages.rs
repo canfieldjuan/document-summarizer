@@ -438,18 +438,16 @@ fn quote_boundary_omission(
 
 fn ocr_text_layer_structure_risk(normalized: &NormalizedDocument) -> bool {
     normalized.pages.iter().any(|page| {
-        let native_text = page
+        let textual_content = page
             .content
             .iter()
-            .filter(|block| {
-                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
-            })
+            .filter(|block| block.source.source_type.is_textual())
             .map(|block| block.text.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
-        native_text.contains('\u{fffd}')
+        textual_content.contains('\u{fffd}')
             || matches!(
-                eligibility::classify(&native_text),
+                eligibility::classify(&textual_content),
                 Some(eligibility::Omission::ScanNoise)
             )
     })
@@ -486,10 +484,9 @@ fn versioned_plan(
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
-                    && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .map(|page| page.page_number)
         .collect::<Vec<_>>();

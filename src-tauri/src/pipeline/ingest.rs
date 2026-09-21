@@ -1,6 +1,6 @@
 use crate::pipeline::contracts::{
     IngestedDocument, ModelProfileSnapshot, PipelineProgress, PipelineRun, PipelineState,
-    SummaryProfile,
+    SourceType, SummaryProfile,
 };
 use crate::pipeline::db::{self, StoreError};
 use chrono::{DateTime, Utc};
@@ -78,6 +78,18 @@ pub(crate) fn prepare_pdf_ingestion(
     file_path: &str,
     original_filename_override: Option<&str>,
 ) -> Result<(IngestedDocument, PipelineRun), IngestError> {
+    prepare_pdf_ingestion_with_source_type(
+        file_path,
+        original_filename_override,
+        SourceType::NativeText,
+    )
+}
+
+pub(crate) fn prepare_pdf_ingestion_with_source_type(
+    file_path: &str,
+    original_filename_override: Option<&str>,
+    source_type: SourceType,
+) -> Result<(IngestedDocument, PipelineRun), IngestError> {
     let path = Path::new(file_path);
 
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -127,6 +139,7 @@ pub(crate) fn prepare_pdf_ingestion(
         document_id: Uuid::new_v4().to_string(),
         original_filename,
         file_type: "pdf".to_string(),
+        source_type,
         byte_size,
         content_hash,
         local_source_path,

@@ -240,6 +240,7 @@ pub struct IngestedDocument {
     pub document_id: String,
     pub original_filename: String,
     pub file_type: String,
+    pub source_type: SourceType,
     pub byte_size: u64,
     pub content_hash: String,
     pub local_source_path: String,
@@ -259,13 +260,23 @@ pub struct ParsedDocument {
     pub document_id: String,
     pub parser_id: String,
     pub parser_version: String,
+    #[serde(default)]
+    pub source_type: SourceType,
     pub pages: Vec<ParsedPage>,
     pub warnings: Vec<PipelineWarning>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceType {
+    #[default]
     NativeText,
+    OcrText,
+}
+
+impl SourceType {
+    pub fn is_textual(self) -> bool {
+        matches!(self, Self::NativeText | Self::OcrText)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

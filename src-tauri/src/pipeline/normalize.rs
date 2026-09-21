@@ -1,6 +1,6 @@
 use crate::pipeline::contracts::{
     DocumentNormalizer, NormalizedBlock, NormalizedBlockKind, NormalizedDocument, NormalizedPage,
-    ParsedDocument, PipelineFailure, PipelineStage, PipelineWarning, SourceSpan, SourceType,
+    ParsedDocument, PipelineFailure, PipelineStage, PipelineWarning, SourceSpan,
 };
 use crate::pipeline::db::{self, StoreError};
 use rusqlite::Connection;
@@ -62,7 +62,7 @@ impl DocumentNormalizer for CanonicalNormalizer {
                         page_start: page.page_number,
                         page_end: page.page_number,
                         section_id: None,
-                        source_type: SourceType::NativeText,
+                        source_type: parsed.source_type,
                     },
                 }]
             };
@@ -283,7 +283,7 @@ fn validate_normalized_document(
                 || block.source.page_start != block.source.page_end
                 || !source_pages.contains(&block.source.page_start)
                 || block.source.section_id.is_some()
-                || block.source.source_type != SourceType::NativeText
+                || block.source.source_type != parsed.source_type
             {
                 return Err(invalid_normalized(
                     "Normalized block source provenance is invalid or crosses a page boundary",
@@ -421,6 +421,7 @@ fn persist_normalization_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::contracts::SourceType;
     use crate::pipeline::contracts::{DocumentParser, ParsedPage, PipelineState, SourceSpan};
     use crate::pipeline::ingest::ingest_pdf;
     use crate::pipeline::parser::parse_document as parse_pipeline_document;
@@ -468,6 +469,7 @@ mod tests {
                 document_id: document.document_id.clone(),
                 parser_id: self.id().to_string(),
                 parser_version: self.version().to_string(),
+                source_type: document.source_type,
                 pages: self.pages.clone(),
                 warnings: self.warnings.clone(),
             })
@@ -509,6 +511,7 @@ mod tests {
             document_id: "document-for-normalization".to_string(),
             parser_id: "fixture-parser".to_string(),
             parser_version: "test".to_string(),
+            source_type: SourceType::NativeText,
             pages,
             warnings: Vec::new(),
         }
@@ -638,6 +641,21 @@ mod tests {
             .iter()
             .any(|warning| warning.code == "REPRESENTATION_CLEANUP_APPLIED"));
         assert!(first.pages[0].content[0].block_id.starts_with("nb-"));
+    }
+
+    #[test]
+    fn normalization_preserves_ocr_text_provenance() {
+        let mut parsed = parsed_document(vec![text_page(1, "OCR-derived text on page one")]);
+        parsed.source_type = SourceType::OcrText;
+
+        let normalized = CanonicalNormalizer::new()
+            .normalize(&parsed)
+            .expect("OCR-derived text should normalize");
+
+        assert_eq!(
+            normalized.pages[0].content[0].source.source_type,
+            SourceType::OcrText
+        );
     }
 
     #[test]
