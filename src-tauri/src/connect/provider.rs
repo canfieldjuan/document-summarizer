@@ -23,7 +23,9 @@ use crate::pipeline::ingest::prepare_pdf_ingestion_with_source_type;
 use crate::pipeline::model_settings::connect_proof_runtime_from_environment;
 use crate::pipeline::model_settings::{runtime_from_settings, settings_path};
 use crate::pipeline::normalize::CanonicalNormalizer;
-use crate::pipeline::parser::{PdfExtractParser, TaggedOcrParser};
+#[cfg(test)]
+use crate::pipeline::parser::PdfExtractParser;
+use crate::pipeline::parser::{SourceParserSet, TaggedOcrParser};
 use crate::pipeline::service::{
     process_ingested_to_summary_with_delivery_policy, SummaryComponents,
 };
@@ -1115,12 +1117,8 @@ fn process_job(state: ProviderState, job_id: String, runtime: Box<dyn ModelRunti
             .ok_or_else(|| db::StoreError::RunNotFound(job.pipeline_run_id.clone()))?;
         let document = db::get_document(&pipeline_conn, &run.document_id)?
             .ok_or_else(|| db::StoreError::DocumentNotFound(run.document_id.clone()))?;
-        let native_parser = PdfExtractParser::new();
-        let tagged_parser = TaggedOcrParser::new();
-        let parser: &dyn DocumentParser = match document.source_type {
-            SourceType::NativeText => &native_parser,
-            SourceType::OcrText => &tagged_parser,
-        };
+        let parsers = SourceParserSet::new();
+        let parser = parsers.select(document.source_type);
         let normalizer = CanonicalNormalizer::new();
         let interpreter = DeterministicStructureInterpreter::new();
         let chunker = DeterministicDocumentChunker::new();

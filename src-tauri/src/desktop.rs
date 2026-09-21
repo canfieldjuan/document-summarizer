@@ -7,7 +7,9 @@ use crate::pipeline::control::CancellationToken;
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::model_settings::{runtime_from_settings, runtime_from_snapshot};
 use crate::pipeline::normalize::CanonicalNormalizer;
+#[cfg(test)]
 use crate::pipeline::parser::PdfExtractParser;
+use crate::pipeline::parser::SourceParserSet;
 use crate::pipeline::service::{
     admit_pdf_for_background, admit_retry_for_background, continuation_plan,
     continue_run_to_summary_controlled, process_started_parsing_to_summary_controlled,
@@ -300,7 +302,12 @@ impl DesktopJobManager {
     ) -> Result<CompletedSummary, DocumentServiceError> {
         let mut conn = db::init_db(&self.db_path)
             .map_err(crate::pipeline::parser::ParsePipelineError::from)?;
-        let parser = PdfExtractParser::new();
+        let run = db::get_pipeline_run(&conn, run_id)?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+        let document = db::get_document(&conn, &run.document_id)?
+            .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
+        let parsers = SourceParserSet::new();
+        let parser = parsers.select(document.source_type);
         let normalizer = CanonicalNormalizer::new();
         let interpreter = DeterministicStructureInterpreter::new();
         let chunker = DeterministicDocumentChunker::new();
@@ -314,7 +321,7 @@ impl DesktopJobManager {
                     &mut conn,
                     run_id,
                     SummaryComponents {
-                        parser: &parser,
+                        parser,
                         normalizer: &normalizer,
                         interpreter: &interpreter,
                         chunker: &chunker,
@@ -330,7 +337,7 @@ impl DesktopJobManager {
                 run_id,
                 expected_state_version,
                 ContinuationComponents {
-                    parser: &parser,
+                    parser,
                     normalizer: &normalizer,
                     interpreter: &interpreter,
                     chunker: &chunker,
@@ -492,9 +499,10 @@ mod tests {
         ModelRequest, ModelResponse, ModelStageProfileSnapshot, SummaryPresentationMode,
     };
     use crate::pipeline::db::{
-        get_analyzed_document, get_normalized_document, get_pipeline_run, get_summary_artifact,
-        get_synthesized_document, list_pipeline_events,
+        get_analyzed_document, get_normalized_document, get_parsed_document, get_pipeline_run,
+        get_summary_artifact, get_synthesized_document, list_pipeline_events,
     };
+    use crate::pipeline::ingest::prepare_pdf_ingestion_with_source_type;
     use crate::pipeline::service::ContinuationPipelineError;
     use crate::pipeline::state::TransitionError;
     use std::fs;
@@ -730,6 +738,69 @@ mod tests {
 
     fn fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf")
+    }
+
+    #[test]
+    fn desktop_worker_dispatches_ocr_reparse_from_durable_source_type() {
+        let database = TestDatabase::new();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let (document, run) = prepare_pdf_ingestion_with_source_type(
+            source.to_str().expect("OCR fixture path should be UTF-8"),
+            Some("recognized.pdf"),
+            crate::pipeline::contracts::SourceType::OcrText,
+        )
+        .expect("OCR fixture should prepare");
+        let ingested = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &run,
+            Some(&fixture_snapshot()),
+            SummaryProfile::General,
+        )
+        .expect("OCR fixture should persist");
+        let parsers = SourceParserSet::new();
+        let normalizer = CanonicalNormalizer::new();
+        let interpreter = DeterministicStructureInterpreter::new();
+        let chunker = DeterministicDocumentChunker::new();
+        let failure = crate::pipeline::service::process_ingested_to_summary(
+            &mut conn,
+            &ingested.run_id,
+            SummaryComponents {
+                parser: parsers.select(document.source_type),
+                normalizer: &normalizer,
+                interpreter: &interpreter,
+                chunker: &chunker,
+                runtime: &SnapshotlessRecoverableFailureRuntime,
+            },
+        )
+        .expect_err("fixture runtime should interrupt the OCR run");
+        drop(conn);
+        let manager = fixture_manager(&database);
+        manager
+            .finalize(&run.run_id, Ok(Err(failure)))
+            .expect("desktop finalizer should make the OCR run retryable");
+        let conn = db::init_db(&database.0).expect("database should reopen");
+        let failed = get_pipeline_run(&conn, &run.run_id)
+            .expect("failed OCR run should load")
+            .expect("failed OCR run should exist");
+        drop(conn);
+
+        let accepted = manager
+            .start_retry(&run.run_id, failed.state_version)
+            .expect("desktop retry should accept the OCR run");
+        wait_until(|| !manager.is_active(&accepted.run_id).unwrap());
+
+        let reopened = db::init_db(&database.0).expect("database should reopen");
+        let parsed = get_parsed_document(&reopened, &accepted.run_id)
+            .expect("parsed artifact should load")
+            .expect("parsed artifact should persist");
+        assert_eq!(parsed.parser_id, "local-connect-tagged-ocr");
+        assert_eq!(
+            parsed.source_type,
+            crate::pipeline::contracts::SourceType::OcrText
+        );
     }
 
     fn fixture_manager(database: &TestDatabase) -> DesktopJobManager {

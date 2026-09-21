@@ -28,6 +28,7 @@ use pipeline::normalize::{
 };
 use pipeline::parser::{
     parse_document as parse_pipeline_document, ParsePipelineError, PdfExtractParser,
+    SourceParserSet,
 };
 use pipeline::profile_suggestion::{
     suggest_summary_profile as suggest_profile_from_document, SummaryProfileSuggestion,
@@ -204,7 +205,14 @@ fn parse_document(
     run_id: String,
 ) -> Result<ParsedDocument, CommandError> {
     let mut conn = open_database(&state)?;
-    parse_pipeline_document(&mut conn, &PdfExtractParser::new(), &run_id)
+    let run = pipeline::db::get_pipeline_run(&conn, &run_id)
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::from(StoreError::RunNotFound(run_id.clone())))?;
+    let document = pipeline::db::get_document(&conn, &run.document_id)
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::from(StoreError::DocumentNotFound(run.document_id)))?;
+    let parsers = SourceParserSet::new();
+    parse_pipeline_document(&mut conn, parsers.select(document.source_type), &run_id)
         .map_err(CommandError::from)
 }
 

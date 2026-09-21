@@ -2584,7 +2584,10 @@ mod tests {
         migrate(&mut conn).expect("current schema should initialize");
         conn.execute_batch(
             r#"
-            INSERT INTO documents VALUES (
+            INSERT INTO documents (
+                document_id, original_filename, file_type, byte_size, content_hash,
+                local_source_path, created_at
+            ) VALUES (
                 'missing-owner-document', 'missing-owner.pdf', 'pdf', 12, 'hash',
                 '/missing-owner.pdf', '2026-09-11T18:00:00Z'
             );

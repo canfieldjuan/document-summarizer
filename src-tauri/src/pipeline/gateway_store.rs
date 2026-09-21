@@ -524,7 +524,10 @@ mod tests {
             let conn = db::init_db(&database.0).unwrap();
             conn.execute_batch(
                 r#"
-                INSERT INTO documents VALUES (
+                INSERT INTO documents (
+                    document_id, original_filename, file_type, byte_size, content_hash,
+                    local_source_path, created_at
+                ) VALUES (
                     'document-1', 'document.pdf', 'pdf', 1, 'hash', '/document.pdf',
                     '2026-09-11T18:00:00Z'
                 );

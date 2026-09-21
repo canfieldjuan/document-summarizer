@@ -1,6 +1,6 @@
 use crate::pipeline::contracts::{
     DocumentParser, IngestedDocument, ParsedDocument, ParsedPage, PipelineFailure, PipelineStage,
-    PipelineWarning,
+    PipelineWarning, SourceType,
 };
 use crate::pipeline::db::{self, StoreError};
 use lopdf::{
@@ -41,6 +41,25 @@ impl DocumentParser for PdfExtractParser {
 
     fn version(&self) -> &'static str {
         "0.12.0"
+    }
+}
+
+#[derive(Default)]
+pub struct SourceParserSet {
+    native: PdfExtractParser,
+    ocr: TaggedOcrParser,
+}
+
+impl SourceParserSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn select(&self, source_type: SourceType) -> &dyn DocumentParser {
+        match source_type {
+            SourceType::NativeText => &self.native,
+            SourceType::OcrText => &self.ocr,
+        }
     }
 }
 
@@ -848,6 +867,17 @@ mod tests {
         Text(Vec<u8>),
         Empty,
         ImageOnly,
+    }
+
+    #[test]
+    fn source_parser_set_dispatches_both_durable_source_types() {
+        let parsers = SourceParserSet::new();
+
+        assert_eq!(parsers.select(SourceType::NativeText).id(), "pdf-extract");
+        assert_eq!(
+            parsers.select(SourceType::OcrText).id(),
+            "local-connect-tagged-ocr"
+        );
     }
 
     struct TestPath(PathBuf);
