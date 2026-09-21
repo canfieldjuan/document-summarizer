@@ -445,11 +445,22 @@ fn tagged_content_mcids(pdf: &PdfDocument, page_id: ObjectId) -> TaggedResult<Ha
         return Err(());
     }
     let mut found = HashSet::new();
+    let mut span_open = false;
     for operation in decode(*contents.last().ok_or(())?)?.operations {
-        if operation.operator != "BDC" {
-            continue;
+        match operation.operator.as_str() {
+            "EMC" => {
+                if !operation.operands.is_empty() || !span_open {
+                    return Err(());
+                }
+                span_open = false;
+                continue;
+            }
+            "BMC" => return Err(()),
+            "BDC" => {}
+            _ => continue,
         }
-        if operation.operands.len() != 2
+        if span_open
+            || operation.operands.len() != 2
             || operation.operands[0].as_name().map_err(|_| ())? != b"Span"
         {
             return Err(());
@@ -466,6 +477,10 @@ fn tagged_content_mcids(pdf: &PdfDocument, page_id: ObjectId) -> TaggedResult<Ha
         if !found.insert(mcid) {
             return Err(());
         }
+        span_open = true;
+    }
+    if span_open {
+        return Err(());
     }
     Ok(found)
 }
@@ -1069,6 +1084,49 @@ mod tests {
             .expect_err("comment-spoofed MCID must fail");
 
         assert_eq!(error.code(), "OCR_STRUCTURE_INVALID");
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_unbalanced_marked_content() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        for mutation in ["missing-emc", "extra-emc"] {
+            let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+            let first_page = *pdf
+                .get_pages()
+                .values()
+                .next()
+                .expect("OCR fixture should have a page");
+            let content_ids = pdf.get_page_contents(first_page);
+            let stream = pdf
+                .get_object_mut(*content_ids.last().expect("OCR stream should exist"))
+                .expect("OCR stream should load")
+                .as_stream_mut()
+                .expect("OCR content should be a stream");
+            let mut content = stream
+                .get_plain_content()
+                .expect("OCR stream should decode");
+            if mutation == "missing-emc" {
+                let position = content
+                    .windows(3)
+                    .rposition(|window| window == b"EMC")
+                    .expect("OCR stream should contain EMC");
+                content.drain(position..position + 3);
+            } else {
+                content.extend_from_slice(b"\nEMC");
+            }
+            stream.set_plain_content(content);
+            let changed = TestPath::new("pdf");
+            pdf.save(&changed.0)
+                .expect("changed OCR fixture should save");
+            let mut conn = db::init_db(":memory:").expect("schema should initialize");
+            let run = persist_tagged_fixture(&mut conn, &changed.0);
+
+            let error = parse_document(&mut conn, &TaggedOcrParser::new(), &run.run_id)
+                .expect_err("unbalanced marked content must fail");
+
+            assert_eq!(error.code(), "OCR_STRUCTURE_INVALID", "{mutation}");
+        }
     }
 
     #[test]
