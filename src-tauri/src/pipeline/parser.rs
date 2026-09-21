@@ -724,11 +724,25 @@ fn tagged_page_text(
     Ok(text)
 }
 
-fn parse_tagged_ocr_pages(pdf: &PdfDocument) -> TaggedResult<Vec<ParsedPage>> {
-    let pages = pdf.get_pages().into_values().collect::<Vec<_>>();
-    if pages.is_empty() || pages.len() > 100 {
+fn bounded_tagged_ocr_pages<I>(mut page_ids: I) -> TaggedResult<Vec<ObjectId>>
+where
+    I: Iterator<Item = ObjectId>,
+{
+    let mut pages = Vec::with_capacity(100);
+    while let Some(page_id) = page_ids.next() {
+        if pages.len() == 100 {
+            return Err(());
+        }
+        pages.push(page_id);
+    }
+    if pages.is_empty() {
         return Err(());
     }
+    Ok(pages)
+}
+
+fn parse_tagged_ocr_pages(pdf: &PdfDocument) -> TaggedResult<Vec<ParsedPage>> {
+    let pages = bounded_tagged_ocr_pages(pdf.page_iter())?;
     let catalog = tagged_dictionary(pdf, pdf.trailer.get(b"Root").map_err(|_| ())?)?;
     let mark_info = tagged_dictionary(pdf, catalog.get(b"MarkInfo").map_err(|_| ())?)?;
     if !mark_info
@@ -1452,6 +1466,31 @@ mod tests {
             Ok(true),
             "cyclic generic dereferencing must terminate and fail closed"
         );
+    }
+
+    #[test]
+    fn tagged_ocr_page_bound_does_not_consult_or_exhaust_the_tail() {
+        struct Pages {
+            yielded: usize,
+        }
+
+        impl Iterator for Pages {
+            type Item = ObjectId;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.yielded += 1;
+                if self.yielded > 101 {
+                    panic!("page enumeration crossed the rejecting boundary");
+                }
+                Some((self.yielded as u32, 0))
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                panic!("bounded page admission must not enumerate the page tree for a hint");
+            }
+        }
+
+        assert!(bounded_tagged_ocr_pages(Pages { yielded: 0 }).is_err());
     }
 
     #[test]
