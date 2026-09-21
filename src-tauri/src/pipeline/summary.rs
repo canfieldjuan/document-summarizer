@@ -12892,6 +12892,11 @@ mod tests {
     fn form_materiality_and_ocr_structure_risk_reach_delivered_warnings() {
         let text = "National Archives job NC1-330-78-7; see the attached memo dated May 28, 2008.";
         let (mut normalized, mut chunked) = materiality_fixture(&[text.into()]);
+        normalized.pages[0].content[0].source.source_type =
+            crate::pipeline::contracts::SourceType::OcrText;
+        for source in &mut chunked.chunks[0].source_spans {
+            source.source_type = crate::pipeline::contracts::SourceType::OcrText;
+        }
         normalized.pages[0].content[0].text.push('�');
         chunked.chunks[0].text = normalized.pages[0].content[0].text.clone();
         let runtime = ParaphraseRepairRuntime {
