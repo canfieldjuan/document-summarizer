@@ -196,7 +196,7 @@ impl TaggedOcrParser {
             ));
         }
         let source_bytes = verified_source_bytes(document)?;
-        let pdf = PdfDocument::load_mem(&source_bytes).map_err(|_| {
+        let pdf = load_bounded_tagged_ocr_pdf(&source_bytes).map_err(|_| {
             parse_failure(
                 "OCR_STRUCTURE_INVALID",
                 "The OCR PDF does not match the required tagged profile",
@@ -244,6 +244,75 @@ impl TaggedOcrParser {
             warnings: Vec::new(),
         })
     }
+}
+
+fn load_bounded_tagged_ocr_pdf(source: &[u8]) -> Result<PdfDocument, ()> {
+    require_classic_tagged_ocr_xref(source)?;
+    PdfDocument::load_mem(source).map_err(|_| ())
+}
+
+fn require_classic_tagged_ocr_xref(source: &[u8]) -> Result<(), ()> {
+    const STARTXREF: &[u8] = b"startxref";
+    const EOF_MARKER: &[u8] = b"%%EOF";
+
+    let marker_offset = source
+        .windows(STARTXREF.len())
+        .rposition(|window| window == STARTXREF)
+        .ok_or(())?;
+    let mut cursor = marker_offset + STARTXREF.len();
+    skip_pdf_whitespace(source, &mut cursor);
+    let number_start = cursor;
+    let mut xref_offset = 0usize;
+    while let Some(digit) = source.get(cursor).filter(|byte| byte.is_ascii_digit()) {
+        xref_offset = xref_offset
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(usize::from(*digit - b'0')))
+            .ok_or(())?;
+        cursor += 1;
+    }
+    if cursor == number_start {
+        return Err(());
+    }
+    skip_pdf_whitespace(source, &mut cursor);
+    if !source
+        .get(cursor..)
+        .is_some_and(|tail| tail.starts_with(EOF_MARKER))
+    {
+        return Err(());
+    }
+    cursor += EOF_MARKER.len();
+    skip_pdf_whitespace(source, &mut cursor);
+    if cursor != source.len() || xref_offset >= marker_offset {
+        return Err(());
+    }
+
+    let xref = source.get(xref_offset..marker_offset).ok_or(())?;
+    if !xref.starts_with(b"xref")
+        || !xref.get(4).is_some_and(|byte| is_pdf_whitespace(*byte))
+        || xref
+            .windows(b"/Prev".len())
+            .any(|window| window == b"/Prev")
+        || xref
+            .windows(b"/XRefStm".len())
+            .any(|window| window == b"/XRefStm")
+        || xref.contains(&b'#')
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn skip_pdf_whitespace(source: &[u8], cursor: &mut usize) {
+    while source
+        .get(*cursor)
+        .is_some_and(|byte| is_pdf_whitespace(*byte))
+    {
+        *cursor += 1;
+    }
+}
+
+fn is_pdf_whitespace(byte: u8) -> bool {
+    matches!(byte, 0 | b'\t' | b'\n' | 12 | b'\r' | b' ')
 }
 
 impl DocumentParser for TaggedOcrParser {
@@ -939,6 +1008,38 @@ mod tests {
     }
 
     #[test]
+    fn tagged_ocr_parser_bounds_structural_streams_before_lopdf_load() {
+        let source = include_str!("parser.rs");
+        let tagged = &source[source.find("impl TaggedOcrParser").unwrap()
+            ..source
+                .find("impl DocumentParser for TaggedOcrParser")
+                .unwrap()];
+
+        assert!(tagged.contains("load_bounded_tagged_ocr_pdf(&source_bytes)"));
+        assert!(!tagged.contains("PdfDocument::load_mem(&source_bytes)"));
+    }
+
+    fn classic_xref_source(trailer_entries: &[u8]) -> Vec<u8> {
+        let mut source = b"%PDF-1.4\n".to_vec();
+        let xref_offset = source.len();
+        source.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 1 ");
+        source.extend_from_slice(trailer_entries);
+        source.extend_from_slice(format!(">>\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes());
+        source
+    }
+
+    #[test]
+    fn tagged_ocr_xref_profile_accepts_only_one_classic_revision() {
+        assert!(require_classic_tagged_ocr_xref(&classic_xref_source(b"")).is_ok());
+        assert!(require_classic_tagged_ocr_xref(&classic_xref_source(b"/Prev 9")).is_err());
+        assert!(require_classic_tagged_ocr_xref(&classic_xref_source(b"/XRefStm 9")).is_err());
+        assert!(require_classic_tagged_ocr_xref(&classic_xref_source(b"/Pr#65v 9")).is_err());
+
+        let xref_stream = b"%PDF-1.5\n1 0 obj\n<< /Type /XRef >>\nstream\n\nendstream\nendobj\nstartxref\n9\n%%EOF\n";
+        assert!(require_classic_tagged_ocr_xref(xref_stream).is_err());
+    }
+
+    #[test]
     fn source_parser_set_dispatches_both_durable_source_types() {
         let parsers = SourceParserSet::new();
 
@@ -1075,6 +1176,11 @@ mod tests {
     #[test]
     fn tagged_ocr_parser_preserves_logical_page_text_and_source_type() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let fixture_bytes = fs::read(&path).expect("OCR fixture should be readable");
+        assert!(
+            require_classic_tagged_ocr_xref(&fixture_bytes).is_ok(),
+            "producer fixture must satisfy the bounded structural profile"
+        );
         let mut conn = db::init_db(":memory:").expect("schema should initialize");
         let (document, run) = prepare_pdf_ingestion_with_source_type(
             path.to_str().expect("UTF-8 path"),
