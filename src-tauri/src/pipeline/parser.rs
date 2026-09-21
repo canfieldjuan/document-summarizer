@@ -325,7 +325,11 @@ fn inherited_page_object<'a>(
     mut page_id: ObjectId,
     key: &[u8],
 ) -> TaggedResult<&'a PdfObject> {
+    let mut visited = HashSet::new();
     loop {
+        if !visited.insert(page_id) {
+            return Err(());
+        }
         let page = pdf.get_dictionary(page_id).map_err(|_| ())?;
         if let Ok(value) = page.get(key) {
             return tagged_object(pdf, value);
@@ -1154,6 +1158,36 @@ mod tests {
             .expect_err("non-string ActualText must fail");
 
         assert_eq!(error.code(), "OCR_STRUCTURE_INVALID");
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_cyclic_inherited_page_tree() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let first_page = *pdf
+            .get_pages()
+            .values()
+            .next()
+            .expect("OCR fixture should have a page");
+        let page = pdf
+            .get_dictionary_mut(first_page)
+            .expect("OCR page should load");
+        page.remove(b"MediaBox");
+        page.set("Parent", PdfObject::Reference(first_page));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            sender
+                .send(tagged_page_box(&pdf, first_page).is_err())
+                .expect("cycle result should be received");
+        });
+
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(true),
+            "cyclic inherited page lookup must terminate and fail closed"
+        );
     }
 
     #[test]
