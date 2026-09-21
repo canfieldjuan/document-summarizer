@@ -12,8 +12,11 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use thiserror::Error;
+
+const MAX_TAGGED_OCR_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct PdfExtractParser;
@@ -423,18 +426,53 @@ fn tagged_parent_maps(
     Ok(result)
 }
 
-fn tagged_content_mcids(pdf: &PdfDocument, page_id: ObjectId) -> TaggedResult<HashSet<usize>> {
+fn tagged_stream_content(
+    stream: &lopdf::Stream,
+    decoded_bytes: &mut usize,
+) -> TaggedResult<Vec<u8>> {
+    let remaining = MAX_TAGGED_OCR_CONTENT_BYTES
+        .checked_sub(*decoded_bytes)
+        .ok_or(())?;
+    let bytes = if stream.dict.get(b"Filter").is_err() {
+        if stream.content.len() > remaining {
+            return Err(());
+        }
+        stream.content.clone()
+    } else {
+        let filters = stream.filters().map_err(|_| ())?;
+        if filters.as_slice() != [b"FlateDecode"] || stream.dict.get(b"DecodeParms").is_ok() {
+            return Err(());
+        }
+        let read_limit = u64::try_from(remaining).map_err(|_| ())? + 1;
+        let mut decoder =
+            flate2::read::ZlibDecoder::new(stream.content.as_slice()).take(read_limit);
+        let mut output = Vec::new();
+        decoder.read_to_end(&mut output).map_err(|_| ())?;
+        if output.len() > remaining {
+            return Err(());
+        }
+        output
+    };
+    *decoded_bytes = decoded_bytes.checked_add(bytes.len()).ok_or(())?;
+    Ok(bytes)
+}
+
+fn tagged_content_mcids(
+    pdf: &PdfDocument,
+    page_id: ObjectId,
+    decoded_bytes: &mut usize,
+) -> TaggedResult<HashSet<usize>> {
     let contents = pdf.get_page_contents(page_id);
     if contents.len() < 3 {
         return Err(());
     }
-    let decode = |id: ObjectId| -> TaggedResult<Content<Vec<lopdf::content::Operation>>> {
+    let mut decode = |id: ObjectId| -> TaggedResult<Content<Vec<lopdf::content::Operation>>> {
         let stream = pdf
             .get_object(id)
             .map_err(|_| ())?
             .as_stream()
             .map_err(|_| ())?;
-        let bytes = stream.get_plain_content().map_err(|_| ())?;
+        let bytes = tagged_stream_content(stream, decoded_bytes)?;
         Content::decode_strict(&bytes).map_err(|_| ())
     };
     let opening = decode(contents[0])?;
@@ -544,6 +582,7 @@ fn tagged_page_text(
     document_id: ObjectId,
     page_id: ObjectId,
     parent_map: &[ObjectId],
+    decoded_bytes: &mut usize,
 ) -> TaggedResult<String> {
     let section = pdf.get_dictionary(section_id).map_err(|_| ())?;
     if tagged_role(section)? != b"Sect" {
@@ -607,7 +646,10 @@ fn tagged_page_text(
         }
     }
     let expected = (0..parent_map.len()).collect::<HashSet<_>>();
-    if seen != expected || tagged_content_mcids(pdf, page_id)? != expected {
+    if text.trim().is_empty()
+        || seen != expected
+        || tagged_content_mcids(pdf, page_id, decoded_bytes)? != expected
+    {
         return Err(());
     }
     Ok(text)
@@ -645,6 +687,7 @@ fn parse_tagged_ocr_pages(pdf: &PdfDocument) -> TaggedResult<Vec<ParsedPage>> {
         return Err(());
     }
     let parent_maps = tagged_parent_maps(pdf, root, pages.len())?;
+    let mut decoded_bytes = 0usize;
     pages
         .into_iter()
         .enumerate()
@@ -659,7 +702,14 @@ fn parse_tagged_ocr_pages(pdf: &PdfDocument) -> TaggedResult<Vec<ParsedPage>> {
                 return Err(());
             }
             let parent_map = parent_maps.get(&struct_parent).ok_or(())?;
-            let text = tagged_page_text(pdf, sections[index], document_id, page_id, parent_map)?;
+            let text = tagged_page_text(
+                pdf,
+                sections[index],
+                document_id,
+                page_id,
+                parent_map,
+                &mut decoded_bytes,
+            )?;
             Ok(ParsedPage {
                 page_number: u32::try_from(index + 1).map_err(|_| ())?,
                 text,
@@ -1158,6 +1208,92 @@ mod tests {
             .expect_err("non-string ActualText must fail");
 
         assert_eq!(error.code(), "OCR_STRUCTURE_INVALID");
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_a_blank_page_at_admission() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let catalog = tagged_dictionary(&pdf, pdf.trailer.get(b"Root").unwrap()).unwrap();
+        let root_id = tagged_reference(catalog.get(b"StructTreeRoot").unwrap()).unwrap();
+        let root = pdf.get_dictionary(root_id).unwrap();
+        let document_id = tagged_child_ids(&pdf, root).unwrap()[0];
+        let sections = tagged_child_ids(&pdf, pdf.get_dictionary(document_id).unwrap()).unwrap();
+        let parent_tree_id = tagged_reference(root.get(b"ParentTree").unwrap()).unwrap();
+        let parent_tree = pdf.get_dictionary(parent_tree_id).unwrap();
+        let numbers = tagged_array(&pdf, parent_tree.get(b"Nums").unwrap()).unwrap();
+        let first_parent_map = numbers[1].clone();
+        let second_page = pdf.get_pages().into_values().nth(1).unwrap();
+        let content_ids = pdf.get_page_contents(second_page);
+
+        pdf.get_dictionary_mut(sections[1])
+            .unwrap()
+            .set("K", PdfObject::Array(Vec::new()));
+        pdf.get_dictionary_mut(parent_tree_id).unwrap().set(
+            "Nums",
+            PdfObject::Array(vec![
+                0.into(),
+                first_parent_map,
+                1.into(),
+                PdfObject::Array(Vec::new()),
+            ]),
+        );
+        pdf.get_object_mut(*content_ids.last().unwrap())
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(Vec::new());
+        let changed = TestPath::new("pdf");
+        pdf.save(&changed.0)
+            .expect("blank-page fixture should save");
+        let (document, _) = prepare_pdf_ingestion_with_source_type(
+            changed.0.to_str().unwrap(),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .expect("blank-page fixture should prepare");
+
+        let error = TaggedOcrParser::new()
+            .parse(&document)
+            .expect_err("blank OCR page must fail during admission");
+
+        assert_eq!(error.code, "OCR_STRUCTURE_INVALID");
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_content_decompression_over_budget() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let first_page = *pdf.get_pages().values().next().unwrap();
+        let content_ids = pdf.get_page_contents(first_page);
+        let stream = pdf
+            .get_object_mut(*content_ids.last().unwrap())
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        let mut content = stream.get_plain_content().unwrap();
+        content.extend(std::iter::repeat_n(b' ', 2 * 1024 * 1024 + 1));
+        stream.set_plain_content(content);
+        stream
+            .compress()
+            .expect("oversized content should compress");
+        let changed = TestPath::new("pdf");
+        pdf.save(&changed.0)
+            .expect("compressed-content fixture should save");
+        let (document, _) = prepare_pdf_ingestion_with_source_type(
+            changed.0.to_str().unwrap(),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .expect("compressed-content fixture should prepare");
+
+        let error = TaggedOcrParser::new()
+            .parse(&document)
+            .expect_err("decoded OCR content over budget must fail during admission");
+
+        assert_eq!(error.code, "OCR_STRUCTURE_INVALID");
     }
 
     #[test]
