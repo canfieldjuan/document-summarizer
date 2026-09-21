@@ -724,12 +724,12 @@ fn tagged_page_text(
     Ok(text)
 }
 
-fn bounded_tagged_ocr_pages<I>(mut page_ids: I) -> TaggedResult<Vec<ObjectId>>
+fn bounded_tagged_ocr_pages<I>(page_ids: I) -> TaggedResult<Vec<ObjectId>>
 where
     I: Iterator<Item = ObjectId>,
 {
     let mut pages = Vec::with_capacity(100);
-    while let Some(page_id) = page_ids.next() {
+    for page_id in page_ids {
         if pages.len() == 100 {
             return Err(());
         }
@@ -1491,6 +1491,37 @@ mod tests {
         }
 
         assert!(bounded_tagged_ocr_pages(Pages { yielded: 0 }).is_err());
+    }
+
+    #[test]
+    fn tagged_ocr_parser_rejects_a_cyclic_pages_hierarchy() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let catalog = tagged_dictionary(&pdf, pdf.trailer.get(b"Root").unwrap()).unwrap();
+        let pages_id = tagged_reference(catalog.get(b"Pages").unwrap()).unwrap();
+        pdf.get_dictionary_mut(pages_id)
+            .unwrap()
+            .get_mut(b"Kids")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(PdfObject::Reference(pages_id));
+        let changed = TestPath::new("pdf");
+        pdf.save(&changed.0)
+            .expect("cyclic OCR fixture should save");
+        let (document, _) = prepare_pdf_ingestion_with_source_type(
+            changed.0.to_str().unwrap(),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .expect("cyclic OCR fixture should prepare");
+
+        let error = TaggedOcrParser::new()
+            .parse(&document)
+            .expect_err("a cyclic page hierarchy must fail during admission");
+
+        assert_eq!(error.code, "OCR_STRUCTURE_INVALID");
     }
 
     #[test]
