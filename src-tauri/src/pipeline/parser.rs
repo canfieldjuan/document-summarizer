@@ -1433,6 +1433,28 @@ mod tests {
     }
 
     #[test]
+    fn tagged_ocr_parser_rejects_cyclic_generic_reference() {
+        let mut pdf = PdfDocument::new();
+        let object_id = pdf.new_object_id();
+        pdf.objects
+            .insert(object_id, PdfObject::Reference(object_id));
+        let reference = PdfObject::Reference(object_id);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            sender
+                .send(tagged_object(&pdf, &reference).is_err())
+                .expect("cycle result should be received");
+        });
+
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(true),
+            "cyclic generic dereferencing must terminate and fail closed"
+        );
+    }
+
+    #[test]
     fn native_multi_page_pdf_preserves_page_order_text_and_unicode() {
         let pdf = save_pdf(build_pdf(vec![
             FixturePage::Text(b"PAGE_ONE".to_vec()),
