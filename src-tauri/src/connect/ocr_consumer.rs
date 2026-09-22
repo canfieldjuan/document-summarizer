@@ -1401,6 +1401,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn lost_acknowledgement_reconciles_before_one_child_admission_after_reopen() {
         let directory = TempDir::new().unwrap();
