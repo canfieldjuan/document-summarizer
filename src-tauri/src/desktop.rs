@@ -103,6 +103,21 @@ pub struct DesktopJobManager {
     runtime_factory: RuntimeFactory,
 }
 
+struct ActiveRecoveryReservations {
+    active: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    run_ids: Vec<String>,
+}
+
+impl Drop for ActiveRecoveryReservations {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active.lock() {
+            for run_id in &self.run_ids {
+                active.remove(run_id);
+            }
+        }
+    }
+}
+
 impl DesktopJobManager {
     pub fn new(db_path: PathBuf, settings_path: PathBuf) -> Self {
         let runtime_db_path = db_path.clone();
@@ -289,10 +304,17 @@ impl DesktopJobManager {
         )
     }
 
-    pub(crate) fn start_ocr_recovery(&self, app_data_dir: PathBuf) -> io::Result<()> {
+    pub(crate) fn start_ocr_recovery(&self, app_data_dir: PathBuf) -> Result<(), DesktopJobError> {
+        let conn = db::init_db(&self.db_path)?;
+        let root_run_ids = db::list_recoverable_ocr_handoffs(&conn)?
+            .into_iter()
+            .filter(|handoff| handoff.phase != "child_admitted")
+            .map(|handoff| handoff.root_run_id)
+            .collect();
+        drop(conn);
         let manager = self.clone();
         let db_path = self.db_path.clone();
-        Self::spawn_ocr_recovery_task(move || {
+        self.start_ocr_recovery_task(root_run_ids, move || {
             let mut conn = match db::init_db(&db_path) {
                 Ok(conn) => conn,
                 Err(error) => {
@@ -317,6 +339,39 @@ impl DesktopJobManager {
                 }
             }
         })
+    }
+
+    fn start_ocr_recovery_task(
+        &self,
+        mut root_run_ids: Vec<String>,
+        task: impl FnOnce() + Send + 'static,
+    ) -> Result<(), DesktopJobError> {
+        root_run_ids.sort();
+        root_run_ids.dedup();
+        {
+            let mut active = self
+                .active
+                .lock()
+                .map_err(|_| DesktopJobError::RegistryUnavailable)?;
+            if let Some(run_id) = root_run_ids
+                .iter()
+                .find(|run_id| active.contains_key(*run_id))
+            {
+                return Err(DesktopJobError::AlreadyRunning(run_id.clone()));
+            }
+            for run_id in &root_run_ids {
+                active.insert(run_id.clone(), CancellationToken::new());
+            }
+        }
+        let reservations = ActiveRecoveryReservations {
+            active: Arc::clone(&self.active),
+            run_ids: root_run_ids,
+        };
+        Self::spawn_ocr_recovery_task(move || {
+            let _reservations = reservations;
+            task();
+        })
+        .map_err(DesktopJobError::WorkerStart)
     }
 
     fn spawn_ocr_recovery_task(task: impl FnOnce() + Send + 'static) -> io::Result<()> {
@@ -1011,6 +1066,40 @@ mod tests {
         assert!(!completed.load(Ordering::Acquire));
         gate.release();
         wait_until(|| completed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn startup_ocr_recovery_reserves_roots_until_task_finishes() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let root_run_id = Uuid::new_v4().to_string();
+        let gate = Arc::new(BlockingGate::new());
+        let task_gate = Arc::clone(&gate);
+
+        manager
+            .start_ocr_recovery_task(vec![root_run_id.clone()], move || {
+                task_gate.entered.store(true, Ordering::Release);
+                let mut released = task_gate.released.lock().unwrap();
+                while !*released {
+                    released = task_gate.release_changed.wait(released).unwrap();
+                }
+            })
+            .expect("recovery task should dispatch");
+
+        wait_until(|| gate.entered.load(Ordering::Acquire));
+        assert!(manager.is_active(&root_run_id).unwrap());
+        assert!(matches!(
+            manager.spawn(
+                root_run_id.clone(),
+                BackgroundWork::Continue {
+                    expected_state_version: 0,
+                },
+                None,
+            ),
+            Err(DesktopJobError::AlreadyRunning(run_id)) if run_id == root_run_id
+        ));
+        gate.release();
+        wait_until(|| !manager.is_active(&root_run_id).unwrap());
     }
 
     #[test]

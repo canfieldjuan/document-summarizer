@@ -805,25 +805,29 @@ fn recover_ocr_handoffs_with(
     let mut child_run_ids = Vec::new();
     let mut warnings = Vec::new();
     for handoff in handoffs {
-        let result = if matches!(handoff.phase.as_str(), "child_admitted" | "completed") {
-            materialize_derived(app_data_dir, &handoff).map(|_| handoff.child_run_id.clone())
-        } else if let Some(provider) = providers.iter().find(|provider| {
-            provider.app_id == handoff.provider_app_id
-                && provider.instance_id == handoff.provider_instance_id
-        }) {
-            run_handoff(
-                conn,
-                handoff.clone(),
-                app_data_dir,
-                provider,
-                transport,
-                &UNCONTROLLED_EXECUTION,
-            )
-        } else {
-            Err(OcrConsumerError::ProviderUnavailable(
-                handoff.provider_instance_id.clone(),
-            ))
-        };
+        let result =
+            cancellation_checkpoint(conn, &handoff, &UNCONTROLLED_EXECUTION).and_then(|()| {
+                if matches!(handoff.phase.as_str(), "child_admitted" | "completed") {
+                    materialize_derived(app_data_dir, &handoff)
+                        .map(|_| handoff.child_run_id.clone())
+                } else if let Some(provider) = providers.iter().find(|provider| {
+                    provider.app_id == handoff.provider_app_id
+                        && provider.instance_id == handoff.provider_instance_id
+                }) {
+                    run_handoff(
+                        conn,
+                        handoff.clone(),
+                        app_data_dir,
+                        provider,
+                        transport,
+                        &UNCONTROLLED_EXECUTION,
+                    )
+                } else {
+                    Err(OcrConsumerError::ProviderUnavailable(
+                        handoff.provider_instance_id.clone(),
+                    ))
+                }
+            });
         match result {
             Ok(child_run_id) => child_run_ids.push(child_run_id),
             Err(OcrConsumerError::Cancelled) => {}
@@ -1635,6 +1639,66 @@ mod tests {
             assert_eq!(cancelled.state, PipelineState::Cancelled);
             assert!(db::list_recoverable_ocr_handoffs(&conn).unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn restart_cancellation_terminalizes_handoff_without_provider() {
+        let directory = TempDir::new().unwrap();
+        let source_path = directory.path().join("scan.pdf");
+        fs::write(&source_path, image_only_pdf()).unwrap();
+        let mut conn = db::init_db(directory.path().join("summarizer.db")).unwrap();
+        let (document, received) =
+            prepare_pdf_ingestion(source_path.to_str().unwrap(), None).unwrap();
+        let ingested = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&snapshot()),
+            SummaryProfile::General,
+        )
+        .unwrap();
+        let (parsing, persisted) =
+            db::start_parsing(&mut conn, &ingested.run_id, ingested.state_version).unwrap();
+        parse_started_document(
+            &mut conn,
+            &PdfExtractParser::new(),
+            &parsing.run_id,
+            parsing.state_version,
+            &persisted,
+        )
+        .unwrap();
+
+        let handoff = prepare_handoff(
+            &mut conn,
+            &parsing.run_id,
+            directory.path(),
+            &live_provider(),
+        )
+        .unwrap();
+        let parsed = db::get_pipeline_run(&conn, &parsing.run_id)
+            .unwrap()
+            .unwrap();
+        let cancelling =
+            db::request_cancellation(&mut conn, &parsed.run_id, parsed.state_version).unwrap();
+        let cancelled =
+            db::complete_cancellation(&mut conn, &cancelling.run_id, cancelling.state_version)
+                .unwrap();
+        assert_eq!(cancelled.state, PipelineState::Cancelled);
+
+        let transport = LostAckTransport::default();
+        let recovery =
+            recover_ocr_handoffs_with(&mut conn, directory.path(), &[], &transport).unwrap();
+
+        assert!(recovery.warnings.is_empty());
+        assert!(recovery.child_run_ids.is_empty());
+        assert!(transport.calls.lock().unwrap().is_empty());
+        let failed = db::get_ocr_handoff(&conn, &handoff.handoff_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.phase, "failed");
+        assert_eq!(failed.error_code.as_deref(), Some("OCR_CANCELLED"));
+        assert_eq!(failed.error_retryable, Some(false));
+        assert!(db::list_recoverable_ocr_handoffs(&conn).unwrap().is_empty());
     }
 
     #[cfg(unix)]

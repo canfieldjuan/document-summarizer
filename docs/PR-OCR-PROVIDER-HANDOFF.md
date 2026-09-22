@@ -16,6 +16,7 @@ Root cause:
 - Unix-only discovery and snapshot operations remain in the non-Unix compile surface, making the required Windows warning gate fail even though direct OCR remains intentionally disabled there.
 - Startup executes remote OCR submission/status polling inside Tauri's synchronous setup closure, so a persisted processing job can block application initialization for the full request deadline.
 - OCR submission and polling do not receive the desktop worker's cancellation control, so cancellation can terminalize the root while leaving a pre-admission handoff recoverable against a root that can no longer admit its child.
+- Detached startup recovery does not reserve its pre-admission root IDs in the desktop active registry, so a user continuation can race the OCR owner before child admission.
 - The current installed OCR provider isolates retained source graphics with a paired `q /Artifact BMC` and `EMC Q` wrapper, while the existing tagged parser admits only the earlier wrapper without graphics-state isolation.
 - The provider's canonical tagged text preserves ASCII tabs and line feeds, while the generic PDF string decoder drops those control bytes and makes a valid PDF/text pair fail exact validation.
 - The gateway client forwards the canonical synthesis schema unchanged, including `uniqueItems`, while the accepted gateway contract rejects that decoder-unsupported keyword with HTTP 422; the existing direct-runtime adapter already projects it away without weakening Rust validation.
@@ -35,6 +36,7 @@ The correct fix must:
 11. Exclude admitted/completed OCR roots before applying the recent-history SQL limit, and compile Unix-only OCR discovery/snapshot code only on Unix without enabling Windows OCR.
 12. Keep application setup free of OCR network waits by dispatching persisted handoff recovery to a named background task after local interrupted-run reconciliation.
 13. Propagate cancellation through OCR coordination, terminalize the owned pre-admission handoff without admitting a child, and let the existing worker finalizer complete the root cancellation.
+14. Reserve every pre-admission recovery root in the desktop active registry before dispatch, reject overlapping continuation ownership, and release the reservation when recovery exits.
 
 Must not change:
 
@@ -58,6 +60,7 @@ Slice phase: direct OCR consumer vertical proof
 7. Align gateway transport with the existing decoder-schema projection so an admitted OCR child can complete its summary without relaxing canonical response validation.
 8. Reconcile exact-head review findings by preserving active OCR child ownership through restart, counting only visible history rows toward the limit, and scoping Unix-only code out of the Windows build.
 9. Reconcile exact-head review findings by moving remote restart recovery off synchronous setup and making OCR waiting cancellation-aware through terminal handoff ownership.
+10. Reconcile exact-head review findings by reserving pre-admission roots across detached recovery and terminalizing cancelled handoffs before provider discovery.
 
 ### Files touched
 
@@ -92,6 +95,7 @@ Acceptance criteria:
 10. Gateway request serialization removes nested decoder-unsupported `uniqueItems` and oversized decoder-only string bounds from its copied response schema while leaving the caller's canonical schema byte-for-byte unchanged.
 11. Tauri setup performs no OCR provider transport or polling; it schedules a named background recovery task and remains available while that task is blocked.
 12. A cancellation committed while OCR is pending records a non-retryable terminal handoff, admits no child, and lets the existing root cancellation transition finish without later startup replay.
+13. Startup reserves each recoverable pre-admission root before the detached task can run, rejects a second owner while recovery is blocked, and releases the reservation after recovery exits.
 
 Affected surfaces: Local Connect v2 discovery/client transport, SQLite migration and transactions, desktop background scheduling, application startup recovery, native scanned-PDF routing.
 
@@ -113,7 +117,11 @@ Direct OCR remains unavailable on non-Unix systems. Platform-specific discovery 
 
 Application setup performs only local database reconciliation, constructs the desktop manager, and schedules a named OCR recovery task. That task owns provider discovery, remote status polling, warning emission, and child resumption without delaying Tauri initialization.
 
+Before dispatch, startup reads the durable recoverable handoffs and reserves every pre-admission root in the desktop active registry. A scoped reservation guard releases those roots when the recovery task returns or unwinds, while duplicate continuation admission fails against the same registry entry during polling.
+
 The root worker's cancellation token is passed through the OCR coordinator. Each loop boundary and each completed transport attempt rechecks cancellation plus the persisted root state. Before child admission, cancellation compare-and-sets the current handoff phase to terminal non-retryable failure and returns the existing cancellation signal, so finalization completes the root as `Cancelled` and restart cannot replay the abandoned handoff.
+
+Restart recovery checks the persisted root cancellation state before provider selection, so a cancelled pre-admission handoff becomes terminal even when its pinned provider is offline.
 
 Document Summarizer's tagged-PDF parser exposes one crate-private canonical-text function so the consumer can byte-compare the paired provider text before child admission without importing provider code or introducing a second traversal implementation inside this application. Its tagged-profile decoder preserves ASCII bytes, including tabs and line feeds, and falls back to the existing BOM-aware PDF string decoder for non-ASCII strings.
 
@@ -134,11 +142,11 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Verification
 
-- `cargo test --lib connect::ocr_consumer::tests` - 5 passed, including submission-time and status-poll cancellation against an image-only two-page PDF.
+- `cargo test --lib connect::ocr_consumer::tests` - 6 passed, including submission-time and status-poll cancellation plus restart cancellation with the pinned provider offline.
 - `cargo test pipeline::schema::tests --lib` - 13 passed.
 - `cargo test --lib pipeline::recovery::tests` - 8 passed after active OCR child ownership and stable-checkpoint rewind repair.
 - `cargo test --lib pipeline::workspace::tests` - 11 passed after visible-history limiting repair.
-- `cargo test --lib desktop::tests` - 15 passed, including same-run active OCR child restart through successful handoff completion and nonblocking startup dispatch.
+- `cargo test --lib desktop::tests` - 16 passed, including same-run active OCR child restart, nonblocking startup dispatch, and synchronous root reservation that rejects overlapping worker admission.
 - `cargo test pipeline::parser::tests --lib` - 26 passed after installed-provider wrapper and ASCII-control repairs.
 - `cargo test pipeline::gateway_client::tests --lib` - 27 passed after fail-first decoder-schema projection repair.
 - `cargo test pipeline::model::tests::decoder_projection --lib` - 1 passed.
@@ -155,4 +163,4 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Estimated diff size
 
-Actual with exact-head review repairs: 14 files, +3,364 / -89. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.
+Actual with exact-head review repairs: 14 files, +3,525 / -89. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.
