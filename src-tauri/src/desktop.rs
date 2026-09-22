@@ -266,6 +266,22 @@ impl DesktopJobManager {
             .contains_key(run_id))
     }
 
+    pub fn status_activity(
+        &self,
+        requested_run_id: &str,
+        projected_run_id: &str,
+    ) -> Result<(bool, bool), DesktopJobError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| DesktopJobError::RegistryUnavailable)?;
+        let projected_active = active.contains_key(projected_run_id);
+        Ok((
+            active.contains_key(requested_run_id) || projected_active,
+            projected_active,
+        ))
+    }
+
     pub(crate) fn resume_ocr_child(&self, run_id: &str) -> Result<(), DesktopJobError> {
         let mut conn = db::init_db(&self.db_path)?;
         let run = db::rewind_interrupted_ocr_child(&mut conn, run_id)?;
@@ -1088,6 +1104,26 @@ mod tests {
 
         wait_until(|| gate.entered.load(Ordering::Acquire));
         assert!(manager.is_active(&root_run_id).unwrap());
+        let projected_child_id = Uuid::new_v4().to_string();
+        assert_eq!(
+            manager
+                .status_activity(&root_run_id, &projected_child_id)
+                .unwrap(),
+            (true, false),
+            "the root keeps polling alive before the child is registered"
+        );
+        manager
+            .active
+            .lock()
+            .unwrap()
+            .insert(projected_child_id.clone(), CancellationToken::new());
+        assert_eq!(
+            manager
+                .status_activity(&root_run_id, &projected_child_id)
+                .unwrap(),
+            (true, true),
+            "a registered child can be cancelled"
+        );
         assert!(matches!(
             manager.spawn(
                 root_run_id.clone(),
@@ -1100,6 +1136,20 @@ mod tests {
         ));
         gate.release();
         wait_until(|| !manager.is_active(&root_run_id).unwrap());
+        assert_eq!(
+            manager
+                .status_activity(&root_run_id, &projected_child_id)
+                .unwrap(),
+            (true, true),
+            "the child keeps polling alive after the root exits"
+        );
+        manager.active.lock().unwrap().remove(&projected_child_id);
+        assert_eq!(
+            manager
+                .status_activity(&root_run_id, &projected_child_id)
+                .unwrap(),
+            (false, false)
+        );
     }
 
     #[test]

@@ -523,12 +523,12 @@ fn get_run_status(
 ) -> Result<RunHistoryItem, CommandError> {
     let conn = open_database(&state)?;
     let mut run = load_run(&conn, &run_id).map_err(CommandError::from)?;
-    let active = state
+    let (background_active, projected_active) = state
         .jobs
-        .is_active(&run.run_id)
+        .status_activity(&run_id, &run.run_id)
         .map_err(CommandError::from)?;
-    run.background_active = active;
-    run.can_cancel = run.state.can_request_cancellation() && active;
+    run.background_active = background_active;
+    run.can_cancel = run.state.can_request_cancellation() && projected_active;
     Ok(run)
 }
 
