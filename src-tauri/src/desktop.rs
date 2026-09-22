@@ -251,26 +251,39 @@ impl DesktopJobManager {
 
     pub(crate) fn resume_ocr_child(&self, run_id: &str) -> Result<(), DesktopJobError> {
         let mut conn = db::init_db(&self.db_path)?;
-        let run = db::get_pipeline_run(&conn, run_id)?
-            .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
-        if run.state == PipelineState::Complete {
+        let run = db::rewind_interrupted_ocr_child(&mut conn, run_id)?;
+        if matches!(
+            run.state,
+            PipelineState::Complete | PipelineState::CompleteWithWarnings
+        ) {
             db::mark_ocr_handoff_completed_for_child(&conn, run_id)?;
             return Ok(());
         }
-        if run.state != PipelineState::Ingested {
+        if run.state.is_terminal() {
             return Ok(());
         }
-        let snapshot = db::get_run_model_profile(&conn, run_id)?
-            .ok_or_else(|| DesktopJobError::RuntimeProfileUnavailable(run_id.to_string()))?;
-        let mut runtime = (self.runtime_factory)(Some(&snapshot))?;
-        runtime.health()?;
-        runtime.bind_run(run_id);
-        let (parsing, _) = db::start_parsing(&mut conn, run_id, run.state_version)?;
+        let plan = continuation_plan(&conn, run_id, run.state_version)
+            .map_err(DocumentServiceError::from)?;
+        let runtime = if plan.requires_runtime {
+            let snapshot = continuation_runtime_snapshot(
+                run_id,
+                plan.checkpoint,
+                db::get_run_model_profile(&conn, run_id)?,
+            )?;
+            let mut runtime = (self.runtime_factory)(snapshot.as_ref())?;
+            runtime.health()?;
+            runtime.bind_run(run_id);
+            Some(runtime)
+        } else {
+            None
+        };
         drop(conn);
         self.spawn(
-            parsing.run_id,
-            BackgroundWork::StartedParsing,
-            Some(runtime),
+            run.run_id,
+            BackgroundWork::Continue {
+                expected_state_version: run.state_version,
+            },
+            runtime,
         )
     }
 
@@ -439,7 +452,10 @@ impl DesktopJobManager {
             return Ok(());
         }
         if run.state.is_terminal() {
-            if run.state == PipelineState::Complete {
+            if matches!(
+                run.state,
+                PipelineState::Complete | PipelineState::CompleteWithWarnings
+            ) {
                 db::mark_ocr_handoff_completed_for_child(&conn, run_id)?;
             }
             return Ok(());
@@ -925,6 +941,100 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("background condition did not become true before the test deadline");
+    }
+
+    #[test]
+    fn resumed_ocr_child_rewinds_active_stage_and_completes_same_run() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let source = fixture_path();
+        let source = source.to_str().expect("fixture path should be UTF-8");
+        let (root_document, root) =
+            crate::pipeline::ingest::ingest_pdf(&mut conn, source).expect("root should ingest");
+        let (_, child) =
+            crate::pipeline::ingest::ingest_pdf(&mut conn, source).expect("child should ingest");
+        let (parsing, document) = db::start_parsing(&mut conn, &child.run_id, child.state_version)
+            .expect("child parsing should start");
+        parse_started_document(
+            &mut conn,
+            &PdfExtractParser::new(),
+            &child.run_id,
+            parsing.state_version,
+            &document,
+        )
+        .expect("child parsing should complete");
+        let parsed = get_pipeline_run(&conn, &child.run_id)
+            .expect("child should reload")
+            .expect("child should exist");
+        conn.execute(
+            "UPDATE pipeline_runs
+             SET state = ?1, state_version = state_version + 1, current_stage = ?2
+             WHERE run_id = ?3 AND state_version = ?4",
+            rusqlite::params![
+                serde_json::to_string(&PipelineState::Normalizing).unwrap(),
+                serde_json::to_string(&PipelineStage::Normalize).unwrap(),
+                child.run_id,
+                parsed.state_version,
+            ],
+        )
+        .expect("interrupted normalizing state should persist");
+        let normalizing = get_pipeline_run(&conn, &child.run_id)
+            .expect("active child should reload")
+            .expect("active child should exist");
+        let handoff_id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO ocr_handoffs (
+                handoff_id, root_run_id, root_document_id, source_artifact_id,
+                source_byte_size, source_sha256, source_display_name, source_bytes,
+                provider_app_id, provider_instance_id, provider_job_id,
+                provider_request_json, provider_request_sha256, phase,
+                child_document_id, child_run_id, derived_path, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, 1, ?5, 'scan.pdf', X'00', 'document-ocr',
+                ?6, ?7, '{}', ?5, 'child_admitted', ?8, ?9, ?10, ?11, ?11
+             )",
+            rusqlite::params![
+                handoff_id,
+                root.run_id,
+                root_document.document_id,
+                Uuid::new_v4().to_string(),
+                "0".repeat(64),
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                normalizing.document_id,
+                normalizing.run_id,
+                database.0.with_extension("ocr.pdf").to_string_lossy(),
+                now,
+            ],
+        )
+        .expect("admitted OCR ownership should persist");
+        drop(conn);
+
+        manager
+            .resume_ocr_child(&normalizing.run_id)
+            .expect("OCR child should resume from its stable checkpoint");
+        wait_until(|| !manager.is_active(&normalizing.run_id).unwrap());
+
+        let reopened = db::init_db(&database.0).expect("database should reopen");
+        let completed = get_pipeline_run(&reopened, &normalizing.run_id)
+            .expect("OCR child should reload")
+            .expect("OCR child should exist");
+        assert_eq!(completed.run_id, normalizing.run_id);
+        assert!(matches!(
+            completed.state,
+            PipelineState::Complete | PipelineState::CompleteWithWarnings
+        ));
+        assert!(db::summary_artifact_exists(&reopened, &completed.run_id).unwrap());
+        let handoff = db::get_ocr_handoff(&reopened, &handoff_id)
+            .expect("handoff should reload")
+            .expect("handoff should exist");
+        assert_eq!(handoff.phase, "completed");
+        assert!(list_pipeline_events(&reopened, &completed.run_id)
+            .expect("events should load")
+            .iter()
+            .any(|event| event.reason.as_deref() == Some("ocr_child_rewound_after_restart")));
     }
 
     #[test]

@@ -148,13 +148,10 @@ pub fn inference_runtime_status(
 }
 
 pub fn list_recent_runs(conn: &Connection) -> Result<Vec<RunHistoryItem>, WorkspaceError> {
-    let mut visible = Vec::new();
-    for run in db::list_recent_pipeline_runs(conn, RECENT_RUN_LIMIT)? {
-        if db::get_admitted_ocr_child_run_id(conn, &run.run_id)?.is_none() {
-            visible.push(run_history_item_from_run(conn, run)?);
-        }
-    }
-    Ok(visible)
+    db::list_recent_pipeline_runs(conn, RECENT_RUN_LIMIT)?
+        .into_iter()
+        .map(|run| run_history_item_from_run(conn, run))
+        .collect()
 }
 
 pub fn get_run(conn: &Connection, run_id: &str) -> Result<RunHistoryItem, WorkspaceError> {
@@ -712,6 +709,76 @@ mod tests {
             .into_iter()
             .map(|run| run.run_id)
             .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn ocr_review_regression_history_limit_counts_visible_runs() {
+        let mut conn = init_db(":memory:").expect("database should initialize");
+        let source = fixture_path();
+        let source = source.to_str().expect("fixture path should be UTF-8");
+        let visible = (0..RECENT_RUN_LIMIT)
+            .map(|_| {
+                ingest_pdf(&mut conn, source)
+                    .expect("visible run should ingest")
+                    .1
+            })
+            .collect::<Vec<_>>();
+        conn.execute(
+            "UPDATE pipeline_runs SET updated_at = '2026-09-21T12:00:00+00:00'",
+            [],
+        )
+        .expect("visible timestamps should persist");
+
+        for _ in 0..15 {
+            let (document, root) = ingest_pdf(&mut conn, source).expect("OCR root should ingest");
+            let handoff_id = Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO ocr_handoffs (
+                    handoff_id, root_run_id, root_document_id, source_artifact_id,
+                    source_byte_size, source_sha256, source_display_name, source_bytes,
+                    provider_app_id, provider_instance_id, provider_job_id,
+                    provider_request_json, provider_request_sha256, phase,
+                    child_document_id, child_run_id, derived_path, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, 1, ?5, 'scan.pdf', X'00', 'document-ocr',
+                    ?6, ?7, '{}', ?5, 'child_admitted', ?8, ?9, ?10, ?11, ?11
+                 )",
+                params![
+                    handoff_id,
+                    root.run_id,
+                    document.document_id,
+                    Uuid::new_v4().to_string(),
+                    "0".repeat(64),
+                    Uuid::new_v4().to_string(),
+                    Uuid::new_v4().to_string(),
+                    Uuid::new_v4().to_string(),
+                    Uuid::new_v4().to_string(),
+                    format!("/tmp/{handoff_id}.pdf"),
+                    now,
+                ],
+            )
+            .expect("OCR root ownership should persist");
+            conn.execute(
+                "UPDATE pipeline_runs
+                 SET updated_at = '2026-09-21T12:01:00+00:00'
+                 WHERE run_id = ?1",
+                [&root.run_id],
+            )
+            .expect("OCR root timestamp should persist");
+        }
+
+        let history = list_recent_runs(&conn).expect("history should load");
+        assert_eq!(history.len(), RECENT_RUN_LIMIT as usize);
+        let expected = visible
+            .into_iter()
+            .map(|run| run.run_id)
+            .collect::<std::collections::HashSet<_>>();
+        let actual = history
+            .into_iter()
+            .map(|run| run.run_id)
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(actual, expected);
     }
 

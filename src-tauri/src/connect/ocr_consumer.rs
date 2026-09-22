@@ -1,7 +1,8 @@
 use crate::connect::contracts::{CapabilityRef, InputArtifact, JobState, APP_ID};
+#[cfg(any(unix, test))]
+use crate::connect::v2::{AppManifest, RuntimeRegistration, TRANSPORT_KIND};
 use crate::connect::v2::{
-    AppManifest, ErrorEnvelope, JobRequest, JobStatus, OutputArtifact, RuntimeRegistration,
-    OCR_INPUT_MEDIA_TYPE, PROTOCOL_VERSION, TRANSPORT_KIND,
+    ErrorEnvelope, JobRequest, JobStatus, OutputArtifact, OCR_INPUT_MEDIA_TYPE, PROTOCOL_VERSION,
 };
 use crate::pipeline::contracts::{IngestedDocument, ParsedDocument, PipelineRun, SourceType};
 use crate::pipeline::db::{self, NewOcrHandoff, OcrHandoff, OcrOutput, StoreError};
@@ -14,14 +15,21 @@ use reqwest::{StatusCode, Url};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs;
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::io::Write;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use uuid::{Uuid, Variant, Version};
+use uuid::Uuid;
+#[cfg(unix)]
+use uuid::{Variant, Version};
 
+#[cfg(any(unix, test))]
 const OCR_APP_ID: &str = "document-ocr";
 const OCR_CAPABILITY_ID: &str = "document.ocr";
 const OCR_CAPABILITY_VERSION: &str = "1.0";
@@ -30,7 +38,9 @@ const TEXT_MEDIA_TYPE: &str = "text/plain";
 const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PDF_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
+#[cfg(unix)]
 const MAX_REGISTRATION_BYTES: u64 = 16 * 1024;
+#[cfg(unix)]
 const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
 const MAX_STATUS_BYTES: u64 = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
@@ -789,7 +799,10 @@ fn expected_derived_path(app_data_dir: &Path, handoff_id: &str) -> PathBuf {
         .join(format!("{handoff_id}.pdf"))
 }
 
-fn materialize_derived(app_data_dir: &Path, handoff: &OcrHandoff) -> Result<(), OcrConsumerError> {
+fn validate_retained_derived<'a>(
+    app_data_dir: &Path,
+    handoff: &'a OcrHandoff,
+) -> Result<(PathBuf, &'a [u8]), OcrConsumerError> {
     let expected = expected_derived_path(app_data_dir, &handoff.handoff_id);
     if Path::new(&handoff.derived_path) != expected {
         return Err(OcrConsumerError::InvalidOutput(
@@ -804,59 +817,65 @@ fn materialize_derived(app_data_dir: &Path, handoff: &OcrHandoff) -> Result<(), 
             "retained OCR PDF integrity is invalid".to_string(),
         ));
     }
+    Ok((expected, bytes))
+}
+
+#[cfg(unix)]
+fn materialize_derived(app_data_dir: &Path, handoff: &OcrHandoff) -> Result<(), OcrConsumerError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let (expected, bytes) = validate_retained_derived(app_data_dir, handoff)?;
     let directory = expected.parent().expect("derived path has a parent");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-        match fs::create_dir(directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-        let directory_metadata = fs::symlink_metadata(directory)?;
-        if !directory_metadata.file_type().is_dir()
-            || directory_metadata.uid() != unsafe { libc::geteuid() }
-        {
-            return Err(OcrConsumerError::InvalidOutput(
-                "the OCR snapshot directory is not owned by the current user".to_string(),
-            ));
-        }
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-        match fs::symlink_metadata(&expected) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_file()
-                    || metadata.uid() != unsafe { libc::geteuid() }
-                    || metadata.permissions().mode() & 0o077 != 0
-                {
-                    return Err(OcrConsumerError::InvalidOutput(
-                        "the OCR snapshot is not an owner-private regular file".to_string(),
-                    ));
-                }
-                if fs::read(&expected)? == *bytes {
-                    return Ok(());
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        let temporary = directory.join(format!(".{}.{}.tmp", handoff.handoff_id, Uuid::new_v4()));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, &expected)?;
-        File::open(directory)?.sync_all()?;
+    match fs::create_dir(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
     }
-    #[cfg(not(unix))]
+    let directory_metadata = fs::symlink_metadata(directory)?;
+    if !directory_metadata.file_type().is_dir()
+        || directory_metadata.uid() != unsafe { libc::geteuid() }
     {
-        return Err(OcrConsumerError::Discovery(
-            "direct OCR recovery is not enabled on this platform".to_string(),
+        return Err(OcrConsumerError::InvalidOutput(
+            "the OCR snapshot directory is not owned by the current user".to_string(),
         ));
     }
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    match fs::symlink_metadata(&expected) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.permissions().mode() & 0o077 != 0
+            {
+                return Err(OcrConsumerError::InvalidOutput(
+                    "the OCR snapshot is not an owner-private regular file".to_string(),
+                ));
+            }
+            if fs::read(&expected)? == bytes {
+                return Ok(());
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let temporary = directory.join(format!(".{}.{}.tmp", handoff.handoff_id, Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::rename(&temporary, &expected)?;
+    File::open(directory)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn materialize_derived(app_data_dir: &Path, handoff: &OcrHandoff) -> Result<(), OcrConsumerError> {
+    validate_retained_derived(app_data_dir, handoff)?;
+    Err(OcrConsumerError::Discovery(
+        "direct OCR recovery is not enabled on this platform".to_string(),
+    ))
 }
 
 fn discover_one_provider() -> Result<LiveOcrProvider, OcrConsumerError> {
@@ -879,111 +898,105 @@ fn discover_selected_provider(instance_id: &str) -> Result<LiveOcrProvider, OcrC
         .ok_or_else(|| OcrConsumerError::ProviderUnavailable(instance_id.to_string()))
 }
 
+#[cfg(not(unix))]
 fn discover_providers() -> Result<Vec<LiveOcrProvider>, OcrConsumerError> {
-    #[cfg(not(unix))]
+    Err(OcrConsumerError::Discovery(
+        "direct OCR discovery is not enabled on this platform".to_string(),
+    ))
+}
+
+#[cfg(unix)]
+fn discover_providers() -> Result<Vec<LiveOcrProvider>, OcrConsumerError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| OcrConsumerError::Discovery("XDG_RUNTIME_DIR is unavailable".to_string()))?;
+    let runtime_metadata = fs::symlink_metadata(&runtime).map_err(|error| {
+        OcrConsumerError::Discovery(format!("runtime directory is unavailable: {error}"))
+    })?;
+    if !runtime_metadata.file_type().is_dir() || runtime_metadata.permissions().mode() & 0o077 != 0
     {
         return Err(OcrConsumerError::Discovery(
-            "direct OCR discovery is not enabled on this platform".to_string(),
+            "runtime directory is not owner-private".to_string(),
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .ok_or_else(|| {
-                OcrConsumerError::Discovery("XDG_RUNTIME_DIR is unavailable".to_string())
-            })?;
-        let runtime_metadata = fs::symlink_metadata(&runtime).map_err(|error| {
-            OcrConsumerError::Discovery(format!("runtime directory is unavailable: {error}"))
-        })?;
-        if !runtime_metadata.file_type().is_dir()
-            || runtime_metadata.permissions().mode() & 0o077 != 0
-        {
-            return Err(OcrConsumerError::Discovery(
-                "runtime directory is not owner-private".to_string(),
-            ));
-        }
-        let owner_uid = unsafe { libc::geteuid() };
-        if runtime_metadata.uid() != owner_uid {
-            return Err(OcrConsumerError::Discovery(
-                "runtime directory is not owned by the current user".to_string(),
-            ));
-        }
-        let directory = runtime.join("local-connect/v2/providers");
-        let metadata = fs::symlink_metadata(&directory).map_err(|error| {
-            OcrConsumerError::Discovery(format!("provider directory is unavailable: {error}"))
-        })?;
-        if !metadata.file_type().is_dir()
-            || metadata.uid() != owner_uid
-            || metadata.permissions().mode() & 0o077 != 0
-        {
-            return Err(OcrConsumerError::Discovery(
-                "provider directory is not owner-private".to_string(),
-            ));
-        }
-        let client = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(DISCOVERY_TIMEOUT)
-            .timeout(DISCOVERY_TIMEOUT)
-            .build()
-            .map_err(|error| OcrConsumerError::Discovery(error.to_string()))?;
-        let mut providers = Vec::new();
-        for entry in fs::read_dir(&directory)
-            .map_err(|error| OcrConsumerError::Discovery(error.to_string()))?
-        {
-            let path = match entry {
-                Ok(entry) => entry.path(),
-                Err(_) => continue,
-            };
-            let Some(registration) = read_registration(&path, owner_uid) else {
-                continue;
-            };
-            if registration.app_id != OCR_APP_ID
-                || registration.protocol_version != PROTOCOL_VERSION
-                || registration.transport.kind != TRANSPORT_KIND
-                || registration.auth.scheme != "bearer"
-                || registration.auth.token.is_empty()
-                || !valid_uuid_v4(&registration.instance_id)
-                || validate_base_url(&registration.transport.base_url).is_none()
-            {
-                continue;
-            }
-            let response = match client
-                .get(
-                    endpoint(&registration.transport.base_url, "v2/manifest")
-                        .map_err(map_transport)?,
-                )
-                .bearer_auth(&registration.auth.token)
-                .send()
-            {
-                Ok(response) if response.status() == StatusCode::OK => response,
-                _ => continue,
-            };
-            let bytes = match read_bounded_response(response, MAX_MANIFEST_BYTES) {
-                Ok(bytes) => bytes,
-                Err(_) => continue,
-            };
-            let manifest: AppManifest = match serde_json::from_slice(&bytes) {
-                Ok(manifest) => manifest,
-                Err(_) => continue,
-            };
-            if valid_ocr_manifest(&manifest, &registration) {
-                providers.push(LiveOcrProvider {
-                    app_id: registration.app_id,
-                    instance_id: registration.instance_id,
-                    base_url: registration.transport.base_url,
-                    token: registration.auth.token,
-                });
-            }
-        }
-        providers.sort_by(|left, right| left.instance_id.cmp(&right.instance_id));
-        providers.dedup_by(|left, right| left.instance_id == right.instance_id);
-        Ok(providers)
+    let owner_uid = unsafe { libc::geteuid() };
+    if runtime_metadata.uid() != owner_uid {
+        return Err(OcrConsumerError::Discovery(
+            "runtime directory is not owned by the current user".to_string(),
+        ));
     }
+    let directory = runtime.join("local-connect/v2/providers");
+    let metadata = fs::symlink_metadata(&directory).map_err(|error| {
+        OcrConsumerError::Discovery(format!("provider directory is unavailable: {error}"))
+    })?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != owner_uid
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(OcrConsumerError::Discovery(
+            "provider directory is not owner-private".to_string(),
+        ));
+    }
+    let client = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(DISCOVERY_TIMEOUT)
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .map_err(|error| OcrConsumerError::Discovery(error.to_string()))?;
+    let mut providers = Vec::new();
+    for entry in
+        fs::read_dir(&directory).map_err(|error| OcrConsumerError::Discovery(error.to_string()))?
+    {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(_) => continue,
+        };
+        let Some(registration) = read_registration(&path, owner_uid) else {
+            continue;
+        };
+        if registration.app_id != OCR_APP_ID
+            || registration.protocol_version != PROTOCOL_VERSION
+            || registration.transport.kind != TRANSPORT_KIND
+            || registration.auth.scheme != "bearer"
+            || registration.auth.token.is_empty()
+            || !valid_uuid_v4(&registration.instance_id)
+            || validate_base_url(&registration.transport.base_url).is_none()
+        {
+            continue;
+        }
+        let response = match client
+            .get(endpoint(&registration.transport.base_url, "v2/manifest").map_err(map_transport)?)
+            .bearer_auth(&registration.auth.token)
+            .send()
+        {
+            Ok(response) if response.status() == StatusCode::OK => response,
+            _ => continue,
+        };
+        let bytes = match read_bounded_response(response, MAX_MANIFEST_BYTES) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let manifest: AppManifest = match serde_json::from_slice(&bytes) {
+            Ok(manifest) => manifest,
+            Err(_) => continue,
+        };
+        if valid_ocr_manifest(&manifest, &registration) {
+            providers.push(LiveOcrProvider {
+                app_id: registration.app_id,
+                instance_id: registration.instance_id,
+                base_url: registration.transport.base_url,
+                token: registration.auth.token,
+            });
+        }
+    }
+    providers.sort_by(|left, right| left.instance_id.cmp(&right.instance_id));
+    providers.dedup_by(|left, right| left.instance_id == right.instance_id);
+    Ok(providers)
 }
 
 #[cfg(unix)]
@@ -1017,6 +1030,7 @@ fn read_registration(path: &Path, owner_uid: u32) -> Option<RuntimeRegistration>
     serde_json::from_slice(&bytes).ok()
 }
 
+#[cfg(any(unix, test))]
 fn valid_ocr_manifest(manifest: &AppManifest, registration: &RuntimeRegistration) -> bool {
     if manifest.protocol_version != PROTOCOL_VERSION
         || manifest.instance_id != registration.instance_id
@@ -1049,6 +1063,7 @@ fn valid_ocr_manifest(manifest: &AppManifest, registration: &RuntimeRegistration
         && !capability.effects.confirmation_required
 }
 
+#[cfg(unix)]
 fn validate_base_url(value: &str) -> Option<Url> {
     let url = Url::parse(value).ok()?;
     (url.scheme() == "http"
@@ -1062,6 +1077,7 @@ fn validate_base_url(value: &str) -> Option<Url> {
     .then_some(url)
 }
 
+#[cfg(unix)]
 fn valid_uuid_v4(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|uuid| {
         uuid.get_version() == Some(Version::Random) && uuid.get_variant() == Variant::RFC4122
@@ -1071,7 +1087,10 @@ fn valid_uuid_v4(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connect::contracts::{AppDescription, ArtifactProvenance, ProviderRef};
+    use crate::connect::contracts::AppDescription;
+    #[cfg(unix)]
+    use crate::connect::contracts::{ArtifactProvenance, ProviderRef};
+    #[cfg(unix)]
     use crate::connect::v2::JobResult;
     use crate::pipeline::contracts::{
         ModelProfileSnapshot, ModelStageProfileSnapshot, ParsedPage, PipelineWarning,
@@ -1174,6 +1193,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn completed_status(handoff: &OcrHandoff) -> JobStatus {
         let pdf = include_bytes!("../../tests/fixtures/ocr_tagged.pdf").to_vec();
         let text = canonical_tagged_ocr_text(&pdf).unwrap();

@@ -328,6 +328,21 @@ pub(crate) fn get_admitted_ocr_child_run_id(
     .map_err(StoreError::from)
 }
 
+pub(crate) fn is_admitted_ocr_child(
+    conn: &Connection,
+    child_run_id: &str,
+) -> Result<bool, StoreError> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM ocr_handoffs
+            WHERE child_run_id = ?1 AND phase = 'child_admitted'
+         )",
+        [child_run_id],
+        |row| row.get(0),
+    )
+    .map_err(StoreError::from)
+}
+
 pub(crate) fn list_recoverable_ocr_handoffs(
     conn: &Connection,
 ) -> Result<Vec<OcrHandoff>, StoreError> {
@@ -594,7 +609,11 @@ pub(crate) fn mark_ocr_handoff_completed_for_child(
 ) -> Result<bool, StoreError> {
     let run = get_pipeline_run(conn, child_run_id)?
         .ok_or_else(|| StoreError::RunNotFound(child_run_id.to_string()))?;
-    if run.state != PipelineState::Complete || !summary_artifact_exists(conn, child_run_id)? {
+    if !matches!(
+        run.state,
+        PipelineState::Complete | PipelineState::CompleteWithWarnings
+    ) || !summary_artifact_exists(conn, child_run_id)?
+    {
         return Ok(false);
     }
     let changed = conn.execute(
@@ -603,6 +622,59 @@ pub(crate) fn mark_ocr_handoff_completed_for_child(
         params![Utc::now().to_rfc3339(), child_run_id],
     )?;
     Ok(changed == 1)
+}
+
+pub(crate) fn rewind_interrupted_ocr_child(
+    conn: &mut Connection,
+    child_run_id: &str,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let owns_child: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM ocr_handoffs
+            WHERE child_run_id = ?1 AND phase = 'child_admitted'
+         )",
+        [child_run_id],
+        |row| row.get(0),
+    )?;
+    if !owns_child {
+        return Err(StoreError::InvalidOcrHandoff(
+            "the interrupted run is not owned by an admitted OCR handoff".to_string(),
+        ));
+    }
+    let run = get_pipeline_run(&tx, child_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(child_run_id.to_string()))?;
+    let rewind = match run.state {
+        PipelineState::Parsing => Some((PipelineState::Ingested, PipelineStage::Ingest)),
+        PipelineState::Normalizing => Some((PipelineState::Parsed, PipelineStage::Parse)),
+        PipelineState::Structuring => Some((PipelineState::Normalized, PipelineStage::Normalize)),
+        PipelineState::Chunking => Some((PipelineState::Structured, PipelineStage::Structure)),
+        PipelineState::Analyzing => Some((PipelineState::Chunked, PipelineStage::Chunk)),
+        PipelineState::Synthesizing => Some((PipelineState::Analyzed, PipelineStage::Analyze)),
+        PipelineState::Verifying => Some((PipelineState::Synthesized, PipelineStage::Synthesize)),
+        PipelineState::Ingesting => {
+            return Err(StoreError::InvalidOcrHandoff(
+                "an admitted OCR child cannot be interrupted during ingestion".to_string(),
+            ));
+        }
+        _ => None,
+    };
+    let Some((checkpoint, stage)) = rewind else {
+        tx.commit()?;
+        return Ok(run);
+    };
+    let rewound = transition_in_tx(
+        &tx,
+        child_run_id,
+        run.state,
+        run.state_version,
+        checkpoint,
+        Some(stage),
+        Some("ocr_child_rewound_after_restart".to_string()),
+        TransitionPatch::default(),
+    )?;
+    tx.commit()?;
+    Ok(rewound)
 }
 
 pub(crate) fn get_or_create_profile_suggestion_owner(
@@ -1096,6 +1168,11 @@ pub fn list_recent_pipeline_runs(
         let mut statement = conn.prepare(
             "SELECT run_id
              FROM pipeline_runs
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM ocr_handoffs
+                 WHERE ocr_handoffs.root_run_id = pipeline_runs.run_id
+                   AND ocr_handoffs.phase IN ('child_admitted', 'completed')
+             )
              ORDER BY updated_at DESC, run_id DESC
              LIMIT ?1",
         )?;

@@ -129,12 +129,23 @@ impl StateMachine {
             (Synthesized, Verifying) => true,
             (Verifying, Verified) => true,
 
+            // Explicit restart recovery edges. Only the OCR ownership-guarded
+            // store operation uses these to return interrupted work to its
+            // last persisted checkpoint before normal continuation.
+            (Parsing, Ingested) => true,
+            (Normalizing, Parsed) => true,
+            (Structuring, Normalized) => true,
+            (Chunking, Structured) => true,
+            (Analyzing, Chunked) => true,
+            (Synthesizing, Analyzed) => true,
+            (Verifying, Synthesized) => true,
+
             (Verified, Complete) => true,
             (Verified, CompleteWithWarnings) => true,
 
             (Cancelling, Cancelled) => true,
 
-            // No implicit retry or resume edges are implemented yet.
+            // No implicit retry or resume edges are implemented.
             _ => false,
         }
     }
