@@ -456,8 +456,8 @@ fn run_handoff(
                 thread::sleep(Duration::from_millis(100));
             }
             "output_ready" => {
+                materialize_derived(app_data_dir, &handoff)?;
                 let child = admit_child(conn, &handoff)?;
-                materialize_derived(app_data_dir, &reload(conn, &handoff.handoff_id)?)?;
                 return Ok(child.run_id);
             }
             "child_admitted" | "completed" => {
@@ -929,6 +929,8 @@ fn materialize_derived(app_data_dir: &Path, handoff: &OcrHandoff) -> Result<(), 
                 ));
             }
             if fs::read(&expected)? == bytes {
+                File::open(&expected)?.sync_all()?;
+                File::open(directory)?.sync_all()?;
                 return Ok(());
             }
         }
@@ -1741,6 +1743,143 @@ mod tests {
         assert_eq!(failed.error_code.as_deref(), Some("OCR_CANCELLED"));
         assert_eq!(failed.error_retryable, Some(false));
         assert!(db::list_recoverable_ocr_handoffs(&conn).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_failure_does_not_admit_child_and_recovery_retries_same_output() {
+        let directory = TempDir::new().unwrap();
+        let source_path = directory.path().join("scan.pdf");
+        fs::write(&source_path, image_only_pdf()).unwrap();
+        let mut conn = db::init_db(directory.path().join("summarizer.db")).unwrap();
+        let (document, received) =
+            prepare_pdf_ingestion(source_path.to_str().unwrap(), None).unwrap();
+        let ingested = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&snapshot()),
+            SummaryProfile::General,
+        )
+        .unwrap();
+        let (parsing, persisted) =
+            db::start_parsing(&mut conn, &ingested.run_id, ingested.state_version).unwrap();
+        parse_started_document(
+            &mut conn,
+            &PdfExtractParser::new(),
+            &parsing.run_id,
+            parsing.state_version,
+            &persisted,
+        )
+        .unwrap();
+
+        let provider = live_provider();
+        let handoff =
+            prepare_handoff(&mut conn, &parsing.run_id, directory.path(), &provider).unwrap();
+        apply_status(&conn, &handoff, completed_status(&handoff)).unwrap();
+        let output_ready = db::get_ocr_handoff(&conn, &handoff.handoff_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(output_ready.phase, "output_ready");
+
+        let obstruction = directory.path().join("ocr-derived");
+        fs::write(&obstruction, b"not a directory").unwrap();
+        let transport = LostAckTransport::default();
+        assert!(matches!(
+            run_handoff(
+                &mut conn,
+                output_ready.clone(),
+                directory.path(),
+                &provider,
+                &transport,
+                &UNCONTROLLED_EXECUTION,
+            ),
+            Err(OcrConsumerError::InvalidOutput(_))
+        ));
+        assert_eq!(
+            db::get_ocr_handoff(&conn, &handoff.handoff_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            "output_ready"
+        );
+        assert!(db::get_pipeline_run(&conn, &handoff.child_run_id)
+            .unwrap()
+            .is_none());
+        let lineage_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ocr_lineage WHERE handoff_id = ?1",
+                [&handoff.handoff_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lineage_count, 0);
+        assert_eq!(
+            db::get_admitted_ocr_child_run_id(&conn, &parsing.run_id).unwrap(),
+            None
+        );
+        let history = crate::pipeline::workspace::list_recent_runs(&conn).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].run_id, parsing.run_id);
+
+        fs::remove_file(&obstruction).unwrap();
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER block_ocr_lineage BEFORE INSERT ON ocr_lineage
+             BEGIN SELECT RAISE(ABORT, 'blocked admission'); END;",
+        )
+        .unwrap();
+        assert!(matches!(
+            run_handoff(
+                &mut conn,
+                output_ready.clone(),
+                directory.path(),
+                &provider,
+                &transport,
+                &UNCONTROLLED_EXECUTION,
+            ),
+            Err(OcrConsumerError::Store(_))
+        ));
+        assert_eq!(
+            fs::read(&handoff.derived_path).unwrap(),
+            output_ready.ocr_pdf_bytes.as_ref().unwrap().as_slice()
+        );
+        assert_eq!(
+            db::get_ocr_handoff(&conn, &handoff.handoff_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            "output_ready"
+        );
+        assert!(db::get_pipeline_run(&conn, &handoff.child_run_id)
+            .unwrap()
+            .is_none());
+        conn.execute_batch("DROP TRIGGER block_ocr_lineage;")
+            .unwrap();
+        let recovery = recover_ocr_handoffs_with(
+            &mut conn,
+            directory.path(),
+            std::slice::from_ref(&provider),
+            &transport,
+        )
+        .unwrap();
+        assert!(recovery.warnings.is_empty());
+        assert_eq!(
+            recovery.child_run_ids.as_slice(),
+            std::slice::from_ref(&handoff.child_run_id)
+        );
+        assert_eq!(
+            fs::read(&handoff.derived_path).unwrap(),
+            output_ready.ocr_pdf_bytes.unwrap()
+        );
+        let lineage_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ocr_lineage WHERE handoff_id = ?1",
+                [&handoff.handoff_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lineage_count, 1);
+        assert!(transport.calls.lock().unwrap().is_empty());
     }
 
     #[cfg(unix)]

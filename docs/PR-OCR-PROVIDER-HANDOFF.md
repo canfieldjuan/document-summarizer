@@ -20,6 +20,7 @@ Root cause:
 - The registry reservation ends when a recovery attempt exits, but a pending handoff can outlive that attempt. The generic continuation path does not check durable handoff ownership, so it can advance the root after a provider outage and strand the saved job.
 - OCR HTTP submit/status uses the full phase deadline as one blocking call timeout, so cancellation is not observed until a stalled call returns.
 - Root-ID status reads project to the admitted child before the child worker enters the active registry; the status command checks only the projected child ID, so a poll in that interval reports an inactive background job and stops monitoring despite the still-active root owner.
+- The `output_ready` coordinator commits an ingestible child before materializing its retained OCR PDF. A snapshot write failure leaves the committed child pointing at a missing source, while the handoff has already moved to `child_admitted`.
 - The current installed OCR provider isolates retained source graphics with a paired `q /Artifact BMC` and `EMC Q` wrapper, while the existing tagged parser admits only the earlier wrapper without graphics-state isolation.
 - The provider's canonical tagged text preserves ASCII tabs and line feeds, while the generic PDF string decoder drops those control bytes and makes a valid PDF/text pair fail exact validation.
 - The gateway client forwards the canonical synthesis schema unchanged, including `uniqueItems`, while the accepted gateway contract rejects that decoder-unsupported keyword with HTTP 422; the existing direct-runtime adapter already projects it away without weakening Rust validation.
@@ -42,6 +43,7 @@ The correct fix must:
 14. Reserve every pre-admission recovery root in the desktop active registry before dispatch and release the reservation when recovery exits. Also reject generic root continuation while any durable OCR handoff owns that root, including after recovery exits.
 15. Bound individual OCR HTTP calls well below the overall phase deadline so a blocked call returns to the cancellation checkpoint promptly.
 16. Keep projected child status active while either the original root owner or child worker is active, using one registry snapshot; offer child cancellation only after the child worker itself is active.
+17. Materialize and durably sync the retained OCR PDF before child admission. If materialization fails, leave the handoff `output_ready` with no child; retry against the same retained output and child identity after storage recovers.
 
 Must not change:
 
@@ -68,6 +70,7 @@ Slice phase: direct OCR consumer vertical proof
 10. Reconcile exact-head review findings by reserving pre-admission roots across detached recovery and terminalizing cancelled handoffs before provider discovery.
 11. Reconcile the durable-root and stalled-HTTP review findings without changing product-facing output.
 12. Reconcile the root-to-child monitoring gap while preserving the existing cancellation target and UI copy.
+13. Reconcile snapshot-write failure before child admission without changing the OCR wire or derived document contracts.
 
 ### Files touched
 
@@ -106,6 +109,7 @@ Acceptance criteria:
 14. A pre-admission OCR handoff that remains after startup recovery exits still prevents generic continuation of its root, and history does not advertise that root as continuable.
 15. A stalled submit or status transport call returns control to the cancellation checkpoint within a bounded per-call timeout, rather than waiting for the full phase deadline.
 16. A status poll by the originally accepted root ID remains background-active between child admission and child worker registration; the projected child becomes cancellable only after its own active registration.
+17. A failed derived-PDF materialization leaves the handoff `output_ready`, exposes no child or lineage, and can be retried after the storage obstruction clears to admit exactly one child whose source bytes match the retained PDF.
 
 Affected surfaces: Local Connect v2 discovery/client transport, SQLite migration and transactions, desktop background scheduling, application startup recovery, native scanned-PDF routing.
 
@@ -137,6 +141,8 @@ Each blocking HTTP attempt uses the lesser of two seconds and the remaining phas
 
 The desktop registry reads original-root and projected-child activity under one lock. Root activity keeps a projected status poll alive during worker handoff; only child activity enables cancellation of the projected child. The existing monitor and command payload shape stay unchanged.
 
+The output-ready coordinator first materializes and syncs the retained PDF to its preassigned private path, then commits the child document/run and lineage. A failed filesystem write therefore leaves durable output-ready state without a runnable child. If the database commit fails after the file is present, the next attempt verifies and re-syncs the same file before retrying the same child identity.
+
 Restart recovery checks the persisted root cancellation state before provider selection, so a cancelled pre-admission handoff becomes terminal even when its pinned provider is offline.
 
 Document Summarizer's tagged-PDF parser exposes one crate-private canonical-text function so the consumer can byte-compare the paired provider text before child admission without importing provider code or introducing a second traversal implementation inside this application. Its tagged-profile decoder preserves ASCII bytes, including tabs and line feeds, and falls back to the existing BOM-aware PDF string decoder for non-ASCII strings.
@@ -158,6 +164,8 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Verification
 
+- Fail-first `cargo test --locked --lib connect::ocr_consumer::tests::snapshot_failure_does_not_admit_child_and_recovery_retries_same_output -- --exact` - failed with persisted `child_admitted` instead of `output_ready`; after the ordering repair, 1 passed. The test covers failed snapshot creation, failed admission after successful sync, and one-child recovery from retained output.
+- `cargo test --locked --lib connect::ocr_consumer::tests` - 8 passed; `cargo test --locked --lib desktop::tests` - 16 passed. `cargo fmt --all -- --check`, Linux strict Clippy, and Windows-target strict Clippy passed after the repair.
 - `cargo test --lib desktop::tests::startup_ocr_recovery_reserves_roots_until_task_finishes` - 1 passed after a fail-first missing-method compile error; covers root-only handoff, both owners active, child-only activity, and neither active.
 - `cargo fmt --all -- --check`, `cargo clippy --locked --lib --tests -- -D warnings`, and `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` - passed after the status repair.
 - `cargo test --locked --lib connect::ocr_consumer::tests -- --nocapture` - 7 passed, including durable-root exclusion after unavailable-provider recovery and a real stalled loopback status request bounded below the phase deadline.
@@ -185,4 +193,4 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Estimated diff size
 
-Actual with exact-head review repairs: 14 files, +3,682 / -92. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.
+Actual with exact-head review repairs: 14 files, +3,829 / -92. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.
