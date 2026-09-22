@@ -1,19 +1,22 @@
+use crate::connect::ocr_consumer::{parsed_document_requires_ocr, process_scanned_document};
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
     CompletedSummary, ModelProfileSnapshot, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
     PipelineRun, PipelineStage, PipelineState, SummaryProfile,
 };
-use crate::pipeline::control::CancellationToken;
+use crate::pipeline::control::{CancellationToken, ExecutionControl};
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::model_settings::{runtime_from_settings, runtime_from_snapshot};
 use crate::pipeline::normalize::CanonicalNormalizer;
 #[cfg(test)]
 use crate::pipeline::parser::PdfExtractParser;
-use crate::pipeline::parser::SourceParserSet;
+use crate::pipeline::parser::{parse_started_document, SourceParserSet};
+#[cfg(test)]
+use crate::pipeline::service::SummaryComponents;
 use crate::pipeline::service::{
     admit_pdf_for_background, admit_retry_for_background, continuation_plan,
-    continue_run_to_summary_controlled, process_started_parsing_to_summary_controlled,
-    validate_retry_for_background, ContinuationComponents, DocumentServiceError, SummaryComponents,
+    continue_run_to_summary_controlled, validate_retry_for_background, ContinuationComponents,
+    DocumentServiceError,
 };
 use crate::pipeline::structure::DeterministicStructureInterpreter;
 use serde::Serialize;
@@ -246,6 +249,31 @@ impl DesktopJobManager {
             .contains_key(run_id))
     }
 
+    pub(crate) fn resume_ocr_child(&self, run_id: &str) -> Result<(), DesktopJobError> {
+        let mut conn = db::init_db(&self.db_path)?;
+        let run = db::get_pipeline_run(&conn, run_id)?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+        if run.state == PipelineState::Complete {
+            db::mark_ocr_handoff_completed_for_child(&conn, run_id)?;
+            return Ok(());
+        }
+        if run.state != PipelineState::Ingested {
+            return Ok(());
+        }
+        let snapshot = db::get_run_model_profile(&conn, run_id)?
+            .ok_or_else(|| DesktopJobError::RuntimeProfileUnavailable(run_id.to_string()))?;
+        let mut runtime = (self.runtime_factory)(Some(&snapshot))?;
+        runtime.health()?;
+        runtime.bind_run(run_id);
+        let (parsing, _) = db::start_parsing(&mut conn, run_id, run.state_version)?;
+        drop(conn);
+        self.spawn(
+            parsing.run_id,
+            BackgroundWork::StartedParsing,
+            Some(runtime),
+        )
+    }
+
     fn spawn(
         &self,
         run_id: String,
@@ -314,18 +342,65 @@ impl DesktopJobManager {
 
         match work {
             BackgroundWork::StartedParsing => {
-                let runtime = runtime.as_deref().ok_or_else(|| {
+                let mut runtime = runtime.ok_or_else(|| {
                     DocumentServiceError::RuntimeRequiredForBackground(run_id.to_string())
                 })?;
-                process_started_parsing_to_summary_controlled(
+                if token.cancellation_requested() {
+                    return Err(DocumentServiceError::CancellationObserved);
+                }
+                let parsed = parse_started_document(
+                    &mut conn,
+                    parser,
+                    run_id,
+                    run.state_version,
+                    &document,
+                )?;
+                if parsed_document_requires_ocr(&parsed) {
+                    let app_data_dir =
+                        self.db_path
+                            .parent()
+                            .ok_or_else(|| DocumentServiceError::OcrHandoff {
+                                code: "OCR_STORAGE_UNAVAILABLE".to_string(),
+                                message: "the application data directory is unavailable"
+                                    .to_string(),
+                            })?;
+                    let child_run_id = process_scanned_document(&mut conn, run_id, app_data_dir)
+                        .map_err(|error| DocumentServiceError::OcrHandoff {
+                            code: "OCR_HANDOFF_FAILED".to_string(),
+                            message: error.to_string(),
+                        })?;
+                    let child = db::get_pipeline_run(&conn, &child_run_id)?
+                        .ok_or_else(|| StoreError::RunNotFound(child_run_id.clone()))?;
+                    runtime.bind_run(&child_run_id);
+                    let (parsing, _) =
+                        db::start_parsing(&mut conn, &child_run_id, child.state_version)?;
+                    drop(conn);
+                    self.spawn(
+                        parsing.run_id,
+                        BackgroundWork::StartedParsing,
+                        Some(runtime),
+                    )
+                    .map_err(|error| DocumentServiceError::OcrHandoff {
+                        code: "OCR_CHILD_WORKER_UNAVAILABLE".to_string(),
+                        message: error.to_string(),
+                    })?;
+                    return Err(DocumentServiceError::OcrHandoff {
+                        code: "OCR_DERIVED_HANDOFF".to_string(),
+                        message: format!("processing continued in derived run {child_run_id}"),
+                    });
+                }
+                let parsed_run = db::get_pipeline_run(&conn, run_id)?
+                    .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+                continue_run_to_summary_controlled(
                     &mut conn,
                     run_id,
-                    SummaryComponents {
+                    parsed_run.state_version,
+                    ContinuationComponents {
                         parser,
                         normalizer: &normalizer,
                         interpreter: &interpreter,
                         chunker: &chunker,
-                        runtime,
+                        runtime: Some(runtime.as_ref()),
                     },
                     token,
                 )
@@ -364,10 +439,19 @@ impl DesktopJobManager {
             return Ok(());
         }
         if run.state.is_terminal() {
+            if run.state == PipelineState::Complete {
+                db::mark_ocr_handoff_completed_for_child(&conn, run_id)?;
+            }
             return Ok(());
         }
         if let Ok(Err(error)) = &outcome {
             if error.is_concurrent_ownership_loss() {
+                return Ok(());
+            }
+            if matches!(error, DocumentServiceError::OcrHandoff { .. })
+                && db::get_ocr_handoff_for_root(&conn, run_id)?
+                    .is_some_and(|handoff| handoff.phase != "failed")
+            {
                 return Ok(());
             }
         }
@@ -796,11 +880,16 @@ mod tests {
         let parsed = get_parsed_document(&reopened, &accepted.run_id)
             .expect("parsed artifact should load")
             .expect("parsed artifact should persist");
+        let completed = get_pipeline_run(&reopened, &accepted.run_id)
+            .expect("completed OCR run should load")
+            .expect("completed OCR run should exist");
         assert_eq!(parsed.parser_id, "local-connect-tagged-ocr");
         assert_eq!(
             parsed.source_type,
             crate::pipeline::contracts::SourceType::OcrText
         );
+        assert_eq!(completed.state, PipelineState::Complete);
+        assert!(db::summary_artifact_exists(&reopened, &accepted.run_id).unwrap());
     }
 
     fn fixture_manager(database: &TestDatabase) -> DesktopJobManager {
@@ -1512,5 +1601,64 @@ mod tests {
             failed.failure.as_ref().map(|failure| failure.code.as_str()),
             Some("BACKGROUND_RUNTIME_REQUIRED")
         );
+    }
+
+    #[test]
+    fn pending_ocr_recovery_keeps_the_root_checkpoint_resumable() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let (document, ingested) = crate::pipeline::ingest::ingest_pdf(
+            &mut conn,
+            fixture_path()
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+        )
+        .expect("fixture should ingest");
+        let handoff_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO ocr_handoffs (
+                handoff_id, root_run_id, root_document_id, source_artifact_id,
+                source_byte_size, source_sha256, source_display_name, source_bytes,
+                provider_app_id, provider_instance_id, provider_job_id,
+                provider_request_json, provider_request_sha256, phase,
+                child_document_id, child_run_id, derived_path, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, 1, ?5, 'scan.pdf', X'00', 'document-ocr',
+                ?6, ?7, '{}', ?5, 'submission_uncertain', ?8, ?9, ?10, ?11, ?11
+             )",
+            rusqlite::params![
+                handoff_id,
+                ingested.run_id,
+                document.document_id,
+                Uuid::new_v4().to_string(),
+                "0".repeat(64),
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                database.0.with_extension("ocr.pdf").to_string_lossy(),
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .expect("pending handoff should persist");
+        drop(conn);
+
+        manager
+            .finalize(
+                &ingested.run_id,
+                Ok(Err(DocumentServiceError::OcrHandoff {
+                    code: "OCR_HANDOFF_FAILED".to_string(),
+                    message: "status is temporarily unavailable".to_string(),
+                })),
+            )
+            .expect("pending OCR ownership should remain resumable");
+
+        let conn = db::init_db(&database.0).expect("database should reopen");
+        let unchanged = get_pipeline_run(&conn, &ingested.run_id)
+            .expect("root should reload")
+            .expect("root should exist");
+        assert_eq!(unchanged.state, PipelineState::Ingested);
+        assert!(unchanged.failure.is_none());
     }
 }

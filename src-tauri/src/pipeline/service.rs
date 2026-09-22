@@ -50,6 +50,8 @@ pub enum DocumentServiceError {
     CancellationObserved,
     #[error("Pipeline run {0} requires the local model runtime for background processing")]
     RuntimeRequiredForBackground(String),
+    #[error("OCR handoff failed: {message}")]
+    OcrHandoff { code: String, message: String },
 }
 
 impl DocumentServiceError {
@@ -67,6 +69,7 @@ impl DocumentServiceError {
             Self::ModelProfile(_) => "PIPELINE_STORE_ERROR",
             Self::CancellationObserved => "PIPELINE_CANCELLATION_OBSERVED",
             Self::RuntimeRequiredForBackground(_) => "BACKGROUND_RUNTIME_REQUIRED",
+            Self::OcrHandoff { code, .. } => code,
         }
     }
 

@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 19;
+pub const CURRENT_SCHEMA_VERSION: u32 = 20;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -729,6 +729,109 @@ ADD COLUMN source_type TEXT NOT NULL DEFAULT 'native_text'
 CHECK (source_type IN ('native_text', 'ocr_text'));
 "#;
 
+const V19_TO_V20: &str = r#"
+CREATE TABLE ocr_handoffs (
+    handoff_id TEXT PRIMARY KEY,
+    root_run_id TEXT NOT NULL UNIQUE,
+    root_document_id TEXT NOT NULL,
+    source_artifact_id TEXT NOT NULL UNIQUE,
+    source_byte_size INTEGER NOT NULL CHECK (
+        source_byte_size > 0 AND source_byte_size <= 33554432
+    ),
+    source_sha256 TEXT NOT NULL CHECK (
+        length(source_sha256) = 64
+        AND source_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    source_display_name TEXT NOT NULL,
+    source_bytes BLOB NOT NULL CHECK (length(source_bytes) = source_byte_size),
+    provider_app_id TEXT NOT NULL CHECK (provider_app_id = 'document-ocr'),
+    provider_instance_id TEXT NOT NULL,
+    provider_job_id TEXT NOT NULL UNIQUE,
+    provider_request_json TEXT NOT NULL,
+    provider_request_sha256 TEXT NOT NULL CHECK (
+        length(provider_request_sha256) = 64
+        AND provider_request_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    phase TEXT NOT NULL CHECK (phase IN (
+        'prepared', 'submission_uncertain', 'running', 'output_ready',
+        'child_admitted', 'completed', 'failed'
+    )),
+    provider_status_json TEXT,
+    ocr_pdf_artifact_id TEXT UNIQUE,
+    ocr_pdf_sha256 TEXT CHECK (
+        ocr_pdf_sha256 IS NULL OR (
+            length(ocr_pdf_sha256) = 64
+            AND ocr_pdf_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    ocr_pdf_byte_size INTEGER CHECK (
+        ocr_pdf_byte_size IS NULL OR (
+            ocr_pdf_byte_size > 0 AND ocr_pdf_byte_size <= 2097152
+        )
+    ),
+    ocr_pdf_bytes BLOB,
+    text_artifact_id TEXT UNIQUE,
+    text_sha256 TEXT CHECK (
+        text_sha256 IS NULL OR (
+            length(text_sha256) = 64
+            AND text_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    text_byte_size INTEGER CHECK (
+        text_byte_size IS NULL OR (
+            text_byte_size > 0 AND text_byte_size <= 262144
+        )
+    ),
+    text_bytes BLOB,
+    child_document_id TEXT NOT NULL UNIQUE,
+    child_run_id TEXT NOT NULL UNIQUE,
+    derived_path TEXT NOT NULL UNIQUE,
+    error_code TEXT,
+    error_message TEXT,
+    error_retryable INTEGER CHECK (error_retryable IS NULL OR error_retryable IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(root_run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(root_document_id) REFERENCES documents(document_id),
+    CHECK (
+        (ocr_pdf_bytes IS NULL AND ocr_pdf_artifact_id IS NULL
+            AND ocr_pdf_sha256 IS NULL AND ocr_pdf_byte_size IS NULL)
+        OR (ocr_pdf_bytes IS NOT NULL AND ocr_pdf_artifact_id IS NOT NULL
+            AND ocr_pdf_sha256 IS NOT NULL
+            AND length(ocr_pdf_bytes) = ocr_pdf_byte_size)
+    ),
+    CHECK (
+        (text_bytes IS NULL AND text_artifact_id IS NULL
+            AND text_sha256 IS NULL AND text_byte_size IS NULL)
+        OR (text_bytes IS NOT NULL AND text_artifact_id IS NOT NULL
+            AND text_sha256 IS NOT NULL AND length(text_bytes) = text_byte_size)
+    )
+);
+
+CREATE INDEX ocr_handoffs_phase_idx ON ocr_handoffs(phase, created_at);
+
+CREATE TABLE ocr_lineage (
+    handoff_id TEXT PRIMARY KEY,
+    producer_output_artifact_id TEXT NOT NULL UNIQUE,
+    child_run_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(handoff_id) REFERENCES ocr_handoffs(handoff_id),
+    FOREIGN KEY(child_run_id) REFERENCES pipeline_runs(run_id)
+);
+
+CREATE TRIGGER ocr_lineage_no_update
+BEFORE UPDATE ON ocr_lineage
+BEGIN
+    SELECT RAISE(ABORT, 'ocr lineage is immutable');
+END;
+
+CREATE TRIGGER ocr_lineage_no_delete
+BEFORE DELETE ON ocr_lineage
+BEGIN
+    SELECT RAISE(ABORT, 'ocr lineage is immutable');
+END;
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -918,6 +1021,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V16_TO_V17)?;
         tx.execute_batch(V17_TO_V18)?;
         tx.execute_batch(V18_TO_V19)?;
+        tx.execute_batch(V19_TO_V20)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -993,6 +1097,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 18 {
         migrate_v18_to_v19(conn)?;
+        current_version = 19;
+    }
+    if current_version == 19 {
+        migrate_v19_to_v20(conn)?;
     }
     validate(conn)
 }
@@ -1098,6 +1206,10 @@ fn migrate_v18_to_v19(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V18_TO_V19, 19)
 }
 
+fn migrate_v19_to_v20(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V19_TO_V20, 20)
+}
+
 fn migrate_additive(
     conn: &mut Connection,
     statements: &str,
@@ -1137,6 +1249,41 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         return Err(MigrationError::Invariant(
             "documents contains an invalid source_type".to_string(),
         ));
+    }
+
+    for (table, expected_columns) in [("ocr_handoffs", 31_u32), ("ocr_lineage", 4_u32)] {
+        let columns: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if columns != expected_columns {
+            return Err(MigrationError::Invariant(format!(
+                "{table} schema is incomplete"
+            )));
+        }
+    }
+    let invalid_ocr_handoffs: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM ocr_handoffs
+         WHERE root_run_id NOT IN (SELECT run_id FROM pipeline_runs)
+            OR root_document_id NOT IN (SELECT document_id FROM documents)",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_ocr_handoffs != 0 {
+        return Err(MigrationError::Invariant(
+            "ocr handoff ownership is invalid".to_string(),
+        ));
+    }
+    for trigger in ["ocr_lineage_no_update", "ocr_lineage_no_delete"] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [trigger],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!("{trigger} is missing")));
+        }
     }
 
     let event_sequence_columns: u32 = conn.query_row(
@@ -2616,5 +2763,24 @@ mod tests {
             Err(MigrationError::Invariant(message))
                 if message == "every pipeline run must have an immutable model request owner"
         ));
+    }
+
+    #[test]
+    fn current_schema_owns_one_ocr_handoff_and_lineage_edge() {
+        let mut conn = Connection::open_in_memory().expect("database should open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        migrate(&mut conn).expect("current schema should initialize");
+
+        for table in ["ocr_handoffs", "ocr_lineage"] {
+            let present: u32 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(present, 1, "{table} must exist");
+        }
     }
 }

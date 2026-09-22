@@ -5,6 +5,7 @@ pub mod pipeline;
 use connect::entitlement::{
     EntitlementDecision, EntitlementGate, EntitlementInstallError, EntitlementStatus,
 };
+use connect::ocr_consumer::recover_ocr_handoffs;
 use connect::provider::ConnectProvider;
 use desktop::{BackgroundRunAccepted, DesktopJobError, DesktopJobManager};
 use pipeline::chunk::{
@@ -521,9 +522,12 @@ fn get_run_status(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<RunHistoryItem, CommandError> {
-    let active = state.jobs.is_active(&run_id).map_err(CommandError::from)?;
     let conn = open_database(&state)?;
     let mut run = load_run(&conn, &run_id).map_err(CommandError::from)?;
+    let active = state
+        .jobs
+        .is_active(&run.run_id)
+        .map_err(CommandError::from)?;
     run.background_active = active;
     run.can_cancel = run.state.can_request_cancellation() && active;
     Ok(run)
@@ -558,6 +562,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             let db_path = app_data_dir.join("summarizer.db");
             let settings_path = model_settings_path(&app_data_dir);
             let mut conn = init_db(&db_path)?;
+            let ocr_recovery = recover_ocr_handoffs(&mut conn, &app_data_dir)?;
+            for warning in &ocr_recovery.warnings {
+                eprintln!("OCR handoff remains pending after restart: {warning}");
+            }
             let recovered = reconcile_interrupted_runs(&mut conn)?;
             if !recovered.is_empty() {
                 eprintln!(
@@ -574,8 +582,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     None
                 }
             };
+            let jobs = DesktopJobManager::new(db_path.clone(), settings_path.clone());
+            for child_run_id in &ocr_recovery.child_run_ids {
+                if let Err(error) = jobs.resume_ocr_child(child_run_id) {
+                    eprintln!("OCR child {child_run_id} could not resume after restart: {error}");
+                }
+            }
             app.manage(AppState {
-                jobs: DesktopJobManager::new(db_path.clone(), settings_path.clone()),
+                jobs,
                 model_settings_path: settings_path,
                 entitlement,
             });

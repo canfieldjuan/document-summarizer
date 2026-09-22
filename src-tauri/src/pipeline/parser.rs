@@ -196,45 +196,7 @@ impl TaggedOcrParser {
             ));
         }
         let source_bytes = verified_source_bytes(document)?;
-        let pdf = load_bounded_tagged_ocr_pdf(&source_bytes).map_err(|_| {
-            parse_failure(
-                "OCR_STRUCTURE_INVALID",
-                "The OCR PDF does not match the required tagged profile",
-                false,
-            )
-        })?;
-        if pdf.was_encrypted() || pdf.is_encrypted() {
-            return Err(parse_failure(
-                "ENCRYPTED_PDF_UNSUPPORTED",
-                "Encrypted PDFs are not supported in the tagged OCR parser",
-                false,
-            ));
-        }
-        let pages = parse_tagged_ocr_pages(&pdf).map_err(|_| {
-            parse_failure(
-                "OCR_STRUCTURE_INVALID",
-                "The OCR PDF does not match the required tagged profile",
-                false,
-            )
-        })?;
-        let text_bytes = pages
-            .iter()
-            .map(|page| page.text.len())
-            .try_fold(0usize, |total, length| total.checked_add(length + 1))
-            .ok_or_else(|| {
-                parse_failure(
-                    "OCR_TEXT_LIMIT_EXCEEDED",
-                    "The OCR text exceeds the supported size",
-                    false,
-                )
-            })?;
-        if text_bytes > 256 * 1024 || pages.iter().all(|page| page.text.trim().is_empty()) {
-            return Err(parse_failure(
-                "OCR_TEXT_LIMIT_EXCEEDED",
-                "The OCR text is empty or exceeds the supported size",
-                false,
-            ));
-        }
+        let pages = parse_tagged_ocr_source(&source_bytes)?;
         Ok(ParsedDocument {
             document_id: document.document_id.clone(),
             parser_id: self.id().to_string(),
@@ -244,6 +206,61 @@ impl TaggedOcrParser {
             warnings: Vec::new(),
         })
     }
+}
+
+fn parse_tagged_ocr_source(source_bytes: &[u8]) -> Result<Vec<ParsedPage>, PipelineFailure> {
+    let pdf = load_bounded_tagged_ocr_pdf(source_bytes).map_err(|_| {
+        parse_failure(
+            "OCR_STRUCTURE_INVALID",
+            "The OCR PDF does not match the required tagged profile",
+            false,
+        )
+    })?;
+    if pdf.was_encrypted() || pdf.is_encrypted() {
+        return Err(parse_failure(
+            "ENCRYPTED_PDF_UNSUPPORTED",
+            "Encrypted PDFs are not supported in the tagged OCR parser",
+            false,
+        ));
+    }
+    let pages = parse_tagged_ocr_pages(&pdf).map_err(|_| {
+        parse_failure(
+            "OCR_STRUCTURE_INVALID",
+            "The OCR PDF does not match the required tagged profile",
+            false,
+        )
+    })?;
+    let text_bytes = pages
+        .iter()
+        .map(|page| page.text.len())
+        .try_fold(0usize, |total, length| total.checked_add(length + 1))
+        .ok_or_else(|| {
+            parse_failure(
+                "OCR_TEXT_LIMIT_EXCEEDED",
+                "The OCR text exceeds the supported size",
+                false,
+            )
+        })?;
+    if text_bytes > 256 * 1024 || pages.iter().all(|page| page.text.trim().is_empty()) {
+        return Err(parse_failure(
+            "OCR_TEXT_LIMIT_EXCEEDED",
+            "The OCR text is empty or exceeds the supported size",
+            false,
+        ));
+    }
+    Ok(pages)
+}
+
+pub(crate) fn canonical_tagged_ocr_text(source_bytes: &[u8]) -> Result<Vec<u8>, PipelineFailure> {
+    let pages = parse_tagged_ocr_source(source_bytes)?;
+    let mut text = Vec::new();
+    for (index, page) in pages.iter().enumerate() {
+        if index > 0 {
+            text.push(0x0c);
+        }
+        text.extend_from_slice(page.text.as_bytes());
+    }
+    Ok(text)
 }
 
 fn load_bounded_tagged_ocr_pdf(source: &[u8]) -> Result<PdfDocument, ()> {
@@ -465,6 +482,14 @@ fn tagged_bbox(pdf: &PdfDocument, span: &PdfDictionary, page_box: [f64; 4]) -> T
     Ok(())
 }
 
+fn decode_tagged_actual_text(actual: &PdfObject) -> TaggedResult<String> {
+    let bytes = actual.as_str().map_err(|_| ())?;
+    if bytes.is_ascii() {
+        return String::from_utf8(bytes.to_vec()).map_err(|_| ());
+    }
+    decode_text_string(actual).map_err(|_| ())
+}
+
 fn tagged_parent_maps(
     pdf: &PdfDocument,
     root: &PdfDictionary,
@@ -546,13 +571,24 @@ fn tagged_content_mcids(
     };
     let opening = decode(contents[0])?;
     let closing = decode(contents[contents.len() - 2])?;
-    if opening.operations.len() != 1
-        || opening.operations[0].operator != "BMC"
-        || opening.operations[0].operands.as_slice() != [PdfObject::Name(b"Artifact".to_vec())]
-        || closing.operations.len() != 1
-        || closing.operations[0].operator != "EMC"
-        || !closing.operations[0].operands.is_empty()
-    {
+    let artifact = PdfObject::Name(b"Artifact".to_vec());
+    let legacy_wrapper = opening.operations.len() == 1
+        && opening.operations[0].operator == "BMC"
+        && opening.operations[0].operands.as_slice() == [artifact.clone()]
+        && closing.operations.len() == 1
+        && closing.operations[0].operator == "EMC"
+        && closing.operations[0].operands.is_empty();
+    let isolated_wrapper = opening.operations.len() == 2
+        && opening.operations[0].operator == "q"
+        && opening.operations[0].operands.is_empty()
+        && opening.operations[1].operator == "BMC"
+        && opening.operations[1].operands.as_slice() == [artifact]
+        && closing.operations.len() == 2
+        && closing.operations[0].operator == "EMC"
+        && closing.operations[0].operands.is_empty()
+        && closing.operations[1].operator == "Q"
+        && closing.operations[1].operands.is_empty();
+    if !legacy_wrapper && !isolated_wrapper {
         return Err(());
     }
     let mut found = HashSet::new();
@@ -615,7 +651,7 @@ fn tagged_span_text(
     if !matches!(actual, PdfObject::String(_, _)) {
         return Err(());
     }
-    let text = decode_text_string(actual).map_err(|_| ())?;
+    let text = decode_tagged_actual_text(actual)?;
     if text.trim().is_empty() || text.contains('\u{000c}') {
         return Err(());
     }
@@ -1029,7 +1065,7 @@ mod tests {
                 .find("impl DocumentParser for TaggedOcrParser")
                 .unwrap()];
 
-        assert!(tagged.contains("load_bounded_tagged_ocr_pdf(&source_bytes)"));
+        assert!(tagged.contains("load_bounded_tagged_ocr_pdf(source_bytes)"));
         assert!(!tagged.contains("PdfDocument::load_mem(&source_bytes)"));
     }
 
@@ -1216,6 +1252,86 @@ mod tests {
             .pages
             .iter()
             .all(|page| !page.requires_visual_processing && page.warnings.is_empty()));
+    }
+
+    fn tagged_fixture_with_wrapper(opening: &[u8], closing: &[u8]) -> TestPath {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let first_page = *pdf
+            .get_pages()
+            .values()
+            .next()
+            .expect("OCR fixture should have a page");
+        let content_ids = pdf.get_page_contents(first_page);
+        pdf.get_object_mut(content_ids[0])
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(opening.to_vec());
+        pdf.get_object_mut(content_ids[content_ids.len() - 2])
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(closing.to_vec());
+        save_pdf(pdf)
+    }
+
+    #[test]
+    fn tagged_ocr_parser_accepts_only_paired_source_graphics_wrappers() {
+        let isolated = tagged_fixture_with_wrapper(b"q\n/Artifact BMC\n", b"EMC\nQ\n");
+        let (isolated_document, _) = prepare_pdf_ingestion_with_source_type(
+            isolated.0.to_str().unwrap(),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .unwrap();
+        TaggedOcrParser::new()
+            .parse(&isolated_document)
+            .expect("the current provider wrapper should parse");
+
+        let mixed = tagged_fixture_with_wrapper(b"q\n/Artifact BMC\n", b"EMC\n");
+        let (mixed_document, _) = prepare_pdf_ingestion_with_source_type(
+            mixed.0.to_str().unwrap(),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .unwrap();
+        let error = TaggedOcrParser::new()
+            .parse(&mixed_document)
+            .expect_err("an unmatched graphics-state wrapper must fail");
+        assert_eq!(error.code, "OCR_STRUCTURE_INVALID");
+    }
+
+    #[test]
+    fn tagged_ocr_parser_preserves_ascii_controls_in_actual_text() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut pdf = PdfDocument::load(&fixture).expect("OCR fixture should load");
+        let catalog = tagged_dictionary(&pdf, pdf.trailer.get(b"Root").unwrap()).unwrap();
+        let root_id = tagged_reference(catalog.get(b"StructTreeRoot").unwrap()).unwrap();
+        let document_id = tagged_child_ids(&pdf, pdf.get_dictionary(root_id).unwrap()).unwrap()[0];
+        let section_id =
+            tagged_child_ids(&pdf, pdf.get_dictionary(document_id).unwrap()).unwrap()[0];
+        let block_id = tagged_child_ids(&pdf, pdf.get_dictionary(section_id).unwrap()).unwrap()[0];
+        let span_id = tagged_child_ids(&pdf, pdf.get_dictionary(block_id).unwrap()).unwrap()[0];
+        pdf.get_dictionary_mut(span_id).unwrap().set(
+            "ActualText",
+            PdfObject::String(b"line one\nline two\t".to_vec(), StringFormat::Literal),
+        );
+        let changed = save_pdf(pdf);
+        let (document, _) = prepare_pdf_ingestion_with_source_type(
+            changed.0.to_str().unwrap(),
+            Some("recognized.pdf"),
+            SourceType::OcrText,
+        )
+        .unwrap();
+
+        let parsed = TaggedOcrParser::new()
+            .parse(&document)
+            .expect("profile ASCII controls should parse");
+
+        assert!(parsed.pages[0].text.starts_with("line one\nline two\t"));
     }
 
     fn persist_tagged_fixture(

@@ -148,15 +148,20 @@ pub fn inference_runtime_status(
 }
 
 pub fn list_recent_runs(conn: &Connection) -> Result<Vec<RunHistoryItem>, WorkspaceError> {
-    db::list_recent_pipeline_runs(conn, RECENT_RUN_LIMIT)?
-        .into_iter()
-        .map(|run| run_history_item_from_run(conn, run))
-        .collect()
+    let mut visible = Vec::new();
+    for run in db::list_recent_pipeline_runs(conn, RECENT_RUN_LIMIT)? {
+        if db::get_admitted_ocr_child_run_id(conn, &run.run_id)?.is_none() {
+            visible.push(run_history_item_from_run(conn, run)?);
+        }
+    }
+    Ok(visible)
 }
 
 pub fn get_run(conn: &Connection, run_id: &str) -> Result<RunHistoryItem, WorkspaceError> {
-    let run = db::get_pipeline_run(conn, run_id)?
-        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    let resolved_run_id =
+        db::get_admitted_ocr_child_run_id(conn, run_id)?.unwrap_or_else(|| run_id.to_string());
+    let run = db::get_pipeline_run(conn, &resolved_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(resolved_run_id))?;
     run_history_item_from_run(conn, run)
 }
 
@@ -164,16 +169,18 @@ pub fn get_persisted_summary(
     conn: &Connection,
     run_id: &str,
 ) -> Result<PersistedSummary, WorkspaceError> {
-    let run = db::get_pipeline_run(conn, run_id)?
-        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    let resolved_run_id =
+        db::get_admitted_ocr_child_run_id(conn, run_id)?.unwrap_or_else(|| run_id.to_string());
+    let run = db::get_pipeline_run(conn, &resolved_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(resolved_run_id.clone()))?;
     let document = db::get_document(conn, &run.document_id)?
         .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
-    let summary = db::get_summary_artifact(conn, run_id)?
-        .ok_or_else(|| WorkspaceError::SummaryNotFound(run_id.to_string()))?;
-    let citations = db::get_citation_artifact(conn, run_id)?;
+    let summary = db::get_summary_artifact(conn, &resolved_run_id)?
+        .ok_or_else(|| WorkspaceError::SummaryNotFound(resolved_run_id.clone()))?;
+    let citations = db::get_citation_artifact(conn, &resolved_run_id)?;
     validate_summary_state(&run, true)?;
     let key_point_claim_ids =
-        validate_citations_against_sources(conn, run_id, &summary, citations.as_ref())?;
+        validate_citations_against_sources(conn, &resolved_run_id, &summary, citations.as_ref())?;
     let summary = summary_view(summary, citations, key_point_claim_ids)?;
 
     Ok(PersistedSummary {

@@ -1408,7 +1408,7 @@ pub(crate) fn response_format(
     Ok(Some(decoder_compatible_schema(schema)))
 }
 
-fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_json::Value {
     let serde_json::Value::Object(fields) = schema else {
         return schema.clone();
     };
