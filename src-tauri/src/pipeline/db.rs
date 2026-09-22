@@ -314,6 +314,18 @@ pub(crate) fn get_ocr_handoff_for_root(
     load_ocr_handoff(conn, "root_run_id = ?1", root_run_id)
 }
 
+pub(crate) fn has_ocr_handoff_for_root(
+    conn: &Connection,
+    root_run_id: &str,
+) -> Result<bool, StoreError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ocr_handoffs WHERE root_run_id = ?1)",
+        [root_run_id],
+        |row| row.get(0),
+    )
+    .map_err(StoreError::from)
+}
+
 pub(crate) fn get_admitted_ocr_child_run_id(
     conn: &Connection,
     root_run_id: &str,

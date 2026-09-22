@@ -216,6 +216,12 @@ pub fn continuation_plan(
             found_version: run.state_version,
         });
     }
+    if db::has_ocr_handoff_for_root(conn, run_id)? {
+        return Err(ContinuationPipelineError::NotAllowed {
+            run_id: run_id.to_string(),
+            state: run.state,
+        });
+    }
     let checkpoint =
         run.continuation_checkpoint()
             .ok_or_else(|| ContinuationPipelineError::NotAllowed {

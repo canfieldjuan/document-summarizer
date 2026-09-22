@@ -47,6 +47,7 @@ const MAX_REGISTRATION_BYTES: u64 = 16 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
 const MAX_STATUS_BYTES: u64 = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +135,7 @@ impl HttpOcrTransport {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(DISCOVERY_TIMEOUT.min(remaining))
-            .timeout(remaining)
+            .timeout(REQUEST_IO_TIMEOUT.min(remaining))
             .build()
             .map_err(|error| TransportError::Uncertain(error.to_string()))
     }
@@ -1270,6 +1271,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stalled_http_status_returns_before_the_phase_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        std::thread::sleep(Duration::from_secs(5));
+                        drop(stream);
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "HTTP client never connected");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("loopback accept failed: {error}"),
+                }
+            }
+        });
+        let mut provider = live_provider();
+        provider.base_url = format!("http://{address}/");
+
+        let started = Instant::now();
+        let response = HttpOcrTransport.status(
+            &provider,
+            "11111111-1111-4111-8111-111111111111",
+            started + Duration::from_secs(4),
+        );
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(matches!(response, Err(TransportError::Uncertain(_))));
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "stalled call took {elapsed:?}"
+        );
+    }
+
     #[cfg(unix)]
     fn completed_status(handoff: &OcrHandoff) -> JobStatus {
         let pdf = include_bytes!("../../tests/fixtures/ocr_tagged.pdf").to_vec();
@@ -1746,6 +1788,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(handoff.phase, "submission_uncertain");
+        let unavailable = recover_ocr_handoffs_with(&mut conn, directory.path(), &[], &transport)
+            .expect("unavailable provider should leave a recoverable handoff");
+        assert_eq!(unavailable.warnings.len(), 1);
+        let root = db::get_pipeline_run(&conn, &parsing.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::pipeline::service::continuation_plan(&conn, &parsing.run_id, root.state_version)
+                .expect_err("the durable OCR owner must exclude generic continuation")
+                .code(),
+            "CONTINUATION_NOT_ALLOWED"
+        );
+        let history = crate::pipeline::workspace::list_recent_runs(&conn).unwrap();
+        assert!(!history[0].can_continue);
         let mut replacement = provider.clone();
         replacement.instance_id = "44444444-4444-4444-8444-444444444444".to_string();
         assert!(matches!(
@@ -1792,6 +1848,11 @@ mod tests {
         assert!(recovery.warnings.is_empty());
         assert_eq!(recovery.child_run_ids.len(), 1);
         let child_run_id = recovery.child_run_ids[0].clone();
+        let child = db::get_pipeline_run(&reopened, &child_run_id)
+            .unwrap()
+            .unwrap();
+        crate::pipeline::service::continuation_plan(&reopened, &child_run_id, child.state_version)
+            .expect("the admitted OCR child keeps its own continuation path");
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
             ["submit", "status"]

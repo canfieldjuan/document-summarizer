@@ -17,6 +17,8 @@ Root cause:
 - Startup executes remote OCR submission/status polling inside Tauri's synchronous setup closure, so a persisted processing job can block application initialization for the full request deadline.
 - OCR submission and polling do not receive the desktop worker's cancellation control, so cancellation can terminalize the root while leaving a pre-admission handoff recoverable against a root that can no longer admit its child.
 - Detached startup recovery does not reserve its pre-admission root IDs in the desktop active registry, so a user continuation can race the OCR owner before child admission.
+- The registry reservation ends when a recovery attempt exits, but a pending handoff can outlive that attempt. The generic continuation path does not check durable handoff ownership, so it can advance the root after a provider outage and strand the saved job.
+- OCR HTTP submit/status uses the full phase deadline as one blocking call timeout, so cancellation is not observed until a stalled call returns.
 - The current installed OCR provider isolates retained source graphics with a paired `q /Artifact BMC` and `EMC Q` wrapper, while the existing tagged parser admits only the earlier wrapper without graphics-state isolation.
 - The provider's canonical tagged text preserves ASCII tabs and line feeds, while the generic PDF string decoder drops those control bytes and makes a valid PDF/text pair fail exact validation.
 - The gateway client forwards the canonical synthesis schema unchanged, including `uniqueItems`, while the accepted gateway contract rejects that decoder-unsupported keyword with HTTP 422; the existing direct-runtime adapter already projects it away without weakening Rust validation.
@@ -36,7 +38,8 @@ The correct fix must:
 11. Exclude admitted/completed OCR roots before applying the recent-history SQL limit, and compile Unix-only OCR discovery/snapshot code only on Unix without enabling Windows OCR.
 12. Keep application setup free of OCR network waits by dispatching persisted handoff recovery to a named background task after local interrupted-run reconciliation.
 13. Propagate cancellation through OCR coordination, terminalize the owned pre-admission handoff without admitting a child, and let the existing worker finalizer complete the root cancellation.
-14. Reserve every pre-admission recovery root in the desktop active registry before dispatch, reject overlapping continuation ownership, and release the reservation when recovery exits.
+14. Reserve every pre-admission recovery root in the desktop active registry before dispatch and release the reservation when recovery exits. Also reject generic root continuation while any durable OCR handoff owns that root, including after recovery exits.
+15. Bound individual OCR HTTP calls well below the overall phase deadline so a blocked call returns to the cancellation checkpoint promptly.
 
 Must not change:
 
@@ -61,6 +64,7 @@ Slice phase: direct OCR consumer vertical proof
 8. Reconcile exact-head review findings by preserving active OCR child ownership through restart, counting only visible history rows toward the limit, and scoping Unix-only code out of the Windows build.
 9. Reconcile exact-head review findings by moving remote restart recovery off synchronous setup and making OCR waiting cancellation-aware through terminal handoff ownership.
 10. Reconcile exact-head review findings by reserving pre-admission roots across detached recovery and terminalizing cancelled handoffs before provider discovery.
+11. Reconcile the durable-root and stalled-HTTP review findings without changing product-facing output.
 
 ### Files touched
 
@@ -96,6 +100,8 @@ Acceptance criteria:
 11. Tauri setup performs no OCR provider transport or polling; it schedules a named background recovery task and remains available while that task is blocked.
 12. A cancellation committed while OCR is pending records a non-retryable terminal handoff, admits no child, and lets the existing root cancellation transition finish without later startup replay.
 13. Startup reserves each recoverable pre-admission root before the detached task can run, rejects a second owner while recovery is blocked, and releases the reservation after recovery exits.
+14. A pre-admission OCR handoff that remains after startup recovery exits still prevents generic continuation of its root, and history does not advertise that root as continuable.
+15. A stalled submit or status transport call returns control to the cancellation checkpoint within a bounded per-call timeout, rather than waiting for the full phase deadline.
 
 Affected surfaces: Local Connect v2 discovery/client transport, SQLite migration and transactions, desktop background scheduling, application startup recovery, native scanned-PDF routing.
 
@@ -119,7 +125,11 @@ Application setup performs only local database reconciliation, constructs the de
 
 Before dispatch, startup reads the durable recoverable handoffs and reserves every pre-admission root in the desktop active registry. A scoped reservation guard releases those roots when the recovery task returns or unwinds, while duplicate continuation admission fails against the same registry entry during polling.
 
+The registry reservation protects the active attempt, while a SQLite existence check protects durable root ownership after that attempt exits. Both generic continuation admission and recent-history action eligibility consult the handoff root key; admitted children remain eligible for their own pipeline continuation. The check reads only existence, not retained source bytes.
+
 The root worker's cancellation token is passed through the OCR coordinator. Each loop boundary and each completed transport attempt rechecks cancellation plus the persisted root state. Before child admission, cancellation compare-and-sets the current handoff phase to terminal non-retryable failure and returns the existing cancellation signal, so finalization completes the root as `Cancelled` and restart cannot replay the abandoned handoff.
+
+Each blocking HTTP attempt uses the lesser of two seconds and the remaining phase deadline, returning control to the cancellation checkpoint even when a provider accepts a connection but never answers. The overall phase deadline remains five minutes.
 
 Restart recovery checks the persisted root cancellation state before provider selection, so a cancelled pre-admission handoff becomes terminal even when its pinned provider is offline.
 
@@ -142,7 +152,11 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Verification
 
-- `cargo test --lib connect::ocr_consumer::tests` - 6 passed, including submission-time and status-poll cancellation plus restart cancellation with the pinned provider offline.
+- `cargo test --locked --lib connect::ocr_consumer::tests -- --nocapture` - 7 passed, including durable-root exclusion after unavailable-provider recovery and a real stalled loopback status request bounded below the phase deadline.
+- `cargo test --locked --lib pipeline::service::tests::continuation_rejects_stale_missing_runtime_active_failed_and_terminal_runs -- --exact` - 1 passed.
+- `cargo test --locked --lib desktop::tests::pending_ocr_recovery_keeps_the_root_checkpoint_resumable -- --exact` - 1 passed.
+- `cargo clippy --locked --lib --tests -- -D warnings` - passed after the review repairs.
+- `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` - passed after the review repairs.
 - `cargo test pipeline::schema::tests --lib` - 13 passed.
 - `cargo test --lib pipeline::recovery::tests` - 8 passed after active OCR child ownership and stable-checkpoint rewind repair.
 - `cargo test --lib pipeline::workspace::tests` - 11 passed after visible-history limiting repair.
@@ -163,4 +177,4 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Estimated diff size
 
-Actual with exact-head review repairs: 14 files, +3,525 / -89. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.
+Actual with exact-head review repairs: 14 files, +3,622 / -90. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.

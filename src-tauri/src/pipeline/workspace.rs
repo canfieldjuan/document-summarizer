@@ -203,6 +203,7 @@ fn run_history_item(
     let continuation_profile_available = !continuation_checkpoint
         .is_some_and(ContinuationCheckpoint::requires_existing_model_profile)
         || model_profile_available;
+    let ocr_handoff_owns_root = db::has_ocr_handoff_for_root(conn, &run.run_id)?;
     Ok(RunHistoryItem {
         run_id: run.run_id,
         document_id: document.document_id,
@@ -220,7 +221,9 @@ fn run_history_item(
         retry_run_id: retry_child.map(|lineage| lineage.retry_run_id),
         can_retry,
         continuation_checkpoint,
-        can_continue: continuation_checkpoint.is_some() && continuation_profile_available,
+        can_continue: continuation_checkpoint.is_some()
+            && continuation_profile_available
+            && !ocr_handoff_owns_root,
         continuation_requires_runtime: continuation_checkpoint
             .is_some_and(ContinuationCheckpoint::requires_runtime),
         cancellation_requested: run.cancellation_requested,
