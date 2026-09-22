@@ -5,7 +5,6 @@ pub mod pipeline;
 use connect::entitlement::{
     EntitlementDecision, EntitlementGate, EntitlementInstallError, EntitlementStatus,
 };
-use connect::ocr_consumer::recover_ocr_handoffs;
 use connect::provider::ConnectProvider;
 use desktop::{BackgroundRunAccepted, DesktopJobError, DesktopJobManager};
 use pipeline::chunk::{
@@ -562,10 +561,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             let db_path = app_data_dir.join("summarizer.db");
             let settings_path = model_settings_path(&app_data_dir);
             let mut conn = init_db(&db_path)?;
-            let ocr_recovery = recover_ocr_handoffs(&mut conn, &app_data_dir)?;
-            for warning in &ocr_recovery.warnings {
-                eprintln!("OCR handoff remains pending after restart: {warning}");
-            }
             let recovered = reconcile_interrupted_runs(&mut conn)?;
             if !recovered.is_empty() {
                 eprintln!(
@@ -583,10 +578,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
             };
             let jobs = DesktopJobManager::new(db_path.clone(), settings_path.clone());
-            for child_run_id in &ocr_recovery.child_run_ids {
-                if let Err(error) = jobs.resume_ocr_child(child_run_id) {
-                    eprintln!("OCR child {child_run_id} could not resume after restart: {error}");
-                }
+            if let Err(error) = jobs.start_ocr_recovery(app_data_dir.clone()) {
+                eprintln!("OCR restart recovery worker could not start: {error}");
             }
             app.manage(AppState {
                 jobs,

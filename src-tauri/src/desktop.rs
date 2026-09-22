@@ -1,4 +1,6 @@
-use crate::connect::ocr_consumer::{parsed_document_requires_ocr, process_scanned_document};
+use crate::connect::ocr_consumer::{
+    parsed_document_requires_ocr, process_scanned_document, recover_ocr_handoffs,
+};
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
     CompletedSummary, ModelProfileSnapshot, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
@@ -287,6 +289,43 @@ impl DesktopJobManager {
         )
     }
 
+    pub(crate) fn start_ocr_recovery(&self, app_data_dir: PathBuf) -> io::Result<()> {
+        let manager = self.clone();
+        let db_path = self.db_path.clone();
+        Self::spawn_ocr_recovery_task(move || {
+            let mut conn = match db::init_db(&db_path) {
+                Ok(conn) => conn,
+                Err(error) => {
+                    eprintln!("OCR restart recovery could not open its database: {error}");
+                    return;
+                }
+            };
+            let recovery = match recover_ocr_handoffs(&mut conn, &app_data_dir) {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    eprintln!("OCR restart recovery failed: {error}");
+                    return;
+                }
+            };
+            drop(conn);
+            for warning in recovery.warnings {
+                eprintln!("OCR handoff remains pending after restart: {warning}");
+            }
+            for child_run_id in recovery.child_run_ids {
+                if let Err(error) = manager.resume_ocr_child(&child_run_id) {
+                    eprintln!("OCR child {child_run_id} could not resume after restart: {error}");
+                }
+            }
+        })
+    }
+
+    fn spawn_ocr_recovery_task(task: impl FnOnce() + Send + 'static) -> io::Result<()> {
+        thread::Builder::new()
+            .name("document-summary-ocr-recovery".to_string())
+            .spawn(task)
+            .map(|_| ())
+    }
+
     fn spawn(
         &self,
         run_id: String,
@@ -377,11 +416,19 @@ impl DesktopJobManager {
                                 message: "the application data directory is unavailable"
                                     .to_string(),
                             })?;
-                    let child_run_id = process_scanned_document(&mut conn, run_id, app_data_dir)
-                        .map_err(|error| DocumentServiceError::OcrHandoff {
-                            code: "OCR_HANDOFF_FAILED".to_string(),
-                            message: error.to_string(),
-                        })?;
+                    let child_run_id =
+                        match process_scanned_document(&mut conn, run_id, app_data_dir, token) {
+                            Ok(child_run_id) => child_run_id,
+                            Err(crate::connect::ocr_consumer::OcrConsumerError::Cancelled) => {
+                                return Err(DocumentServiceError::CancellationObserved);
+                            }
+                            Err(error) => {
+                                return Err(DocumentServiceError::OcrHandoff {
+                                    code: "OCR_HANDOFF_FAILED".to_string(),
+                                    message: error.to_string(),
+                                });
+                            }
+                        };
                     let child = db::get_pipeline_run(&conn, &child_run_id)?
                         .ok_or_else(|| StoreError::RunNotFound(child_run_id.clone()))?;
                     runtime.bind_run(&child_run_id);
@@ -941,6 +988,29 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("background condition did not become true before the test deadline");
+    }
+
+    #[test]
+    fn startup_ocr_recovery_dispatch_returns_before_blocked_work_finishes() {
+        let gate = Arc::new(BlockingGate::new());
+        let task_gate = Arc::clone(&gate);
+        let completed = Arc::new(AtomicBool::new(false));
+        let task_completed = Arc::clone(&completed);
+
+        DesktopJobManager::spawn_ocr_recovery_task(move || {
+            task_gate.entered.store(true, Ordering::Release);
+            let mut released = task_gate.released.lock().unwrap();
+            while !*released {
+                released = task_gate.release_changed.wait(released).unwrap();
+            }
+            task_completed.store(true, Ordering::Release);
+        })
+        .expect("recovery task should dispatch");
+
+        wait_until(|| gate.entered.load(Ordering::Acquire));
+        assert!(!completed.load(Ordering::Acquire));
+        gate.release();
+        wait_until(|| completed.load(Ordering::Acquire));
     }
 
     #[test]

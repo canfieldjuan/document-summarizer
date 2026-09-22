@@ -4,7 +4,10 @@ use crate::connect::v2::{AppManifest, RuntimeRegistration, TRANSPORT_KIND};
 use crate::connect::v2::{
     ErrorEnvelope, JobRequest, JobStatus, OutputArtifact, OCR_INPUT_MEDIA_TYPE, PROTOCOL_VERSION,
 };
-use crate::pipeline::contracts::{IngestedDocument, ParsedDocument, PipelineRun, SourceType};
+use crate::pipeline::contracts::{
+    IngestedDocument, ParsedDocument, PipelineRun, PipelineState, SourceType,
+};
+use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, NewOcrHandoff, OcrHandoff, OcrOutput, StoreError};
 use crate::pipeline::ingest::prepare_received_run;
 use crate::pipeline::parser::canonical_tagged_ocr_text;
@@ -76,6 +79,8 @@ pub(crate) enum OcrConsumerError {
     ProviderUnavailable(String),
     #[error("OCR processing exceeded its local deadline")]
     Deadline,
+    #[error("OCR processing was cancelled")]
+    Cancelled,
     #[error("OCR snapshot I/O failed: {0}")]
     Io(#[from] io::Error),
 }
@@ -245,8 +250,15 @@ pub(crate) fn process_scanned_document(
     conn: &mut Connection,
     root_run_id: &str,
     app_data_dir: &Path,
+    control: &dyn ExecutionControl,
 ) -> Result<String, OcrConsumerError> {
-    let provider = match db::get_ocr_handoff_for_root(conn, root_run_id)? {
+    let existing = db::get_ocr_handoff_for_root(conn, root_run_id)?;
+    if let Some(handoff) = existing.as_ref() {
+        cancellation_checkpoint(conn, handoff, control)?;
+    } else if root_cancellation_requested(conn, root_run_id, control)? {
+        return Err(OcrConsumerError::Cancelled);
+    }
+    let provider = match existing {
         Some(handoff) => discover_selected_provider(&handoff.provider_instance_id)?,
         None => discover_one_provider()?,
     };
@@ -256,6 +268,7 @@ pub(crate) fn process_scanned_document(
         app_data_dir,
         &provider,
         &HttpOcrTransport,
+        control,
     )
 }
 
@@ -265,6 +278,7 @@ fn process_scanned_document_with(
     app_data_dir: &Path,
     provider: &LiveOcrProvider,
     transport: &dyn OcrTransport,
+    control: &dyn ExecutionControl,
 ) -> Result<String, OcrConsumerError> {
     let handoff = match db::get_ocr_handoff_for_root(conn, root_run_id)? {
         Some(existing) => existing,
@@ -277,7 +291,7 @@ fn process_scanned_document_with(
             handoff.provider_instance_id,
         ));
     }
-    run_handoff(conn, handoff, app_data_dir, provider, transport)
+    run_handoff(conn, handoff, app_data_dir, provider, transport, control)
 }
 
 fn prepare_handoff(
@@ -362,9 +376,11 @@ fn run_handoff(
     app_data_dir: &Path,
     provider: &LiveOcrProvider,
     transport: &dyn OcrTransport,
+    control: &dyn ExecutionControl,
 ) -> Result<String, OcrConsumerError> {
     let deadline = Instant::now() + REQUEST_TIMEOUT;
     loop {
+        cancellation_checkpoint(conn, &handoff, control)?;
         if Instant::now() > deadline {
             return Err(OcrConsumerError::Deadline);
         }
@@ -395,7 +411,10 @@ fn run_handoff(
                     continue;
                 }
                 handoff = reload(conn, &handoff.handoff_id)?;
-                match transport.submit(provider, &request, &handoff.source_bytes, deadline) {
+                let submitted =
+                    transport.submit(provider, &request, &handoff.source_bytes, deadline);
+                cancellation_checkpoint(conn, &handoff, control)?;
+                match submitted {
                     Ok(status) => apply_status(conn, &handoff, status)?,
                     Err(TransportError::Refused { message, retryable }) => {
                         db::fail_ocr_handoff(
@@ -412,7 +431,9 @@ fn run_handoff(
                 }
             }
             "submission_uncertain" => {
-                match transport.status(provider, &handoff.provider_job_id, deadline) {
+                let status = transport.status(provider, &handoff.provider_job_id, deadline);
+                cancellation_checkpoint(conn, &handoff, control)?;
+                match status {
                     Ok(status) => apply_status(conn, &handoff, status)?,
                     Err(TransportError::NotFound) => {
                         db::transition_ocr_handoff(
@@ -427,9 +448,9 @@ fn run_handoff(
                 }
             }
             "running" => {
-                let status = transport
-                    .status(provider, &handoff.provider_job_id, deadline)
-                    .map_err(map_transport)?;
+                let status = transport.status(provider, &handoff.provider_job_id, deadline);
+                cancellation_checkpoint(conn, &handoff, control)?;
+                let status = status.map_err(map_transport)?;
                 apply_status(conn, &handoff, status)?;
                 thread::sleep(Duration::from_millis(100));
             }
@@ -458,6 +479,50 @@ fn run_handoff(
         }
         handoff = reload(conn, &handoff.handoff_id)?;
     }
+}
+
+fn cancellation_checkpoint(
+    conn: &Connection,
+    handoff: &OcrHandoff,
+    control: &dyn ExecutionControl,
+) -> Result<(), OcrConsumerError> {
+    if !root_cancellation_requested(conn, &handoff.root_run_id, control)? {
+        return Ok(());
+    }
+    let mut current = handoff.clone();
+    loop {
+        match current.phase.as_str() {
+            "child_admitted" | "completed" => return Ok(()),
+            "failed" => return Err(OcrConsumerError::Cancelled),
+            _ => {}
+        }
+        if db::fail_ocr_handoff(
+            conn,
+            &current.handoff_id,
+            &current.phase,
+            "OCR_CANCELLED",
+            "OCR processing was cancelled before child admission",
+            false,
+        )? {
+            return Err(OcrConsumerError::Cancelled);
+        }
+        current = reload(conn, &current.handoff_id)?;
+    }
+}
+
+fn root_cancellation_requested(
+    conn: &Connection,
+    root_run_id: &str,
+    control: &dyn ExecutionControl,
+) -> Result<bool, OcrConsumerError> {
+    let root = db::get_pipeline_run(conn, root_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(root_run_id.to_string()))?;
+    Ok(control.cancellation_requested()
+        || root.cancellation_requested
+        || matches!(
+            root.state,
+            PipelineState::Cancelling | PipelineState::Cancelled
+        ))
 }
 
 fn validate_saved_request(handoff: &OcrHandoff) -> Result<JobRequest, OcrConsumerError> {
@@ -746,7 +811,14 @@ fn recover_ocr_handoffs_with(
             provider.app_id == handoff.provider_app_id
                 && provider.instance_id == handoff.provider_instance_id
         }) {
-            run_handoff(conn, handoff.clone(), app_data_dir, provider, transport)
+            run_handoff(
+                conn,
+                handoff.clone(),
+                app_data_dir,
+                provider,
+                transport,
+                &UNCONTROLLED_EXECUTION,
+            )
         } else {
             Err(OcrConsumerError::ProviderUnavailable(
                 handoff.provider_instance_id.clone(),
@@ -754,6 +826,7 @@ fn recover_ocr_handoffs_with(
         };
         match result {
             Ok(child_run_id) => child_run_ids.push(child_run_id),
+            Err(OcrConsumerError::Cancelled) => {}
             Err(error) => warnings.push(format!("{}: {error}", handoff.handoff_id)),
         }
     }
@@ -1282,6 +1355,56 @@ mod tests {
         }
     }
 
+    struct CancellingTransport {
+        database: PathBuf,
+        root_run_id: String,
+        token: crate::pipeline::control::CancellationToken,
+        cancel_during_status: bool,
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl CancellingTransport {
+        fn cancel(&self) {
+            let mut conn = db::init_db(&self.database).unwrap();
+            let root = db::get_pipeline_run(&conn, &self.root_run_id)
+                .unwrap()
+                .unwrap();
+            db::request_cancellation(&mut conn, &root.run_id, root.state_version).unwrap();
+            self.token.request();
+        }
+    }
+
+    impl OcrTransport for CancellingTransport {
+        fn submit(
+            &self,
+            _provider: &LiveOcrProvider,
+            _request: &JobRequest,
+            _source: &[u8],
+            _deadline: Instant,
+        ) -> Result<JobStatus, TransportError> {
+            self.calls.lock().unwrap().push("submit");
+            assert!(!self.cancel_during_status);
+            self.cancel();
+            Err(TransportError::Uncertain(
+                "cancelled during submission".to_string(),
+            ))
+        }
+
+        fn status(
+            &self,
+            _provider: &LiveOcrProvider,
+            _job_id: &str,
+            _deadline: Instant,
+        ) -> Result<JobStatus, TransportError> {
+            self.calls.lock().unwrap().push("status");
+            assert!(self.cancel_during_status);
+            self.cancel();
+            Err(TransportError::Uncertain(
+                "cancelled during status polling".to_string(),
+            ))
+        }
+    }
+
     #[test]
     fn routing_requires_the_whole_document_no_text_signal() {
         let page = ParsedPage {
@@ -1408,7 +1531,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(
-            run_handoff(&mut conn, tampered, directory.path(), &provider, &transport,),
+            run_handoff(
+                &mut conn,
+                tampered,
+                directory.path(),
+                &provider,
+                &transport,
+                &UNCONTROLLED_EXECUTION,
+            ),
             Err(OcrConsumerError::InvalidOutput(_))
         ));
         assert!(transport.calls.lock().unwrap().is_empty());
@@ -1419,6 +1549,92 @@ mod tests {
                 .phase,
             "failed"
         );
+    }
+
+    #[test]
+    fn cancellation_during_transport_terminalizes_handoff_without_child_admission() {
+        for (cancel_during_status, starting_phase, expected_call) in
+            [(false, "prepared", "submit"), (true, "running", "status")]
+        {
+            let directory = TempDir::new().unwrap();
+            let source_path = directory.path().join("scan.pdf");
+            fs::write(&source_path, image_only_pdf()).unwrap();
+            let database = directory.path().join("summarizer.db");
+            let mut conn = db::init_db(&database).unwrap();
+            let (document, received) =
+                prepare_pdf_ingestion(source_path.to_str().unwrap(), None).unwrap();
+            let ingested = db::persist_ingestion_with_profiles(
+                &mut conn,
+                &document,
+                &received,
+                Some(&snapshot()),
+                SummaryProfile::General,
+            )
+            .unwrap();
+            let (parsing, persisted) =
+                db::start_parsing(&mut conn, &ingested.run_id, ingested.state_version).unwrap();
+            parse_started_document(
+                &mut conn,
+                &PdfExtractParser::new(),
+                &parsing.run_id,
+                parsing.state_version,
+                &persisted,
+            )
+            .unwrap();
+
+            let provider = live_provider();
+            let mut handoff =
+                prepare_handoff(&mut conn, &parsing.run_id, directory.path(), &provider).unwrap();
+            if starting_phase == "running" {
+                assert!(db::transition_ocr_handoff(
+                    &conn,
+                    &handoff.handoff_id,
+                    "prepared",
+                    "running",
+                    None,
+                )
+                .unwrap());
+                handoff = reload(&conn, &handoff.handoff_id).unwrap();
+            }
+            let token = crate::pipeline::control::CancellationToken::new();
+            let transport = CancellingTransport {
+                database: database.clone(),
+                root_run_id: parsing.run_id.clone(),
+                token: token.clone(),
+                cancel_during_status,
+                calls: Mutex::new(Vec::new()),
+            };
+            let result = run_handoff(
+                &mut conn,
+                handoff,
+                directory.path(),
+                &provider,
+                &transport,
+                &token,
+            );
+            assert!(matches!(result, Err(OcrConsumerError::Cancelled)));
+            assert_eq!(transport.calls.lock().unwrap().as_slice(), [expected_call]);
+
+            let handoff = db::get_ocr_handoff_for_root(&conn, &parsing.run_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(handoff.phase, "failed");
+            assert_eq!(handoff.error_code.as_deref(), Some("OCR_CANCELLED"));
+            assert_eq!(handoff.error_retryable, Some(false));
+            assert!(db::get_pipeline_run(&conn, &handoff.child_run_id)
+                .unwrap()
+                .is_none());
+
+            let cancelling = db::get_pipeline_run(&conn, &parsing.run_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(cancelling.state, PipelineState::Cancelling);
+            let cancelled =
+                db::complete_cancellation(&mut conn, &cancelling.run_id, cancelling.state_version)
+                    .unwrap();
+            assert_eq!(cancelled.state, PipelineState::Cancelled);
+            assert!(db::list_recoverable_ocr_handoffs(&conn).unwrap().is_empty());
+        }
     }
 
     #[cfg(unix)]
@@ -1459,6 +1675,7 @@ mod tests {
             directory.path(),
             &provider,
             &transport,
+            &UNCONTROLLED_EXECUTION,
         );
         assert!(matches!(first, Err(OcrConsumerError::Transport(_))));
         let handoff = db::get_ocr_handoff_for_root(&conn, &parsing.run_id)
@@ -1474,6 +1691,7 @@ mod tests {
                 directory.path(),
                 &replacement,
                 &transport,
+                &UNCONTROLLED_EXECUTION,
             ),
             Err(OcrConsumerError::ProviderUnavailable(_))
         ));
@@ -1520,6 +1738,7 @@ mod tests {
             directory.path(),
             &provider,
             &transport,
+            &UNCONTROLLED_EXECUTION,
         )
         .unwrap();
         assert_eq!(same_child, child_run_id);
