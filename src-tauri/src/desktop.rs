@@ -108,6 +108,23 @@ struct ActiveRecoveryReservations {
     run_ids: Vec<String>,
 }
 
+struct ActiveRunClaim {
+    active: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    run_id: String,
+    token: CancellationToken,
+    armed: bool,
+}
+
+impl Drop for ActiveRunClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Ok(mut active) = self.active.lock() {
+                active.remove(&self.run_id);
+            }
+        }
+    }
+}
+
 impl Drop for ActiveRecoveryReservations {
     fn drop(&mut self) {
         if let Ok(mut active) = self.active.lock() {
@@ -283,6 +300,7 @@ impl DesktopJobManager {
     }
 
     pub(crate) fn resume_ocr_child(&self, run_id: &str) -> Result<(), DesktopJobError> {
+        let mut claim = self.claim_run(run_id)?;
         let mut conn = db::init_db(&self.db_path)?;
         let run = db::rewind_interrupted_ocr_child(&mut conn, run_id)?;
         if matches!(
@@ -311,13 +329,16 @@ impl DesktopJobManager {
             None
         };
         drop(conn);
-        self.spawn(
+        self.spawn_claimed(
             run.run_id,
             BackgroundWork::Continue {
                 expected_state_version: run.state_version,
             },
             runtime,
-        )
+            claim.token.clone(),
+        )?;
+        claim.armed = false;
+        Ok(())
     }
 
     pub(crate) fn start_ocr_recovery(&self, app_data_dir: PathBuf) -> Result<(), DesktopJobError> {
@@ -403,21 +424,48 @@ impl DesktopJobManager {
         work: BackgroundWork,
         runtime: Option<Box<dyn ModelRuntime>>,
     ) -> Result<(), DesktopJobError> {
+        let mut claim = self.claim_run(&run_id)?;
+        let active_admission = matches!(work, BackgroundWork::StartedParsing);
+        if let Err(error) = self.spawn_claimed(run_id.clone(), work, runtime, claim.token.clone()) {
+            drop(claim);
+            if active_admission {
+                self.persist_worker_start_failure(&run_id)?;
+            }
+            return Err(error);
+        }
+        claim.armed = false;
+        Ok(())
+    }
+
+    fn claim_run(&self, run_id: &str) -> Result<ActiveRunClaim, DesktopJobError> {
         let token = CancellationToken::new();
         {
             let mut active = self
                 .active
                 .lock()
                 .map_err(|_| DesktopJobError::RegistryUnavailable)?;
-            if active.contains_key(&run_id) {
-                return Err(DesktopJobError::AlreadyRunning(run_id));
+            if active.contains_key(run_id) {
+                return Err(DesktopJobError::AlreadyRunning(run_id.to_string()));
             }
-            active.insert(run_id.clone(), token.clone());
+            active.insert(run_id.to_string(), token.clone());
         }
+        Ok(ActiveRunClaim {
+            active: Arc::clone(&self.active),
+            run_id: run_id.to_string(),
+            token,
+            armed: true,
+        })
+    }
 
+    fn spawn_claimed(
+        &self,
+        run_id: String,
+        work: BackgroundWork,
+        runtime: Option<Box<dyn ModelRuntime>>,
+        token: CancellationToken,
+    ) -> Result<(), DesktopJobError> {
         let worker_manager = self.clone();
         let worker_run_id = run_id.clone();
-        let active_admission = matches!(work, BackgroundWork::StartedParsing);
         let spawn_result = thread::Builder::new()
             .name(format!("document-summary-{}", short_run_id(&run_id)))
             .spawn(move || {
@@ -432,15 +480,7 @@ impl DesktopJobManager {
                 }
             });
 
-        if let Err(error) = spawn_result {
-            if let Ok(mut active) = self.active.lock() {
-                active.remove(&run_id);
-            }
-            if active_admission {
-                self.persist_worker_start_failure(&run_id)?;
-            }
-            return Err(DesktopJobError::WorkerStart(error));
-        }
+        spawn_result.map_err(DesktopJobError::WorkerStart)?;
         Ok(())
     }
 
@@ -1222,6 +1262,24 @@ mod tests {
         drop(conn);
 
         manager
+            .active
+            .lock()
+            .unwrap()
+            .insert(normalizing.run_id.clone(), CancellationToken::new());
+        assert!(matches!(
+            manager.resume_ocr_child(&normalizing.run_id),
+            Err(DesktopJobError::AlreadyRunning(run_id)) if run_id == normalizing.run_id
+        ));
+        let unchanged = db::init_db(&database.0).expect("database should reopen");
+        let active_child = get_pipeline_run(&unchanged, &normalizing.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active_child.state, PipelineState::Normalizing);
+        assert_eq!(active_child.state_version, normalizing.state_version);
+        drop(unchanged);
+        manager.active.lock().unwrap().remove(&normalizing.run_id);
+
+        manager
             .resume_ocr_child(&normalizing.run_id)
             .expect("OCR child should resume from its stable checkpoint");
         wait_until(|| !manager.is_active(&normalizing.run_id).unwrap());
@@ -1244,6 +1302,19 @@ mod tests {
             .expect("events should load")
             .iter()
             .any(|event| event.reason.as_deref() == Some("ocr_child_rewound_after_restart")));
+    }
+
+    #[test]
+    fn failed_ocr_child_resume_releases_its_registry_claim() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let missing_run_id = Uuid::new_v4().to_string();
+
+        assert!(matches!(
+            manager.resume_ocr_child(&missing_run_id),
+            Err(DesktopJobError::Store(StoreError::InvalidOcrHandoff(_)))
+        ));
+        assert!(!manager.is_active(&missing_run_id).unwrap());
     }
 
     #[test]

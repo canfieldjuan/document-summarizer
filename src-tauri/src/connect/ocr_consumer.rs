@@ -48,6 +48,7 @@ const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
 const MAX_STATUS_BYTES: u64 = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const RETRY_BACKOFF: Duration = Duration::from_millis(100);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,13 +374,32 @@ fn prepare_handoff(
 
 fn run_handoff(
     conn: &mut Connection,
-    mut handoff: OcrHandoff,
+    handoff: OcrHandoff,
     app_data_dir: &Path,
     provider: &LiveOcrProvider,
     transport: &dyn OcrTransport,
     control: &dyn ExecutionControl,
 ) -> Result<String, OcrConsumerError> {
-    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    run_handoff_until(
+        conn,
+        handoff,
+        app_data_dir,
+        provider,
+        transport,
+        control,
+        Instant::now() + REQUEST_TIMEOUT,
+    )
+}
+
+fn run_handoff_until(
+    conn: &mut Connection,
+    mut handoff: OcrHandoff,
+    app_data_dir: &Path,
+    provider: &LiveOcrProvider,
+    transport: &dyn OcrTransport,
+    control: &dyn ExecutionControl,
+    deadline: Instant,
+) -> Result<String, OcrConsumerError> {
     loop {
         cancellation_checkpoint(conn, &handoff, control)?;
         if Instant::now() > deadline {
@@ -428,6 +448,9 @@ fn run_handoff(
                         )?;
                         return Err(OcrConsumerError::ProviderFailed(message));
                     }
+                    Err(TransportError::Uncertain(_)) => {
+                        thread::sleep(RETRY_BACKOFF);
+                    }
                     Err(error) => return Err(map_transport(error)),
                 }
             }
@@ -445,15 +468,21 @@ fn run_handoff(
                             None,
                         )?;
                     }
+                    Err(TransportError::Uncertain(_)) => {
+                        thread::sleep(RETRY_BACKOFF);
+                    }
                     Err(error) => return Err(map_transport(error)),
                 }
             }
             "running" => {
                 let status = transport.status(provider, &handoff.provider_job_id, deadline);
                 cancellation_checkpoint(conn, &handoff, control)?;
-                let status = status.map_err(map_transport)?;
-                apply_status(conn, &handoff, status)?;
-                thread::sleep(Duration::from_millis(100));
+                match status {
+                    Ok(status) => apply_status(conn, &handoff, status)?,
+                    Err(TransportError::Uncertain(_)) => {}
+                    Err(error) => return Err(map_transport(error)),
+                }
+                thread::sleep(RETRY_BACKOFF);
             }
             "output_ready" => {
                 materialize_derived(app_data_dir, &handoff)?;
@@ -1394,12 +1423,51 @@ mod tests {
             _job_id: &str,
             _deadline: Instant,
         ) -> Result<JobStatus, TransportError> {
-            self.calls.lock().unwrap().push("status");
+            let mut calls = self.calls.lock().unwrap();
+            let first_status = !calls.contains(&"status");
+            calls.push("status");
+            drop(calls);
+            if first_status {
+                return Err(TransportError::Uncertain(
+                    "status temporarily unavailable".to_string(),
+                ));
+            }
             self.completed
                 .lock()
                 .unwrap()
                 .clone()
-                .ok_or_else(|| TransportError::Uncertain("status unavailable".to_string()))
+                .ok_or_else(|| TransportError::Invalid("status response is invalid".to_string()))
+        }
+    }
+
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct RepeatedUncertaintyTransport {
+        status_calls: Mutex<usize>,
+    }
+
+    #[cfg(unix)]
+    impl OcrTransport for RepeatedUncertaintyTransport {
+        fn submit(
+            &self,
+            _provider: &LiveOcrProvider,
+            _request: &JobRequest,
+            _source: &[u8],
+            _deadline: Instant,
+        ) -> Result<JobStatus, TransportError> {
+            panic!("a saved uncertain job must be reconciled before replay")
+        }
+
+        fn status(
+            &self,
+            _provider: &LiveOcrProvider,
+            _job_id: &str,
+            _deadline: Instant,
+        ) -> Result<JobStatus, TransportError> {
+            *self.status_calls.lock().unwrap() += 1;
+            Err(TransportError::Uncertain(
+                "status remains unavailable".to_string(),
+            ))
         }
     }
 
@@ -1884,6 +1952,67 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn transient_submit_and_status_uncertainty_completes_in_one_invocation() {
+        let directory = TempDir::new().unwrap();
+        let source_path = directory.path().join("scan.pdf");
+        fs::write(&source_path, image_only_pdf()).unwrap();
+        let database = directory.path().join("summarizer.db");
+        let mut conn = db::init_db(&database).unwrap();
+        let (document, received) =
+            prepare_pdf_ingestion(source_path.to_str().unwrap(), None).unwrap();
+        let ingested = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&snapshot()),
+            SummaryProfile::General,
+        )
+        .unwrap();
+        let (parsing, persisted) =
+            db::start_parsing(&mut conn, &ingested.run_id, ingested.state_version).unwrap();
+        parse_started_document(
+            &mut conn,
+            &PdfExtractParser::new(),
+            &parsing.run_id,
+            parsing.state_version,
+            &persisted,
+        )
+        .unwrap();
+
+        let provider = live_provider();
+        let handoff =
+            prepare_handoff(&mut conn, &parsing.run_id, directory.path(), &provider).unwrap();
+        let transport = LostAckTransport::default();
+        *transport.completed.lock().unwrap() = Some(completed_status(&handoff));
+        let child_run_id = process_scanned_document_with(
+            &mut conn,
+            &parsing.run_id,
+            directory.path(),
+            &provider,
+            &transport,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+
+        assert_eq!(child_run_id, handoff.child_run_id);
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            ["submit", "status", "status"]
+        );
+        assert_eq!(
+            db::get_ocr_handoff(&conn, &handoff.handoff_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            "child_admitted"
+        );
+        assert!(db::get_pipeline_run(&conn, &child_run_id)
+            .unwrap()
+            .is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn lost_acknowledgement_reconciles_before_one_child_admission_after_reopen() {
         let directory = TempDir::new().unwrap();
         let source_path = directory.path().join("scan.pdf");
@@ -1922,11 +2051,32 @@ mod tests {
             &transport,
             &UNCONTROLLED_EXECUTION,
         );
-        assert!(matches!(first, Err(OcrConsumerError::Transport(_))));
+        assert!(matches!(first, Err(OcrConsumerError::InvalidOutput(_))));
         let handoff = db::get_ocr_handoff_for_root(&conn, &parsing.run_id)
             .unwrap()
             .unwrap();
         assert_eq!(handoff.phase, "submission_uncertain");
+        let repeated = RepeatedUncertaintyTransport::default();
+        assert!(matches!(
+            run_handoff_until(
+                &mut conn,
+                handoff.clone(),
+                directory.path(),
+                &provider,
+                &repeated,
+                &UNCONTROLLED_EXECUTION,
+                Instant::now() + Duration::from_secs(1),
+            ),
+            Err(OcrConsumerError::Deadline)
+        ));
+        assert!(*repeated.status_calls.lock().unwrap() >= 2);
+        assert_eq!(
+            db::get_ocr_handoff(&conn, &handoff.handoff_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            "submission_uncertain"
+        );
         let unavailable = recover_ocr_handoffs_with(&mut conn, directory.path(), &[], &transport)
             .expect("unavailable provider should leave a recoverable handoff");
         assert_eq!(unavailable.warnings.len(), 1);
@@ -1954,7 +2104,10 @@ mod tests {
             ),
             Err(OcrConsumerError::ProviderUnavailable(_))
         ));
-        assert_eq!(transport.calls.lock().unwrap().as_slice(), ["submit"]);
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            ["submit", "status", "status"]
+        );
 
         let mut invalid_status = completed_status(&handoff);
         let invalid_text = b"wrong page one\x0cwrong page two".to_vec();
@@ -1994,7 +2147,7 @@ mod tests {
             .expect("the admitted OCR child keeps its own continuation path");
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
-            ["submit", "status"]
+            ["submit", "status", "status", "status"]
         );
         let same_child = process_scanned_document_with(
             &mut reopened,
@@ -2008,7 +2161,7 @@ mod tests {
         assert_eq!(same_child, child_run_id);
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
-            ["submit", "status"]
+            ["submit", "status", "status", "status"]
         );
         let child = db::get_pipeline_run(&reopened, &child_run_id)
             .unwrap()
