@@ -26,6 +26,8 @@ Root cause:
 - The current installed OCR provider isolates retained source graphics with a paired `q /Artifact BMC` and `EMC Q` wrapper, while the existing tagged parser admits only the earlier wrapper without graphics-state isolation.
 - The provider's canonical tagged text preserves ASCII tabs and line feeds, while the generic PDF string decoder drops those control bytes and makes a valid PDF/text pair fail exact validation.
 - The gateway client forwards the canonical synthesis schema unchanged, including `uniqueItems`, while the accepted gateway contract rejects that decoder-unsupported keyword with HTTP 422; the existing direct-runtime adapter already projects it away without weakening Rust validation.
+- A provider can send HTTP headers and then stall while sending its body. The body-read timeout is classified as malformed output, so the durable coordinator exits instead of reconciling an uncertain transport result.
+- The direct normalization command reaches the shared `Parsed` to `Normalizing` store transition without checking whether an OCR handoff owns the root. A pending OCR root can advance and permanently lose child-admission eligibility.
 
 The correct fix must:
 
@@ -48,6 +50,8 @@ The correct fix must:
 17. Materialize and durably sync the retained OCR PDF before child admission. If materialization fails, leave the handoff `output_ready` with no child; retry against the same retained output and child identity after storage recovers.
 18. Retry uncertain submit/status calls with bounded backoff and cancellation checks until the existing phase deadline, preserving the durable phase and reconciling a saved job by status before any replay.
 19. Claim an admitted child in the desktop active registry before any restart rewind, and transfer that claim to the resumed worker without an unowned interval. If a user worker already owns the child, recovery must not rewind it.
+20. Classify response-body transport timeouts as uncertainty while retaining invalid classification for oversized or malformed complete responses, so the existing bounded retry and status-before-replay logic runs.
+21. Reject normalization of a root with any durable OCR handoff inside the shared immediate store transition, while leaving native roots and admitted OCR children eligible.
 
 Must not change:
 
@@ -76,6 +80,7 @@ Slice phase: direct OCR consumer vertical proof
 12. Reconcile the root-to-child monitoring gap while preserving the existing cancellation target and UI copy.
 13. Reconcile snapshot-write failure before child admission without changing the OCR wire or derived document contracts.
 14. Reconcile same-session transport uncertainty and the admitted-child recovery race without changing public contracts.
+15. Reconcile response-body timeout classification and direct normalization of OCR-owned roots at their shared boundaries.
 
 ### Files touched
 
@@ -117,6 +122,8 @@ Acceptance criteria:
 17. A failed derived-PDF materialization leaves the handoff `output_ready`, exposes no child or lineage, and can be retried after the storage obstruction clears to admit exactly one child whose source bytes match the retained PDF.
 18. A transient uncertain submit or status call retries in the same coordinator invocation, checks cancellation, and never replays a saved job without a status `NotFound` response; repeated uncertainty stops at the existing phase deadline.
 19. A competing child continuation prevents recovery from rewinding its state; when recovery claims first, the claim remains exclusive through rewind and worker dispatch, including error cleanup.
+20. A loopback provider that sends headers then stalls its body produces `Uncertain` and stays on the existing bounded same-session reconciliation path; oversized complete responses remain invalid.
+21. The direct `normalize_document` path cannot advance a parsed root with a persisted OCR handoff, and its state/version remain unchanged; a native root without a handoff can still normalize.
 
 Affected surfaces: Local Connect v2 discovery/client transport, SQLite migration and transactions, desktop background scheduling, application startup recovery, native scanned-PDF routing.
 
@@ -152,6 +159,8 @@ The output-ready coordinator first materializes and syncs the retained PDF to it
 
 An uncertain transport response leaves the saved phase unchanged and returns through a short bounded backoff to the next cancellation and deadline checkpoint. Submission uncertainty reconciles by status before any replay; a repeated timeout cannot busy-spin or extend the five-minute deadline.
 
+The bounded response reader distinguishes transport timeouts, including reqwest errors wrapped in an I/O error, from complete invalid responses. The shared normalization transaction checks durable handoff ownership before the state transition, so direct and coordinated callers cannot bypass the same root boundary.
+
 Child restart recovery claims the child ID in the same active registry used by user continuation before it rewinds SQLite state. The claim stays present while runtime construction and worker dispatch occur, then transfers to the worker; error paths release only the claim they own.
 
 Restart recovery checks the persisted root cancellation state before provider selection, so a cancelled pre-admission handoff becomes terminal even when its pinned provider is offline.
@@ -175,6 +184,10 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Verification
 
+- Fail-first `cargo test --locked --lib connect::ocr_consumer::tests::stalled_response_body_is_uncertain_but_oversized_body_is_invalid -- --exact` failed because the stalled body was not `Uncertain`; after the repair, 1 passed, including the oversized negative case.
+- Fail-first `cargo test --locked --lib connect::ocr_consumer::tests::direct_normalization_cannot_advance_an_ocr_owned_root -- --exact` failed because the direct path advanced the root; after the transactional guard, 1 passed with unchanged run and handoff.
+- `cargo test --locked --lib connect::ocr_consumer::tests` - 11 passed; `cargo test --locked --lib pipeline::normalize::tests` - 10 passed.
+- `cargo fmt --all -- --check`, `cargo clippy --locked --lib --tests -- -D warnings`, and `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` - passed after the review repairs.
 - Fail-first `cargo test --locked --lib connect::ocr_consumer::tests::lost_acknowledgement_reconciles_before_one_child_admission_after_reopen -- --exact` failed at the expected `InvalidOutput` assertion because the first uncertain submit returned before status reconciliation; after the repair, 1 passed.
 - Fail-first `cargo test --locked --lib desktop::tests::resumed_ocr_child_rewinds_active_stage_and_completes_same_run -- --exact` failed with `Parsed` instead of the live `Normalizing` state after an `AlreadyRunning` result; after the claim-before-rewind repair, 1 passed.
 - `cargo test --locked --lib connect::ocr_consumer::tests` - 9 passed, including same-invocation completion after transient submit/status uncertainty, short-deadline repeated uncertainty, cancellation, and reopen reconciliation.
@@ -209,4 +222,4 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Estimated diff size
 
-Actual with exact-head review repairs: 14 files, +4,082 / -105. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.
+Actual with exact-head review repairs: 14 files, +4,220 / -105. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.

@@ -143,8 +143,18 @@ impl HttpOcrTransport {
 
     fn answer(response: Response, limit: u64) -> Result<JobStatus, TransportError> {
         let status = response.status();
-        let bytes = read_bounded_response(response, limit)
-            .map_err(|error| TransportError::Invalid(error.to_string()))?;
+        let bytes = read_bounded_response(response, limit).map_err(|error| {
+            if error.kind() == io::ErrorKind::TimedOut
+                || error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                    .is_some_and(reqwest::Error::is_timeout)
+            {
+                TransportError::Uncertain(error.to_string())
+            } else {
+                TransportError::Invalid(error.to_string())
+            }
+        })?;
         if status.is_success() {
             return serde_json::from_slice(&bytes)
                 .map_err(|error| TransportError::Invalid(error.to_string()));
@@ -1343,6 +1353,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stalled_response_body_is_uncertain_but_oversized_body_is_invalid() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+                .unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+        });
+        let mut provider = live_provider();
+        provider.base_url = format!("http://{address}/");
+        let started = Instant::now();
+        let stalled = HttpOcrTransport.status(
+            &provider,
+            "11111111-1111-4111-8111-111111111111",
+            started + Duration::from_secs(4),
+        );
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+        assert!(matches!(stalled, Err(TransportError::Uncertain(_))));
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "body call took {elapsed:?}"
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9000000\r\n\r\n")
+                .unwrap();
+        });
+        provider.base_url = format!("http://{address}/");
+        let oversized = HttpOcrTransport.status(
+            &provider,
+            "11111111-1111-4111-8111-111111111111",
+            Instant::now() + Duration::from_secs(4),
+        );
+        server.join().unwrap();
+        assert!(matches!(oversized, Err(TransportError::Invalid(_))));
+    }
+
     #[cfg(unix)]
     fn completed_status(handoff: &OcrHandoff) -> JobStatus {
         let pdf = include_bytes!("../../tests/fixtures/ocr_tagged.pdf").to_vec();
@@ -1664,6 +1721,69 @@ mod tests {
                 .unwrap()
                 .phase,
             "failed"
+        );
+    }
+
+    #[test]
+    fn direct_normalization_cannot_advance_an_ocr_owned_root() {
+        let directory = TempDir::new().unwrap();
+        let source_path = directory.path().join("scan.pdf");
+        fs::write(&source_path, image_only_pdf()).unwrap();
+        let mut conn = db::init_db(directory.path().join("summarizer.db")).unwrap();
+        let (document, received) =
+            prepare_pdf_ingestion(source_path.to_str().unwrap(), None).unwrap();
+        let ingested = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&snapshot()),
+            SummaryProfile::General,
+        )
+        .unwrap();
+        let (parsing, persisted) =
+            db::start_parsing(&mut conn, &ingested.run_id, ingested.state_version).unwrap();
+        parse_started_document(
+            &mut conn,
+            &PdfExtractParser::new(),
+            &parsing.run_id,
+            parsing.state_version,
+            &persisted,
+        )
+        .unwrap();
+        let handoff = prepare_handoff(
+            &mut conn,
+            &parsing.run_id,
+            directory.path(),
+            &live_provider(),
+        )
+        .unwrap();
+        let before = db::get_pipeline_run(&conn, &parsing.run_id)
+            .unwrap()
+            .unwrap();
+
+        let result = crate::pipeline::normalize::normalize_document(
+            &mut conn,
+            &crate::pipeline::normalize::CanonicalNormalizer::new(),
+            &parsing.run_id,
+        );
+
+        assert!(matches!(
+            result,
+            Err(crate::pipeline::normalize::NormalizePipelineError::Store(
+                StoreError::InvalidOcrHandoff(_)
+            ))
+        ));
+        assert_eq!(
+            db::get_pipeline_run(&conn, &parsing.run_id)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            db::get_ocr_handoff(&conn, &handoff.handoff_id)
+                .unwrap()
+                .unwrap(),
+            handoff
         );
     }
 

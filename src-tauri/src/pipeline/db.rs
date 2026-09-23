@@ -2136,6 +2136,11 @@ pub(super) fn start_normalizing(
     expected_version: u32,
 ) -> Result<(PipelineRun, ParsedDocument), StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if has_ocr_handoff_for_root(&tx, run_id)? {
+        return Err(StoreError::InvalidOcrHandoff(
+            "the OCR handoff owns this root run".to_string(),
+        ));
+    }
     let parsed = get_parsed_document(&tx, run_id)?
         .ok_or_else(|| StoreError::ParsedArtifactNotFound(run_id.to_string()))?;
     let normalizing_run = transition_in_tx(
