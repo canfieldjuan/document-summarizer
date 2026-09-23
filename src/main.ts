@@ -163,6 +163,16 @@ interface BackgroundRunAccepted {
 
 type SummaryPresentationMode = "legacyClaimList" | "coherent" | "claimLedgerFallback";
 
+type UnquotedSourceUnitKind = "overLimitSentence" | "noSentenceBoundary";
+
+interface UnquotedSourceUnit {
+  pageNumber: number;
+  kind: UnquotedSourceUnitKind;
+  characterCount: number;
+  clauseReference: string | null;
+  openingText: string;
+}
+
 interface SummaryArtifact {
   text: string;
   warnings: PipelineWarning[];
@@ -171,6 +181,7 @@ interface SummaryArtifact {
   summaryClaims: CitedClaim[];
   claims: CitedClaim[];
   keyPointClaimIds: string[];
+  unquotedSourceUnits: UnquotedSourceUnit[];
 }
 
 interface CitedClaim {
@@ -247,6 +258,8 @@ const allClaimsCount = element<HTMLSpanElement>("#all-claims-count");
 const evidencePanel = element<HTMLElement>("#evidence-panel");
 const evidenceLabel = element<HTMLParagraphElement>("#evidence-label");
 const evidenceQuote = element<HTMLQuoteElement>("#evidence-quote");
+const unquotedSection = element<HTMLElement>("#unquoted-section");
+const unquotedList = element<HTMLUListElement>("#unquoted-list");
 const warningSection = element<HTMLElement>("#warning-section");
 const warningList = element<HTMLUListElement>("#warning-list");
 const failureTitle = element<HTMLHeadingElement>("#failure-title");
@@ -1226,6 +1239,7 @@ function renderSummary(
     ? `${summaryProfileLabel(profile)} · ${formatBytes(byteSize)} · ${formatDate(summary.createdAt)} · ${citedClaimCount} cited ${citedClaimCount === 1 ? "passage" : "passages"}`
     : `${summaryProfileLabel(profile)} · ${formatBytes(byteSize)} · ${formatDate(summary.createdAt)}`;
   renderClaims(summary);
+  renderUnquotedSourceUnits(summary.unquotedSourceUnits);
   renderWarnings(summary.warnings);
   showStage("summary");
 }
@@ -1361,6 +1375,20 @@ function showEvidence(citation: Citation, selected: HTMLButtonElement): void {
   evidenceLabel.textContent = citation.label;
   evidenceQuote.textContent = citation.exactQuote;
   evidencePanel.hidden = false;
+}
+
+function renderUnquotedSourceUnits(units: UnquotedSourceUnit[]): void {
+  unquotedList.replaceChildren();
+  unquotedSection.hidden = units.length === 0;
+  for (const unit of units) {
+    const item = document.createElement("li");
+    const clause = unit.clauseReference ? ` · clause ${unit.clauseReference}` : "";
+    const reason = unit.kind === "overLimitSentence"
+      ? `one ${unit.characterCount}-character sentence exceeds the quotation limit`
+      : "the text has no complete sentence ending";
+    item.textContent = `Page ${unit.pageNumber}${clause}: “${unit.openingText}” (${reason})`;
+    unquotedList.append(item);
+  }
 }
 
 function renderWarnings(warnings: PipelineWarning[]): void {

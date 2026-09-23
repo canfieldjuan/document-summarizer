@@ -4818,6 +4818,11 @@ fn inline_contract_clause_reference(text: &str) -> Option<ContractClauseReferenc
     None
 }
 
+/// The numbered clause that begins `text`, found by the Contract clause detector.
+pub(super) fn leading_contract_clause_number(text: &str) -> Option<String> {
+    leading_contract_source_clause_reference(text).map(|reference| reference.number)
+}
+
 fn leading_contract_source_clause_reference(text: &str) -> Option<ContractClauseReference> {
     leading_contract_clause_reference(text).or_else(|| inline_contract_clause_reference(text))
 }
@@ -16160,6 +16165,35 @@ mod tests {
             Some(WithheldUnitKind::DecoderClipped)
         );
         assert_eq!(constrained.requests().len(), 1);
+    }
+
+    // Contract test 8: the bound Contract repair is deterministic, so a resumed synthesis
+    // replays the same gateway ledger keys (stage, ordinal) and semantic content instead of
+    // submitting new requests. Its prompt carries previous_invalid_response (test 2b), which the
+    // unbound 9.0.0 repair never sent, so the ledger's semantic-collision rule
+    // (gateway_store reservations_converge_survive_reopen_and_reject_semantic_collisions)
+    // never lets a resumed 10.0.0 request reuse a 9.0.0 repair entry.
+    #[test]
+    fn contract_window_repair_requests_replay_deterministically() {
+        let catalog = windowed_contract_catalog();
+        let first = WindowRepairRuntime::new(WindowRepairBehavior::Correct);
+        generate_windowed_contract(&first, &catalog).unwrap();
+        let resumed = WindowRepairRuntime::new(WindowRepairBehavior::Correct);
+        generate_windowed_contract(&resumed, &catalog).unwrap();
+        let first_requests = first.requests();
+        assert_eq!(first_requests, resumed.requests());
+        assert_eq!(
+            first_requests
+                .iter()
+                .map(|request| (request.stage.clone(), request.ordinal))
+                .collect::<Vec<_>>(),
+            vec![
+                (PipelineStage::Synthesize, 0),
+                (PipelineStage::Synthesize, 1)
+            ]
+        );
+        let repair_prompt = serde_json::from_str::<Value>(&first_requests[1].user_prompt).unwrap();
+        assert!(repair_prompt.get("previous_invalid_response").is_some());
     }
 
     #[test]

@@ -296,7 +296,51 @@ struct AnalysisQuoteCatalog {
 struct AnalysisQuoteSegmentation {
     segments: Vec<String>,
     omitted_source_units: usize,
+    omitted_units: Vec<OmittedQuoteUnit>,
 }
+
+impl AnalysisQuoteSegmentation {
+    /// The omitted count is derived from the recorded spans, never tallied separately.
+    fn new(segments: Vec<String>, omitted_units: Vec<OmittedQuoteUnit>) -> Self {
+        Self {
+            segments,
+            omitted_source_units: omitted_units.len(),
+            omitted_units,
+        }
+    }
+}
+
+/// A trimmed byte range of one normalized block that the version-13 catalog omits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OmittedQuoteUnit {
+    start: usize,
+    end: usize,
+    kind: UnquotedSourceUnitKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnquotedSourceUnitKind {
+    /// A safe-boundary source sentence unit longer than the quote ceiling.
+    OverLimitSentence,
+    /// A nonempty block tail without a safe sentence terminal.
+    NoSentenceBoundary,
+}
+
+/// One source passage that could not enter the analysis quotation catalog. It is display-only
+/// disclosure: never a citation, model input, summary text, integrity input or Connect field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnquotedSourceUnit {
+    pub page_number: u32,
+    pub kind: UnquotedSourceUnitKind,
+    pub character_count: usize,
+    /// Locator only: the numbered clause that begins the passage, not a coverage claim.
+    pub clause_reference: Option<String>,
+    pub opening_text: String,
+}
+
+const UNQUOTED_OPENING_CHARACTERS: usize = 80;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnalysisScope {
@@ -2836,10 +2880,7 @@ fn analysis_quote_segmentation_for_version(
     if analysis_version == ANALYSIS_VERSION {
         analysis_quote_segments_v13(source)
     } else {
-        AnalysisQuoteSegmentation {
-            segments: analysis_quote_segments_v12(source),
-            omitted_source_units: 0,
-        }
+        AnalysisQuoteSegmentation::new(analysis_quote_segments_v12(source), Vec::new())
     }
 }
 
@@ -2910,17 +2951,11 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
     let source_start = source.len() - source.trim_start().len();
     let source_end = source.trim_end().len();
     if source_start >= source_end {
-        return AnalysisQuoteSegmentation {
-            segments: Vec::new(),
-            omitted_source_units: 0,
-        };
+        return AnalysisQuoteSegmentation::new(Vec::new(), Vec::new());
     }
     let complete_block = &source[source_start..source_end];
     if complete_block.chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS {
-        return AnalysisQuoteSegmentation {
-            segments: vec![complete_block.to_string()],
-            omitted_source_units: 0,
-        };
+        return AnalysisQuoteSegmentation::new(vec![complete_block.to_string()], Vec::new());
     }
 
     let mut units = Vec::new();
@@ -2941,7 +2976,7 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
     }
 
     let mut segments = Vec::new();
-    let mut omitted_source_units = 0usize;
+    let mut omitted_units = Vec::new();
     let mut packed: Option<(usize, usize)> = None;
     for (start, end) in units {
         let unit_characters = source[start..end].chars().count();
@@ -2949,7 +2984,11 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
             if let Some((packed_start, packed_end)) = packed.take() {
                 segments.push(source[packed_start..packed_end].to_string());
             }
-            omitted_source_units += 1;
+            omitted_units.push(OmittedQuoteUnit {
+                start,
+                end,
+                kind: UnquotedSourceUnitKind::OverLimitSentence,
+            });
             continue;
         }
         if let Some((packed_start, _)) = packed {
@@ -2965,14 +3004,119 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
     if let Some((packed_start, packed_end)) = packed {
         segments.push(source[packed_start..packed_end].to_string());
     }
-    if !source[unit_start..source_end].trim().is_empty() {
-        omitted_source_units += 1;
+    let tail = &source[unit_start..source_end];
+    if !tail.trim().is_empty() {
+        omitted_units.push(OmittedQuoteUnit {
+            start: unit_start + tail.len() - tail.trim_start().len(),
+            end: source_end,
+            kind: UnquotedSourceUnitKind::NoSentenceBoundary,
+        });
     }
 
-    AnalysisQuoteSegmentation {
-        segments,
-        omitted_source_units,
+    AnalysisQuoteSegmentation::new(segments, omitted_units)
+}
+
+/// Lists, in source order, every passage the version-13 analysis quotation catalog omits,
+/// derived from persisted normalized source. For each inspected page the per-page count must
+/// equal `versioned_page_scope`, and both counts of the recorded quote-boundary warning must
+/// match; any disagreement is an integrity failure, never an empty list.
+pub(crate) fn unquoted_source_units(
+    analyzed: &AnalyzedDocument,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<Vec<UnquotedSourceUnit>, PipelineFailure> {
+    if analyzed.analysis_version != ANALYSIS_VERSION {
+        return Ok(Vec::new());
     }
+    let blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
+    let mut passages = Vec::new();
+    for chunk in &chunked.chunks {
+        for block_id in &chunk.block_ids {
+            let block = blocks
+                .get(block_id.as_str())
+                .ok_or_else(unquoted_disclosure_mismatch)?;
+            for omitted in analysis_quote_segments_v13(&block.text).omitted_units {
+                let passage = &block.text[omitted.start..omitted.end];
+                passages.push(UnquotedSourceUnit {
+                    page_number: block.source.page_start,
+                    kind: omitted.kind,
+                    character_count: passage.chars().count(),
+                    clause_reference: coherent::leading_contract_clause_number(passage),
+                    opening_text: unquoted_opening_text(passage),
+                });
+            }
+        }
+    }
+
+    let mut affected_pages = 0usize;
+    let mut omitted_units = 0usize;
+    for page in &analyzed.inspected_pages {
+        let (_, _, _, _, expected) =
+            pages::versioned_page_scope(&analyzed.analysis_version, *page, chunked, normalized)?;
+        let derived = passages
+            .iter()
+            .filter(|passage| passage.page_number == *page)
+            .count();
+        if derived != expected {
+            return Err(unquoted_disclosure_mismatch());
+        }
+        if derived > 0 {
+            affected_pages += 1;
+            omitted_units = omitted_units
+                .checked_add(derived)
+                .ok_or_else(unquoted_disclosure_mismatch)?;
+        }
+    }
+    let expected_warning =
+        (omitted_units > 0).then(|| pages::quote_boundary_warning(affected_pages, omitted_units));
+    let mut recorded_warnings = analyzed
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE);
+    let recorded_warning = recorded_warnings.next();
+    if recorded_warnings.next().is_some() || recorded_warning != expected_warning.as_ref() {
+        return Err(unquoted_disclosure_mismatch());
+    }
+    Ok(passages)
+}
+
+fn unquoted_disclosure_mismatch() -> PipelineFailure {
+    stage_failure(
+        PipelineStage::Analyze,
+        "UNQUOTED_DISCLOSURE_MISMATCH",
+        "Unquoted source passages disagree with the recorded quote-boundary analysis",
+        false,
+    )
+}
+
+/// The passage's leading words, at most `UNQUOTED_OPENING_CHARACTERS` long, cut at a word
+/// boundary and marked with a trailing ellipsis when shortened.
+fn unquoted_opening_text(passage: &str) -> String {
+    let words = passage.split_whitespace().collect::<Vec<_>>();
+    let mut opening = String::new();
+    let mut used_words = 0usize;
+    for word in &words {
+        let separator = usize::from(!opening.is_empty());
+        if opening.chars().count() + separator + word.chars().count() > UNQUOTED_OPENING_CHARACTERS
+        {
+            break;
+        }
+        if separator == 1 {
+            opening.push(' ');
+        }
+        opening.push_str(word);
+        used_words += 1;
+    }
+    if used_words == 0 {
+        opening = words
+            .first()
+            .map(|word| word.chars().take(UNQUOTED_OPENING_CHARACTERS).collect())
+            .unwrap_or_default();
+    }
+    if used_words < words.len() {
+        opening.push('…');
+    }
+    opening
 }
 
 fn safe_analysis_sentence_boundary(
@@ -10420,6 +10564,200 @@ mod tests {
             &runtime,
         )
         .expect_err("a current-version Contract fallback over an admissible catalog is forged");
+    }
+
+    fn sentence_of_length(opening: &str, characters: usize) -> String {
+        let ending = " documentation.";
+        let padding = characters - opening.chars().count() - 1 - ending.chars().count();
+        format!("{opening} {}{ending}", "a".repeat(padding))
+    }
+
+    // Contract test 6: the unquoted list names each passage the version-13 catalog omits
+    // and agrees per page, and with both warning counts, for every inspected page.
+    #[test]
+    fn unquoted_source_units_disclose_omitted_passages_and_agree_with_analysis() {
+        let (normalized, chunked) = incomplete_long_contract_fixture();
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+        let units = unquoted_source_units(&analyzed, &chunked, &normalized)
+            .expect("the derived passages should agree with the analysis warning");
+        assert_eq!(units.len(), 1);
+        let unit = &units[0];
+        assert_eq!(unit.page_number, 3);
+        assert_eq!(unit.kind, UnquotedSourceUnitKind::OverLimitSentence);
+        assert!(unit.character_count > MAX_ANALYSIS_QUOTE_CHARACTERS);
+        assert_eq!(unit.clause_reference, None);
+        assert!(unit
+            .opening_text
+            .starts_with("The Contractor shall defend, indemnify"));
+        assert!(unit.opening_text.ends_with('…'));
+        assert!(unit.opening_text.chars().count() <= UNQUOTED_OPENING_CHARACTERS + 1);
+        let serialized = serde_json::to_value(unit).unwrap();
+        assert_eq!(serialized["kind"], "overLimitSentence");
+        assert_eq!(serialized["pageNumber"], 3);
+        assert!(serialized["clauseReference"].is_null());
+
+        let mut missing_warning = analyzed.clone();
+        missing_warning
+            .warnings
+            .retain(|warning| warning.code != QUOTE_BOUNDARY_OMITTED_WARNING_CODE);
+        assert!(unquoted_source_units(&missing_warning, &chunked, &normalized).is_err());
+        let mut inflated_warning = analyzed.clone();
+        for warning in &mut inflated_warning.warnings {
+            if warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE {
+                warning.message = warning
+                    .message
+                    .replacen("1 source unit", "2 source units", 1);
+            }
+        }
+        assert!(unquoted_source_units(&inflated_warning, &chunked, &normalized).is_err());
+
+        let mut historical = analyzed.clone();
+        historical.analysis_version = QUOTE_BOUNDARY_ANALYSIS_VERSION.to_string();
+        assert!(unquoted_source_units(&historical, &chunked, &normalized)
+            .unwrap()
+            .is_empty());
+
+        let (complete_normalized, complete_chunked) = page_text_fixture(
+            "complete-contract",
+            &["1. Parties. The agreement binds both named organizations.".to_string()],
+        );
+        let complete = analyze(
+            &runtime,
+            &complete_chunked,
+            &complete_normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert!(
+            unquoted_source_units(&complete, &complete_chunked, &complete_normalized)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // Contract test 6 boundaries: 600 versus 601 characters, an unterminated tail, and a
+    // passage that begins with a numbered clause.
+    #[test]
+    fn unquoted_source_units_cover_limit_tail_and_clause_boundaries() {
+        let filler = "The service provider maintains accurate operational documentation.";
+        let tail = "The parties acknowledge the attached schedule of services";
+        let pages = vec![
+            format!(
+                "{filler} {}",
+                sentence_of_length("The exact limit sentence remains", 600)
+            ),
+            format!(
+                "{filler} {}",
+                sentence_of_length("The first over-limit sentence remains", 601)
+            ),
+            format!("{} {tail}", [filler; 9].join(" ")),
+            // The existing clause detector accepts numbers written with a trailing period.
+            format!(
+                "{filler} 6.1. Risk. {}",
+                sentence_of_length("The Contractor bears every operational", 640)
+            ),
+        ];
+        let (normalized, chunked) = page_text_fixture("unquoted-boundaries", &pages);
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("boundary fixture analysis should validate");
+        let units = unquoted_source_units(&analyzed, &chunked, &normalized)
+            .expect("boundary passages should agree with the analysis warning");
+        let shape = units
+            .iter()
+            .map(|unit| {
+                (
+                    unit.page_number,
+                    unit.kind,
+                    unit.character_count,
+                    unit.clause_reference.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            vec![
+                (2, UnquotedSourceUnitKind::OverLimitSentence, 601, None),
+                (
+                    3,
+                    UnquotedSourceUnitKind::NoSentenceBoundary,
+                    tail.chars().count(),
+                    None
+                ),
+                (
+                    4,
+                    UnquotedSourceUnitKind::OverLimitSentence,
+                    651,
+                    Some("6.1".to_string())
+                ),
+            ]
+        );
+        assert_eq!(
+            units[0].opening_text,
+            "The first over-limit sentence remains…"
+        );
+        assert_eq!(units[1].opening_text, tail);
+        assert!(units[2]
+            .opening_text
+            .starts_with("6.1. Risk. The Contractor"));
+    }
+
+    // Contract test 7: omitted spans are the single source of the omitted count and never
+    // overlap an admitted quotation.
+    #[test]
+    fn version_13_omitted_spans_are_the_omitted_units() {
+        let filler = "The service provider maintains accurate operational documentation.";
+        for source in [
+            format!(
+                "{filler} {}",
+                sentence_of_length("The exact limit sentence remains", 600)
+            ),
+            format!(
+                "{filler} {}",
+                sentence_of_length("The first over-limit sentence remains", 601)
+            ),
+            format!(
+                "{} The parties acknowledge the attached schedule",
+                [filler; 9].join(" ")
+            ),
+            format!(
+                "{} {filler} Unterminated closing words",
+                sentence_of_length("A leading over-limit sentence remains", 700)
+            ),
+        ] {
+            // Each fixture's sentences are distinct, so text containment is positional overlap.
+            let segmented = analysis_quote_segments_v13(&source);
+            assert_eq!(
+                segmented.omitted_units.len(),
+                segmented.omitted_source_units
+            );
+            for omitted in &segmented.omitted_units {
+                let passage = &source[omitted.start..omitted.end];
+                assert!(!passage.is_empty());
+                assert_eq!(passage, passage.trim());
+                for segment in &segmented.segments {
+                    assert!(
+                        !segment.contains(passage) && !passage.contains(segment.as_str()),
+                        "omitted passage {passage:?} overlaps admitted segment {segment:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
