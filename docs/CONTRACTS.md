@@ -657,6 +657,62 @@ Connect page coverage. This contract does not add persisted document-type
 metadata, measured classification reliability, trained adapters, a parallel
 synthesis framework or a renderer redesign.
 
+### Long Contract synthesis and unquoted-passage disclosure
+
+Status: implemented on PR #92 (`docs/PR-CONTRACT-LONG-SYNTHESIS.md`). The
+deterministic suite, strict Linux and Windows Clippy, formatting and the
+frontend build pass. Opt-in live acceptance on the originating private
+contracts is reported on the PR and is not implied by these gates.
+
+Current coherent synthesis is version 10.0.0. Version 9.0.0 remains a named
+current-equivalent version for reload, verification pairing and delivery
+coverage, so persisted 9.0.0 artifacts keep their rules, including the 9.0.0
+Contract incomplete-catalog ledger fallback. General and Story behavior is
+unchanged apart from the version identity bound into durable identifiers.
+
+- Incomplete catalogs: from 10.0.0 a Contract catalog with quote-boundary
+  omissions proceeds to synthesis when it has at least one admitted candidate,
+  the rule General already uses. Story and 9.0.0 Contract keep the fallback. The
+  admission check takes the artifact's own version, so a current-version
+  Contract fallback over an admissible catalog is rejected on validation.
+- Clipped units: a windowed Contract catalog classifies a unit that is exactly
+  `MAX_UNIT_CHARACTERS` long with valid unique source IDs and incomplete text as
+  `MODEL_SUMMARY_RESPONSE_UNIT_CLIPPED` and receives General's single clipped
+  repair and safe-sibling fallback.
+- Cross-window units: Contract determines cross-window ownership from validated
+  source IDs before clipping or completion validation can mask it; a
+  cross-window unit is repairable by ownership alone because the repair replaces
+  it. Contract's existing single window repair is bound to the rejected response
+  exactly as General's: siblings unchanged and each mixed unit's evidence
+  covered exactly once by single-window units, otherwise the safe-sibling
+  fallback with `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD`, and a fail-closed
+  stage when no safe unit exists. No repair attempt is added.
+- Unquoted passages: the desktop summary view of a Contract run with analysis
+  version 13.0.0 carries `unquotedSourceUnits`, one entry per source unit the
+  version-13 quotation catalog omits, in source order: page, kind
+  (`overLimitSentence` or `noSentenceBoundary`), character count, a clause
+  locator from the existing clause detector, and at most 80 characters of
+  opening words cut at a word boundary with a trailing ellipsis when shortened.
+  The list is derived on read from persisted normalized source; nothing new is
+  persisted. For every inspected page the derived count equals
+  `versioned_page_scope`, and both counts of `ANALYSIS_QUOTE_BOUNDARY_OMITTED`
+  match; any disagreement fails closed with `CITATION_ARTIFACT_MISMATCH`, never
+  an empty list. The UI states only that each listed passage could not enter the
+  quotation catalog and that other passages of the same clause or page may still
+  be cited. The list is display-only: never a citation, model input, summary
+  text, integrity input or Connect field. The clause detector recognizes numbers
+  written with a trailing period (`6.1.`); styles such as `3.3 Either` or
+  `§ 4.7.1` yield a null locator.
+
+Verification: fail-first regressions for an incomplete long Contract catalog
+reaching bounded Contract selection, a replay of the live clipped cross-window
+response shape, a non-clipped cross-window repair bound to the rejected
+response, clipped-unit limit boundaries, version-bound fallback validation,
+per-page and warning agreement of the unquoted list, 600/601-character and
+unterminated-tail boundaries, clause locators, the omitted-span source of the
+version-13 count, the workspace view over `tests/fixtures/contract_long_clause.pdf`,
+and deterministic replay of the bound repair's gateway ledger keys.
+
 ### Historical direct verified paraphrases and explicit omissions
 
 Status: the direct-summary and tolerant-paraphrase behavior is implemented by
