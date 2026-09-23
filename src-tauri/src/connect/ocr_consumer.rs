@@ -1355,7 +1355,7 @@ mod tests {
 
     #[test]
     fn stalled_response_body_is_uncertain_but_oversized_body_is_invalid() {
-        use std::io::Write;
+        use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1387,17 +1387,35 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9000000\r\n\r\n")
+                .set_read_timeout(Some(Duration::from_secs(4)))
                 .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                assert!(request.len() < 16 * 1024, "request headers are too large");
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0, "client closed before sending request headers");
+                request.extend_from_slice(&chunk[..count]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+                .unwrap();
+            stream.write_all(&[b'x'; 100]).unwrap();
         });
         provider.base_url = format!("http://{address}/");
-        let oversized = HttpOcrTransport.status(
-            &provider,
-            "11111111-1111-4111-8111-111111111111",
-            Instant::now() + Duration::from_secs(4),
-        );
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let response = HttpOcrTransport::client(deadline)
+            .unwrap()
+            .get(endpoint(&provider.base_url, "v2/jobs/test").unwrap())
+            .bearer_auth(&provider.token)
+            .send()
+            .unwrap();
+        let oversized = HttpOcrTransport::answer(response, 32);
         server.join().unwrap();
-        assert!(matches!(oversized, Err(TransportError::Invalid(_))));
+        assert!(
+            matches!(&oversized, Err(TransportError::Invalid(_))),
+            "unexpected oversized response: {oversized:?}"
+        );
     }
 
     #[cfg(unix)]

@@ -437,6 +437,36 @@ impl DesktopJobManager {
         Ok(())
     }
 
+    fn start_admitted_ocr_child(
+        &self,
+        conn: &mut rusqlite::Connection,
+        child_run_id: &str,
+        mut runtime: Box<dyn ModelRuntime>,
+    ) -> Result<(), DocumentServiceError> {
+        let unavailable = |error: DesktopJobError| DocumentServiceError::OcrHandoff {
+            code: "OCR_CHILD_WORKER_UNAVAILABLE".to_string(),
+            message: error.to_string(),
+        };
+        let mut claim = self.claim_run(child_run_id).map_err(unavailable)?;
+        let child = db::get_pipeline_run(conn, child_run_id)?
+            .ok_or_else(|| StoreError::RunNotFound(child_run_id.to_string()))?;
+        runtime.bind_run(child_run_id);
+        let (parsing, _) = db::start_parsing(conn, child_run_id, child.state_version)?;
+        if let Err(error) = self.spawn_claimed(
+            parsing.run_id,
+            BackgroundWork::StartedParsing,
+            Some(runtime),
+            claim.token.clone(),
+        ) {
+            drop(claim);
+            self.persist_worker_start_failure(child_run_id)
+                .map_err(unavailable)?;
+            return Err(unavailable(error));
+        }
+        claim.armed = false;
+        Ok(())
+    }
+
     fn claim_run(&self, run_id: &str) -> Result<ActiveRunClaim, DesktopJobError> {
         let token = CancellationToken::new();
         {
@@ -505,7 +535,7 @@ impl DesktopJobManager {
 
         match work {
             BackgroundWork::StartedParsing => {
-                let mut runtime = runtime.ok_or_else(|| {
+                let runtime = runtime.ok_or_else(|| {
                     DocumentServiceError::RuntimeRequiredForBackground(run_id.to_string())
                 })?;
                 if token.cancellation_requested() {
@@ -540,21 +570,7 @@ impl DesktopJobManager {
                                 });
                             }
                         };
-                    let child = db::get_pipeline_run(&conn, &child_run_id)?
-                        .ok_or_else(|| StoreError::RunNotFound(child_run_id.clone()))?;
-                    runtime.bind_run(&child_run_id);
-                    let (parsing, _) =
-                        db::start_parsing(&mut conn, &child_run_id, child.state_version)?;
-                    drop(conn);
-                    self.spawn(
-                        parsing.run_id,
-                        BackgroundWork::StartedParsing,
-                        Some(runtime),
-                    )
-                    .map_err(|error| DocumentServiceError::OcrHandoff {
-                        code: "OCR_CHILD_WORKER_UNAVAILABLE".to_string(),
-                        message: error.to_string(),
-                    })?;
+                    self.start_admitted_ocr_child(&mut conn, &child_run_id, runtime)?;
                     return Err(DocumentServiceError::OcrHandoff {
                         code: "OCR_DERIVED_HANDOFF".to_string(),
                         message: format!("processing continued in derived run {child_run_id}"),
@@ -1189,6 +1205,65 @@ mod tests {
                 .status_activity(&root_run_id, &projected_child_id)
                 .unwrap(),
             (false, false)
+        );
+    }
+
+    #[test]
+    fn live_ocr_child_is_claimed_before_parsing_and_worker_dispatch() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let (document, received) = prepare_pdf_ingestion_with_source_type(
+            source.to_str().expect("OCR fixture path should be UTF-8"),
+            Some("recognized.pdf"),
+            crate::pipeline::contracts::SourceType::OcrText,
+        )
+        .expect("OCR fixture should prepare");
+        let child = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&fixture_snapshot()),
+            SummaryProfile::General,
+        )
+        .expect("OCR child should persist");
+        let before = db::get_pipeline_run(&conn, &child.run_id)
+            .expect("child should load")
+            .expect("child should exist");
+
+        let competing_claim = manager.claim_run(&child.run_id).expect("user claims first");
+        let blocked =
+            manager.start_admitted_ocr_child(&mut conn, &child.run_id, Box::new(FixtureRuntime));
+        assert!(matches!(
+            blocked,
+            Err(DocumentServiceError::OcrHandoff {
+                code,
+                ..
+            }) if code == "OCR_CHILD_WORKER_UNAVAILABLE"
+        ));
+        assert_eq!(
+            db::get_pipeline_run(&conn, &child.run_id)
+                .expect("child should load")
+                .expect("child should exist"),
+            before,
+            "losing the claim must not advance the child"
+        );
+        drop(competing_claim);
+
+        manager
+            .start_admitted_ocr_child(&mut conn, &child.run_id, Box::new(FixtureRuntime))
+            .expect("root claims before parsing and dispatches the child");
+        drop(conn);
+        wait_until(|| !manager.is_active(&child.run_id).unwrap());
+        let conn = db::init_db(&database.0).expect("database should reopen");
+        assert_eq!(
+            db::get_pipeline_run(&conn, &child.run_id)
+                .expect("child should load")
+                .expect("child should exist")
+                .state,
+            PipelineState::Complete
         );
     }
 
