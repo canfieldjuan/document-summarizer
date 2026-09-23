@@ -451,7 +451,17 @@ impl DesktopJobManager {
         let child = db::get_pipeline_run(conn, child_run_id)?
             .ok_or_else(|| StoreError::RunNotFound(child_run_id.to_string()))?;
         runtime.bind_run(child_run_id);
-        let (parsing, _) = db::start_parsing(conn, child_run_id, child.state_version)?;
+        let (parsing, _) = match db::start_parsing(conn, child_run_id, child.state_version) {
+            Ok(started) => started,
+            Err(error) => {
+                if let Some(current) = db::get_pipeline_run(conn, child_run_id)? {
+                    if current.state == PipelineState::Cancelling {
+                        db::complete_cancellation(conn, child_run_id, current.state_version)?;
+                    }
+                }
+                return Err(error.into());
+            }
+        };
         if let Err(error) = self.spawn_claimed(
             parsing.run_id,
             BackgroundWork::StartedParsing,
@@ -825,6 +835,35 @@ mod tests {
 
         fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
             Some(fixture_snapshot())
+        }
+    }
+
+    struct CancelOnBindRuntime {
+        manager: DesktopJobManager,
+        expected_state_version: u32,
+    }
+
+    impl ModelRuntime for CancelOnBindRuntime {
+        fn bind_run(&mut self, run_id: &str) {
+            self.manager
+                .request_cancellation(run_id, self.expected_state_version)
+                .expect("cancellation should commit after the child claim");
+        }
+
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            FixtureRuntime.health()
+        }
+
+        fn runtime_id(&self) -> &str {
+            FixtureRuntime.runtime_id()
+        }
+
+        fn model_id(&self) -> &str {
+            FixtureRuntime.model_id()
         }
     }
 
@@ -1265,6 +1304,45 @@ mod tests {
                 .state,
             PipelineState::Complete
         );
+    }
+
+    #[test]
+    fn cancelled_live_ocr_child_completes_before_claim_release() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let (document, received) = prepare_pdf_ingestion_with_source_type(
+            source.to_str().expect("OCR fixture path should be UTF-8"),
+            Some("recognized.pdf"),
+            crate::pipeline::contracts::SourceType::OcrText,
+        )
+        .expect("OCR fixture should prepare");
+        let child = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&fixture_snapshot()),
+            SummaryProfile::General,
+        )
+        .expect("OCR child should persist");
+
+        assert!(manager
+            .start_admitted_ocr_child(
+                &mut conn,
+                &child.run_id,
+                Box::new(CancelOnBindRuntime {
+                    manager: manager.clone(),
+                    expected_state_version: child.state_version,
+                }),
+            )
+            .is_err());
+        let cancelled = db::get_pipeline_run(&conn, &child.run_id)
+            .expect("child should load")
+            .expect("child should exist");
+        assert_eq!(cancelled.state, PipelineState::Cancelled);
+        assert!(!manager.is_active(&child.run_id).unwrap());
     }
 
     #[test]

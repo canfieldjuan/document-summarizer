@@ -30,6 +30,7 @@ Root cause:
 - The direct normalization command reaches the shared `Parsed` to `Normalizing` store transition without checking whether an OCR handoff owns the root. A pending OCR root can advance and permanently lose child-admission eligibility.
 - Live OCR child admission makes the child visible as `Ingested`, but the root worker transitions it to `Parsing` before claiming its active-registry ID. A competing continuation can claim first; both workers then exit on ownership loss and leave the child without an active worker.
 - The loopback oversized-response test sends a response before reading the client's request, then closes immediately. Native Windows CI failed its invalid-response assertion, and a held-open variant also returned a send error on Linux. The fixture does not reliably reach the bounded-header decision.
+- A live OCR child becomes cancellable as soon as its registry claim exists, even while its persisted state is still `Ingested`. If cancellation commits before `start_parsing`, that transition fails and the claim drops without a child worker to complete `Cancelling`.
 
 The correct fix must:
 
@@ -56,6 +57,7 @@ The correct fix must:
 21. Reject normalization of a root with any durable OCR handoff inside the shared immediate store transition, while leaving native roots and admitted OCR children eligible.
 22. Claim a live-admitted OCR child before its first `Parsing` transition, hold that claim through worker dispatch, and release or fail the child consistently on errors. A competing continuation must not lose a state-version race to an unowned transition.
 23. Make the oversized-response loopback fixture read the request and send a complete response that exceeds a small test limit, so the real response classifier is exercised without an incomplete HTTP exchange or changes to production transport behavior.
+24. If cancellation wins between live-child claim and parse transition, complete the child's persisted cancellation before releasing that claim; do not start a worker or change the normal parse-and-dispatch path.
 
 Must not change:
 
@@ -102,7 +104,6 @@ Slice phase: direct OCR consumer vertical proof
 - `src-tauri/src/pipeline/service.rs`
 - `src-tauri/src/pipeline/state.rs`
 - `src-tauri/src/pipeline/workspace.rs`
-- `docs/PR-OCR-PROVIDER-HANDOFF.md`
 
 ### Review Contract
 
@@ -131,6 +132,7 @@ Acceptance criteria:
 21. The direct `normalize_document` path cannot advance a parsed root with a persisted OCR handoff, and its state/version remain unchanged; a native root without a handoff can still normalize.
 22. Within the desktop manager's shared mutex-backed active registry, competing root/user worker claims are serialized: if a competing owner claims an admitted `Ingested` child first, the root worker leaves its state/version unchanged; if the root worker claims first, it holds the claim through `Parsing` and worker dispatch. The controlled competing-claim test samples both sides of that invariant.
 23. The loopback oversized-response test consumes the request headers and sends a complete body larger than its bounded test limit; native Windows Connect CI passes that assertion.
+24. A controlled cancellation after live-child claim but before `start_parsing` leaves the child `Cancelled`, not stranded in `Cancelling`, and releases its registry claim; an uncancelled child still reaches completion.
 
 Affected surfaces: Local Connect v2 discovery/client transport, SQLite migration and transactions, desktop background scheduling, application startup recovery, native scanned-PDF routing.
 
@@ -172,6 +174,8 @@ Child restart recovery claims the child ID in the same active registry used by u
 
 The live root worker likewise claims the admitted child before loading and transitioning it to `Parsing`. A scoped claim stays armed until the child worker starts; a worker-start failure releases the claim and records the existing recoverable background-start failure. The loopback oversized-response fixture first consumes the complete request headers, then sends a complete small response through the same HTTP client and classifier with a small test limit; the production limit and transport branches remain unchanged.
 
+If the child is cancelled while the live claim is held but before parsing commits, the claim owner completes that persisted cancellation on the transition-error path, then releases the claim. Other transition errors remain errors and do not gain a worker.
+
 Restart recovery checks the persisted root cancellation state before provider selection, so a cancelled pre-admission handoff becomes terminal even when its pinned provider is offline.
 
 Document Summarizer's tagged-PDF parser exposes one crate-private canonical-text function so the consumer can byte-compare the paired provider text before child admission without importing provider code or introducing a second traversal implementation inside this application. Its tagged-profile decoder preserves ASCII bytes, including tabs and line feeds, and falls back to the existing BOM-aware PDF string decoder for non-ASCII strings.
@@ -193,6 +197,7 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Verification
 
+- Fail-first `cargo test --locked --lib desktop::tests::cancelled_live_ocr_child_completes_before_claim_release -- --exact` failed with `Cancelling` instead of `Cancelled`; after the transition-error repair, 1 passed. `cargo test --locked --lib desktop::tests` passed 19 tests, including normal live-child completion. `cargo fmt --all -- --check` and strict Linux/Windows-target Clippy passed.
 - Fail-first `cargo test --locked --lib desktop::tests::live_ocr_child_is_claimed_before_parsing_and_worker_dispatch -- --exact` failed because the claim-before-transition helper was absent; after the repair, 1 passed. The test covers a competing first claim without state/version mutation, then successful claimed dispatch through completion.
 - Native Windows Connect security CI on the previous head failed `stalled_response_body_is_uncertain_but_oversized_body_is_invalid` at the oversized-response assertion. A held-open but premature-response variant also returned `Uncertain` on Linux; after the complete-request/complete-response fixture repair, the targeted test and all 11 OCR consumer tests pass locally. Native Windows CI on the new head remains the required cross-platform proof.
 - `cargo test --locked --lib desktop::tests` - 18 passed; `cargo fmt --all -- --check`, strict Linux Clippy, and strict Windows-target Clippy passed after these repairs.
@@ -234,4 +239,4 @@ Parked hardening: the items already listed in `HANDOFF-2026-09-21-SCANNED-OCR.md
 
 ## Estimated diff size
 
-Actual with exact-head review repairs: 14 files, +4,325 / -105. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.
+Actual with exact-head review repairs: 14 files, +4,408 / -105. The slice exceeds the usual soft cap because strict discovery, bounded HTTP transport, durable crash ownership, status-before-replay reconciliation, paired-output validation, migration, transactional child admission, startup recovery, workspace projection, gateway-compatible synthesis, and their boundary tests form one indivisible vertical safety boundary; omitting any one recreates the original blocker, breaks the existing desktop monitor, or violates accepted ADR-0008.
