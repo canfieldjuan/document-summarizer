@@ -43,11 +43,13 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "9.0.0";
+pub const SYNTHESIS_VERSION: &str = "10.0.0";
 pub const VERIFICATION_VERSION: &str = "10.0.0";
 pub const SUMMARY_VERSION: &str = "8.0.0";
 pub const CITATION_VERSION: &str = "4.0.0";
 
+/// Contract long-document synthesis still used the incomplete-catalog ledger fallback.
+const PRE_LONG_CONTRACT_SYNTHESIS_VERSION: &str = "9.0.0";
 const PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION: &str = "8.0.0";
 const PRE_CONTEXT_SYNTHESIS_VERSION: &str = "7.0.0";
 const PRE_DISCLOSURE_SYNTHESIS_VERSION: &str = "6.0.0";
@@ -146,6 +148,7 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
         SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -158,7 +161,9 @@ fn coherent_verification_versions_match(
 ) -> bool {
     (matches!(
         synthesis_version,
-        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
+            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
     ) && verification_version == VERIFICATION_VERSION)
         || (synthesis_version == PRE_CONTEXT_SYNTHESIS_VERSION
             && verification_version == PRE_CONTEXT_VERIFICATION_VERSION)
@@ -1286,7 +1291,9 @@ fn verify(
             Vec::new()
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
-        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
+        SYNTHESIS_VERSION
+        | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
+        | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
         PRE_CONTEXT_SYNTHESIS_VERSION => PRE_CONTEXT_VERIFICATION_VERSION,
         PRE_DISCLOSURE_SYNTHESIS_VERSION
             if synthesized.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback =>
@@ -1753,6 +1760,7 @@ fn verification_claim_budget(
     if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -3912,6 +3920,7 @@ fn validate_synthesized_document_without_runtime(
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -3927,6 +3936,7 @@ fn validate_synthesized_document_without_runtime(
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -4167,8 +4177,10 @@ fn validate_coherent_verified_document(
     analyzed: &AnalyzedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
-    let delivery_coverage_fallback = synthesized.synthesis_version == SYNTHESIS_VERSION
-        && verified.verification_version == VERIFICATION_VERSION
+    let delivery_coverage_fallback = matches!(
+        synthesized.synthesis_version.as_str(),
+        SYNTHESIS_VERSION | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
+    ) && verified.verification_version == VERIFICATION_VERSION
         && synthesized.presentation_mode == SummaryPresentationMode::Coherent
         && verified.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback;
     let metadata_valid = coherent_verification_versions_match(
@@ -10206,6 +10218,210 @@ mod tests {
         assert_eq!(completed.summary.warnings, verified.warnings);
     }
 
+    fn page_text_fixture(
+        document_id: &str,
+        page_texts: &[String],
+    ) -> (NormalizedDocument, ChunkedDocument) {
+        let pages = page_texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let page_number = u32::try_from(index + 1).expect("page count should fit u32");
+                crate::pipeline::contracts::NormalizedPage {
+                    page_number,
+                    content: vec![NormalizedBlock {
+                        block_id: format!("{document_id}-block-{page_number}"),
+                        kind: crate::pipeline::contracts::NormalizedBlockKind::Text,
+                        text: text.clone(),
+                        source: SourceSpan {
+                            page_start: page_number,
+                            page_end: page_number,
+                            section_id: None,
+                            source_type: crate::pipeline::contracts::SourceType::NativeText,
+                        },
+                    }],
+                    warnings: vec![],
+                    requires_visual_processing: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        let chunks = pages
+            .iter()
+            .map(|page| {
+                let block = &page.content[0];
+                crate::pipeline::contracts::DocumentChunk {
+                    chunk_id: format!("{document_id}-chunk-{}", page.page_number),
+                    ordinal: page.page_number,
+                    structure_node_id: format!("{document_id}-node-{}", page.page_number),
+                    text: block.text.clone(),
+                    block_ids: vec![block.block_id.clone()],
+                    source_spans: vec![block.source.clone()],
+                    warnings: vec![],
+                }
+            })
+            .collect::<Vec<_>>();
+        (
+            NormalizedDocument {
+                document_id: document_id.to_string(),
+                normalization_version: "test-normalization-v1".to_string(),
+                pages,
+                warnings: vec![],
+            },
+            ChunkedDocument {
+                document_id: document_id.to_string(),
+                chunking_version: "test-chunking-v1".to_string(),
+                chunks,
+                warnings: vec![],
+            },
+        )
+    }
+
+    /// Ten contract pages. Page 3 carries one indemnity sentence longer than the
+    /// 600-character quote ceiling, so the version-13 catalog omits exactly one unit.
+    /// Other sentences end in words of six or more letters so the open-set
+    /// abbreviation rule does not coalesce them into further omissions.
+    fn incomplete_long_contract_fixture() -> (NormalizedDocument, ChunkedDocument) {
+        let long_indemnity = format!(
+            "The Contractor shall defend, indemnify and hold harmless the Client, its \
+             governors, officers, directors, employees, agents and permitted assignees from \
+             and against all claims, demands, actions, liabilities, judgments, settlements, \
+             penalties, fines, losses, damages, costs and expenses, including reasonable \
+             attorney fees and litigation expenses, arising out of or relating to {}, in each \
+             case except to the extent caused by the gross negligence or willful misconduct of \
+             the indemnified parties as finally determined by a court of competent jurisdiction.",
+            "any negligent act, omission, breach of warranty, breach of confidentiality, \
+             violation of applicable regulations, infringement of intellectual property, \
+             personal injury, death or property damage caused by the Contractor, its \
+             personnel, subcontractors or suppliers in connection with the services"
+        );
+        assert!(long_indemnity.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+        let clause =
+            |number: usize, heading: &str, body: &str| format!("{number}. {heading} {body}");
+        let pages = vec![
+            clause(1, "Parties.", "This Services Agreement is between Alpha Services Incorporated and Beta Holdings Limited. The Contractor provides janitorial services at the Client facilities."),
+            clause(2, "Term.", "The agreement runs from January 1, 2026 through December 31, 2026. Either party may renew the agreement by written amendment."),
+            format!("3. Indemnification. {long_indemnity} The Client shall give the Contractor prompt written notification."),
+            clause(4, "Payment.", "The Client pays each undisputed invoice within thirty calendar days. Invoices must identify the services performed during the invoiced period."),
+            clause(5, "Termination.", "Either party may terminate the agreement upon thirty days written notification. The Client pays for accepted services through the termination effective date."),
+            clause(6, "Insurance.", "The Contractor maintains commercial general liability insurance of one million dollars per occurrence. Certificates are delivered before services commence."),
+            clause(7, "Confidentiality.", "Each party protects the other party's confidential information using reasonable safeguards. Obligations survive expiration or termination of the agreement."),
+            clause(8, "Liability.", "Neither party is liable for consequential or indirect damages arising under the agreement. This limitation excludes indemnification obligations."),
+            clause(9, "Law.", "The agreement is governed by the laws of the State of Illinois. Disputes proceed exclusively in the courts located in Effingham County."),
+            clause(10, "Notices.", "Notices must be delivered in writing to the addresses listed in the signature blocks. Notices become effective upon confirmed delivery."),
+        ];
+        page_text_fixture("incomplete-long-contract", &pages)
+    }
+
+    // Contract test 1: an incomplete long Contract catalog proceeds to bounded source
+    // selection and synthesis instead of the verified-ledger fallback.
+    #[test]
+    fn incomplete_long_contract_catalog_uses_bounded_contract_selection() {
+        let (normalized, chunked) = incomplete_long_contract_fixture();
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+        assert!(
+            analyzed
+                .warnings
+                .iter()
+                .any(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE),
+            "precondition: the fixture must omit a quote-boundary source unit"
+        );
+        let analysis_requests = runtime.schema_names.lock().unwrap().len();
+
+        let synthesized = coherent::synthesize(
+            SummaryProfile::Contract,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("an incomplete long Contract catalog should synthesize");
+
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert!(synthesized
+            .warnings
+            .iter()
+            .all(|warning| warning.code != coherent::FALLBACK_WARNING_CODE));
+        assert!(synthesized
+            .warnings
+            .iter()
+            .any(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE));
+        let schema_names = runtime.schema_names.lock().unwrap();
+        let synthesis_schemas = &schema_names[analysis_requests..];
+        assert!(synthesis_schemas
+            .iter()
+            .any(|name| name == coherent::CONTRACT_SOURCE_SELECTION_SCHEMA_NAME));
+        assert!(synthesis_schemas
+            .iter()
+            .any(|name| name == coherent::CONTRACT_SCHEMA_NAME));
+    }
+
+    // Contract test 4: the incomplete-catalog Contract fallback is bound to the synthesis
+    // version that produced it. 9.0.0 keeps its rules; the current version rejects it.
+    #[test]
+    fn contract_incomplete_catalog_fallback_is_bound_to_its_synthesis_version() {
+        let (normalized, chunked) = incomplete_long_contract_fixture();
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+
+        let historical = coherent::incomplete_catalog_fallback_for_version(
+            &runtime, &analyzed, &chunked, "9.0.0",
+        )
+        .expect("the 9.0.0 fallback should materialize");
+        coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &historical,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &runtime,
+        )
+        .expect("a 9.0.0 Contract fallback keeps validating under 9.0.0 rules");
+        validate_synthesized_document_without_runtime(
+            &historical,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .expect("a persisted 9.0.0 synthesis artifact remains reloadable");
+
+        let relabeled = coherent::incomplete_catalog_fallback_for_version(
+            &runtime,
+            &analyzed,
+            &chunked,
+            SYNTHESIS_VERSION,
+        )
+        .expect("the relabeled fallback should materialize");
+        coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &relabeled,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &runtime,
+        )
+        .expect_err("a current-version Contract fallback over an admissible catalog is forged");
+    }
+
     #[test]
     fn source_selection_context_rejection_uses_verified_ledger_fallback() {
         let runtime = LowSynthesisContextRuntime::rejecting_exact_synthesis_admission();
@@ -10590,7 +10806,8 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "9.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "10.0.0");
+        assert_eq!(PRE_LONG_CONTRACT_SYNTHESIS_VERSION, "9.0.0");
         assert_eq!(PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION, "8.0.0");
         assert_eq!(PRE_CONTEXT_SYNTHESIS_VERSION, "7.0.0");
         assert_eq!(PRE_DISCLOSURE_SYNTHESIS_VERSION, "6.0.0");
