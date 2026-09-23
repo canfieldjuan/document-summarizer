@@ -1,7 +1,9 @@
-# Long Contract synthesis parity and unquoted-clause disclosure
+# Long Contract synthesis parity and unquoted-passage disclosure
 
-Status: proposed contract. Implementation has not started and must wait for
-explicit operator acceptance of this document.
+Status: proposed contract, revised for the three review findings on PR #92
+(run B scope, passage-level disclosure, warning-count agreement).
+Implementation has not started and waits for operator acceptance of this
+revision.
 
 ### Contract
 
@@ -46,10 +48,23 @@ Root cause:
   - C. Unmodified, General profile: `coherent` presentation, verified, four
     summary units, with `COHERENT_SUMMARY_SOURCE_SELECTION_APPLIED` and
     `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD`.
-- Consequence: making the catalog complete (for example by splitting long
-  clauses) would convert today's fallback into a hard failure (run B). That
-  symptom patch is rejected. Separately, the user sees only a count of
-  unquotable source units, never which clauses they are.
+- What run B does and does not establish: B is a gate-only probe. It kept the
+  same incomplete catalog (its Analyze warnings still report 18 omitted units).
+  It establishes that once the gate is passed, the Contract path has no
+  recovery for a clipped or cross-window unit, and that such responses occur on
+  real input (`summary/coherent.rs:6347-6405`). It does not establish what a
+  complete catalog would produce, because completing the catalog changes the
+  candidate set, selection windows, prompt and response.
+- Why quote segmentation is not this slice: segmentation remains an open,
+  separate follow-up, not a rejected option. It cannot replace R2-R4 because R3
+  and R4 govern model responses whatever the catalog contains, and because
+  measured catalogs keep omissions that boundary splitting cannot remove. All 10
+  page tails lack a safe terminal. In an approximate estimate over the 31
+  over-limit units, 9 stayed over 600 characters after clause-number and
+  enumerator splits. Any claim about segmentation's end-to-end effect requires a
+  complete-catalog live probe in that slice.
+- Separately, the user sees only a count of unquotable source units, never
+  which passages they are.
 
 Required behavior:
 - R1 Version. New runs use synthesis version `10.0.0`. Artifacts persisted
@@ -80,7 +95,8 @@ Required behavior:
   repairs. Window repair and clipped repair each remain one attempt.
 - R5 Contract source selection is unchanged, including its identity/scope and
   risk/exit source requirements.
-- R6 Unquoted-clause disclosure (operator decision, 2026-09-23). For a
+- R6 Unquoted-passage disclosure (operator decision, 2026-09-23, narrowed in
+  review from clauses to source passages). For a
   Contract-profile run whose analysis version is `13.0.0`, the desktop summary
   view returned by `get_persisted_summary` carries `unquotedSourceUnits`. It
   has one entry per source unit that the analysis quote catalog omits, across
@@ -89,8 +105,9 @@ Required behavior:
   - `kind`: `overLimitSentence` for a safe-boundary unit over 600 characters,
     or `noSentenceBoundary` for a nonempty tail without a safe terminal
   - `characterCount`
-  - `clauseReference`: the leading numbered clause reference found by the
-    existing contract clause detector, or `null`
+  - `clauseReference`: the numbered clause reference that begins the passage,
+    found by the existing contract clause detector, or `null`. This is a
+    locator only, not a statement about that clause's coverage.
   - `openingText`: the unit's leading words, at most 80 characters, cut at a
     word boundary, marked as shortened when cut
 
@@ -98,10 +115,14 @@ Required behavior:
   run's recorded analysis version, through the same segmentation function that
   produces the omission counts. Nothing new is persisted. For other profiles,
   and for analysis versions that record no quote-boundary omissions, the list is
-  present and empty. The desktop UI renders a "Clauses not quoted" section under
-  both `coherent` and `claimLedgerFallback` presentations whenever the list is
-  nonempty. The section states that these clauses are not covered by the
-  summary or its evidence. `openingText` is display-only: it is never a
+  present and empty. The desktop UI renders a "Passages that could not be
+  quoted" section under both `coherent` and `claimLedgerFallback` presentations
+  whenever the list is nonempty. It states only the fact the derivation proves:
+  each listed source passage could not enter the quotation catalog, so no
+  summary unit or claim cites that passage. It also states that other passages
+  from the same clause or page may still be quoted and cited. It makes no claim
+  that a clause as a whole is uncovered; clause-level coverage is not computed
+  in this slice. `openingText` is display-only: it is never a
   citation, never sent to a model, and never part of summary text, integrity
   hashes, verification or Connect results.
 - R7 Connect. Connect-admitted Contract runs get the R2-R4 synthesis behavior,
@@ -115,10 +136,19 @@ Invariants:
   segmenter's segments and omitted counts stay byte-identical. Exposing omitted
   spans derives the existing count from the same spans rather than computing a
   second count.
-- For pages the Analyze stage inspected, the unquoted entries equal the count
-  and page set reported by that run's `ANALYSIS_QUOTE_BOUNDARY_OMITTED` warning.
-  The list may also include pages that analysis did not inspect, because
-  synthesis catalogs every chunk.
+- Per-page agreement: for every page in the analyzed artifact's
+  `inspected_pages`, the number of derived entries on that page equals the
+  omitted-unit count that `versioned_page_scope` computes for the page. That is
+  the same per-page value `validate_plan` already recomputes
+  (`summary/pages.rs:1235-1251`).
+- Warning agreement: the `ANALYSIS_QUOTE_BOUNDARY_OMITTED` warning carries only
+  two counts and no page set (`summary/pages.rs:1053-1070`), so both are checked
+  separately. The sum of derived entries over inspected pages equals the
+  warning's omitted-unit count, and the number of inspected pages with at least
+  one entry equals its affected-page count. With no entries on inspected pages,
+  the warning is absent.
+- The list may also include pages analysis did not inspect, because synthesis
+  catalogs every chunk. Those entries are not compared with the warning.
 - A coherent Contract summary built from an incomplete catalog still carries
   the Analyze quote-boundary warning. Disclosure never replaces warnings.
 - Durable identifiers created under `10.0.0` bind `10.0.0`. A persisted `9.0.0`
@@ -130,9 +160,9 @@ Failure cases:
 - A runtime context rejection keeps the existing ledger fallback and its
   boundary-specific message.
 - If the normalized document or analyzed artifact is missing or invalid on
-  read, or the derived entries contradict the recorded warning for inspected
-  pages, the summary view fails with the existing workspace integrity error. An
-  error is never presented as an empty list.
+  read, or the derived entries violate the per-page or warning agreement above,
+  the summary view fails with the existing workspace integrity error. An error
+  is never presented as an empty list.
 
 Concurrency model:
 - Synthesis stays one sequential background task per run. New repair requests
@@ -164,7 +194,7 @@ Required change surface:
     branches untouched.
 - `src-tauri/src/pipeline/workspace.rs`: `SummaryView` gains
   `unquoted_source_units`, derived in `get_persisted_summary`.
-- `src/main.ts` and `index.html`: the view type and the "Clauses not quoted"
+- `src/main.ts` and `index.html`: the view type and the "Passages that could not be quoted"
   section.
 - Tests in the existing `summary.rs`, `summary/coherent.rs` and `workspace.rs`
   test modules, listed in the verification plan.
@@ -188,7 +218,7 @@ Explicit non-scope:
 
 Assumptions/blockers:
 - Operator decision (2026-09-23): a Contract summary may be produced from an
-  incomplete catalog when the unquotable clauses are listed explicitly.
+  incomplete catalog when the unquotable source passages are listed explicitly.
 - The two real contracts contain private contact data and are never committed.
   Deterministic fixtures reproduce their shapes synthetically.
 - Parity alone may yield thin long-contract summaries. Run C's General summary
@@ -218,8 +248,11 @@ Verification plan:
      coherent. A `9.0.0` fallback relabeled `10.0.0` is rejected.
   5. The existing General and Story suites pass unchanged apart from version
      identity.
-  6. The unquoted list: equality with the warning for inspected pages; an empty
-     list with zero omissions; 600- versus 601-character units; a no-terminal
+  6. The unquoted list: per-page equality with `versioned_page_scope` for every
+     inspected page; both warning counts (units and affected pages) equal the
+     sums; warning absent when inspected pages have no entries; entries on
+     uninspected pages excluded from those comparisons; an empty list with zero
+     omissions; 600- versus 601-character units; a no-terminal
      tail; clause reference present and absent; the 80-character word-boundary
      cut; empty for non-Contract profiles and for version-12 analysis; an
      integrity error on contradiction; never present in summary text or
