@@ -1,7 +1,8 @@
 # Long Contract synthesis parity and unquoted-passage disclosure
 
-Status: proposed contract, revised for the three review findings on PR #92
-(run B scope, passage-level disclosure, warning-count agreement).
+Status: proposed contract, revised for the review findings on PR #92 (run B
+scope, passage-level disclosure, warning-count agreement, and R4 as binding
+the existing mixed-window repair).
 Implementation has not started and waits for operator acceptance of this
 revision.
 
@@ -34,8 +35,8 @@ Root cause:
   3. For Contract, per-unit completeness validation runs before cross-window
      ownership is determined, and the one window repair sends generic feedback
      without binding to the rejected response (`summary/coherent.rs:3856`,
-     `3989`, `4023-4038`; `parse_window_repair_requirements` returns early for
-     non-General at `6498`), unlike General after PR #63.
+     `3989`, `4023-4038`, `4083-4093`; `parse_window_repair_requirements`
+     returns early for non-General at `6498`), unlike General after PR #63.
 - Evidence from a controlled experiment (scratch worktree at `origin/main`,
   live gateway, fresh database, the 10-page agreement):
   - A. Unmodified, Contract profile: reproduces the installed result exactly
@@ -50,11 +51,20 @@ Root cause:
     `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD`.
 - What run B does and does not establish: B is a gate-only probe. It kept the
   same incomplete catalog (its Analyze warnings still report 18 omitted units).
-  It establishes that once the gate is passed, the Contract path has no
-  recovery for a clipped or cross-window unit, and that such responses occur on
-  real input (`summary/coherent.rs:6347-6405`). It does not establish what a
-  complete catalog would produce, because completing the catalog changes the
-  candidate set, selection windows, prompt and response.
+  It establishes that clipping masks Contract's mixed-window handling. B's unit
+  was both clipped and cross-window. A clipped Contract unit returns
+  `MODEL_SUMMARY_RESPONSE_INVALID` inside the per-unit checks, before window
+  ownership is examined (`summary/coherent.rs:6347-6371`), so the stage failed.
+  It also shows that such responses occur on real input.
+- B did not exercise Contract's existing mixed-window path. A complete
+  mixed-window Contract unit returns `WINDOW_MIXED_RESPONSE_CODE` (`6401-6405`).
+  The repair loop then makes one generic repair request (`3988-4067`), and the
+  safe-sibling window fallback is already available to Contract
+  (`parse_response_without_mixed_windows`, `6641-6642`). That repair is not
+  bound to the rejected response (`3989`, `4030-4038`, `4083-4093`).
+- B does not establish what a complete catalog would produce, because
+  completing the catalog changes the candidate set, selection windows, prompt
+  and response.
 - Why quote segmentation is not this slice: segmentation remains an open,
   separate follow-up, not a rejected option. It cannot replace R2-R4 because R3
   and R4 govern model responses whatever the catalog contains, and because
@@ -84,15 +94,22 @@ Required behavior:
   clipped-unit repair and safe-sibling fallback as windowed General. A
   non-windowed Contract catalog keeps its current behavior, matching
   non-windowed General.
-- R4 Cross-window ownership and repair. Under `10.0.0`, Contract determines
-  cross-window ownership from validated response source IDs before per-unit
-  clipping or completion validation can mask it. Its one window repair is bound
-  to the rejected response exactly as General's is after PR #63: valid siblings
-  unchanged, and every mixed unit's original evidence covered exactly once by
-  single-window replacement units. Otherwise it uses the safe-sibling fallback
-  with `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD`, and it fails closed when
-  no safe result exists. Contract keeps its existing budget of two validation
-  repairs. Window repair and clipped repair each remain one attempt.
+- R4 Cross-window ownership, and binding the existing repair. Contract already
+  detects a complete mixed-window unit, makes one generic window repair and has
+  the safe-sibling window fallback. R4 hardens that existing path; it adds no
+  new repair. Under `10.0.0`:
+  - Contract determines cross-window ownership from validated response source
+    IDs before per-unit clipping or completion validation can mask it.
+  - The existing window repair is bound to the rejected response exactly as
+    General's is after PR #63. The repair prompt carries the rejected response.
+    The repair is accepted only when valid siblings are unchanged and every
+    mixed unit's original evidence is covered exactly once by single-window
+    replacement units.
+  - A repair that violates the binding uses the existing safe-sibling fallback
+    with `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD`. The stage fails closed
+    when no safe result exists.
+  - Contract keeps its existing budget of two validation repairs. Window repair
+    and clipped repair each remain one attempt.
 - R5 Contract source selection is unchanged, including its identity/scope and
   risk/exit source requirements.
 - R6 Unquoted-passage disclosure (operator decision, 2026-09-23, narrowed in
@@ -187,8 +204,9 @@ Required change surface:
   - extend clipped classification, clipped repair and bound window repair to
     windowed Contract catalogs: the `is_windowed_general_catalog` predicate and
     its call sites (`6347`, `6704`), the General-only guard in
-    `parse_window_repair_requirements` (`6498`), and the General-only branches of
-    the repair loop (`3856`, `3989`, `4023-4038`);
+    `parse_window_repair_requirements` (`6498`), the General-only branches of
+    the repair loop (`3856`, `3989`, `4023-4038`), and the rejected-response
+    acceptance check that binds the existing repair (`4083-4093`);
   - leave General-only source framing
     (`parse_response_without_mixed_source_framing_units`, `6580`) and all Story
     branches untouched.
@@ -234,12 +252,26 @@ Verification plan:
   1. A long Contract catalog with one sentence unit over 600 characters.
      Before: ledger fallback with zero Synthesize requests. After: source
      selection and synthesis requests are issued and the result is `coherent`.
-  2. A replay of run B's response shape: a windowed Contract unit citing two
+  2a. A replay of run B's response shape: a windowed Contract unit citing two
      windows and ending at exactly 1,200 characters mid-sentence. Before:
-     `Failed` with `MODEL_SUMMARY_RESPONSE_INVALID`. After: window ownership is
-     detected first and one bound repair is made. A valid repair is accepted; an
-     invalid repair yields the safe-sibling fallback with its warning; with no
-     safe unit the stage fails closed.
+     `Failed` with `MODEL_SUMMARY_RESPONSE_INVALID`, because clipping masks
+     ownership. After: window ownership is detected first and one bound repair
+     is made. A valid repair is accepted; an invalid repair yields the
+     safe-sibling fallback with its warning; with no safe unit the stage fails
+     closed.
+  2b. A non-clipped mixed-window regression, which preserves the existing path
+     while enforcing the new binding: a complete (not clipped) windowed
+     Contract unit citing two windows.
+     - Both before and after: the parser returns `WINDOW_MIXED_RESPONSE_CODE`,
+       not `MODEL_SUMMARY_RESPONSE_INVALID`, and exactly one window repair
+       request is made.
+     - Before (fail-first): a repair that drops one of the mixed unit's
+       original sources, or rewrites a valid sibling, is accepted.
+     - After: the repair prompt carries the rejected response. Such a repair is
+       rejected and yields the safe-sibling fallback with
+       `COHERENT_SUMMARY_CROSS_WINDOW_UNITS_WITHHELD`. A repair that re-mixes
+       windows is rejected the same way. A valid single-window split covering
+       every original source exactly once is accepted.
   3. A single-window clipped Contract unit: 1,199 characters and incomplete is
      invalid; 1,200 characters and incomplete is clipped and repaired; 1,200
      characters and complete is valid.
