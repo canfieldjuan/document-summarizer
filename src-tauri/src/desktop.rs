@@ -1,19 +1,24 @@
+use crate::connect::ocr_consumer::{
+    parsed_document_requires_ocr, process_scanned_document, recover_ocr_handoffs,
+};
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
     CompletedSummary, ModelProfileSnapshot, ModelRuntime, ModelRuntimeFailure, PipelineFailure,
     PipelineRun, PipelineStage, PipelineState, SummaryProfile,
 };
-use crate::pipeline::control::CancellationToken;
+use crate::pipeline::control::{CancellationToken, ExecutionControl};
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::model_settings::{runtime_from_settings, runtime_from_snapshot};
 use crate::pipeline::normalize::CanonicalNormalizer;
 #[cfg(test)]
 use crate::pipeline::parser::PdfExtractParser;
-use crate::pipeline::parser::SourceParserSet;
+use crate::pipeline::parser::{parse_started_document, SourceParserSet};
+#[cfg(test)]
+use crate::pipeline::service::SummaryComponents;
 use crate::pipeline::service::{
     admit_pdf_for_background, admit_retry_for_background, continuation_plan,
-    continue_run_to_summary_controlled, process_started_parsing_to_summary_controlled,
-    validate_retry_for_background, ContinuationComponents, DocumentServiceError, SummaryComponents,
+    continue_run_to_summary_controlled, validate_retry_for_background, ContinuationComponents,
+    DocumentServiceError,
 };
 use crate::pipeline::structure::DeterministicStructureInterpreter;
 use serde::Serialize;
@@ -96,6 +101,38 @@ pub struct DesktopJobManager {
     db_path: PathBuf,
     active: Arc<Mutex<HashMap<String, CancellationToken>>>,
     runtime_factory: RuntimeFactory,
+}
+
+struct ActiveRecoveryReservations {
+    active: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    run_ids: Vec<String>,
+}
+
+struct ActiveRunClaim {
+    active: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    run_id: String,
+    token: CancellationToken,
+    armed: bool,
+}
+
+impl Drop for ActiveRunClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Ok(mut active) = self.active.lock() {
+                active.remove(&self.run_id);
+            }
+        }
+    }
+}
+
+impl Drop for ActiveRecoveryReservations {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active.lock() {
+            for run_id in &self.run_ids {
+                active.remove(run_id);
+            }
+        }
+    }
 }
 
 impl DesktopJobManager {
@@ -246,27 +283,229 @@ impl DesktopJobManager {
             .contains_key(run_id))
     }
 
+    pub fn status_activity(
+        &self,
+        requested_run_id: &str,
+        projected_run_id: &str,
+    ) -> Result<(bool, bool), DesktopJobError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| DesktopJobError::RegistryUnavailable)?;
+        let projected_active = active.contains_key(projected_run_id);
+        Ok((
+            active.contains_key(requested_run_id) || projected_active,
+            projected_active,
+        ))
+    }
+
+    pub(crate) fn resume_ocr_child(&self, run_id: &str) -> Result<(), DesktopJobError> {
+        let mut claim = self.claim_run(run_id)?;
+        let mut conn = db::init_db(&self.db_path)?;
+        let run = db::rewind_interrupted_ocr_child(&mut conn, run_id)?;
+        if matches!(
+            run.state,
+            PipelineState::Complete | PipelineState::CompleteWithWarnings
+        ) {
+            db::mark_ocr_handoff_completed_for_child(&conn, run_id)?;
+            return Ok(());
+        }
+        if run.state.is_terminal() {
+            return Ok(());
+        }
+        let plan = continuation_plan(&conn, run_id, run.state_version)
+            .map_err(DocumentServiceError::from)?;
+        let runtime = if plan.requires_runtime {
+            let snapshot = continuation_runtime_snapshot(
+                run_id,
+                plan.checkpoint,
+                db::get_run_model_profile(&conn, run_id)?,
+            )?;
+            let mut runtime = (self.runtime_factory)(snapshot.as_ref())?;
+            runtime.health()?;
+            runtime.bind_run(run_id);
+            Some(runtime)
+        } else {
+            None
+        };
+        drop(conn);
+        self.spawn_claimed(
+            run.run_id,
+            BackgroundWork::Continue {
+                expected_state_version: run.state_version,
+            },
+            runtime,
+            claim.token.clone(),
+        )?;
+        claim.armed = false;
+        Ok(())
+    }
+
+    pub(crate) fn start_ocr_recovery(&self, app_data_dir: PathBuf) -> Result<(), DesktopJobError> {
+        let conn = db::init_db(&self.db_path)?;
+        let root_run_ids = db::list_recoverable_ocr_handoffs(&conn)?
+            .into_iter()
+            .filter(|handoff| handoff.phase != "child_admitted")
+            .map(|handoff| handoff.root_run_id)
+            .collect();
+        drop(conn);
+        let manager = self.clone();
+        let db_path = self.db_path.clone();
+        self.start_ocr_recovery_task(root_run_ids, move || {
+            let mut conn = match db::init_db(&db_path) {
+                Ok(conn) => conn,
+                Err(error) => {
+                    eprintln!("OCR restart recovery could not open its database: {error}");
+                    return;
+                }
+            };
+            let recovery = match recover_ocr_handoffs(&mut conn, &app_data_dir) {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    eprintln!("OCR restart recovery failed: {error}");
+                    return;
+                }
+            };
+            drop(conn);
+            for warning in recovery.warnings {
+                eprintln!("OCR handoff remains pending after restart: {warning}");
+            }
+            for child_run_id in recovery.child_run_ids {
+                if let Err(error) = manager.resume_ocr_child(&child_run_id) {
+                    eprintln!("OCR child {child_run_id} could not resume after restart: {error}");
+                }
+            }
+        })
+    }
+
+    fn start_ocr_recovery_task(
+        &self,
+        mut root_run_ids: Vec<String>,
+        task: impl FnOnce() + Send + 'static,
+    ) -> Result<(), DesktopJobError> {
+        root_run_ids.sort();
+        root_run_ids.dedup();
+        {
+            let mut active = self
+                .active
+                .lock()
+                .map_err(|_| DesktopJobError::RegistryUnavailable)?;
+            if let Some(run_id) = root_run_ids
+                .iter()
+                .find(|run_id| active.contains_key(*run_id))
+            {
+                return Err(DesktopJobError::AlreadyRunning(run_id.clone()));
+            }
+            for run_id in &root_run_ids {
+                active.insert(run_id.clone(), CancellationToken::new());
+            }
+        }
+        let reservations = ActiveRecoveryReservations {
+            active: Arc::clone(&self.active),
+            run_ids: root_run_ids,
+        };
+        Self::spawn_ocr_recovery_task(move || {
+            let _reservations = reservations;
+            task();
+        })
+        .map_err(DesktopJobError::WorkerStart)
+    }
+
+    fn spawn_ocr_recovery_task(task: impl FnOnce() + Send + 'static) -> io::Result<()> {
+        thread::Builder::new()
+            .name("document-summary-ocr-recovery".to_string())
+            .spawn(task)
+            .map(|_| ())
+    }
+
     fn spawn(
         &self,
         run_id: String,
         work: BackgroundWork,
         runtime: Option<Box<dyn ModelRuntime>>,
     ) -> Result<(), DesktopJobError> {
+        let mut claim = self.claim_run(&run_id)?;
+        let active_admission = matches!(work, BackgroundWork::StartedParsing);
+        if let Err(error) = self.spawn_claimed(run_id.clone(), work, runtime, claim.token.clone()) {
+            drop(claim);
+            if active_admission {
+                self.persist_worker_start_failure(&run_id)?;
+            }
+            return Err(error);
+        }
+        claim.armed = false;
+        Ok(())
+    }
+
+    fn start_admitted_ocr_child(
+        &self,
+        conn: &mut rusqlite::Connection,
+        child_run_id: &str,
+        mut runtime: Box<dyn ModelRuntime>,
+    ) -> Result<(), DocumentServiceError> {
+        let unavailable = |error: DesktopJobError| DocumentServiceError::OcrHandoff {
+            code: "OCR_CHILD_WORKER_UNAVAILABLE".to_string(),
+            message: error.to_string(),
+        };
+        let mut claim = self.claim_run(child_run_id).map_err(unavailable)?;
+        let child = db::get_pipeline_run(conn, child_run_id)?
+            .ok_or_else(|| StoreError::RunNotFound(child_run_id.to_string()))?;
+        runtime.bind_run(child_run_id);
+        let (parsing, _) = match db::start_parsing(conn, child_run_id, child.state_version) {
+            Ok(started) => started,
+            Err(error) => {
+                if let Some(current) = db::get_pipeline_run(conn, child_run_id)? {
+                    if current.state == PipelineState::Cancelling {
+                        db::complete_cancellation(conn, child_run_id, current.state_version)?;
+                    }
+                }
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = self.spawn_claimed(
+            parsing.run_id,
+            BackgroundWork::StartedParsing,
+            Some(runtime),
+            claim.token.clone(),
+        ) {
+            drop(claim);
+            self.persist_worker_start_failure(child_run_id)
+                .map_err(unavailable)?;
+            return Err(unavailable(error));
+        }
+        claim.armed = false;
+        Ok(())
+    }
+
+    fn claim_run(&self, run_id: &str) -> Result<ActiveRunClaim, DesktopJobError> {
         let token = CancellationToken::new();
         {
             let mut active = self
                 .active
                 .lock()
                 .map_err(|_| DesktopJobError::RegistryUnavailable)?;
-            if active.contains_key(&run_id) {
-                return Err(DesktopJobError::AlreadyRunning(run_id));
+            if active.contains_key(run_id) {
+                return Err(DesktopJobError::AlreadyRunning(run_id.to_string()));
             }
-            active.insert(run_id.clone(), token.clone());
+            active.insert(run_id.to_string(), token.clone());
         }
+        Ok(ActiveRunClaim {
+            active: Arc::clone(&self.active),
+            run_id: run_id.to_string(),
+            token,
+            armed: true,
+        })
+    }
 
+    fn spawn_claimed(
+        &self,
+        run_id: String,
+        work: BackgroundWork,
+        runtime: Option<Box<dyn ModelRuntime>>,
+        token: CancellationToken,
+    ) -> Result<(), DesktopJobError> {
         let worker_manager = self.clone();
         let worker_run_id = run_id.clone();
-        let active_admission = matches!(work, BackgroundWork::StartedParsing);
         let spawn_result = thread::Builder::new()
             .name(format!("document-summary-{}", short_run_id(&run_id)))
             .spawn(move || {
@@ -281,15 +520,7 @@ impl DesktopJobManager {
                 }
             });
 
-        if let Err(error) = spawn_result {
-            if let Ok(mut active) = self.active.lock() {
-                active.remove(&run_id);
-            }
-            if active_admission {
-                self.persist_worker_start_failure(&run_id)?;
-            }
-            return Err(DesktopJobError::WorkerStart(error));
-        }
+        spawn_result.map_err(DesktopJobError::WorkerStart)?;
         Ok(())
     }
 
@@ -314,18 +545,59 @@ impl DesktopJobManager {
 
         match work {
             BackgroundWork::StartedParsing => {
-                let runtime = runtime.as_deref().ok_or_else(|| {
+                let runtime = runtime.ok_or_else(|| {
                     DocumentServiceError::RuntimeRequiredForBackground(run_id.to_string())
                 })?;
-                process_started_parsing_to_summary_controlled(
+                if token.cancellation_requested() {
+                    return Err(DocumentServiceError::CancellationObserved);
+                }
+                let parsed = parse_started_document(
+                    &mut conn,
+                    parser,
+                    run_id,
+                    run.state_version,
+                    &document,
+                )?;
+                if parsed_document_requires_ocr(&parsed) {
+                    let app_data_dir =
+                        self.db_path
+                            .parent()
+                            .ok_or_else(|| DocumentServiceError::OcrHandoff {
+                                code: "OCR_STORAGE_UNAVAILABLE".to_string(),
+                                message: "the application data directory is unavailable"
+                                    .to_string(),
+                            })?;
+                    let child_run_id =
+                        match process_scanned_document(&mut conn, run_id, app_data_dir, token) {
+                            Ok(child_run_id) => child_run_id,
+                            Err(crate::connect::ocr_consumer::OcrConsumerError::Cancelled) => {
+                                return Err(DocumentServiceError::CancellationObserved);
+                            }
+                            Err(error) => {
+                                return Err(DocumentServiceError::OcrHandoff {
+                                    code: "OCR_HANDOFF_FAILED".to_string(),
+                                    message: error.to_string(),
+                                });
+                            }
+                        };
+                    self.start_admitted_ocr_child(&mut conn, &child_run_id, runtime)?;
+                    return Err(DocumentServiceError::OcrHandoff {
+                        code: "OCR_DERIVED_HANDOFF".to_string(),
+                        message: format!("processing continued in derived run {child_run_id}"),
+                    });
+                }
+                let parsed_run = db::get_pipeline_run(&conn, run_id)?
+                    .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+                continue_run_to_summary_controlled(
                     &mut conn,
                     run_id,
-                    SummaryComponents {
+                    parsed_run.state_version,
+                    ContinuationComponents {
                         parser,
                         normalizer: &normalizer,
                         interpreter: &interpreter,
                         chunker: &chunker,
-                        runtime,
+                        runtime: Some(runtime.as_ref()),
                     },
                     token,
                 )
@@ -364,10 +636,22 @@ impl DesktopJobManager {
             return Ok(());
         }
         if run.state.is_terminal() {
+            if matches!(
+                run.state,
+                PipelineState::Complete | PipelineState::CompleteWithWarnings
+            ) {
+                db::mark_ocr_handoff_completed_for_child(&conn, run_id)?;
+            }
             return Ok(());
         }
         if let Ok(Err(error)) = &outcome {
             if error.is_concurrent_ownership_loss() {
+                return Ok(());
+            }
+            if matches!(error, DocumentServiceError::OcrHandoff { .. })
+                && db::get_ocr_handoff_for_root(&conn, run_id)?
+                    .is_some_and(|handoff| handoff.phase != "failed")
+            {
                 return Ok(());
             }
         }
@@ -551,6 +835,35 @@ mod tests {
 
         fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
             Some(fixture_snapshot())
+        }
+    }
+
+    struct CancelOnBindRuntime {
+        manager: DesktopJobManager,
+        expected_state_version: u32,
+    }
+
+    impl ModelRuntime for CancelOnBindRuntime {
+        fn bind_run(&mut self, run_id: &str) {
+            self.manager
+                .request_cancellation(run_id, self.expected_state_version)
+                .expect("cancellation should commit after the child claim");
+        }
+
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            FixtureRuntime.generate(request)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            FixtureRuntime.health()
+        }
+
+        fn runtime_id(&self) -> &str {
+            FixtureRuntime.runtime_id()
+        }
+
+        fn model_id(&self) -> &str {
+            FixtureRuntime.model_id()
         }
     }
 
@@ -796,11 +1109,16 @@ mod tests {
         let parsed = get_parsed_document(&reopened, &accepted.run_id)
             .expect("parsed artifact should load")
             .expect("parsed artifact should persist");
+        let completed = get_pipeline_run(&reopened, &accepted.run_id)
+            .expect("completed OCR run should load")
+            .expect("completed OCR run should exist");
         assert_eq!(parsed.parser_id, "local-connect-tagged-ocr");
         assert_eq!(
             parsed.source_type,
             crate::pipeline::contracts::SourceType::OcrText
         );
+        assert_eq!(completed.state, PipelineState::Complete);
+        assert!(db::summary_artifact_exists(&reopened, &accepted.run_id).unwrap());
     }
 
     fn fixture_manager(database: &TestDatabase) -> DesktopJobManager {
@@ -836,6 +1154,320 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("background condition did not become true before the test deadline");
+    }
+
+    #[test]
+    fn startup_ocr_recovery_dispatch_returns_before_blocked_work_finishes() {
+        let gate = Arc::new(BlockingGate::new());
+        let task_gate = Arc::clone(&gate);
+        let completed = Arc::new(AtomicBool::new(false));
+        let task_completed = Arc::clone(&completed);
+
+        DesktopJobManager::spawn_ocr_recovery_task(move || {
+            task_gate.entered.store(true, Ordering::Release);
+            let mut released = task_gate.released.lock().unwrap();
+            while !*released {
+                released = task_gate.release_changed.wait(released).unwrap();
+            }
+            task_completed.store(true, Ordering::Release);
+        })
+        .expect("recovery task should dispatch");
+
+        wait_until(|| gate.entered.load(Ordering::Acquire));
+        assert!(!completed.load(Ordering::Acquire));
+        gate.release();
+        wait_until(|| completed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn startup_ocr_recovery_reserves_roots_until_task_finishes() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let root_run_id = Uuid::new_v4().to_string();
+        let gate = Arc::new(BlockingGate::new());
+        let task_gate = Arc::clone(&gate);
+
+        manager
+            .start_ocr_recovery_task(vec![root_run_id.clone()], move || {
+                task_gate.entered.store(true, Ordering::Release);
+                let mut released = task_gate.released.lock().unwrap();
+                while !*released {
+                    released = task_gate.release_changed.wait(released).unwrap();
+                }
+            })
+            .expect("recovery task should dispatch");
+
+        wait_until(|| gate.entered.load(Ordering::Acquire));
+        assert!(manager.is_active(&root_run_id).unwrap());
+        let projected_child_id = Uuid::new_v4().to_string();
+        assert_eq!(
+            manager
+                .status_activity(&root_run_id, &projected_child_id)
+                .unwrap(),
+            (true, false),
+            "the root keeps polling alive before the child is registered"
+        );
+        manager
+            .active
+            .lock()
+            .unwrap()
+            .insert(projected_child_id.clone(), CancellationToken::new());
+        assert_eq!(
+            manager
+                .status_activity(&root_run_id, &projected_child_id)
+                .unwrap(),
+            (true, true),
+            "a registered child can be cancelled"
+        );
+        assert!(matches!(
+            manager.spawn(
+                root_run_id.clone(),
+                BackgroundWork::Continue {
+                    expected_state_version: 0,
+                },
+                None,
+            ),
+            Err(DesktopJobError::AlreadyRunning(run_id)) if run_id == root_run_id
+        ));
+        gate.release();
+        wait_until(|| !manager.is_active(&root_run_id).unwrap());
+        assert_eq!(
+            manager
+                .status_activity(&root_run_id, &projected_child_id)
+                .unwrap(),
+            (true, true),
+            "the child keeps polling alive after the root exits"
+        );
+        manager.active.lock().unwrap().remove(&projected_child_id);
+        assert_eq!(
+            manager
+                .status_activity(&root_run_id, &projected_child_id)
+                .unwrap(),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn live_ocr_child_is_claimed_before_parsing_and_worker_dispatch() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let (document, received) = prepare_pdf_ingestion_with_source_type(
+            source.to_str().expect("OCR fixture path should be UTF-8"),
+            Some("recognized.pdf"),
+            crate::pipeline::contracts::SourceType::OcrText,
+        )
+        .expect("OCR fixture should prepare");
+        let child = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&fixture_snapshot()),
+            SummaryProfile::General,
+        )
+        .expect("OCR child should persist");
+        let before = db::get_pipeline_run(&conn, &child.run_id)
+            .expect("child should load")
+            .expect("child should exist");
+
+        let competing_claim = manager.claim_run(&child.run_id).expect("user claims first");
+        let blocked =
+            manager.start_admitted_ocr_child(&mut conn, &child.run_id, Box::new(FixtureRuntime));
+        assert!(matches!(
+            blocked,
+            Err(DocumentServiceError::OcrHandoff {
+                code,
+                ..
+            }) if code == "OCR_CHILD_WORKER_UNAVAILABLE"
+        ));
+        assert_eq!(
+            db::get_pipeline_run(&conn, &child.run_id)
+                .expect("child should load")
+                .expect("child should exist"),
+            before,
+            "losing the claim must not advance the child"
+        );
+        drop(competing_claim);
+
+        manager
+            .start_admitted_ocr_child(&mut conn, &child.run_id, Box::new(FixtureRuntime))
+            .expect("root claims before parsing and dispatches the child");
+        drop(conn);
+        wait_until(|| !manager.is_active(&child.run_id).unwrap());
+        let conn = db::init_db(&database.0).expect("database should reopen");
+        assert_eq!(
+            db::get_pipeline_run(&conn, &child.run_id)
+                .expect("child should load")
+                .expect("child should exist")
+                .state,
+            PipelineState::Complete
+        );
+    }
+
+    #[test]
+    fn cancelled_live_ocr_child_completes_before_claim_release() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let (document, received) = prepare_pdf_ingestion_with_source_type(
+            source.to_str().expect("OCR fixture path should be UTF-8"),
+            Some("recognized.pdf"),
+            crate::pipeline::contracts::SourceType::OcrText,
+        )
+        .expect("OCR fixture should prepare");
+        let child = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&fixture_snapshot()),
+            SummaryProfile::General,
+        )
+        .expect("OCR child should persist");
+
+        assert!(manager
+            .start_admitted_ocr_child(
+                &mut conn,
+                &child.run_id,
+                Box::new(CancelOnBindRuntime {
+                    manager: manager.clone(),
+                    expected_state_version: child.state_version,
+                }),
+            )
+            .is_err());
+        let cancelled = db::get_pipeline_run(&conn, &child.run_id)
+            .expect("child should load")
+            .expect("child should exist");
+        assert_eq!(cancelled.state, PipelineState::Cancelled);
+        assert!(!manager.is_active(&child.run_id).unwrap());
+    }
+
+    #[test]
+    fn resumed_ocr_child_rewinds_active_stage_and_completes_same_run() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let source = fixture_path();
+        let source = source.to_str().expect("fixture path should be UTF-8");
+        let (root_document, root) =
+            crate::pipeline::ingest::ingest_pdf(&mut conn, source).expect("root should ingest");
+        let (_, child) =
+            crate::pipeline::ingest::ingest_pdf(&mut conn, source).expect("child should ingest");
+        let (parsing, document) = db::start_parsing(&mut conn, &child.run_id, child.state_version)
+            .expect("child parsing should start");
+        parse_started_document(
+            &mut conn,
+            &PdfExtractParser::new(),
+            &child.run_id,
+            parsing.state_version,
+            &document,
+        )
+        .expect("child parsing should complete");
+        let parsed = get_pipeline_run(&conn, &child.run_id)
+            .expect("child should reload")
+            .expect("child should exist");
+        conn.execute(
+            "UPDATE pipeline_runs
+             SET state = ?1, state_version = state_version + 1, current_stage = ?2
+             WHERE run_id = ?3 AND state_version = ?4",
+            rusqlite::params![
+                serde_json::to_string(&PipelineState::Normalizing).unwrap(),
+                serde_json::to_string(&PipelineStage::Normalize).unwrap(),
+                child.run_id,
+                parsed.state_version,
+            ],
+        )
+        .expect("interrupted normalizing state should persist");
+        let normalizing = get_pipeline_run(&conn, &child.run_id)
+            .expect("active child should reload")
+            .expect("active child should exist");
+        let handoff_id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO ocr_handoffs (
+                handoff_id, root_run_id, root_document_id, source_artifact_id,
+                source_byte_size, source_sha256, source_display_name, source_bytes,
+                provider_app_id, provider_instance_id, provider_job_id,
+                provider_request_json, provider_request_sha256, phase,
+                child_document_id, child_run_id, derived_path, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, 1, ?5, 'scan.pdf', X'00', 'document-ocr',
+                ?6, ?7, '{}', ?5, 'child_admitted', ?8, ?9, ?10, ?11, ?11
+             )",
+            rusqlite::params![
+                handoff_id,
+                root.run_id,
+                root_document.document_id,
+                Uuid::new_v4().to_string(),
+                "0".repeat(64),
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                normalizing.document_id,
+                normalizing.run_id,
+                database.0.with_extension("ocr.pdf").to_string_lossy(),
+                now,
+            ],
+        )
+        .expect("admitted OCR ownership should persist");
+        drop(conn);
+
+        manager
+            .active
+            .lock()
+            .unwrap()
+            .insert(normalizing.run_id.clone(), CancellationToken::new());
+        assert!(matches!(
+            manager.resume_ocr_child(&normalizing.run_id),
+            Err(DesktopJobError::AlreadyRunning(run_id)) if run_id == normalizing.run_id
+        ));
+        let unchanged = db::init_db(&database.0).expect("database should reopen");
+        let active_child = get_pipeline_run(&unchanged, &normalizing.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active_child.state, PipelineState::Normalizing);
+        assert_eq!(active_child.state_version, normalizing.state_version);
+        drop(unchanged);
+        manager.active.lock().unwrap().remove(&normalizing.run_id);
+
+        manager
+            .resume_ocr_child(&normalizing.run_id)
+            .expect("OCR child should resume from its stable checkpoint");
+        wait_until(|| !manager.is_active(&normalizing.run_id).unwrap());
+
+        let reopened = db::init_db(&database.0).expect("database should reopen");
+        let completed = get_pipeline_run(&reopened, &normalizing.run_id)
+            .expect("OCR child should reload")
+            .expect("OCR child should exist");
+        assert_eq!(completed.run_id, normalizing.run_id);
+        assert!(matches!(
+            completed.state,
+            PipelineState::Complete | PipelineState::CompleteWithWarnings
+        ));
+        assert!(db::summary_artifact_exists(&reopened, &completed.run_id).unwrap());
+        let handoff = db::get_ocr_handoff(&reopened, &handoff_id)
+            .expect("handoff should reload")
+            .expect("handoff should exist");
+        assert_eq!(handoff.phase, "completed");
+        assert!(list_pipeline_events(&reopened, &completed.run_id)
+            .expect("events should load")
+            .iter()
+            .any(|event| event.reason.as_deref() == Some("ocr_child_rewound_after_restart")));
+    }
+
+    #[test]
+    fn failed_ocr_child_resume_releases_its_registry_claim() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let missing_run_id = Uuid::new_v4().to_string();
+
+        assert!(matches!(
+            manager.resume_ocr_child(&missing_run_id),
+            Err(DesktopJobError::Store(StoreError::InvalidOcrHandoff(_)))
+        ));
+        assert!(!manager.is_active(&missing_run_id).unwrap());
     }
 
     #[test]
@@ -1512,5 +2144,64 @@ mod tests {
             failed.failure.as_ref().map(|failure| failure.code.as_str()),
             Some("BACKGROUND_RUNTIME_REQUIRED")
         );
+    }
+
+    #[test]
+    fn pending_ocr_recovery_keeps_the_root_checkpoint_resumable() {
+        let database = TestDatabase::new();
+        let manager = fixture_manager(&database);
+        let mut conn = db::init_db(&database.0).expect("database should initialize");
+        let (document, ingested) = crate::pipeline::ingest::ingest_pdf(
+            &mut conn,
+            fixture_path()
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+        )
+        .expect("fixture should ingest");
+        let handoff_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO ocr_handoffs (
+                handoff_id, root_run_id, root_document_id, source_artifact_id,
+                source_byte_size, source_sha256, source_display_name, source_bytes,
+                provider_app_id, provider_instance_id, provider_job_id,
+                provider_request_json, provider_request_sha256, phase,
+                child_document_id, child_run_id, derived_path, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, 1, ?5, 'scan.pdf', X'00', 'document-ocr',
+                ?6, ?7, '{}', ?5, 'submission_uncertain', ?8, ?9, ?10, ?11, ?11
+             )",
+            rusqlite::params![
+                handoff_id,
+                ingested.run_id,
+                document.document_id,
+                Uuid::new_v4().to_string(),
+                "0".repeat(64),
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                database.0.with_extension("ocr.pdf").to_string_lossy(),
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .expect("pending handoff should persist");
+        drop(conn);
+
+        manager
+            .finalize(
+                &ingested.run_id,
+                Ok(Err(DocumentServiceError::OcrHandoff {
+                    code: "OCR_HANDOFF_FAILED".to_string(),
+                    message: "status is temporarily unavailable".to_string(),
+                })),
+            )
+            .expect("pending OCR ownership should remain resumable");
+
+        let conn = db::init_db(&database.0).expect("database should reopen");
+        let unchanged = get_pipeline_run(&conn, &ingested.run_id)
+            .expect("root should reload")
+            .expect("root should exist");
+        assert_eq!(unchanged.state, PipelineState::Ingested);
+        assert!(unchanged.failure.is_none());
     }
 }

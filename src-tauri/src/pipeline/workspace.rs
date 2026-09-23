@@ -155,8 +155,10 @@ pub fn list_recent_runs(conn: &Connection) -> Result<Vec<RunHistoryItem>, Worksp
 }
 
 pub fn get_run(conn: &Connection, run_id: &str) -> Result<RunHistoryItem, WorkspaceError> {
-    let run = db::get_pipeline_run(conn, run_id)?
-        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    let resolved_run_id =
+        db::get_admitted_ocr_child_run_id(conn, run_id)?.unwrap_or_else(|| run_id.to_string());
+    let run = db::get_pipeline_run(conn, &resolved_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(resolved_run_id))?;
     run_history_item_from_run(conn, run)
 }
 
@@ -164,16 +166,18 @@ pub fn get_persisted_summary(
     conn: &Connection,
     run_id: &str,
 ) -> Result<PersistedSummary, WorkspaceError> {
-    let run = db::get_pipeline_run(conn, run_id)?
-        .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
+    let resolved_run_id =
+        db::get_admitted_ocr_child_run_id(conn, run_id)?.unwrap_or_else(|| run_id.to_string());
+    let run = db::get_pipeline_run(conn, &resolved_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(resolved_run_id.clone()))?;
     let document = db::get_document(conn, &run.document_id)?
         .ok_or_else(|| StoreError::DocumentNotFound(run.document_id.clone()))?;
-    let summary = db::get_summary_artifact(conn, run_id)?
-        .ok_or_else(|| WorkspaceError::SummaryNotFound(run_id.to_string()))?;
-    let citations = db::get_citation_artifact(conn, run_id)?;
+    let summary = db::get_summary_artifact(conn, &resolved_run_id)?
+        .ok_or_else(|| WorkspaceError::SummaryNotFound(resolved_run_id.clone()))?;
+    let citations = db::get_citation_artifact(conn, &resolved_run_id)?;
     validate_summary_state(&run, true)?;
     let key_point_claim_ids =
-        validate_citations_against_sources(conn, run_id, &summary, citations.as_ref())?;
+        validate_citations_against_sources(conn, &resolved_run_id, &summary, citations.as_ref())?;
     let summary = summary_view(summary, citations, key_point_claim_ids)?;
 
     Ok(PersistedSummary {
@@ -199,6 +203,7 @@ fn run_history_item(
     let continuation_profile_available = !continuation_checkpoint
         .is_some_and(ContinuationCheckpoint::requires_existing_model_profile)
         || model_profile_available;
+    let ocr_handoff_owns_root = db::has_ocr_handoff_for_root(conn, &run.run_id)?;
     Ok(RunHistoryItem {
         run_id: run.run_id,
         document_id: document.document_id,
@@ -216,7 +221,9 @@ fn run_history_item(
         retry_run_id: retry_child.map(|lineage| lineage.retry_run_id),
         can_retry,
         continuation_checkpoint,
-        can_continue: continuation_checkpoint.is_some() && continuation_profile_available,
+        can_continue: continuation_checkpoint.is_some()
+            && continuation_profile_available
+            && !ocr_handoff_owns_root,
         continuation_requires_runtime: continuation_checkpoint
             .is_some_and(ContinuationCheckpoint::requires_runtime),
         cancellation_requested: run.cancellation_requested,
@@ -705,6 +712,76 @@ mod tests {
             .into_iter()
             .map(|run| run.run_id)
             .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn ocr_review_regression_history_limit_counts_visible_runs() {
+        let mut conn = init_db(":memory:").expect("database should initialize");
+        let source = fixture_path();
+        let source = source.to_str().expect("fixture path should be UTF-8");
+        let visible = (0..RECENT_RUN_LIMIT)
+            .map(|_| {
+                ingest_pdf(&mut conn, source)
+                    .expect("visible run should ingest")
+                    .1
+            })
+            .collect::<Vec<_>>();
+        conn.execute(
+            "UPDATE pipeline_runs SET updated_at = '2026-09-21T12:00:00+00:00'",
+            [],
+        )
+        .expect("visible timestamps should persist");
+
+        for _ in 0..15 {
+            let (document, root) = ingest_pdf(&mut conn, source).expect("OCR root should ingest");
+            let handoff_id = Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO ocr_handoffs (
+                    handoff_id, root_run_id, root_document_id, source_artifact_id,
+                    source_byte_size, source_sha256, source_display_name, source_bytes,
+                    provider_app_id, provider_instance_id, provider_job_id,
+                    provider_request_json, provider_request_sha256, phase,
+                    child_document_id, child_run_id, derived_path, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, 1, ?5, 'scan.pdf', X'00', 'document-ocr',
+                    ?6, ?7, '{}', ?5, 'child_admitted', ?8, ?9, ?10, ?11, ?11
+                 )",
+                params![
+                    handoff_id,
+                    root.run_id,
+                    document.document_id,
+                    Uuid::new_v4().to_string(),
+                    "0".repeat(64),
+                    Uuid::new_v4().to_string(),
+                    Uuid::new_v4().to_string(),
+                    Uuid::new_v4().to_string(),
+                    Uuid::new_v4().to_string(),
+                    format!("/tmp/{handoff_id}.pdf"),
+                    now,
+                ],
+            )
+            .expect("OCR root ownership should persist");
+            conn.execute(
+                "UPDATE pipeline_runs
+                 SET updated_at = '2026-09-21T12:01:00+00:00'
+                 WHERE run_id = ?1",
+                [&root.run_id],
+            )
+            .expect("OCR root timestamp should persist");
+        }
+
+        let history = list_recent_runs(&conn).expect("history should load");
+        assert_eq!(history.len(), RECENT_RUN_LIMIT as usize);
+        let expected = visible
+            .into_iter()
+            .map(|run| run.run_id)
+            .collect::<std::collections::HashSet<_>>();
+        let actual = history
+            .into_iter()
+            .map(|run| run.run_id)
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(actual, expected);
     }
 

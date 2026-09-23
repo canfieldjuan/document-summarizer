@@ -50,6 +50,8 @@ pub enum DocumentServiceError {
     CancellationObserved,
     #[error("Pipeline run {0} requires the local model runtime for background processing")]
     RuntimeRequiredForBackground(String),
+    #[error("OCR handoff failed: {message}")]
+    OcrHandoff { code: String, message: String },
 }
 
 impl DocumentServiceError {
@@ -67,6 +69,7 @@ impl DocumentServiceError {
             Self::ModelProfile(_) => "PIPELINE_STORE_ERROR",
             Self::CancellationObserved => "PIPELINE_CANCELLATION_OBSERVED",
             Self::RuntimeRequiredForBackground(_) => "BACKGROUND_RUNTIME_REQUIRED",
+            Self::OcrHandoff { code, .. } => code,
         }
     }
 
@@ -211,6 +214,12 @@ pub fn continuation_plan(
             run_id: run_id.to_string(),
             expected_version: expected_state_version,
             found_version: run.state_version,
+        });
+    }
+    if db::has_ocr_handoff_for_root(conn, run_id)? {
+        return Err(ContinuationPipelineError::NotAllowed {
+            run_id: run_id.to_string(),
+            state: run.state,
         });
     }
     let checkpoint =

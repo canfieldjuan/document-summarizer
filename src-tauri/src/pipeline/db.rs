@@ -126,6 +126,8 @@ pub enum StoreError {
     SummaryProfileMismatch { run_id: String },
     #[error("Pipeline run {0} has no immutable summary profile")]
     SummaryProfileUnavailable(String),
+    #[error("Invalid OCR handoff: {0}")]
+    InvalidOcrHandoff(String),
     #[error("Pipeline run {run_id} cannot be cancelled from {state:?}")]
     CancellationNotAllowed {
         run_id: String,
@@ -171,6 +173,66 @@ pub(super) struct InterruptedRunTransition {
     pub action: InterruptedRunAction,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OcrHandoff {
+    pub handoff_id: String,
+    pub root_run_id: String,
+    pub root_document_id: String,
+    pub source_artifact_id: String,
+    pub source_byte_size: u64,
+    pub source_sha256: String,
+    pub source_display_name: String,
+    pub source_bytes: Vec<u8>,
+    pub provider_app_id: String,
+    pub provider_instance_id: String,
+    pub provider_job_id: String,
+    pub provider_request_json: String,
+    pub provider_request_sha256: String,
+    pub phase: String,
+    pub provider_status_json: Option<String>,
+    pub ocr_pdf_artifact_id: Option<String>,
+    pub ocr_pdf_sha256: Option<String>,
+    pub ocr_pdf_bytes: Option<Vec<u8>>,
+    pub text_artifact_id: Option<String>,
+    pub text_sha256: Option<String>,
+    pub text_bytes: Option<Vec<u8>>,
+    pub child_document_id: String,
+    pub child_run_id: String,
+    pub derived_path: String,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub error_retryable: Option<bool>,
+}
+
+#[derive(Debug)]
+pub(crate) struct NewOcrHandoff<'a> {
+    pub handoff_id: &'a str,
+    pub root_run_id: &'a str,
+    pub root_document_id: &'a str,
+    pub source_artifact_id: &'a str,
+    pub source_bytes: &'a [u8],
+    pub source_sha256: &'a str,
+    pub source_display_name: &'a str,
+    pub provider_app_id: &'a str,
+    pub provider_instance_id: &'a str,
+    pub provider_job_id: &'a str,
+    pub provider_request_json: &'a str,
+    pub child_document_id: &'a str,
+    pub child_run_id: &'a str,
+    pub derived_path: &'a str,
+}
+
+#[derive(Debug)]
+pub(crate) struct OcrOutput<'a> {
+    pub provider_status_json: &'a str,
+    pub pdf_artifact_id: &'a str,
+    pub pdf_sha256: &'a str,
+    pub pdf_bytes: &'a [u8],
+    pub text_artifact_id: &'a str,
+    pub text_sha256: &'a str,
+    pub text_bytes: &'a [u8],
+}
+
 pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, StoreError> {
     let mut conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
@@ -181,6 +243,450 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, StoreError> {
 
 pub fn schema_version(conn: &Connection) -> Result<u32, StoreError> {
     Ok(schema::version(conn)?)
+}
+
+const OCR_HANDOFF_COLUMNS: &str = "
+    handoff_id, root_run_id, root_document_id, source_artifact_id,
+    source_byte_size, source_sha256, source_display_name, source_bytes,
+    provider_app_id, provider_instance_id, provider_job_id, provider_request_json,
+    provider_request_sha256, phase, provider_status_json, ocr_pdf_artifact_id,
+    ocr_pdf_sha256, ocr_pdf_bytes,
+    text_artifact_id, text_sha256, text_bytes, child_document_id, child_run_id,
+    derived_path, error_code, error_message, error_retryable";
+
+fn read_ocr_handoff(row: &rusqlite::Row<'_>) -> rusqlite::Result<OcrHandoff> {
+    Ok(OcrHandoff {
+        handoff_id: row.get(0)?,
+        root_run_id: row.get(1)?,
+        root_document_id: row.get(2)?,
+        source_artifact_id: row.get(3)?,
+        source_byte_size: row.get(4)?,
+        source_sha256: row.get(5)?,
+        source_display_name: row.get(6)?,
+        source_bytes: row.get(7)?,
+        provider_app_id: row.get(8)?,
+        provider_instance_id: row.get(9)?,
+        provider_job_id: row.get(10)?,
+        provider_request_json: row.get(11)?,
+        provider_request_sha256: row.get(12)?,
+        phase: row.get(13)?,
+        provider_status_json: row.get(14)?,
+        ocr_pdf_artifact_id: row.get(15)?,
+        ocr_pdf_sha256: row.get(16)?,
+        ocr_pdf_bytes: row.get(17)?,
+        text_artifact_id: row.get(18)?,
+        text_sha256: row.get(19)?,
+        text_bytes: row.get(20)?,
+        child_document_id: row.get(21)?,
+        child_run_id: row.get(22)?,
+        derived_path: row.get(23)?,
+        error_code: row.get(24)?,
+        error_message: row.get(25)?,
+        error_retryable: row.get(26)?,
+    })
+}
+
+fn load_ocr_handoff(
+    conn: &Connection,
+    predicate: &str,
+    value: &str,
+) -> Result<Option<OcrHandoff>, StoreError> {
+    conn.query_row(
+        &format!("SELECT {OCR_HANDOFF_COLUMNS} FROM ocr_handoffs WHERE {predicate}"),
+        [value],
+        read_ocr_handoff,
+    )
+    .optional()
+    .map_err(StoreError::from)
+}
+
+pub(crate) fn get_ocr_handoff(
+    conn: &Connection,
+    handoff_id: &str,
+) -> Result<Option<OcrHandoff>, StoreError> {
+    load_ocr_handoff(conn, "handoff_id = ?1", handoff_id)
+}
+
+pub(crate) fn get_ocr_handoff_for_root(
+    conn: &Connection,
+    root_run_id: &str,
+) -> Result<Option<OcrHandoff>, StoreError> {
+    load_ocr_handoff(conn, "root_run_id = ?1", root_run_id)
+}
+
+pub(crate) fn has_ocr_handoff_for_root(
+    conn: &Connection,
+    root_run_id: &str,
+) -> Result<bool, StoreError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ocr_handoffs WHERE root_run_id = ?1)",
+        [root_run_id],
+        |row| row.get(0),
+    )
+    .map_err(StoreError::from)
+}
+
+pub(crate) fn get_admitted_ocr_child_run_id(
+    conn: &Connection,
+    root_run_id: &str,
+) -> Result<Option<String>, StoreError> {
+    conn.query_row(
+        "SELECT child_run_id FROM ocr_handoffs
+         WHERE root_run_id = ?1 AND phase IN ('child_admitted', 'completed')",
+        [root_run_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(StoreError::from)
+}
+
+pub(crate) fn is_admitted_ocr_child(
+    conn: &Connection,
+    child_run_id: &str,
+) -> Result<bool, StoreError> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM ocr_handoffs
+            WHERE child_run_id = ?1 AND phase = 'child_admitted'
+         )",
+        [child_run_id],
+        |row| row.get(0),
+    )
+    .map_err(StoreError::from)
+}
+
+pub(crate) fn list_recoverable_ocr_handoffs(
+    conn: &Connection,
+) -> Result<Vec<OcrHandoff>, StoreError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {OCR_HANDOFF_COLUMNS} FROM ocr_handoffs
+         WHERE phase NOT IN ('completed', 'failed') ORDER BY created_at, handoff_id"
+    ))?;
+    let rows = statement.query_map([], read_ocr_handoff)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub(crate) fn prepare_ocr_handoff(
+    conn: &mut Connection,
+    admission: &NewOcrHandoff<'_>,
+) -> Result<OcrHandoff, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(existing) = get_ocr_handoff_for_root(&tx, admission.root_run_id)? {
+        return Ok(existing);
+    }
+    let root = get_pipeline_run(&tx, admission.root_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(admission.root_run_id.to_string()))?;
+    let document = get_document(&tx, &root.document_id)?
+        .ok_or_else(|| StoreError::DocumentNotFound(root.document_id.clone()))?;
+    let parsed = get_parsed_document(&tx, admission.root_run_id)?.ok_or_else(|| {
+        StoreError::InvalidOcrHandoff("the native parse result is missing".to_string())
+    })?;
+    let whole_document_scan = parsed
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "NO_NATIVE_TEXT_IN_DOCUMENT");
+    let source_size = u64::try_from(admission.source_bytes.len()).map_err(|_| {
+        StoreError::InvalidOcrHandoff("the source snapshot is too large".to_string())
+    })?;
+    if root.state != PipelineState::Parsed
+        || root.document_id != admission.root_document_id
+        || document.source_type != SourceType::NativeText
+        || !whole_document_scan
+        || source_size != document.byte_size
+        || sha256_hex(admission.source_bytes) != document.content_hash
+        || admission.source_sha256 != document.content_hash
+        || admission.provider_app_id != "document-ocr"
+    {
+        return Err(StoreError::InvalidOcrHandoff(
+            "the root document is not an exact admitted whole-document scan".to_string(),
+        ));
+    }
+    let request_sha256 = sha256_hex(admission.provider_request_json.as_bytes());
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO ocr_handoffs (
+            handoff_id, root_run_id, root_document_id, source_artifact_id,
+            source_byte_size, source_sha256, source_display_name, source_bytes,
+            provider_app_id, provider_instance_id, provider_job_id, provider_request_json,
+            provider_request_sha256, phase, child_document_id, child_run_id, derived_path,
+            created_at, updated_at
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+            'prepared', ?14, ?15, ?16, ?17, ?17
+         )",
+        params![
+            admission.handoff_id,
+            admission.root_run_id,
+            admission.root_document_id,
+            admission.source_artifact_id,
+            source_size,
+            admission.source_sha256,
+            admission.source_display_name,
+            admission.source_bytes,
+            admission.provider_app_id,
+            admission.provider_instance_id,
+            admission.provider_job_id,
+            admission.provider_request_json,
+            request_sha256,
+            admission.child_document_id,
+            admission.child_run_id,
+            admission.derived_path,
+            now,
+        ],
+    )?;
+    tx.commit()?;
+    get_ocr_handoff(conn, admission.handoff_id)?.ok_or_else(|| {
+        StoreError::InvalidOcrHandoff("the admitted handoff disappeared".to_string())
+    })
+}
+
+pub(crate) fn transition_ocr_handoff(
+    conn: &Connection,
+    handoff_id: &str,
+    expected_phase: &str,
+    next_phase: &str,
+    provider_status_json: Option<&str>,
+) -> Result<bool, StoreError> {
+    let changed = conn.execute(
+        "UPDATE ocr_handoffs SET phase = ?1,
+            provider_status_json = COALESCE(?2, provider_status_json), updated_at = ?3
+         WHERE handoff_id = ?4 AND phase = ?5",
+        params![
+            next_phase,
+            provider_status_json,
+            Utc::now().to_rfc3339(),
+            handoff_id,
+            expected_phase
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
+pub(crate) fn store_ocr_outputs(
+    conn: &Connection,
+    handoff_id: &str,
+    expected_phase: &str,
+    output: &OcrOutput<'_>,
+) -> Result<bool, StoreError> {
+    let changed = conn.execute(
+        "UPDATE ocr_handoffs SET phase = 'output_ready', provider_status_json = ?1,
+            ocr_pdf_artifact_id = ?2, ocr_pdf_sha256 = ?3, ocr_pdf_byte_size = ?4,
+            ocr_pdf_bytes = ?5, text_artifact_id = ?6, text_sha256 = ?7,
+            text_byte_size = ?8, text_bytes = ?9, updated_at = ?10
+         WHERE handoff_id = ?11 AND phase = ?12",
+        params![
+            output.provider_status_json,
+            output.pdf_artifact_id,
+            output.pdf_sha256,
+            output.pdf_bytes.len() as u64,
+            output.pdf_bytes,
+            output.text_artifact_id,
+            output.text_sha256,
+            output.text_bytes.len() as u64,
+            output.text_bytes,
+            Utc::now().to_rfc3339(),
+            handoff_id,
+            expected_phase,
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
+pub(crate) fn fail_ocr_handoff(
+    conn: &Connection,
+    handoff_id: &str,
+    expected_phase: &str,
+    code: &str,
+    message: &str,
+    retryable: bool,
+) -> Result<bool, StoreError> {
+    let changed = conn.execute(
+        "UPDATE ocr_handoffs SET phase = 'failed', error_code = ?1,
+            error_message = ?2, error_retryable = ?3, updated_at = ?4
+         WHERE handoff_id = ?5 AND phase = ?6",
+        params![
+            code,
+            message,
+            retryable,
+            Utc::now().to_rfc3339(),
+            handoff_id,
+            expected_phase
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
+pub(crate) fn admit_ocr_child(
+    conn: &mut Connection,
+    handoff: &OcrHandoff,
+    document: &IngestedDocument,
+    run: &PipelineRun,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = get_ocr_handoff(&tx, &handoff.handoff_id)?.ok_or_else(|| {
+        StoreError::InvalidOcrHandoff("the OCR handoff no longer exists".to_string())
+    })?;
+    let pdf_bytes = current.ocr_pdf_bytes.as_deref().ok_or_else(|| {
+        StoreError::InvalidOcrHandoff("the OCR PDF recovery bytes are missing".to_string())
+    })?;
+    if current.phase == "child_admitted" || current.phase == "completed" {
+        return get_pipeline_run(&tx, &current.child_run_id)?.ok_or_else(|| {
+            StoreError::InvalidOcrHandoff("the admitted OCR child is missing".to_string())
+        });
+    }
+    if current.phase != "output_ready"
+        || document.document_id != current.child_document_id
+        || run.run_id != current.child_run_id
+        || run.document_id != document.document_id
+        || document.source_type != SourceType::OcrText
+        || document.local_source_path != current.derived_path
+        || document.byte_size != pdf_bytes.len() as u64
+        || document.content_hash != sha256_hex(pdf_bytes)
+        || current.ocr_pdf_sha256.as_deref() != Some(document.content_hash.as_str())
+    {
+        return Err(StoreError::InvalidOcrHandoff(
+            "the derived child does not match its retained OCR output".to_string(),
+        ));
+    }
+    let summary_profile = get_run_summary_profile(&tx, &current.root_run_id)?
+        .ok_or_else(|| StoreError::SummaryProfileUnavailable(current.root_run_id.clone()))?;
+    let ingested = persist_ingestion_in_transaction(&tx, document, run, summary_profile)?;
+    let copied_profile = tx.execute(
+        "INSERT INTO pipeline_run_model_profiles (run_id, profile_snapshot, created_at)
+         SELECT ?1, profile_snapshot, ?2 FROM pipeline_run_model_profiles WHERE run_id = ?3",
+        params![
+            current.child_run_id,
+            run.created_at.to_rfc3339(),
+            current.root_run_id
+        ],
+    )?;
+    if copied_profile != 1 {
+        return Err(StoreError::ModelProfileMismatch {
+            run_id: current.root_run_id,
+        });
+    }
+    let root = get_pipeline_run(&tx, &handoff.root_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(handoff.root_run_id.clone()))?;
+    let failure = PipelineFailure {
+        code: "OCR_DERIVED_HANDOFF".to_string(),
+        message: format!(
+            "Processing continued in derived run {}",
+            current.child_run_id
+        ),
+        stage: Some(PipelineStage::Parse),
+        recoverable: false,
+    };
+    transition_in_tx(
+        &tx,
+        &root.run_id,
+        PipelineState::Parsed,
+        root.state_version,
+        PipelineState::Failed,
+        Some(PipelineStage::Parse),
+        Some(failure.code.clone()),
+        TransitionPatch {
+            warnings: None,
+            failure: Some(failure),
+            cancellation_requested: None,
+        },
+    )?;
+    tx.execute(
+        "INSERT INTO ocr_lineage (
+            handoff_id, producer_output_artifact_id, child_run_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            current.handoff_id,
+            current.ocr_pdf_artifact_id,
+            current.child_run_id,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    let changed = tx.execute(
+        "UPDATE ocr_handoffs SET phase = 'child_admitted', updated_at = ?1
+         WHERE handoff_id = ?2 AND phase = 'output_ready'",
+        params![Utc::now().to_rfc3339(), current.handoff_id],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::InvalidOcrHandoff(
+            "the OCR child admission lost phase ownership".to_string(),
+        ));
+    }
+    tx.commit()?;
+    Ok(ingested)
+}
+
+pub(crate) fn mark_ocr_handoff_completed_for_child(
+    conn: &Connection,
+    child_run_id: &str,
+) -> Result<bool, StoreError> {
+    let run = get_pipeline_run(conn, child_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(child_run_id.to_string()))?;
+    if !matches!(
+        run.state,
+        PipelineState::Complete | PipelineState::CompleteWithWarnings
+    ) || !summary_artifact_exists(conn, child_run_id)?
+    {
+        return Ok(false);
+    }
+    let changed = conn.execute(
+        "UPDATE ocr_handoffs SET phase = 'completed', updated_at = ?1
+         WHERE child_run_id = ?2 AND phase = 'child_admitted'",
+        params![Utc::now().to_rfc3339(), child_run_id],
+    )?;
+    Ok(changed == 1)
+}
+
+pub(crate) fn rewind_interrupted_ocr_child(
+    conn: &mut Connection,
+    child_run_id: &str,
+) -> Result<PipelineRun, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let owns_child: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM ocr_handoffs
+            WHERE child_run_id = ?1 AND phase = 'child_admitted'
+         )",
+        [child_run_id],
+        |row| row.get(0),
+    )?;
+    if !owns_child {
+        return Err(StoreError::InvalidOcrHandoff(
+            "the interrupted run is not owned by an admitted OCR handoff".to_string(),
+        ));
+    }
+    let run = get_pipeline_run(&tx, child_run_id)?
+        .ok_or_else(|| StoreError::RunNotFound(child_run_id.to_string()))?;
+    let rewind = match run.state {
+        PipelineState::Parsing => Some((PipelineState::Ingested, PipelineStage::Ingest)),
+        PipelineState::Normalizing => Some((PipelineState::Parsed, PipelineStage::Parse)),
+        PipelineState::Structuring => Some((PipelineState::Normalized, PipelineStage::Normalize)),
+        PipelineState::Chunking => Some((PipelineState::Structured, PipelineStage::Structure)),
+        PipelineState::Analyzing => Some((PipelineState::Chunked, PipelineStage::Chunk)),
+        PipelineState::Synthesizing => Some((PipelineState::Analyzed, PipelineStage::Analyze)),
+        PipelineState::Verifying => Some((PipelineState::Synthesized, PipelineStage::Synthesize)),
+        PipelineState::Ingesting => {
+            return Err(StoreError::InvalidOcrHandoff(
+                "an admitted OCR child cannot be interrupted during ingestion".to_string(),
+            ));
+        }
+        _ => None,
+    };
+    let Some((checkpoint, stage)) = rewind else {
+        tx.commit()?;
+        return Ok(run);
+    };
+    let rewound = transition_in_tx(
+        &tx,
+        child_run_id,
+        run.state,
+        run.state_version,
+        checkpoint,
+        Some(stage),
+        Some("ocr_child_rewound_after_restart".to_string()),
+        TransitionPatch::default(),
+    )?;
+    tx.commit()?;
+    Ok(rewound)
 }
 
 pub(crate) fn get_or_create_profile_suggestion_owner(
@@ -674,6 +1180,11 @@ pub fn list_recent_pipeline_runs(
         let mut statement = conn.prepare(
             "SELECT run_id
              FROM pipeline_runs
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM ocr_handoffs
+                 WHERE ocr_handoffs.root_run_id = pipeline_runs.run_id
+                   AND ocr_handoffs.phase IN ('child_admitted', 'completed')
+             )
              ORDER BY updated_at DESC, run_id DESC
              LIMIT ?1",
         )?;
@@ -1533,7 +2044,7 @@ fn transition_pipeline_run(
     Ok(run)
 }
 
-pub(super) fn start_parsing(
+pub(crate) fn start_parsing(
     conn: &mut Connection,
     run_id: &str,
     expected_version: u32,
@@ -1625,6 +2136,11 @@ pub(super) fn start_normalizing(
     expected_version: u32,
 ) -> Result<(PipelineRun, ParsedDocument), StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if has_ocr_handoff_for_root(&tx, run_id)? {
+        return Err(StoreError::InvalidOcrHandoff(
+            "the OCR handoff owns this root run".to_string(),
+        ));
+    }
     let parsed = get_parsed_document(&tx, run_id)?
         .ok_or_else(|| StoreError::ParsedArtifactNotFound(run_id.to_string()))?;
     let normalizing_run = transition_in_tx(

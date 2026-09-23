@@ -5,22 +5,26 @@ use rusqlite::Connection;
 pub const INTERRUPTION_FAILURE_CODE: &str = "PROCESS_INTERRUPTED";
 
 pub fn reconcile_interrupted_runs(conn: &mut Connection) -> Result<Vec<PipelineRun>, StoreError> {
-    let candidates = db::list_pipeline_runs_for_recovery(conn)?
-        .into_iter()
-        .filter_map(|run| {
-            let action = if run.state == crate::pipeline::contracts::PipelineState::Cancelling {
-                InterruptedRunAction::CompleteCancellation
-            } else {
-                InterruptedRunAction::Fail(interruption_failure(run.state.active_stage()?))
+    let mut candidates = Vec::new();
+    for run in db::list_pipeline_runs_for_recovery(conn)? {
+        let action = if run.state == crate::pipeline::contracts::PipelineState::Cancelling {
+            InterruptedRunAction::CompleteCancellation
+        } else {
+            let Some(stage) = run.state.active_stage() else {
+                continue;
             };
-            Some(InterruptedRunTransition {
-                run_id: run.run_id,
-                expected_state: run.state,
-                expected_version: run.state_version,
-                action,
-            })
-        })
-        .collect::<Vec<_>>();
+            if db::is_admitted_ocr_child(conn, &run.run_id)? {
+                continue;
+            }
+            InterruptedRunAction::Fail(interruption_failure(stage))
+        };
+        candidates.push(InterruptedRunTransition {
+            run_id: run.run_id,
+            expected_state: run.state,
+            expected_version: run.state_version,
+            action,
+        });
+    }
 
     db::reconcile_interrupted_runs_in_transaction(conn, &candidates)
 }
@@ -53,10 +57,13 @@ fn stage_label(stage: &PipelineStage) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::contracts::{PipelineEvent, PipelineState};
+    use crate::pipeline::contracts::{ContinuationCheckpoint, PipelineEvent, PipelineState};
     use crate::pipeline::db::{get_document, get_pipeline_run, init_db, list_pipeline_events};
     use crate::pipeline::ingest::ingest_pdf;
+    use crate::pipeline::parser::{parse_started_document, PdfExtractParser};
+    use crate::pipeline::service::continuation_plan;
     use crate::pipeline::state::TransitionError;
+    use rusqlite::params;
     use std::fs;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -98,6 +105,95 @@ mod tests {
 
     fn recovery_event(events: &[PipelineEvent]) -> &PipelineEvent {
         events.last().expect("recovery event should exist")
+    }
+
+    fn insert_admitted_ocr_handoff(conn: &Connection, root: &PipelineRun, child: &PipelineRun) {
+        let handoff_id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO ocr_handoffs (
+                handoff_id, root_run_id, root_document_id, source_artifact_id,
+                source_byte_size, source_sha256, source_display_name, source_bytes,
+                provider_app_id, provider_instance_id, provider_job_id,
+                provider_request_json, provider_request_sha256, phase,
+                child_document_id, child_run_id, derived_path, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, 1, ?5, 'scan.pdf', X'00', 'document-ocr',
+                ?6, ?7, '{}', ?5, 'child_admitted', ?8, ?9, ?10, ?11, ?11
+             )",
+            params![
+                handoff_id,
+                root.run_id,
+                root.document_id,
+                Uuid::new_v4().to_string(),
+                "0".repeat(64),
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                child.document_id,
+                child.run_id,
+                format!("/tmp/{handoff_id}.pdf"),
+                now,
+            ],
+        )
+        .expect("admitted OCR ownership should persist");
+    }
+
+    #[test]
+    fn ocr_review_regression_active_child_keeps_restart_ownership() {
+        let mut conn = init_db(":memory:").expect("database should initialize");
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let source = source.to_str().expect("fixture path should be UTF-8");
+        let (_, root) = ingest_pdf(&mut conn, source).expect("root should ingest");
+        let (_, child) = ingest_pdf(&mut conn, source).expect("child should ingest");
+        let (parsing, document) = db::start_parsing(&mut conn, &child.run_id, child.state_version)
+            .expect("child parsing should start");
+        parse_started_document(
+            &mut conn,
+            &PdfExtractParser::new(),
+            &child.run_id,
+            parsing.state_version,
+            &document,
+        )
+        .expect("child parsing should complete");
+        let parsed = get_pipeline_run(&conn, &child.run_id)
+            .expect("child should reload")
+            .expect("child should exist");
+        let normalizing = db::start_normalizing(&mut conn, &child.run_id, parsed.state_version)
+            .expect("child normalization should start")
+            .0;
+        insert_admitted_ocr_handoff(&conn, &root, &normalizing);
+
+        let ordinary = {
+            let (_, ingested) = ingest_pdf(&mut conn, source).expect("ordinary run should ingest");
+            db::start_parsing(&mut conn, &ingested.run_id, ingested.state_version)
+                .expect("ordinary parsing should start")
+                .0
+        };
+
+        let recovered = reconcile_interrupted_runs(&mut conn)
+            .expect("interrupted runs should reconcile atomically");
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![ordinary.run_id.as_str()]
+        );
+        let preserved = get_pipeline_run(&conn, &normalizing.run_id)
+            .expect("OCR child should reload")
+            .expect("OCR child should exist");
+        assert_eq!(preserved.state, PipelineState::Normalizing);
+        assert_eq!(preserved.state_version, normalizing.state_version);
+
+        let rewound = db::rewind_interrupted_ocr_child(&mut conn, &normalizing.run_id)
+            .expect("OCR child should rewind to its persisted checkpoint");
+        assert_eq!(rewound.state, PipelineState::Parsed);
+        assert_eq!(rewound.state_version, normalizing.state_version + 1);
+        assert_eq!(rewound.current_stage, Some(PipelineStage::Parse));
+        let plan = continuation_plan(&conn, &rewound.run_id, rewound.state_version)
+            .expect("rewound OCR child should be continuable");
+        assert_eq!(plan.checkpoint, ContinuationCheckpoint::Parsed);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::pipeline::gateway_store::{
     reserve_request_after_lock, GatewayCompletion, GatewayRequestKey, GatewayRequestRecord,
     GatewayRequestState, GatewayStoreError,
 };
+use crate::pipeline::model::decoder_compatible_schema;
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE};
@@ -560,7 +561,7 @@ struct Generation<'a> {
     messages: [GenerationMessage<'a>; 2],
     temperature: f64,
     seed: u64,
-    response_schema: &'a Value,
+    response_schema: Value,
 }
 
 #[derive(Serialize)]
@@ -703,7 +704,7 @@ fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClient
             ],
             temperature: 0.0,
             seed: request.seed,
-            response_schema: schema,
+            response_schema: decoder_compatible_schema(schema),
         },
     })
 }
@@ -737,7 +738,7 @@ fn preflight_request_size(core: &RequestCore<'_>) -> Result<(), GatewayClientErr
                 ],
                 temperature: core.generation.temperature,
                 seed: core.generation.seed,
-                response_schema: core.generation.response_schema,
+                response_schema: core.generation.response_schema.clone(),
             },
         },
     };
@@ -1208,6 +1209,40 @@ mod tests {
                 }),
             },
         }
+    }
+
+    #[test]
+    fn request_core_projects_decoder_schema_without_mutating_contract() {
+        let mut model_request = request();
+        let canonical = {
+            let ModelOutputFormat::JsonSchema { schema, .. } = &mut model_request.output_format
+            else {
+                panic!("test request must use a JSON schema");
+            };
+            schema["properties"]["ids"] = serde_json::json!({
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "uniqueItems": true,
+                "items": {"type": "string", "maxLength": 2_000}
+            });
+            schema.clone()
+        };
+
+        let core = request_core(&model_request).expect("gateway request should project");
+
+        assert!(core.generation.response_schema["properties"]["ids"]
+            .get("uniqueItems")
+            .is_none());
+        assert!(
+            core.generation.response_schema["properties"]["ids"]["items"]
+                .get("maxLength")
+                .is_none()
+        );
+        let ModelOutputFormat::JsonSchema { schema, .. } = &model_request.output_format else {
+            panic!("test request must use a JSON schema");
+        };
+        assert_eq!(schema, &canonical);
     }
 
     fn raw_response(status: u16, body: Value) -> RawResponse {

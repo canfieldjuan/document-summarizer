@@ -521,11 +521,14 @@ fn get_run_status(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<RunHistoryItem, CommandError> {
-    let active = state.jobs.is_active(&run_id).map_err(CommandError::from)?;
     let conn = open_database(&state)?;
     let mut run = load_run(&conn, &run_id).map_err(CommandError::from)?;
-    run.background_active = active;
-    run.can_cancel = run.state.can_request_cancellation() && active;
+    let (background_active, projected_active) = state
+        .jobs
+        .status_activity(&run_id, &run.run_id)
+        .map_err(CommandError::from)?;
+    run.background_active = background_active;
+    run.can_cancel = run.state.can_request_cancellation() && projected_active;
     Ok(run)
 }
 
@@ -574,8 +577,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     None
                 }
             };
+            let jobs = DesktopJobManager::new(db_path.clone(), settings_path.clone());
+            if let Err(error) = jobs.start_ocr_recovery(app_data_dir.clone()) {
+                eprintln!("OCR restart recovery worker could not start: {error}");
+            }
             app.manage(AppState {
-                jobs: DesktopJobManager::new(db_path.clone(), settings_path.clone()),
+                jobs,
                 model_settings_path: settings_path,
                 entitlement,
             });
