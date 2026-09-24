@@ -5,6 +5,7 @@ use crate::pipeline::contracts::{
 };
 use crate::pipeline::db::{self, StoreError};
 use crate::pipeline::model_settings::{load_settings, runtime_from_settings};
+use crate::pipeline::summary::{unquoted_source_units, UnquotedSourceUnit};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -69,6 +70,8 @@ pub struct SummaryView {
     pub summary_claims: Vec<CitedClaimView>,
     pub claims: Vec<CitedClaimView>,
     pub key_point_claim_ids: Vec<String>,
+    /// Contract passages that could not be quoted, derived on read; empty for other profiles.
+    pub unquoted_source_units: Vec<UnquotedSourceUnit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -178,7 +181,10 @@ pub fn get_persisted_summary(
     validate_summary_state(&run, true)?;
     let key_point_claim_ids =
         validate_citations_against_sources(conn, &resolved_run_id, &summary, citations.as_ref())?;
-    let summary = summary_view(summary, citations, key_point_claim_ids)?;
+    let document_id = summary.document_id.clone();
+    let mut summary = summary_view(summary, citations, key_point_claim_ids)?;
+    summary.unquoted_source_units =
+        unquoted_source_units_for_run(conn, &resolved_run_id, &document_id)?;
 
     Ok(PersistedSummary {
         run: run_history_item(conn, run, document, true)?,
@@ -386,7 +392,25 @@ fn summary_view(
         summary_claims,
         claims,
         key_point_claim_ids,
+        unquoted_source_units: Vec::new(),
     })
+}
+
+/// Derives the Contract unquoted-passage list from persisted sources on read. Missing sources or
+/// a disagreement with the recorded analysis fail closed with the existing integrity error.
+fn unquoted_source_units_for_run(
+    conn: &Connection,
+    run_id: &str,
+    document_id: &str,
+) -> Result<Vec<UnquotedSourceUnit>, WorkspaceError> {
+    if db::get_run_summary_profile(conn, run_id)? != Some(SummaryProfile::Contract) {
+        return Ok(Vec::new());
+    }
+    let mismatch = || WorkspaceError::CitationMismatch(document_id.to_string());
+    let normalized = db::get_normalized_document(conn, run_id)?.ok_or_else(mismatch)?;
+    let chunked = db::get_chunked_document(conn, run_id)?.ok_or_else(mismatch)?;
+    let analyzed = db::get_analyzed_document(conn, run_id)?.ok_or_else(mismatch)?;
+    unquoted_source_units(&analyzed, &chunked, &normalized).map_err(|_| mismatch())
 }
 
 fn cited_claim_views(
@@ -888,6 +912,69 @@ mod tests {
         let error = get_persisted_summary(&conn, &run.run_id)
             .expect_err("an incomplete run must not return a summary");
         assert_eq!(error.code(), "SUMMARY_NOT_FOUND");
+    }
+
+    fn complete_profiled_fixture_summary(
+        conn: &mut Connection,
+        source: &std::path::Path,
+        profile: SummaryProfile,
+    ) -> String {
+        let (_, run) = crate::pipeline::service::admit_pdf_for_background(
+            conn,
+            source.to_str().expect("fixture path should be UTF-8"),
+            None,
+            profile,
+            None,
+        )
+        .expect("fixture should be admitted");
+        let parser = PdfExtractParser::new();
+        let normalizer = CanonicalNormalizer::new();
+        let interpreter = DeterministicStructureInterpreter::new();
+        let chunker = DeterministicDocumentChunker::new();
+        crate::pipeline::service::process_started_parsing_to_summary_controlled(
+            conn,
+            &run.run_id,
+            SummaryComponents {
+                parser: &parser,
+                normalizer: &normalizer,
+                interpreter: &interpreter,
+                chunker: &chunker,
+                runtime: &FixtureRuntime,
+            },
+            &crate::pipeline::control::UNCONTROLLED_EXECUTION,
+        )
+        .expect("profiled fixture summary should complete");
+        run.run_id
+    }
+
+    // Contract test 6 (workspace): the Contract summary view lists the unquotable passage,
+    // derived on read; other profiles get an empty list; the list never enters summary text.
+    #[test]
+    fn contract_summary_view_lists_unquoted_passages_derived_on_read() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/contract_long_clause.pdf");
+        let mut conn = init_db(":memory:").expect("database should initialize");
+        let contract_run =
+            complete_profiled_fixture_summary(&mut conn, &source, SummaryProfile::Contract);
+        let persisted = get_persisted_summary(&conn, &contract_run)
+            .expect("the Contract summary should pass read validation");
+        let serialized = serde_json::to_value(CompletedSummaryView::from(persisted))
+            .expect("presentation result should serialize");
+        let units = serialized["summary"]["unquotedSourceUnits"]
+            .as_array()
+            .expect("the Contract view carries the unquoted list");
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0]["pageNumber"], 2);
+        assert_eq!(units[0]["kind"], "overLimitSentence");
+        let opening = units[0]["openingText"].as_str().unwrap();
+        assert!(opening.starts_with("The Contractor shall defend"));
+        let summary_text = serialized["summary"]["text"].as_str().unwrap();
+        assert!(!summary_text.contains(opening.trim_end_matches('…')));
+
+        let general_run =
+            complete_profiled_fixture_summary(&mut conn, &source, SummaryProfile::General);
+        let general = get_persisted_summary(&conn, &general_run).unwrap();
+        assert!(general.summary.unquoted_source_units.is_empty());
     }
 
     #[test]

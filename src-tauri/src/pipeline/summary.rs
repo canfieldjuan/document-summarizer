@@ -43,11 +43,13 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "9.0.0";
+pub const SYNTHESIS_VERSION: &str = "10.0.0";
 pub const VERIFICATION_VERSION: &str = "10.0.0";
 pub const SUMMARY_VERSION: &str = "8.0.0";
 pub const CITATION_VERSION: &str = "4.0.0";
 
+/// Contract long-document synthesis still used the incomplete-catalog ledger fallback.
+const PRE_LONG_CONTRACT_SYNTHESIS_VERSION: &str = "9.0.0";
 const PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION: &str = "8.0.0";
 const PRE_CONTEXT_SYNTHESIS_VERSION: &str = "7.0.0";
 const PRE_DISCLOSURE_SYNTHESIS_VERSION: &str = "6.0.0";
@@ -146,6 +148,7 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
         SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -158,7 +161,9 @@ fn coherent_verification_versions_match(
 ) -> bool {
     (matches!(
         synthesis_version,
-        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
+            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
     ) && verification_version == VERIFICATION_VERSION)
         || (synthesis_version == PRE_CONTEXT_SYNTHESIS_VERSION
             && verification_version == PRE_CONTEXT_VERIFICATION_VERSION)
@@ -291,7 +296,51 @@ struct AnalysisQuoteCatalog {
 struct AnalysisQuoteSegmentation {
     segments: Vec<String>,
     omitted_source_units: usize,
+    omitted_units: Vec<OmittedQuoteUnit>,
 }
+
+impl AnalysisQuoteSegmentation {
+    /// The omitted count is derived from the recorded spans, never tallied separately.
+    fn new(segments: Vec<String>, omitted_units: Vec<OmittedQuoteUnit>) -> Self {
+        Self {
+            segments,
+            omitted_source_units: omitted_units.len(),
+            omitted_units,
+        }
+    }
+}
+
+/// A trimmed byte range of one normalized block that the version-13 catalog omits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OmittedQuoteUnit {
+    start: usize,
+    end: usize,
+    kind: UnquotedSourceUnitKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnquotedSourceUnitKind {
+    /// A safe-boundary source sentence unit longer than the quote ceiling.
+    OverLimitSentence,
+    /// A nonempty block tail without a safe sentence terminal.
+    NoSentenceBoundary,
+}
+
+/// One source passage that could not enter the analysis quotation catalog. It is display-only
+/// disclosure: never a citation, model input, summary text, integrity input or Connect field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnquotedSourceUnit {
+    pub page_number: u32,
+    pub kind: UnquotedSourceUnitKind,
+    pub character_count: usize,
+    /// Locator only: the numbered clause that begins the passage, not a coverage claim.
+    pub clause_reference: Option<String>,
+    pub opening_text: String,
+}
+
+const UNQUOTED_OPENING_CHARACTERS: usize = 80;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnalysisScope {
@@ -731,7 +780,13 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
             &chunked,
             &normalized,
         )?;
-        coherent::validate_verified_profile(summary_profile, &verified, &chunked, &normalized)?;
+        coherent::validate_verified_profile(
+            summary_profile,
+            &verified,
+            &persisted_synthesis.synthesis_version,
+            &chunked,
+            &normalized,
+        )?;
         Ok(verified)
     }) {
         Ok(verified) => verified,
@@ -1162,6 +1217,13 @@ fn verify(
 ) -> Result<VerifiedDocument, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Verify)?;
     validate_synthesized_document_without_runtime(synthesized, analyzed, chunked, normalized)?;
+    coherent::validate_model_output_fallback_boundary(
+        summary_profile,
+        synthesized,
+        analyzed,
+        chunked,
+        normalized,
+    )?;
     let ledger_evidence = analyzed
         .chunks
         .iter()
@@ -1224,9 +1286,12 @@ fn verify(
         &synthesized.synthesis_evidence,
         &mut summary_claim_verifications,
     )?;
-    if let Some(required_evidence_ids) =
-        coherent::required_short_contract_evidence_ids(summary_profile, chunked, normalized)?
-    {
+    if let Some(required_evidence_ids) = coherent::required_short_contract_evidence_ids(
+        summary_profile,
+        &synthesized.synthesis_version,
+        chunked,
+        normalized,
+    )? {
         apply_contract_material_coverage(
             runtime,
             &synthesized.summary_claims,
@@ -1286,7 +1351,9 @@ fn verify(
             Vec::new()
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
-        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
+        SYNTHESIS_VERSION
+        | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
+        | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
         PRE_CONTEXT_SYNTHESIS_VERSION => PRE_CONTEXT_VERIFICATION_VERSION,
         PRE_DISCLOSURE_SYNTHESIS_VERSION
             if synthesized.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback =>
@@ -1753,6 +1820,7 @@ fn verification_claim_budget(
     if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -2828,10 +2896,7 @@ fn analysis_quote_segmentation_for_version(
     if analysis_version == ANALYSIS_VERSION {
         analysis_quote_segments_v13(source)
     } else {
-        AnalysisQuoteSegmentation {
-            segments: analysis_quote_segments_v12(source),
-            omitted_source_units: 0,
-        }
+        AnalysisQuoteSegmentation::new(analysis_quote_segments_v12(source), Vec::new())
     }
 }
 
@@ -2902,17 +2967,11 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
     let source_start = source.len() - source.trim_start().len();
     let source_end = source.trim_end().len();
     if source_start >= source_end {
-        return AnalysisQuoteSegmentation {
-            segments: Vec::new(),
-            omitted_source_units: 0,
-        };
+        return AnalysisQuoteSegmentation::new(Vec::new(), Vec::new());
     }
     let complete_block = &source[source_start..source_end];
     if complete_block.chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS {
-        return AnalysisQuoteSegmentation {
-            segments: vec![complete_block.to_string()],
-            omitted_source_units: 0,
-        };
+        return AnalysisQuoteSegmentation::new(vec![complete_block.to_string()], Vec::new());
     }
 
     let mut units = Vec::new();
@@ -2933,7 +2992,7 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
     }
 
     let mut segments = Vec::new();
-    let mut omitted_source_units = 0usize;
+    let mut omitted_units = Vec::new();
     let mut packed: Option<(usize, usize)> = None;
     for (start, end) in units {
         let unit_characters = source[start..end].chars().count();
@@ -2941,7 +3000,11 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
             if let Some((packed_start, packed_end)) = packed.take() {
                 segments.push(source[packed_start..packed_end].to_string());
             }
-            omitted_source_units += 1;
+            omitted_units.push(OmittedQuoteUnit {
+                start,
+                end,
+                kind: UnquotedSourceUnitKind::OverLimitSentence,
+            });
             continue;
         }
         if let Some((packed_start, _)) = packed {
@@ -2957,14 +3020,114 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
     if let Some((packed_start, packed_end)) = packed {
         segments.push(source[packed_start..packed_end].to_string());
     }
-    if !source[unit_start..source_end].trim().is_empty() {
-        omitted_source_units += 1;
+    let tail = &source[unit_start..source_end];
+    if !tail.trim().is_empty() {
+        omitted_units.push(OmittedQuoteUnit {
+            start: unit_start + tail.len() - tail.trim_start().len(),
+            end: source_end,
+            kind: UnquotedSourceUnitKind::NoSentenceBoundary,
+        });
     }
 
-    AnalysisQuoteSegmentation {
-        segments,
-        omitted_source_units,
+    AnalysisQuoteSegmentation::new(segments, omitted_units)
+}
+
+/// Lists, in source order, every passage the version-13 analysis quotation catalog omits,
+/// derived from persisted normalized source. For each inspected page the per-page count must
+/// equal `versioned_page_scope`, and both counts of the recorded quote-boundary warning must
+/// match; any disagreement is an integrity failure, never an empty list.
+pub(crate) fn unquoted_source_units(
+    analyzed: &AnalyzedDocument,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<Vec<UnquotedSourceUnit>, PipelineFailure> {
+    if analyzed.analysis_version != ANALYSIS_VERSION {
+        return Ok(Vec::new());
     }
+    let blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
+    let mut passages = Vec::new();
+    for chunk in &chunked.chunks {
+        for block_id in &chunk.block_ids {
+            let block = blocks
+                .get(block_id.as_str())
+                .ok_or_else(unquoted_disclosure_mismatch)?;
+            for omitted in analysis_quote_segments_v13(&block.text).omitted_units {
+                let passage = &block.text[omitted.start..omitted.end];
+                passages.push(UnquotedSourceUnit {
+                    page_number: block.source.page_start,
+                    kind: omitted.kind,
+                    character_count: passage.chars().count(),
+                    clause_reference: coherent::leading_contract_clause_number(passage),
+                    opening_text: unquoted_opening_text(passage),
+                });
+            }
+        }
+    }
+
+    let mut affected_pages = 0usize;
+    let mut omitted_units = 0usize;
+    for page in &analyzed.inspected_pages {
+        let (_, _, _, _, expected) =
+            pages::versioned_page_scope(&analyzed.analysis_version, *page, chunked, normalized)?;
+        let derived = passages
+            .iter()
+            .filter(|passage| passage.page_number == *page)
+            .count();
+        if derived != expected {
+            return Err(unquoted_disclosure_mismatch());
+        }
+        if derived > 0 {
+            affected_pages += 1;
+            omitted_units = omitted_units
+                .checked_add(derived)
+                .ok_or_else(unquoted_disclosure_mismatch)?;
+        }
+    }
+    let expected_warning =
+        (omitted_units > 0).then(|| pages::quote_boundary_warning(affected_pages, omitted_units));
+    let mut recorded_warnings = analyzed
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE);
+    let recorded_warning = recorded_warnings.next();
+    if recorded_warnings.next().is_some() || recorded_warning != expected_warning.as_ref() {
+        return Err(unquoted_disclosure_mismatch());
+    }
+    Ok(passages)
+}
+
+fn unquoted_disclosure_mismatch() -> PipelineFailure {
+    stage_failure(
+        PipelineStage::Analyze,
+        "UNQUOTED_DISCLOSURE_MISMATCH",
+        "Unquoted source passages disagree with the recorded quote-boundary analysis",
+        false,
+    )
+}
+
+/// The passage's whole leading words, at most `UNQUOTED_OPENING_CHARACTERS` characters in
+/// total including a trailing `…` marker when shortened. A passage that fits is returned whole
+/// without the marker; a first word too long to fit yields the marker alone.
+fn unquoted_opening_text(passage: &str) -> String {
+    let words = passage.split_whitespace().collect::<Vec<_>>();
+    let whole = words.join(" ");
+    if whole.chars().count() <= UNQUOTED_OPENING_CHARACTERS {
+        return whole;
+    }
+    let prefix_limit = UNQUOTED_OPENING_CHARACTERS - 1;
+    let mut opening = String::new();
+    for word in &words {
+        let separator = usize::from(!opening.is_empty());
+        if opening.chars().count() + separator + word.chars().count() > prefix_limit {
+            break;
+        }
+        if separator == 1 {
+            opening.push(' ');
+        }
+        opening.push_str(word);
+    }
+    opening.push('…');
+    opening
 }
 
 fn safe_analysis_sentence_boundary(
@@ -3912,6 +4075,7 @@ fn validate_synthesized_document_without_runtime(
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -3927,6 +4091,7 @@ fn validate_synthesized_document_without_runtime(
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -4167,8 +4332,10 @@ fn validate_coherent_verified_document(
     analyzed: &AnalyzedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
-    let delivery_coverage_fallback = synthesized.synthesis_version == SYNTHESIS_VERSION
-        && verified.verification_version == VERIFICATION_VERSION
+    let delivery_coverage_fallback = matches!(
+        synthesized.synthesis_version.as_str(),
+        SYNTHESIS_VERSION | PRE_LONG_CONTRACT_SYNTHESIS_VERSION
+    ) && verified.verification_version == VERIFICATION_VERSION
         && synthesized.presentation_mode == SummaryPresentationMode::Coherent
         && verified.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback;
     let metadata_valid = coherent_verification_versions_match(
@@ -10206,6 +10373,1176 @@ mod tests {
         assert_eq!(completed.summary.warnings, verified.warnings);
     }
 
+    fn page_text_fixture(
+        document_id: &str,
+        page_texts: &[String],
+    ) -> (NormalizedDocument, ChunkedDocument) {
+        let pages = page_texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let page_number = u32::try_from(index + 1).expect("page count should fit u32");
+                crate::pipeline::contracts::NormalizedPage {
+                    page_number,
+                    content: vec![NormalizedBlock {
+                        block_id: format!("{document_id}-block-{page_number}"),
+                        kind: crate::pipeline::contracts::NormalizedBlockKind::Text,
+                        text: text.clone(),
+                        source: SourceSpan {
+                            page_start: page_number,
+                            page_end: page_number,
+                            section_id: None,
+                            source_type: crate::pipeline::contracts::SourceType::NativeText,
+                        },
+                    }],
+                    warnings: vec![],
+                    requires_visual_processing: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        let chunks = pages
+            .iter()
+            .map(|page| {
+                let block = &page.content[0];
+                crate::pipeline::contracts::DocumentChunk {
+                    chunk_id: format!("{document_id}-chunk-{}", page.page_number),
+                    ordinal: page.page_number,
+                    structure_node_id: format!("{document_id}-node-{}", page.page_number),
+                    text: block.text.clone(),
+                    block_ids: vec![block.block_id.clone()],
+                    source_spans: vec![block.source.clone()],
+                    warnings: vec![],
+                }
+            })
+            .collect::<Vec<_>>();
+        (
+            NormalizedDocument {
+                document_id: document_id.to_string(),
+                normalization_version: "test-normalization-v1".to_string(),
+                pages,
+                warnings: vec![],
+            },
+            ChunkedDocument {
+                document_id: document_id.to_string(),
+                chunking_version: "test-chunking-v1".to_string(),
+                chunks,
+                warnings: vec![],
+            },
+        )
+    }
+
+    /// Ten contract pages. Page 3 carries one indemnity sentence longer than the
+    /// 600-character quote ceiling, so the version-13 catalog omits exactly one unit.
+    /// Other sentences end in words of six or more letters so the open-set
+    /// abbreviation rule does not coalesce them into further omissions.
+    fn incomplete_long_contract_fixture() -> (NormalizedDocument, ChunkedDocument) {
+        let long_indemnity = format!(
+            "The Contractor shall defend, indemnify and hold harmless the Client, its \
+             governors, officers, directors, employees, agents and permitted assignees from \
+             and against all claims, demands, actions, liabilities, judgments, settlements, \
+             penalties, fines, losses, damages, costs and expenses, including reasonable \
+             attorney fees and litigation expenses, arising out of or relating to {}, in each \
+             case except to the extent caused by the gross negligence or willful misconduct of \
+             the indemnified parties as finally determined by a court of competent jurisdiction.",
+            "any negligent act, omission, breach of warranty, breach of confidentiality, \
+             violation of applicable regulations, infringement of intellectual property, \
+             personal injury, death or property damage caused by the Contractor, its \
+             personnel, subcontractors or suppliers in connection with the services"
+        );
+        assert!(long_indemnity.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+        let clause =
+            |number: usize, heading: &str, body: &str| format!("{number}. {heading} {body}");
+        let pages = vec![
+            clause(1, "Parties.", "This Services Agreement is between Alpha Services Incorporated and Beta Holdings Limited. The Contractor provides janitorial services at the Client facilities."),
+            clause(2, "Term.", "The agreement runs from January 1, 2026 through December 31, 2026. Either party may renew the agreement by written amendment."),
+            format!("3. Indemnification. {long_indemnity} The Client shall give the Contractor prompt written notification."),
+            clause(4, "Payment.", "The Client pays each undisputed invoice within thirty calendar days. Invoices must identify the services performed during the invoiced period."),
+            clause(5, "Termination.", "Either party may terminate the agreement upon thirty days written notification. The Client pays for accepted services through the termination effective date."),
+            clause(6, "Insurance.", "The Contractor maintains commercial general liability insurance of one million dollars per occurrence. Certificates are delivered before services commence."),
+            clause(7, "Confidentiality.", "Each party protects the other party's confidential information using reasonable safeguards. Obligations survive expiration or termination of the agreement."),
+            clause(8, "Liability.", "Neither party is liable for consequential or indirect damages arising under the agreement. This limitation excludes indemnification obligations."),
+            clause(9, "Law.", "The agreement is governed by the laws of the State of Illinois. Disputes proceed exclusively in the courts located in Effingham County."),
+            clause(10, "Notices.", "Notices must be delivered in writing to the addresses listed in the signature blocks. Notices become effective upon confirmed delivery."),
+        ];
+        page_text_fixture("incomplete-long-contract", &pages)
+    }
+
+    // Contract test 1: an incomplete long Contract catalog proceeds to bounded source
+    // selection and synthesis instead of the verified-ledger fallback.
+    #[test]
+    fn incomplete_long_contract_catalog_uses_bounded_contract_selection() {
+        let (normalized, chunked) = incomplete_long_contract_fixture();
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+        assert!(
+            analyzed
+                .warnings
+                .iter()
+                .any(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE),
+            "precondition: the fixture must omit a quote-boundary source unit"
+        );
+        let analysis_requests = runtime.schema_names.lock().unwrap().len();
+
+        let synthesized = coherent::synthesize(
+            SummaryProfile::Contract,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("an incomplete long Contract catalog should synthesize");
+
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert!(synthesized
+            .warnings
+            .iter()
+            .all(|warning| warning.code != coherent::FALLBACK_WARNING_CODE));
+        assert!(synthesized
+            .warnings
+            .iter()
+            .any(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE));
+        let schema_names = runtime.schema_names.lock().unwrap();
+        let synthesis_schemas = &schema_names[analysis_requests..];
+        assert!(synthesis_schemas
+            .iter()
+            .any(|name| name == coherent::CONTRACT_SOURCE_SELECTION_SCHEMA_NAME));
+        assert!(synthesis_schemas
+            .iter()
+            .any(|name| name == coherent::CONTRACT_SCHEMA_NAME));
+    }
+
+    // Contract test 4: the incomplete-catalog Contract fallback is bound to the synthesis
+    // version that produced it. 9.0.0 keeps its rules; the current version rejects it.
+    #[test]
+    fn contract_incomplete_catalog_fallback_is_bound_to_its_synthesis_version() {
+        let (normalized, chunked) = incomplete_long_contract_fixture();
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+
+        let historical = coherent::incomplete_catalog_fallback_for_version(
+            &runtime, &analyzed, &chunked, "9.0.0",
+        )
+        .expect("the 9.0.0 fallback should materialize");
+        coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &historical,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &runtime,
+        )
+        .expect("a 9.0.0 Contract fallback keeps validating under 9.0.0 rules");
+        validate_synthesized_document_without_runtime(
+            &historical,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .expect("a persisted 9.0.0 synthesis artifact remains reloadable");
+
+        let relabeled = coherent::incomplete_catalog_fallback_for_version(
+            &runtime,
+            &analyzed,
+            &chunked,
+            SYNTHESIS_VERSION,
+        )
+        .expect("the relabeled fallback should materialize");
+        coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &relabeled,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &runtime,
+        )
+        .expect_err("a current-version Contract fallback over an admissible catalog is forged");
+    }
+
+    fn sentence_of_length(opening: &str, characters: usize) -> String {
+        let ending = " documentation.";
+        let padding = characters - opening.chars().count() - 1 - ending.chars().count();
+        format!("{opening} {}{ending}", "a".repeat(padding))
+    }
+
+    // Contract test 6: the unquoted list names each passage the version-13 catalog omits
+    // and agrees per page, and with both warning counts, for every inspected page.
+    #[test]
+    fn unquoted_source_units_disclose_omitted_passages_and_agree_with_analysis() {
+        let (normalized, chunked) = incomplete_long_contract_fixture();
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+        let units = unquoted_source_units(&analyzed, &chunked, &normalized)
+            .expect("the derived passages should agree with the analysis warning");
+        assert_eq!(units.len(), 1);
+        let unit = &units[0];
+        assert_eq!(unit.page_number, 3);
+        assert_eq!(unit.kind, UnquotedSourceUnitKind::OverLimitSentence);
+        assert!(unit.character_count > MAX_ANALYSIS_QUOTE_CHARACTERS);
+        assert_eq!(unit.clause_reference, None);
+        assert!(unit
+            .opening_text
+            .starts_with("The Contractor shall defend, indemnify"));
+        assert!(unit.opening_text.ends_with('…'));
+        assert!(unit.opening_text.chars().count() <= UNQUOTED_OPENING_CHARACTERS);
+        let serialized = serde_json::to_value(unit).unwrap();
+        assert_eq!(serialized["kind"], "overLimitSentence");
+        assert_eq!(serialized["pageNumber"], 3);
+        assert!(serialized["clauseReference"].is_null());
+
+        let mut missing_warning = analyzed.clone();
+        missing_warning
+            .warnings
+            .retain(|warning| warning.code != QUOTE_BOUNDARY_OMITTED_WARNING_CODE);
+        assert!(unquoted_source_units(&missing_warning, &chunked, &normalized).is_err());
+        let mut inflated_warning = analyzed.clone();
+        for warning in &mut inflated_warning.warnings {
+            if warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE {
+                warning.message = warning
+                    .message
+                    .replacen("1 source unit", "2 source units", 1);
+            }
+        }
+        assert!(unquoted_source_units(&inflated_warning, &chunked, &normalized).is_err());
+
+        let mut historical = analyzed.clone();
+        historical.analysis_version = QUOTE_BOUNDARY_ANALYSIS_VERSION.to_string();
+        assert!(unquoted_source_units(&historical, &chunked, &normalized)
+            .unwrap()
+            .is_empty());
+
+        let (complete_normalized, complete_chunked) = page_text_fixture(
+            "complete-contract",
+            &["1. Parties. The agreement binds both named organizations.".to_string()],
+        );
+        let complete = analyze(
+            &runtime,
+            &complete_chunked,
+            &complete_normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert!(
+            unquoted_source_units(&complete, &complete_chunked, &complete_normalized)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // Contract test 6 boundaries: 600 versus 601 characters, an unterminated tail, and a
+    // passage that begins with a numbered clause.
+    #[test]
+    fn unquoted_source_units_cover_limit_tail_and_clause_boundaries() {
+        let filler = "The service provider maintains accurate operational documentation.";
+        let tail = "The parties acknowledge the attached schedule of services";
+        let pages = vec![
+            format!(
+                "{filler} {}",
+                sentence_of_length("The exact limit sentence remains", 600)
+            ),
+            format!(
+                "{filler} {}",
+                sentence_of_length("The first over-limit sentence remains", 601)
+            ),
+            format!("{} {tail}", [filler; 9].join(" ")),
+            // The existing clause detector accepts numbers written with a trailing period.
+            format!(
+                "{filler} 6.1. Risk. {}",
+                sentence_of_length("The Contractor bears every operational", 640)
+            ),
+        ];
+        let (normalized, chunked) = page_text_fixture("unquoted-boundaries", &pages);
+        let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("boundary fixture analysis should validate");
+        let units = unquoted_source_units(&analyzed, &chunked, &normalized)
+            .expect("boundary passages should agree with the analysis warning");
+        let shape = units
+            .iter()
+            .map(|unit| {
+                (
+                    unit.page_number,
+                    unit.kind,
+                    unit.character_count,
+                    unit.clause_reference.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            vec![
+                (2, UnquotedSourceUnitKind::OverLimitSentence, 601, None),
+                (
+                    3,
+                    UnquotedSourceUnitKind::NoSentenceBoundary,
+                    tail.chars().count(),
+                    None
+                ),
+                (
+                    4,
+                    UnquotedSourceUnitKind::OverLimitSentence,
+                    651,
+                    Some("6.1".to_string())
+                ),
+            ]
+        );
+        assert_eq!(
+            units[0].opening_text,
+            "The first over-limit sentence remains…"
+        );
+        assert_eq!(units[1].opening_text, tail);
+        assert!(units[2]
+            .opening_text
+            .starts_with("6.1. Risk. The Contractor"));
+    }
+
+    // Contract test 7: omitted spans are the single source of the omitted count and never
+    // overlap an admitted quotation.
+    #[test]
+    fn version_13_omitted_spans_are_the_omitted_units() {
+        let filler = "The service provider maintains accurate operational documentation.";
+        for source in [
+            format!(
+                "{filler} {}",
+                sentence_of_length("The exact limit sentence remains", 600)
+            ),
+            format!(
+                "{filler} {}",
+                sentence_of_length("The first over-limit sentence remains", 601)
+            ),
+            format!(
+                "{} The parties acknowledge the attached schedule",
+                [filler; 9].join(" ")
+            ),
+            format!(
+                "{} {filler} Unterminated closing words",
+                sentence_of_length("A leading over-limit sentence remains", 700)
+            ),
+        ] {
+            // Each fixture's sentences are distinct, so text containment is positional overlap.
+            let segmented = analysis_quote_segments_v13(&source);
+            assert_eq!(
+                segmented.omitted_units.len(),
+                segmented.omitted_source_units
+            );
+            for omitted in &segmented.omitted_units {
+                let passage = &source[omitted.start..omitted.end];
+                assert!(!passage.is_empty());
+                assert_eq!(passage, passage.trim());
+                for segment in &segmented.segments {
+                    assert!(
+                        !segment.contains(passage) && !passage.contains(segment.as_str()),
+                        "omitted passage {passage:?} overlaps admitted segment {segment:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum ModelOutputFault {
+        RepeatedSummaryUnits,
+        UnknownSelectionSource,
+        RepeatedModalStrengthening,
+        LongModalStrengthening,
+        FirstSourceOnly,
+        SynthesisRuntimeFailure,
+        VerificationRuntimeFailure,
+        CancelAtSummary,
+    }
+
+    /// Answers every request with `fixture_model_output`, except for the scripted faults.
+    struct ModelOutputFaultRuntime {
+        faults: Vec<ModelOutputFault>,
+        synthesis_context_tokens: u32,
+        cancellation: Option<CancellationToken>,
+        summary_requests: AtomicUsize,
+        rejected_summary_text: Mutex<Vec<String>>,
+        /// A scripted invalid response the model repeats verbatim on every repair.
+        repeated_response: Mutex<Option<String>>,
+    }
+
+    impl ModelOutputFaultRuntime {
+        fn new(faults: &[ModelOutputFault], synthesis_context_tokens: u32) -> Self {
+            Self {
+                faults: faults.to_vec(),
+                synthesis_context_tokens,
+                cancellation: None,
+                summary_requests: AtomicUsize::new(0),
+                rejected_summary_text: Mutex::new(Vec::new()),
+                repeated_response: Mutex::new(None),
+            }
+        }
+
+        fn has(&self, fault: ModelOutputFault) -> bool {
+            self.faults.contains(&fault)
+        }
+    }
+
+    /// A source sentence whose "may" the scripted model strengthens to "must", with the
+    /// request-local source ID that states it.
+    fn strengthened_source_sentence(request: &ModelRequest) -> (Value, String) {
+        let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+        for segment in prompt["source_segments"]
+            .as_array()
+            .expect("a synthesis prompt lists its source segments")
+        {
+            let quote = segment["exact_quote"].as_str().unwrap_or_default();
+            if let Some(sentence) = quote
+                .split_inclusive(". ")
+                .map(str::trim)
+                .find(|sentence| sentence.contains(" may "))
+            {
+                let sentence = sentence.trim_end_matches('.').to_string() + ".";
+                return (
+                    segment["source_id"].clone(),
+                    sentence.replacen(" may ", " must ", 1),
+                );
+            }
+        }
+        panic!("the modal probe requires a source sentence that states \"may\"");
+    }
+
+    fn scripted_runtime_failure(message: &str) -> ModelRuntimeFailure {
+        ModelRuntimeFailure {
+            code: "MODEL_RUNTIME_UNAVAILABLE".to_string(),
+            message: message.to_string(),
+            recoverable: true,
+            request_attempts: Vec::new(),
+        }
+    }
+
+    impl ModelRuntime for ModelOutputFaultRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let ModelOutputFormat::JsonSchema { name, .. } = &request.output_format else {
+                panic!("fault fixture requests must require structured output");
+            };
+            let selection = [
+                coherent::SOURCE_SELECTION_SCHEMA_NAME,
+                coherent::STORY_SOURCE_SELECTION_SCHEMA_NAME,
+                coherent::CONTRACT_SOURCE_SELECTION_SCHEMA_NAME,
+            ]
+            .contains(&name.as_str());
+            let summary = request.stage == PipelineStage::Synthesize && !selection;
+            if summary {
+                self.summary_requests.fetch_add(1, Ordering::SeqCst);
+                if self.has(ModelOutputFault::CancelAtSummary) {
+                    self.cancellation
+                        .as_ref()
+                        .expect("the cancel probe supplies a token")
+                        .request();
+                }
+                if self.has(ModelOutputFault::SynthesisRuntimeFailure) {
+                    return Err(scripted_runtime_failure(
+                        "scripted synthesis runtime failure",
+                    ));
+                }
+            }
+            if request.stage == PipelineStage::Verify
+                && self.has(ModelOutputFault::VerificationRuntimeFailure)
+            {
+                return Err(scripted_runtime_failure(
+                    "scripted verification runtime failure",
+                ));
+            }
+            let text = if selection && self.has(ModelOutputFault::UnknownSelectionSource) {
+                json!({
+                    "identity_scope_source_ids": [],
+                    "risk_exit_source_ids": [],
+                    "source_ids": ["s999999"]
+                })
+                .to_string()
+            } else if summary && self.has(ModelOutputFault::RepeatedSummaryUnits) {
+                let mut output: Value =
+                    serde_json::from_str(&fixture_model_output(request)).unwrap();
+                let first = output["units"][0].clone();
+                self.rejected_summary_text
+                    .lock()
+                    .unwrap()
+                    .push(first["text"].as_str().unwrap().to_string());
+                output["units"] = json!([first.clone(), first]);
+                output.to_string()
+            } else if summary && self.has(ModelOutputFault::FirstSourceOnly) {
+                let mut repeated = self.repeated_response.lock().unwrap();
+                repeated
+                    .get_or_insert_with(|| {
+                        let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                        let first = &prompt["source_segments"][0];
+                        json!({"units": [{
+                            "text": first["exact_quote"].clone(),
+                            "source_ids": [first["source_id"].clone()]
+                        }]})
+                        .to_string()
+                    })
+                    .clone()
+            } else if summary
+                && (self.has(ModelOutputFault::RepeatedModalStrengthening)
+                    || self.has(ModelOutputFault::LongModalStrengthening))
+            {
+                let mut repeated = self.repeated_response.lock().unwrap();
+                repeated
+                    .get_or_insert_with(|| {
+                        let (source_id, strengthened) = strengthened_source_sentence(request);
+                        let mut text = strengthened;
+                        if self.has(ModelOutputFault::LongModalStrengthening) {
+                            while text.chars().count() < 1_100 {
+                                text.push_str(" The agreement records this requirement for both named organizations.");
+                            }
+                        }
+                        self.rejected_summary_text.lock().unwrap().push(text.clone());
+                        json!({"units": [{"text": text, "source_ids": [source_id]}]}).to_string()
+                    })
+                    .clone()
+            } else {
+                fixture_model_output(request)
+            };
+            Ok(ModelResponse {
+                text,
+                runtime_id: self.runtime_id().to_string(),
+                model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
+            })
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "model-output-fault-runtime"
+        }
+        fn model_id(&self) -> &str {
+            "model-output-fault-model"
+        }
+        fn context_tokens(&self, stage: PipelineStage) -> u32 {
+            if stage == PipelineStage::Synthesize {
+                self.synthesis_context_tokens
+            } else {
+                LEGACY_MODEL_CONTEXT_TOKENS
+            }
+        }
+    }
+
+    const MODEL_OUTPUT_INVALID_WARNING: &str = "COHERENT_SUMMARY_MODEL_OUTPUT_INVALID";
+    /// With the incomplete contract fixture, synthesis contexts of 4,200-5,000 tokens fit the
+    /// full first request but not a Contract repair that repeats a ~1,100-character rejected
+    /// response (measured). 4,600 sits inside that window; the probe asserts one request.
+    const OVERSIZED_REPAIR_SYNTHESIS_CONTEXT_TOKENS: u32 = 4_600;
+
+    fn synthesis_fallback_codes(synthesized: &SynthesizedDocument) -> Vec<String> {
+        synthesized
+            .warnings
+            .iter()
+            .filter(|warning| {
+                warning.stage == Some(PipelineStage::Synthesize)
+                    && (warning.code == coherent::FALLBACK_WARNING_CODE
+                        || warning.code == MODEL_OUTPUT_INVALID_WARNING)
+            })
+            .map(|warning| warning.code.clone())
+            .collect()
+    }
+
+    /// Six numbered clauses on six pages, each in the "N. Title." heading form followed by a
+    /// line break that short-Contract clause detection requires: a complete short Contract.
+    fn complete_short_contract_fixture() -> (NormalizedDocument, ChunkedDocument) {
+        let pages = [
+            "1. Parties.\nAlpha Services Incorporated engages Beta Holdings Limited for janitorial services.",
+            "2. Term.\nThe engagement runs from January 1, 2026 through December 31, 2026 inclusive.",
+            "3. Payment.\nThe Client pays each undisputed invoice within thirty calendar days of receipt.",
+            "4. Insurance.\nThe Contractor maintains liability insurance of one million dollars per occurrence.",
+            "5. Termination.\nEither party may terminate upon thirty days written notification.",
+            "6. Governing Law.\nThe agreement is governed by the laws of the State of Illinois.",
+        ]
+        .map(str::to_string);
+        page_text_fixture("complete-short-contract", &pages)
+    }
+
+    fn complete_long_contract_fixture() -> (NormalizedDocument, ChunkedDocument) {
+        let pages = (1..=10)
+            .map(|number| {
+                format!(
+                    "{number}. Clause. The parties performed the obligations described in paragraph {number} without exception. \
+                     Each party preserved accurate records concerning paragraph {number} throughout performance."
+                )
+            })
+            .collect::<Vec<_>>();
+        page_text_fixture("complete-long-contract", &pages)
+    }
+
+    fn fixture_run(
+        database: &TestDatabase,
+        fixture: &str,
+        summary_profile: SummaryProfile,
+    ) -> (Connection, String) {
+        let mut conn = init_db(&database.0).expect("test database should initialize");
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture);
+        let (_, run) = ingest_pdf_with_profiles(
+            &mut conn,
+            source.to_str().expect("fixture path should be UTF-8"),
+            None,
+            summary_profile,
+            None,
+        )
+        .expect("fixture should ingest");
+        parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id)
+            .expect("fixture should parse");
+        normalize_document(&mut conn, &CanonicalNormalizer::new(), &run.run_id)
+            .expect("fixture should normalize");
+        structure_document(
+            &mut conn,
+            &DeterministicStructureInterpreter::new(),
+            &run.run_id,
+        )
+        .expect("fixture should structure");
+        chunk_document(&mut conn, &DeterministicDocumentChunker::new(), &run.run_id)
+            .expect("fixture should chunk");
+        (conn, run.run_id)
+    }
+
+    fn synthesize_in_memory(
+        profile: SummaryProfile,
+        runtime: &ModelOutputFaultRuntime,
+        fixture: (NormalizedDocument, ChunkedDocument),
+        control: &dyn ExecutionControl,
+    ) -> Result<SynthesizedDocument, PipelineFailure> {
+        let (normalized, chunked) = fixture;
+        let analyzed = analyze(
+            runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+        coherent::synthesize(
+            profile,
+            runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            control,
+        )
+    }
+
+    fn assert_model_output_fallback(synthesized: &SynthesizedDocument, rejected: &[String]) {
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(synthesized.summary_claims.is_empty());
+        assert!(synthesized.synthesis_evidence.is_empty());
+        assert!(!synthesized.claims.is_empty());
+        assert_eq!(
+            synthesis_fallback_codes(synthesized),
+            vec![MODEL_OUTPUT_INVALID_WARNING.to_string()]
+        );
+        for text in rejected {
+            assert!(!synthesized.summary_text.contains(text.as_str()));
+            assert!(synthesized.claims.iter().all(|claim| claim.text != *text));
+        }
+    }
+
+    // Contract test 9 (amendment 1): the live repeated-unit response on an R2-admitted
+    // Contract falls back to the verified ledger and the ledger is verified.
+    #[test]
+    fn r2_contract_invalid_summary_output_uses_verified_ledger_fallback() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = fixture_run(
+            &database,
+            "contract_long_clause.pdf",
+            SummaryProfile::Contract,
+        );
+        let runtime = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::RepeatedSummaryUnits],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("invalid Contract synthesis output should fall back to the verified ledger");
+        let analyzed = get_analyzed_document(&conn, &run_id).unwrap().unwrap();
+        assert!(analyzed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE));
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let rejected = runtime.rejected_summary_text.lock().unwrap().clone();
+        assert!(!rejected.is_empty());
+        assert_model_output_fallback(&synthesized, &rejected);
+        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+        assert_eq!(
+            verified.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(!verified.claim_verifications.is_empty());
+        for text in &rejected {
+            assert!(!completed.summary.text.contains(text.as_str()));
+        }
+    }
+
+    // Contract test 10 (amendment 1): each eligible exit on an R2-admitted Contract catalog.
+    #[test]
+    fn r2_contract_eligible_model_output_exits_use_verified_ledger_fallback() {
+        let selection =
+            ModelOutputFaultRuntime::new(&[ModelOutputFault::UnknownSelectionSource], 3_900);
+        let synthesized = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &selection,
+            incomplete_long_contract_fixture(),
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("an invalid source-selection response should fall back to the verified ledger");
+        assert_model_output_fallback(&synthesized, &[]);
+        assert_eq!(selection.summary_requests.load(Ordering::SeqCst), 0);
+
+        let exhausted = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::RepeatedModalStrengthening],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let synthesized = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &exhausted,
+            incomplete_long_contract_fixture(),
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("exhausted validation repairs should fall back to the verified ledger");
+        let rejected = exhausted.rejected_summary_text.lock().unwrap().clone();
+        assert_model_output_fallback(&synthesized, &rejected);
+        // The first response plus the Contract profile's two validation repairs.
+        assert_eq!(exhausted.summary_requests.load(Ordering::SeqCst), 3);
+
+        let oversized = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::LongModalStrengthening],
+            OVERSIZED_REPAIR_SYNTHESIS_CONTEXT_TOKENS,
+        );
+        let synthesized = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &oversized,
+            incomplete_long_contract_fixture(),
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("a repair that cannot fit should fall back to the verified ledger");
+        let rejected = oversized.rejected_summary_text.lock().unwrap().clone();
+        assert_model_output_fallback(&synthesized, &rejected);
+        assert_eq!(oversized.summary_requests.load(Ordering::SeqCst), 1);
+    }
+
+    // Contract test 10 (amendment 1): ineligible cases keep today's outcome.
+    #[test]
+    fn model_output_fallback_is_limited_to_r2_contract_catalogs() {
+        for (profile, fixture) in [
+            (SummaryProfile::General, incomplete_long_contract_fixture()),
+            (SummaryProfile::Story, complete_long_contract_fixture()),
+            (SummaryProfile::Contract, complete_long_contract_fixture()),
+        ] {
+            let runtime = ModelOutputFaultRuntime::new(
+                &[ModelOutputFault::RepeatedSummaryUnits],
+                LEGACY_MODEL_CONTEXT_TOKENS,
+            );
+            let failure = synthesize_in_memory(profile, &runtime, fixture, &UNCONTROLLED_EXECUTION)
+                .expect_err("only an R2-admitted Contract catalog may fall back on invalid output");
+            assert_eq!(
+                failure.code, "MODEL_SUMMARY_RESPONSE_INVALID",
+                "{profile:?}"
+            );
+        }
+
+        let runtime_failure = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::SynthesisRuntimeFailure],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let failure = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &runtime_failure,
+            incomplete_long_contract_fixture(),
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect_err("a runtime failure is not invalid model output");
+        assert_ne!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
+
+        let token = CancellationToken::new();
+        let mut cancelling = ModelOutputFaultRuntime::new(
+            &[
+                ModelOutputFault::CancelAtSummary,
+                ModelOutputFault::RepeatedSummaryUnits,
+            ],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        cancelling.cancellation = Some(token.clone());
+        let failure = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &cancelling,
+            incomplete_long_contract_fixture(),
+            &token,
+        )
+        .expect_err("cancellation is not invalid model output");
+        assert!(cancellation_observed(&failure));
+
+        let (normalized, mut chunked) = incomplete_long_contract_fixture();
+        let repeated = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::RepeatedSummaryUnits],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let analyzed = analyze(
+            &repeated,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        chunked.chunks[0]
+            .block_ids
+            .push("unknown-normalized-block".to_string());
+        let failure = coherent::synthesize(
+            SummaryProfile::Contract,
+            &repeated,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect_err("an invalid source artifact is not invalid model output");
+        assert_ne!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
+    }
+
+    // Contract test 10 (amendment 1): a complete short Contract whose coverage repairs are
+    // exhausted still fails closed at the synthesis stage; R8 does not apply to it.
+    #[test]
+    fn complete_short_contract_coverage_exhaustion_still_fails_closed() {
+        let runtime = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::FirstSourceOnly],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let (normalized, chunked) = complete_short_contract_fixture();
+        assert!(
+            coherent::required_short_contract_evidence_ids(
+                SummaryProfile::Contract,
+                SYNTHESIS_VERSION,
+                &chunked,
+                &normalized,
+            )
+            .unwrap()
+            .is_some(),
+            "precondition: the fixture is a complete short Contract with required clauses"
+        );
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("the short Contract fixture should analyze");
+        assert!(analyzed
+            .warnings
+            .iter()
+            .all(|warning| warning.code != QUOTE_BOUNDARY_OMITTED_WARNING_CODE));
+        let failure = coherent::synthesize(
+            SummaryProfile::Contract,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect_err("a complete short Contract keeps failing closed on exhausted coverage repair");
+        assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
+        // The first response plus the Contract profile's two validation repairs.
+        assert_eq!(runtime.summary_requests.load(Ordering::SeqCst), 3);
+    }
+
+    // Contract test 10 (amendment 1): a failed verification is not converted.
+    #[test]
+    fn model_output_fallback_does_not_mask_a_failed_verification() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = fixture_run(
+            &database,
+            "contract_long_clause.pdf",
+            SummaryProfile::Contract,
+        );
+        let runtime = ModelOutputFaultRuntime::new(
+            &[
+                ModelOutputFault::RepeatedSummaryUnits,
+                ModelOutputFault::VerificationRuntimeFailure,
+            ],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect_err("verification fails after the ledger fallback");
+        let run = get_pipeline_run(&conn, &run_id).unwrap().unwrap();
+        let failure = run.failure.expect("the run records its failure");
+        assert_eq!(failure.stage, Some(PipelineStage::Verify));
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        assert_eq!(
+            synthesis_fallback_codes(&synthesized),
+            vec![MODEL_OUTPUT_INVALID_WARNING.to_string()]
+        );
+    }
+
+    // Contract test 13 (amendment 1, F-A): opening text never exceeds 80 characters and
+    // contains only whole words or the lone marker.
+    #[test]
+    fn unquoted_opening_text_keeps_whole_words_within_eighty_characters() {
+        let word = |length: usize| "w".repeat(length);
+        let exact = format!("{} {}", word(40), word(39));
+        assert_eq!(exact.chars().count(), 80);
+        let one_over = format!("{} {} {}", word(40), word(39), word(3));
+        let first_word_at_cap = format!("{} tail", word(80));
+        let first_word_over_cap = format!("{} tail", word(120));
+        let first_word_at_prefix_cap = format!("{} tail", word(79));
+        let cases = [
+            (exact.clone(), exact.clone()),
+            // `w40 w39` is 80 characters, so the 79-character prefix keeps only `w40`.
+            (one_over, format!("{}…", word(40))),
+            (first_word_at_cap, "…".to_string()),
+            (first_word_over_cap, "…".to_string()),
+            (first_word_at_prefix_cap, format!("{}…", word(79))),
+        ];
+        for (passage, expected) in cases {
+            let opening = unquoted_opening_text(&passage);
+            assert!(
+                opening.chars().count() <= UNQUOTED_OPENING_CHARACTERS,
+                "{opening:?}"
+            );
+            assert_eq!(opening, expected, "{passage:?}");
+        }
+    }
+
+    fn analyzed_fixture(
+        runtime: &ModelOutputFaultRuntime,
+        fixture: (NormalizedDocument, ChunkedDocument),
+    ) -> (NormalizedDocument, ChunkedDocument, AnalyzedDocument) {
+        let (normalized, chunked) = fixture;
+        let analyzed = analyze(
+            runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+        (normalized, chunked, analyzed)
+    }
+
+    fn synthesis_warning(code: &str) -> PipelineWarning {
+        PipelineWarning {
+            code: code.to_string(),
+            message: "Scripted fallback warning".to_string(),
+            stage: Some(PipelineStage::Synthesize),
+        }
+    }
+
+    // Contract test 11 (amendment 1): persisted-result validation admits the invalid-output
+    // fallback only for a current-version Contract whose catalog R2 admitted.
+    #[test]
+    fn model_output_fallback_validation_requires_the_r2_contract_path() {
+        let runtime = ModelOutputFaultRuntime::new(&[], LEGACY_MODEL_CONTEXT_TOKENS);
+        let (normalized, chunked, analyzed) =
+            analyzed_fixture(&runtime, incomplete_long_contract_fixture());
+        let current = coherent::model_output_fallback_for_version(
+            &runtime,
+            &analyzed,
+            &chunked,
+            SYNTHESIS_VERSION,
+        )
+        .unwrap();
+        coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &current,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &runtime,
+        )
+        .expect("a current-version R2 Contract fallback validates");
+        validate_synthesized_document_without_runtime(&current, &analyzed, &chunked, &normalized)
+            .expect("a current-version R2 Contract fallback reloads");
+        for profile in [SummaryProfile::General, SummaryProfile::Story] {
+            assert!(
+                coherent::validate_for_runtime(
+                    profile,
+                    &current,
+                    &analyzed,
+                    &chunked,
+                    &normalized,
+                    &runtime
+                )
+                .is_err(),
+                "{profile:?}"
+            );
+        }
+        let historical =
+            coherent::model_output_fallback_for_version(&runtime, &analyzed, &chunked, "9.0.0")
+                .unwrap();
+        assert!(coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &historical,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &runtime
+        )
+        .is_err());
+        let (complete_normalized, complete_chunked, complete_analyzed) =
+            analyzed_fixture(&runtime, complete_long_contract_fixture());
+        let complete = coherent::model_output_fallback_for_version(
+            &runtime,
+            &complete_analyzed,
+            &complete_chunked,
+            SYNTHESIS_VERSION,
+        )
+        .unwrap();
+        assert!(coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &complete,
+            &complete_analyzed,
+            &complete_chunked,
+            &complete_normalized,
+            &runtime
+        )
+        .is_err());
+
+        let mut both = current.clone();
+        both.warnings
+            .push(synthesis_warning(coherent::FALLBACK_WARNING_CODE));
+        assert!(coherent::validate_content(&both, &analyzed, &chunked, &normalized).is_err());
+        let mut neither = current.clone();
+        neither
+            .warnings
+            .retain(|warning| warning.code != MODEL_OUTPUT_INVALID_WARNING);
+        assert!(coherent::validate_content(&neither, &analyzed, &chunked, &normalized).is_err());
+        let coherent_summary = coherent::synthesize(
+            SummaryProfile::Contract,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("the fixture synthesizes a coherent Contract summary");
+        assert_eq!(
+            coherent_summary.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        let mut tagged = coherent_summary;
+        tagged
+            .warnings
+            .push(synthesis_warning(MODEL_OUTPUT_INVALID_WARNING));
+        assert!(coherent::validate_content(&tagged, &analyzed, &chunked, &normalized).is_err());
+    }
+
+    // Contract amendment 1, verification boundary: verification starts with a profile-blind
+    // artifact validator, so the invalid-output fallback is checked against the run profile.
+    #[test]
+    fn verification_admits_the_model_output_fallback_only_on_the_r2_contract_path() {
+        let runtime = ModelOutputFaultRuntime::new(&[], LEGACY_MODEL_CONTEXT_TOKENS);
+        let (normalized, chunked, analyzed) =
+            analyzed_fixture(&runtime, incomplete_long_contract_fixture());
+        let current = coherent::model_output_fallback_for_version(
+            &runtime,
+            &analyzed,
+            &chunked,
+            SYNTHESIS_VERSION,
+        )
+        .unwrap();
+        coherent::validate_model_output_fallback_boundary(
+            SummaryProfile::Contract,
+            &current,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .expect("verification admits an R2 Contract invalid-output fallback");
+        for profile in [SummaryProfile::General, SummaryProfile::Story] {
+            assert!(
+                coherent::validate_model_output_fallback_boundary(
+                    profile,
+                    &current,
+                    &analyzed,
+                    &chunked,
+                    &normalized
+                )
+                .is_err(),
+                "{profile:?}"
+            );
+        }
+        let historical =
+            coherent::model_output_fallback_for_version(&runtime, &analyzed, &chunked, "9.0.0")
+                .unwrap();
+        assert!(coherent::validate_model_output_fallback_boundary(
+            SummaryProfile::Contract,
+            &historical,
+            &analyzed,
+            &chunked,
+            &normalized
+        )
+        .is_err());
+        let (complete_normalized, complete_chunked, complete_analyzed) =
+            analyzed_fixture(&runtime, complete_long_contract_fixture());
+        let complete = coherent::model_output_fallback_for_version(
+            &runtime,
+            &complete_analyzed,
+            &complete_chunked,
+            SYNTHESIS_VERSION,
+        )
+        .unwrap();
+        assert!(coherent::validate_model_output_fallback_boundary(
+            SummaryProfile::Contract,
+            &complete,
+            &complete_analyzed,
+            &complete_chunked,
+            &complete_normalized
+        )
+        .is_err());
+        let ordinary = coherent::incomplete_catalog_fallback_for_version(
+            &runtime, &analyzed, &chunked, "9.0.0",
+        )
+        .unwrap();
+        coherent::validate_model_output_fallback_boundary(
+            SummaryProfile::General,
+            &ordinary,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .expect("the boundary concerns only the invalid-output fallback");
+    }
+
     #[test]
     fn source_selection_context_rejection_uses_verified_ledger_fallback() {
         let runtime = LowSynthesisContextRuntime::rejecting_exact_synthesis_admission();
@@ -10590,7 +11927,8 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "9.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "10.0.0");
+        assert_eq!(PRE_LONG_CONTRACT_SYNTHESIS_VERSION, "9.0.0");
         assert_eq!(PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION, "8.0.0");
         assert_eq!(PRE_CONTEXT_SYNTHESIS_VERSION, "7.0.0");
         assert_eq!(PRE_DISCLOSURE_SYNTHESIS_VERSION, "6.0.0");
