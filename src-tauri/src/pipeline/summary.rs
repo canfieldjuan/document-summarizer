@@ -780,7 +780,13 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
             &chunked,
             &normalized,
         )?;
-        coherent::validate_verified_profile(summary_profile, &verified, &chunked, &normalized)?;
+        coherent::validate_verified_profile(
+            summary_profile,
+            &verified,
+            &persisted_synthesis.synthesis_version,
+            &chunked,
+            &normalized,
+        )?;
         Ok(verified)
     }) {
         Ok(verified) => verified,
@@ -1211,6 +1217,13 @@ fn verify(
 ) -> Result<VerifiedDocument, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Verify)?;
     validate_synthesized_document_without_runtime(synthesized, analyzed, chunked, normalized)?;
+    coherent::validate_model_output_fallback_boundary(
+        summary_profile,
+        synthesized,
+        analyzed,
+        chunked,
+        normalized,
+    )?;
     let ledger_evidence = analyzed
         .chunks
         .iter()
@@ -1273,9 +1286,12 @@ fn verify(
         &synthesized.synthesis_evidence,
         &mut summary_claim_verifications,
     )?;
-    if let Some(required_evidence_ids) =
-        coherent::required_short_contract_evidence_ids(summary_profile, chunked, normalized)?
-    {
+    if let Some(required_evidence_ids) = coherent::required_short_contract_evidence_ids(
+        summary_profile,
+        &synthesized.synthesis_version,
+        chunked,
+        normalized,
+    )? {
         apply_contract_material_coverage(
             runtime,
             &synthesized.summary_claims,
@@ -3089,33 +3105,28 @@ fn unquoted_disclosure_mismatch() -> PipelineFailure {
     )
 }
 
-/// The passage's leading words, at most `UNQUOTED_OPENING_CHARACTERS` long, cut at a word
-/// boundary and marked with a trailing ellipsis when shortened.
+/// The passage's whole leading words, at most `UNQUOTED_OPENING_CHARACTERS` characters in
+/// total including a trailing `…` marker when shortened. A passage that fits is returned whole
+/// without the marker; a first word too long to fit yields the marker alone.
 fn unquoted_opening_text(passage: &str) -> String {
     let words = passage.split_whitespace().collect::<Vec<_>>();
+    let whole = words.join(" ");
+    if whole.chars().count() <= UNQUOTED_OPENING_CHARACTERS {
+        return whole;
+    }
+    let prefix_limit = UNQUOTED_OPENING_CHARACTERS - 1;
     let mut opening = String::new();
-    let mut used_words = 0usize;
     for word in &words {
         let separator = usize::from(!opening.is_empty());
-        if opening.chars().count() + separator + word.chars().count() > UNQUOTED_OPENING_CHARACTERS
-        {
+        if opening.chars().count() + separator + word.chars().count() > prefix_limit {
             break;
         }
         if separator == 1 {
             opening.push(' ');
         }
         opening.push_str(word);
-        used_words += 1;
     }
-    if used_words == 0 {
-        opening = words
-            .first()
-            .map(|word| word.chars().take(UNQUOTED_OPENING_CHARACTERS).collect())
-            .unwrap_or_default();
-    }
-    if used_words < words.len() {
-        opening.push('…');
-    }
+    opening.push('…');
     opening
 }
 
@@ -10598,7 +10609,7 @@ mod tests {
             .opening_text
             .starts_with("The Contractor shall defend, indemnify"));
         assert!(unit.opening_text.ends_with('…'));
-        assert!(unit.opening_text.chars().count() <= UNQUOTED_OPENING_CHARACTERS + 1);
+        assert!(unit.opening_text.chars().count() <= UNQUOTED_OPENING_CHARACTERS);
         let serialized = serde_json::to_value(unit).unwrap();
         assert_eq!(serialized["kind"], "overLimitSentence");
         assert_eq!(serialized["pageNumber"], 3);
@@ -10758,6 +10769,778 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum ModelOutputFault {
+        RepeatedSummaryUnits,
+        UnknownSelectionSource,
+        RepeatedModalStrengthening,
+        LongModalStrengthening,
+        FirstSourceOnly,
+        SynthesisRuntimeFailure,
+        VerificationRuntimeFailure,
+        CancelAtSummary,
+    }
+
+    /// Answers every request with `fixture_model_output`, except for the scripted faults.
+    struct ModelOutputFaultRuntime {
+        faults: Vec<ModelOutputFault>,
+        synthesis_context_tokens: u32,
+        cancellation: Option<CancellationToken>,
+        summary_requests: AtomicUsize,
+        rejected_summary_text: Mutex<Vec<String>>,
+        /// A scripted invalid response the model repeats verbatim on every repair.
+        repeated_response: Mutex<Option<String>>,
+    }
+
+    impl ModelOutputFaultRuntime {
+        fn new(faults: &[ModelOutputFault], synthesis_context_tokens: u32) -> Self {
+            Self {
+                faults: faults.to_vec(),
+                synthesis_context_tokens,
+                cancellation: None,
+                summary_requests: AtomicUsize::new(0),
+                rejected_summary_text: Mutex::new(Vec::new()),
+                repeated_response: Mutex::new(None),
+            }
+        }
+
+        fn has(&self, fault: ModelOutputFault) -> bool {
+            self.faults.contains(&fault)
+        }
+    }
+
+    /// A source sentence whose "may" the scripted model strengthens to "must", with the
+    /// request-local source ID that states it.
+    fn strengthened_source_sentence(request: &ModelRequest) -> (Value, String) {
+        let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+        for segment in prompt["source_segments"]
+            .as_array()
+            .expect("a synthesis prompt lists its source segments")
+        {
+            let quote = segment["exact_quote"].as_str().unwrap_or_default();
+            if let Some(sentence) = quote
+                .split_inclusive(". ")
+                .map(str::trim)
+                .find(|sentence| sentence.contains(" may "))
+            {
+                let sentence = sentence.trim_end_matches('.').to_string() + ".";
+                return (
+                    segment["source_id"].clone(),
+                    sentence.replacen(" may ", " must ", 1),
+                );
+            }
+        }
+        panic!("the modal probe requires a source sentence that states \"may\"");
+    }
+
+    fn scripted_runtime_failure(message: &str) -> ModelRuntimeFailure {
+        ModelRuntimeFailure {
+            code: "MODEL_RUNTIME_UNAVAILABLE".to_string(),
+            message: message.to_string(),
+            recoverable: true,
+            request_attempts: Vec::new(),
+        }
+    }
+
+    impl ModelRuntime for ModelOutputFaultRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let ModelOutputFormat::JsonSchema { name, .. } = &request.output_format else {
+                panic!("fault fixture requests must require structured output");
+            };
+            let selection = [
+                coherent::SOURCE_SELECTION_SCHEMA_NAME,
+                coherent::STORY_SOURCE_SELECTION_SCHEMA_NAME,
+                coherent::CONTRACT_SOURCE_SELECTION_SCHEMA_NAME,
+            ]
+            .contains(&name.as_str());
+            let summary = request.stage == PipelineStage::Synthesize && !selection;
+            if summary {
+                self.summary_requests.fetch_add(1, Ordering::SeqCst);
+                if self.has(ModelOutputFault::CancelAtSummary) {
+                    self.cancellation
+                        .as_ref()
+                        .expect("the cancel probe supplies a token")
+                        .request();
+                }
+                if self.has(ModelOutputFault::SynthesisRuntimeFailure) {
+                    return Err(scripted_runtime_failure(
+                        "scripted synthesis runtime failure",
+                    ));
+                }
+            }
+            if request.stage == PipelineStage::Verify
+                && self.has(ModelOutputFault::VerificationRuntimeFailure)
+            {
+                return Err(scripted_runtime_failure(
+                    "scripted verification runtime failure",
+                ));
+            }
+            let text = if selection && self.has(ModelOutputFault::UnknownSelectionSource) {
+                json!({
+                    "identity_scope_source_ids": [],
+                    "risk_exit_source_ids": [],
+                    "source_ids": ["s999999"]
+                })
+                .to_string()
+            } else if summary && self.has(ModelOutputFault::RepeatedSummaryUnits) {
+                let mut output: Value =
+                    serde_json::from_str(&fixture_model_output(request)).unwrap();
+                let first = output["units"][0].clone();
+                self.rejected_summary_text
+                    .lock()
+                    .unwrap()
+                    .push(first["text"].as_str().unwrap().to_string());
+                output["units"] = json!([first.clone(), first]);
+                output.to_string()
+            } else if summary && self.has(ModelOutputFault::FirstSourceOnly) {
+                let mut repeated = self.repeated_response.lock().unwrap();
+                repeated
+                    .get_or_insert_with(|| {
+                        let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                        let first = &prompt["source_segments"][0];
+                        json!({"units": [{
+                            "text": first["exact_quote"].clone(),
+                            "source_ids": [first["source_id"].clone()]
+                        }]})
+                        .to_string()
+                    })
+                    .clone()
+            } else if summary
+                && (self.has(ModelOutputFault::RepeatedModalStrengthening)
+                    || self.has(ModelOutputFault::LongModalStrengthening))
+            {
+                let mut repeated = self.repeated_response.lock().unwrap();
+                repeated
+                    .get_or_insert_with(|| {
+                        let (source_id, strengthened) = strengthened_source_sentence(request);
+                        let mut text = strengthened;
+                        if self.has(ModelOutputFault::LongModalStrengthening) {
+                            while text.chars().count() < 1_100 {
+                                text.push_str(" The agreement records this requirement for both named organizations.");
+                            }
+                        }
+                        self.rejected_summary_text.lock().unwrap().push(text.clone());
+                        json!({"units": [{"text": text, "source_ids": [source_id]}]}).to_string()
+                    })
+                    .clone()
+            } else {
+                fixture_model_output(request)
+            };
+            Ok(ModelResponse {
+                text,
+                runtime_id: self.runtime_id().to_string(),
+                model_id: self.model_id().to_string(),
+                request_attempts: Vec::new(),
+            })
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "model-output-fault-runtime"
+        }
+        fn model_id(&self) -> &str {
+            "model-output-fault-model"
+        }
+        fn context_tokens(&self, stage: PipelineStage) -> u32 {
+            if stage == PipelineStage::Synthesize {
+                self.synthesis_context_tokens
+            } else {
+                LEGACY_MODEL_CONTEXT_TOKENS
+            }
+        }
+    }
+
+    const MODEL_OUTPUT_INVALID_WARNING: &str = "COHERENT_SUMMARY_MODEL_OUTPUT_INVALID";
+    /// With the incomplete contract fixture, synthesis contexts of 4,200-5,000 tokens fit the
+    /// full first request but not a Contract repair that repeats a ~1,100-character rejected
+    /// response (measured). 4,600 sits inside that window; the probe asserts one request.
+    const OVERSIZED_REPAIR_SYNTHESIS_CONTEXT_TOKENS: u32 = 4_600;
+
+    fn synthesis_fallback_codes(synthesized: &SynthesizedDocument) -> Vec<String> {
+        synthesized
+            .warnings
+            .iter()
+            .filter(|warning| {
+                warning.stage == Some(PipelineStage::Synthesize)
+                    && (warning.code == coherent::FALLBACK_WARNING_CODE
+                        || warning.code == MODEL_OUTPUT_INVALID_WARNING)
+            })
+            .map(|warning| warning.code.clone())
+            .collect()
+    }
+
+    /// Six numbered clauses on six pages, each in the "N. Title." heading form followed by a
+    /// line break that short-Contract clause detection requires: a complete short Contract.
+    fn complete_short_contract_fixture() -> (NormalizedDocument, ChunkedDocument) {
+        let pages = [
+            "1. Parties.\nAlpha Services Incorporated engages Beta Holdings Limited for janitorial services.",
+            "2. Term.\nThe engagement runs from January 1, 2026 through December 31, 2026 inclusive.",
+            "3. Payment.\nThe Client pays each undisputed invoice within thirty calendar days of receipt.",
+            "4. Insurance.\nThe Contractor maintains liability insurance of one million dollars per occurrence.",
+            "5. Termination.\nEither party may terminate upon thirty days written notification.",
+            "6. Governing Law.\nThe agreement is governed by the laws of the State of Illinois.",
+        ]
+        .map(str::to_string);
+        page_text_fixture("complete-short-contract", &pages)
+    }
+
+    fn complete_long_contract_fixture() -> (NormalizedDocument, ChunkedDocument) {
+        let pages = (1..=10)
+            .map(|number| {
+                format!(
+                    "{number}. Clause. The parties performed the obligations described in paragraph {number} without exception. \
+                     Each party preserved accurate records concerning paragraph {number} throughout performance."
+                )
+            })
+            .collect::<Vec<_>>();
+        page_text_fixture("complete-long-contract", &pages)
+    }
+
+    fn fixture_run(
+        database: &TestDatabase,
+        fixture: &str,
+        summary_profile: SummaryProfile,
+    ) -> (Connection, String) {
+        let mut conn = init_db(&database.0).expect("test database should initialize");
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture);
+        let (_, run) = ingest_pdf_with_profiles(
+            &mut conn,
+            source.to_str().expect("fixture path should be UTF-8"),
+            None,
+            summary_profile,
+            None,
+        )
+        .expect("fixture should ingest");
+        parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id)
+            .expect("fixture should parse");
+        normalize_document(&mut conn, &CanonicalNormalizer::new(), &run.run_id)
+            .expect("fixture should normalize");
+        structure_document(
+            &mut conn,
+            &DeterministicStructureInterpreter::new(),
+            &run.run_id,
+        )
+        .expect("fixture should structure");
+        chunk_document(&mut conn, &DeterministicDocumentChunker::new(), &run.run_id)
+            .expect("fixture should chunk");
+        (conn, run.run_id)
+    }
+
+    fn synthesize_in_memory(
+        profile: SummaryProfile,
+        runtime: &ModelOutputFaultRuntime,
+        fixture: (NormalizedDocument, ChunkedDocument),
+        control: &dyn ExecutionControl,
+    ) -> Result<SynthesizedDocument, PipelineFailure> {
+        let (normalized, chunked) = fixture;
+        let analyzed = analyze(
+            runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+        coherent::synthesize(
+            profile,
+            runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            control,
+        )
+    }
+
+    fn assert_model_output_fallback(synthesized: &SynthesizedDocument, rejected: &[String]) {
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(synthesized.summary_claims.is_empty());
+        assert!(synthesized.synthesis_evidence.is_empty());
+        assert!(!synthesized.claims.is_empty());
+        assert_eq!(
+            synthesis_fallback_codes(synthesized),
+            vec![MODEL_OUTPUT_INVALID_WARNING.to_string()]
+        );
+        for text in rejected {
+            assert!(!synthesized.summary_text.contains(text.as_str()));
+            assert!(synthesized.claims.iter().all(|claim| claim.text != *text));
+        }
+    }
+
+    // Contract test 9 (amendment 1): the live repeated-unit response on an R2-admitted
+    // Contract falls back to the verified ledger and the ledger is verified.
+    #[test]
+    fn r2_contract_invalid_summary_output_uses_verified_ledger_fallback() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = fixture_run(
+            &database,
+            "contract_long_clause.pdf",
+            SummaryProfile::Contract,
+        );
+        let runtime = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::RepeatedSummaryUnits],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect("invalid Contract synthesis output should fall back to the verified ledger");
+        let analyzed = get_analyzed_document(&conn, &run_id).unwrap().unwrap();
+        assert!(analyzed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == QUOTE_BOUNDARY_OMITTED_WARNING_CODE));
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let rejected = runtime.rejected_summary_text.lock().unwrap().clone();
+        assert!(!rejected.is_empty());
+        assert_model_output_fallback(&synthesized, &rejected);
+        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+        assert_eq!(
+            verified.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(!verified.claim_verifications.is_empty());
+        for text in &rejected {
+            assert!(!completed.summary.text.contains(text.as_str()));
+        }
+    }
+
+    // Contract test 10 (amendment 1): each eligible exit on an R2-admitted Contract catalog.
+    #[test]
+    fn r2_contract_eligible_model_output_exits_use_verified_ledger_fallback() {
+        let selection =
+            ModelOutputFaultRuntime::new(&[ModelOutputFault::UnknownSelectionSource], 3_900);
+        let synthesized = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &selection,
+            incomplete_long_contract_fixture(),
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("an invalid source-selection response should fall back to the verified ledger");
+        assert_model_output_fallback(&synthesized, &[]);
+        assert_eq!(selection.summary_requests.load(Ordering::SeqCst), 0);
+
+        let exhausted = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::RepeatedModalStrengthening],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let synthesized = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &exhausted,
+            incomplete_long_contract_fixture(),
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("exhausted validation repairs should fall back to the verified ledger");
+        let rejected = exhausted.rejected_summary_text.lock().unwrap().clone();
+        assert_model_output_fallback(&synthesized, &rejected);
+        // The first response plus the Contract profile's two validation repairs.
+        assert_eq!(exhausted.summary_requests.load(Ordering::SeqCst), 3);
+
+        let oversized = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::LongModalStrengthening],
+            OVERSIZED_REPAIR_SYNTHESIS_CONTEXT_TOKENS,
+        );
+        let synthesized = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &oversized,
+            incomplete_long_contract_fixture(),
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("a repair that cannot fit should fall back to the verified ledger");
+        let rejected = oversized.rejected_summary_text.lock().unwrap().clone();
+        assert_model_output_fallback(&synthesized, &rejected);
+        assert_eq!(oversized.summary_requests.load(Ordering::SeqCst), 1);
+    }
+
+    // Contract test 10 (amendment 1): ineligible cases keep today's outcome.
+    #[test]
+    fn model_output_fallback_is_limited_to_r2_contract_catalogs() {
+        for (profile, fixture) in [
+            (SummaryProfile::General, incomplete_long_contract_fixture()),
+            (SummaryProfile::Story, complete_long_contract_fixture()),
+            (SummaryProfile::Contract, complete_long_contract_fixture()),
+        ] {
+            let runtime = ModelOutputFaultRuntime::new(
+                &[ModelOutputFault::RepeatedSummaryUnits],
+                LEGACY_MODEL_CONTEXT_TOKENS,
+            );
+            let failure = synthesize_in_memory(profile, &runtime, fixture, &UNCONTROLLED_EXECUTION)
+                .expect_err("only an R2-admitted Contract catalog may fall back on invalid output");
+            assert_eq!(
+                failure.code, "MODEL_SUMMARY_RESPONSE_INVALID",
+                "{profile:?}"
+            );
+        }
+
+        let runtime_failure = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::SynthesisRuntimeFailure],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let failure = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &runtime_failure,
+            incomplete_long_contract_fixture(),
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect_err("a runtime failure is not invalid model output");
+        assert_ne!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
+
+        let token = CancellationToken::new();
+        let mut cancelling = ModelOutputFaultRuntime::new(
+            &[
+                ModelOutputFault::CancelAtSummary,
+                ModelOutputFault::RepeatedSummaryUnits,
+            ],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        cancelling.cancellation = Some(token.clone());
+        let failure = synthesize_in_memory(
+            SummaryProfile::Contract,
+            &cancelling,
+            incomplete_long_contract_fixture(),
+            &token,
+        )
+        .expect_err("cancellation is not invalid model output");
+        assert!(cancellation_observed(&failure));
+
+        let (normalized, mut chunked) = incomplete_long_contract_fixture();
+        let repeated = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::RepeatedSummaryUnits],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let analyzed = analyze(
+            &repeated,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        chunked.chunks[0]
+            .block_ids
+            .push("unknown-normalized-block".to_string());
+        let failure = coherent::synthesize(
+            SummaryProfile::Contract,
+            &repeated,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect_err("an invalid source artifact is not invalid model output");
+        assert_ne!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
+    }
+
+    // Contract test 10 (amendment 1): a complete short Contract whose coverage repairs are
+    // exhausted still fails closed at the synthesis stage; R8 does not apply to it.
+    #[test]
+    fn complete_short_contract_coverage_exhaustion_still_fails_closed() {
+        let runtime = ModelOutputFaultRuntime::new(
+            &[ModelOutputFault::FirstSourceOnly],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        let (normalized, chunked) = complete_short_contract_fixture();
+        assert!(
+            coherent::required_short_contract_evidence_ids(
+                SummaryProfile::Contract,
+                SYNTHESIS_VERSION,
+                &chunked,
+                &normalized,
+            )
+            .unwrap()
+            .is_some(),
+            "precondition: the fixture is a complete short Contract with required clauses"
+        );
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("the short Contract fixture should analyze");
+        assert!(analyzed
+            .warnings
+            .iter()
+            .all(|warning| warning.code != QUOTE_BOUNDARY_OMITTED_WARNING_CODE));
+        let failure = coherent::synthesize(
+            SummaryProfile::Contract,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect_err("a complete short Contract keeps failing closed on exhausted coverage repair");
+        assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
+        // The first response plus the Contract profile's two validation repairs.
+        assert_eq!(runtime.summary_requests.load(Ordering::SeqCst), 3);
+    }
+
+    // Contract test 10 (amendment 1): a failed verification is not converted.
+    #[test]
+    fn model_output_fallback_does_not_mask_a_failed_verification() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = fixture_run(
+            &database,
+            "contract_long_clause.pdf",
+            SummaryProfile::Contract,
+        );
+        let runtime = ModelOutputFaultRuntime::new(
+            &[
+                ModelOutputFault::RepeatedSummaryUnits,
+                ModelOutputFault::VerificationRuntimeFailure,
+            ],
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        );
+        summarize_chunked_document(&mut conn, &runtime, &run_id)
+            .expect_err("verification fails after the ledger fallback");
+        let run = get_pipeline_run(&conn, &run_id).unwrap().unwrap();
+        let failure = run.failure.expect("the run records its failure");
+        assert_eq!(failure.stage, Some(PipelineStage::Verify));
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        assert_eq!(
+            synthesis_fallback_codes(&synthesized),
+            vec![MODEL_OUTPUT_INVALID_WARNING.to_string()]
+        );
+    }
+
+    // Contract test 13 (amendment 1, F-A): opening text never exceeds 80 characters and
+    // contains only whole words or the lone marker.
+    #[test]
+    fn unquoted_opening_text_keeps_whole_words_within_eighty_characters() {
+        let word = |length: usize| "w".repeat(length);
+        let exact = format!("{} {}", word(40), word(39));
+        assert_eq!(exact.chars().count(), 80);
+        let one_over = format!("{} {} {}", word(40), word(39), word(3));
+        let first_word_at_cap = format!("{} tail", word(80));
+        let first_word_over_cap = format!("{} tail", word(120));
+        let first_word_at_prefix_cap = format!("{} tail", word(79));
+        let cases = [
+            (exact.clone(), exact.clone()),
+            // `w40 w39` is 80 characters, so the 79-character prefix keeps only `w40`.
+            (one_over, format!("{}…", word(40))),
+            (first_word_at_cap, "…".to_string()),
+            (first_word_over_cap, "…".to_string()),
+            (first_word_at_prefix_cap, format!("{}…", word(79))),
+        ];
+        for (passage, expected) in cases {
+            let opening = unquoted_opening_text(&passage);
+            assert!(
+                opening.chars().count() <= UNQUOTED_OPENING_CHARACTERS,
+                "{opening:?}"
+            );
+            assert_eq!(opening, expected, "{passage:?}");
+        }
+    }
+
+    fn analyzed_fixture(
+        runtime: &ModelOutputFaultRuntime,
+        fixture: (NormalizedDocument, ChunkedDocument),
+    ) -> (NormalizedDocument, ChunkedDocument, AnalyzedDocument) {
+        let (normalized, chunked) = fixture;
+        let analyzed = analyze(
+            runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("fixture analysis should validate");
+        (normalized, chunked, analyzed)
+    }
+
+    fn synthesis_warning(code: &str) -> PipelineWarning {
+        PipelineWarning {
+            code: code.to_string(),
+            message: "Scripted fallback warning".to_string(),
+            stage: Some(PipelineStage::Synthesize),
+        }
+    }
+
+    // Contract test 11 (amendment 1): persisted-result validation admits the invalid-output
+    // fallback only for a current-version Contract whose catalog R2 admitted.
+    #[test]
+    fn model_output_fallback_validation_requires_the_r2_contract_path() {
+        let runtime = ModelOutputFaultRuntime::new(&[], LEGACY_MODEL_CONTEXT_TOKENS);
+        let (normalized, chunked, analyzed) =
+            analyzed_fixture(&runtime, incomplete_long_contract_fixture());
+        let current = coherent::model_output_fallback_for_version(
+            &runtime,
+            &analyzed,
+            &chunked,
+            SYNTHESIS_VERSION,
+        )
+        .unwrap();
+        coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &current,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &runtime,
+        )
+        .expect("a current-version R2 Contract fallback validates");
+        validate_synthesized_document_without_runtime(&current, &analyzed, &chunked, &normalized)
+            .expect("a current-version R2 Contract fallback reloads");
+        for profile in [SummaryProfile::General, SummaryProfile::Story] {
+            assert!(
+                coherent::validate_for_runtime(
+                    profile,
+                    &current,
+                    &analyzed,
+                    &chunked,
+                    &normalized,
+                    &runtime
+                )
+                .is_err(),
+                "{profile:?}"
+            );
+        }
+        let historical =
+            coherent::model_output_fallback_for_version(&runtime, &analyzed, &chunked, "9.0.0")
+                .unwrap();
+        assert!(coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &historical,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &runtime
+        )
+        .is_err());
+        let (complete_normalized, complete_chunked, complete_analyzed) =
+            analyzed_fixture(&runtime, complete_long_contract_fixture());
+        let complete = coherent::model_output_fallback_for_version(
+            &runtime,
+            &complete_analyzed,
+            &complete_chunked,
+            SYNTHESIS_VERSION,
+        )
+        .unwrap();
+        assert!(coherent::validate_for_runtime(
+            SummaryProfile::Contract,
+            &complete,
+            &complete_analyzed,
+            &complete_chunked,
+            &complete_normalized,
+            &runtime
+        )
+        .is_err());
+
+        let mut both = current.clone();
+        both.warnings
+            .push(synthesis_warning(coherent::FALLBACK_WARNING_CODE));
+        assert!(coherent::validate_content(&both, &analyzed, &chunked, &normalized).is_err());
+        let mut neither = current.clone();
+        neither
+            .warnings
+            .retain(|warning| warning.code != MODEL_OUTPUT_INVALID_WARNING);
+        assert!(coherent::validate_content(&neither, &analyzed, &chunked, &normalized).is_err());
+        let coherent_summary = coherent::synthesize(
+            SummaryProfile::Contract,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("the fixture synthesizes a coherent Contract summary");
+        assert_eq!(
+            coherent_summary.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        let mut tagged = coherent_summary;
+        tagged
+            .warnings
+            .push(synthesis_warning(MODEL_OUTPUT_INVALID_WARNING));
+        assert!(coherent::validate_content(&tagged, &analyzed, &chunked, &normalized).is_err());
+    }
+
+    // Contract amendment 1, verification boundary: verification starts with a profile-blind
+    // artifact validator, so the invalid-output fallback is checked against the run profile.
+    #[test]
+    fn verification_admits_the_model_output_fallback_only_on_the_r2_contract_path() {
+        let runtime = ModelOutputFaultRuntime::new(&[], LEGACY_MODEL_CONTEXT_TOKENS);
+        let (normalized, chunked, analyzed) =
+            analyzed_fixture(&runtime, incomplete_long_contract_fixture());
+        let current = coherent::model_output_fallback_for_version(
+            &runtime,
+            &analyzed,
+            &chunked,
+            SYNTHESIS_VERSION,
+        )
+        .unwrap();
+        coherent::validate_model_output_fallback_boundary(
+            SummaryProfile::Contract,
+            &current,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .expect("verification admits an R2 Contract invalid-output fallback");
+        for profile in [SummaryProfile::General, SummaryProfile::Story] {
+            assert!(
+                coherent::validate_model_output_fallback_boundary(
+                    profile,
+                    &current,
+                    &analyzed,
+                    &chunked,
+                    &normalized
+                )
+                .is_err(),
+                "{profile:?}"
+            );
+        }
+        let historical =
+            coherent::model_output_fallback_for_version(&runtime, &analyzed, &chunked, "9.0.0")
+                .unwrap();
+        assert!(coherent::validate_model_output_fallback_boundary(
+            SummaryProfile::Contract,
+            &historical,
+            &analyzed,
+            &chunked,
+            &normalized
+        )
+        .is_err());
+        let (complete_normalized, complete_chunked, complete_analyzed) =
+            analyzed_fixture(&runtime, complete_long_contract_fixture());
+        let complete = coherent::model_output_fallback_for_version(
+            &runtime,
+            &complete_analyzed,
+            &complete_chunked,
+            SYNTHESIS_VERSION,
+        )
+        .unwrap();
+        assert!(coherent::validate_model_output_fallback_boundary(
+            SummaryProfile::Contract,
+            &complete,
+            &complete_analyzed,
+            &complete_chunked,
+            &complete_normalized
+        )
+        .is_err());
+        let ordinary = coherent::incomplete_catalog_fallback_for_version(
+            &runtime, &analyzed, &chunked, "9.0.0",
+        )
+        .unwrap();
+        coherent::validate_model_output_fallback_boundary(
+            SummaryProfile::General,
+            &ordinary,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .expect("the boundary concerns only the invalid-output fallback");
     }
 
     #[test]
