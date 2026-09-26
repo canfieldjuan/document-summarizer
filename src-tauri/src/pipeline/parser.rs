@@ -918,7 +918,14 @@ pub(crate) fn parse_started_document(
     parsing_state_version: u32,
     document: &IngestedDocument,
 ) -> Result<ParsedDocument, ParsePipelineError> {
-    let parsed = match parser.parse(document) {
+    let corrected = crate::pipeline::corrections::load_for_document(conn, &document.document_id)
+        .map_err(|error| parse_failure(error.code(), error.to_string(), false));
+    let output = match corrected {
+        Ok(Some(parsed)) => Ok(parsed),
+        Ok(None) => parser.parse(document),
+        Err(failure) => Err(failure),
+    };
+    let parsed = match output {
         Ok(parsed) => parsed,
         Err(failure) => {
             return Err(persist_parser_failure(

@@ -1,6 +1,7 @@
 pub mod chunk;
 pub mod contracts;
 pub mod control;
+pub mod corrections;
 pub mod db;
 pub(crate) mod gateway_client;
 pub(crate) mod gateway_runtime;

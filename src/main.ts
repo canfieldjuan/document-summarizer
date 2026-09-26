@@ -197,6 +197,15 @@ interface CommandError {
   message: string;
 }
 
+interface OcrReview {
+  runId: string;
+  expectedStateVersion: number;
+  sourceParsedHash: string;
+  pages: { pageNumber: number; text: string }[];
+  correctionOfRunId: string | null;
+  correctedRunId: string | null;
+}
+
 const selectButton = element<HTMLButtonElement>("#select-btn");
 const actionHint = element<HTMLParagraphElement>("#action-hint");
 const runtimeDot = element<HTMLSpanElement>("#runtime-dot");
@@ -257,6 +266,15 @@ const continueButton = element<HTMLButtonElement>("#continue-btn");
 const continueHint = element<HTMLParagraphElement>("#continue-hint");
 const retryButton = element<HTMLButtonElement>("#retry-btn");
 const retryHint = element<HTMLParagraphElement>("#retry-hint");
+const ocrReviewPanel = element<HTMLDetailsElement>("#ocr-review");
+const ocrPages = element<HTMLDivElement>("#ocr-pages");
+const ocrLineage = element<HTMLDivElement>("#ocr-lineage");
+const ocrSave = element<HTMLButtonElement>("#ocr-save");
+const ocrOpenSource = element<HTMLButtonElement>("#ocr-open-source");
+const ocrStatus = element<HTMLParagraphElement>("#ocr-review-status");
+let ocrReview: OcrReview | null = null;
+let ocrLoadSequence = 0;
+let ocrSaving = false;
 
 let runtimeReady = false;
 let selectedModelLabel: string | null = null;
@@ -291,7 +309,106 @@ function showStage(view: "empty" | "processing" | "summary" | "failure"): void {
   processingView.hidden = view !== "processing";
   summaryView.hidden = view !== "summary";
   failureView.hidden = view !== "failure";
+  ocrLoadSequence += 1;
+  ocrReviewPanel.hidden = true;
+  ocrReview = null;
+  if ((view === "summary" || view === "failure") && activeRunId) {
+    void loadOcrReview(activeRunId, ocrLoadSequence);
+  }
 }
+
+async function loadOcrReview(runId: string, sequence: number): Promise<void> {
+  try {
+    const review = await invoke<OcrReview | null>("get_ocr_review", { runId });
+    if (sequence !== ocrLoadSequence || activeRunId !== runId || !review) return;
+    ocrReview = review;
+    ocrPages.replaceChildren();
+    ocrLineage.replaceChildren();
+    ocrStatus.textContent = "";
+    ocrSave.disabled = review.correctedRunId !== null || ocrSaving;
+    for (const page of review.pages) {
+      const label = document.createElement("label");
+      label.textContent = `Page ${page.pageNumber}`;
+      const text = document.createElement("textarea");
+      text.value = page.text;
+      text.dataset.pageNumber = String(page.pageNumber);
+      text.rows = 8;
+      text.readOnly = review.correctedRunId !== null;
+      label.append(text);
+      ocrPages.append(label);
+    }
+    for (const [id, title] of [
+      [review.correctionOfRunId, "Open source run"],
+      [review.correctedRunId, "Open corrected successor"],
+    ]) {
+      if (!id) continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "quiet-button";
+      button.textContent = title;
+      button.addEventListener("click", () => void openOcrRelatedRun(id));
+      ocrLineage.append(button);
+    }
+    if (review.correctedRunId) {
+      ocrStatus.textContent = "This source already has a corrected successor. Open it for further changes.";
+    }
+    ocrReviewPanel.open = false;
+    ocrReviewPanel.hidden = false;
+  } catch (error) {
+    if (sequence !== ocrLoadSequence) return;
+    ocrStatus.textContent = normalizeCommandError(error).message;
+    ocrPages.replaceChildren();
+    ocrLineage.replaceChildren();
+    ocrSave.disabled = true;
+    ocrReviewPanel.hidden = false;
+  }
+}
+
+async function openOcrRelatedRun(runId: string): Promise<void> {
+  try {
+    const run = await invoke<RunHistoryItem>("get_run_status", { runId });
+    await openHistoryRun(run);
+  } catch (error) {
+    ocrStatus.textContent = normalizeCommandError(error).message;
+  }
+}
+
+ocrOpenSource.addEventListener("click", async () => {
+  if (!ocrReview) return;
+  try {
+    await invoke("open_ocr_source", { runId: ocrReview.runId });
+  } catch (error) {
+    ocrStatus.textContent = normalizeCommandError(error).message;
+  }
+});
+
+ocrSave.addEventListener("click", async () => {
+  const review = ocrReview;
+  if (!review || ocrSaving || review.correctedRunId) return;
+  const sequence = ocrLoadSequence;
+  const pages = [...ocrPages.querySelectorAll<HTMLTextAreaElement>("textarea")]
+    .map((input) => ({ pageNumber: Number(input.dataset.pageNumber), text: input.value }))
+    .filter((page) => page.text !== review.pages.find((old) => old.pageNumber === page.pageNumber)?.text);
+  if (pages.length === 0) {
+    ocrStatus.textContent = "Change the text before saving a correction.";
+    return;
+  }
+  ocrSaving = true;
+  ocrSave.disabled = true;
+  try {
+    const run = await invoke<RunHistoryItem>("save_ocr_correction", {
+      request: { runId: review.runId, expectedStateVersion: review.expectedStateVersion,
+        sourceParsedHash: review.sourceParsedHash, pages },
+    });
+    await refreshHistory();
+    if (sequence === ocrLoadSequence) await openHistoryRun(run);
+  } catch (error) {
+    if (sequence === ocrLoadSequence) ocrStatus.textContent = normalizeCommandError(error).message;
+  } finally {
+    ocrSaving = false;
+    ocrSave.disabled = ocrReview === null || ocrReview.correctedRunId !== null;
+  }
+});
 
 function syncPrimaryAction(): void {
   selectButton.disabled = !runtimeReady || processing;
