@@ -21,8 +21,10 @@ Continue action provide the required execution path without another service.
   Keep the original parsed artifact, PDF, summary and Connect result unchanged.
 - Preserve page numbering and unchanged pages. Reject native inputs, unknown or
   duplicate pages, empty edits, unchanged submissions, stale state/hash and
-  over-limit text. Reuse the OCR admission bound of 262144 UTF-8 bytes across
-  all corrected pages; never silently truncate.
+  over-limit text. Limit the raw corrected page text to 262144 UTF-8 bytes in
+  total; never silently truncate. This uses the same numeric limit as tagged
+  OCR admission but different accounting: the PDF parser additionally counts
+  one separator byte per page, while the correction stores page text directly.
 - Admit the new document/run, parsed artifact, lineage, profiles and state
   events atomically in SQLite. Allow one corrected successor per source
   document. Identical request replay returns that successor; competing edits
@@ -34,12 +36,14 @@ Continue action provide the required execution path without another service.
 - Keep OcrText provenance and propagate an OPERATOR_CORRECTED_OCR_TEXT warning
   through normalization, summaries and citation display. Operator text is not
   represented as an independently verified machine transcription.
-- Surface lineage and the corrected successor in recent work. Source opening
-  accepts a stored run identity, validates the retained PDF hash, and does not
-  accept an arbitrary path or URL from the frontend.
+- Surface source/successor navigation in the OCR review panel opened from a
+  recent-work entry. The recent-work list retains its existing filename and
+  state presentation; it does not display correction lineage as a list label.
+  Source opening accepts a stored run identity, validates the retained PDF
+  hash, and does not accept an arbitrary path or URL from the frontend.
 
-Likely files: pipeline/corrections.rs (new), db.rs, schema.rs, parser.rs,
-workspace.rs, mod.rs, lib.rs, src/main.ts, src/styles.css, index.html and focused
+Files: pipeline/corrections.rs (new), db.rs, schema.rs, parser.rs,
+mod.rs, lib.rs, src/main.ts, src/styles.css, index.html and focused
 tests beside the relevant core code. One additive local schema migration is
 required; no public Connect schema change.
 
@@ -134,6 +138,12 @@ No dependency, runtime/model, public Connect schema, prompt, or completed-job
 mutation is in the diff. Native rejection and source-file integrity tests cover
 the admission and PDF-opening boundaries. The frontend constructs text nodes
 and textareas rather than interpreting document content as markup.
+
+Review reconciliation: both non-blocking wording findings at `9c1bc79` are
+confirmed. The cap test pins raw text bytes and does not claim parser separator
+accounting. Source/successor buttons live in the opened review panel, not in
+`RunHistoryItem` or the list labels. The wording above records that implemented
+scope; no source, test, configuration, or dependency change accompanies it.
 
 ## Gap audit
 

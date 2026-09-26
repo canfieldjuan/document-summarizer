@@ -147,9 +147,13 @@ later changes target that successor. The original artifacts, summary, and
 completed Connect outputs remain unchanged.
 
 Corrections retain `OcrText` provenance, page numbering, and unchanged pages.
-They are bounded to 262144 UTF-8 bytes across all pages. Continue uses the
-existing pipeline; retries load the immutable correction rather than parsing
-the original OCR text again. `OPERATOR_CORRECTED_OCR_TEXT` identifies corrected
+They are bounded to 262144 raw UTF-8 text bytes across all pages. Tagged-PDF
+admission uses the same numeric limit but also counts one separator byte per
+page; correction text does not include that parser accounting overhead.
+Source/successor links appear inside the OCR review panel opened from recent
+work; recent-work list labels keep the existing filename/state presentation.
+Continue uses the existing pipeline; retries load the immutable correction
+rather than parsing the original OCR text again. `OPERATOR_CORRECTED_OCR_TEXT` identifies corrected
 source in summary warnings and citation display. Saving does not call a model
 or redeliver Connect results. See `PR-OCR-SOURCE-CORRECTIONS.md` for the scoped
 contract and verification.
