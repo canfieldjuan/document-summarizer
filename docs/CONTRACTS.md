@@ -113,8 +113,8 @@ validation belongs to the parser stage.
 ### OCR-derived input
 
 Every ingested document carries a durable `SourceType`. Existing rows and
-ordinary `application/pdf` inputs are `NativeText`. Only the v2
-`application/vnd.local-connect.ocr-pdf` input path may create `OcrText`; v1
+ordinary `application/pdf` inputs are `NativeText`. External `OcrText` admission
+uses the v2 `application/vnd.local-connect.ocr-pdf` input path; v1
 remains `application/pdf` only. The multipart content type and declared input
 media type must agree in both directions.
 
@@ -135,6 +135,24 @@ its source-to-derived relation commit with the derived pipeline run, so restart
 cannot create two children or lose the retained original. Provider inputs that
 already carry the vendor OCR media type do not create local scan lineage because
 their original-scan edge is owned by the upstream consumer.
+
+An operator can review an idle OCR run at `Parsed`, `Complete`,
+`CompleteWithWarnings`, or `Failed` when its parsed artifact exists. Explicit
+page-text corrections create a separate local document/run at `Parsed`, with
+the same PDF identity and inherited summary/model profiles. Schema 21 stores
+immutable correction text and its source run/document/hash. One successor per
+source document, state/hash checks, and a single immediate transaction prevent
+competing edits or partial admission. Identical saves return the existing run;
+later changes target that successor. The original artifacts, summary, and
+completed Connect outputs remain unchanged.
+
+Corrections retain `OcrText` provenance, page numbering, and unchanged pages.
+They are bounded to 262144 UTF-8 bytes across all pages. Continue uses the
+existing pipeline; retries load the immutable correction rather than parsing
+the original OCR text again. `OPERATOR_CORRECTED_OCR_TEXT` identifies corrected
+source in summary warnings and citation display. Saving does not call a model
+or redeliver Connect results. See `PR-OCR-SOURCE-CORRECTIONS.md` for the scoped
+contract and verification.
 
 ## Durable transition boundary
 
