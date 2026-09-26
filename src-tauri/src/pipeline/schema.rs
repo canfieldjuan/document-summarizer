@@ -1,7 +1,29 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 20;
+pub const CURRENT_SCHEMA_VERSION: u32 = 21;
+
+const V20_TO_V21: &str = r#"
+CREATE TABLE ocr_text_corrections (
+    document_id TEXT PRIMARY KEY REFERENCES documents(document_id),
+    run_id TEXT NOT NULL UNIQUE REFERENCES pipeline_runs(run_id),
+    source_document_id TEXT NOT NULL UNIQUE REFERENCES documents(document_id),
+    source_run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id),
+    source_version INTEGER NOT NULL CHECK (source_version > 0),
+    source_parsed_hash TEXT NOT NULL,
+    corrected_parsed_hash TEXT NOT NULL,
+    corrected_parsed TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER ocr_text_corrections_no_update
+BEFORE UPDATE ON ocr_text_corrections BEGIN
+    SELECT RAISE(ABORT, 'OCR text corrections are immutable');
+END;
+CREATE TRIGGER ocr_text_corrections_no_delete
+BEFORE DELETE ON ocr_text_corrections BEGIN
+    SELECT RAISE(ABORT, 'OCR text corrections are immutable');
+END;
+"#;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -1022,6 +1044,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V17_TO_V18)?;
         tx.execute_batch(V18_TO_V19)?;
         tx.execute_batch(V19_TO_V20)?;
+        tx.execute_batch(V20_TO_V21)?;
         tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         tx.commit()?;
         return validate(conn);
@@ -1101,6 +1124,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 19 {
         migrate_v19_to_v20(conn)?;
+        current_version = 20;
+    }
+    if current_version == 20 {
+        migrate_additive(conn, V20_TO_V21, 21)?;
     }
     validate(conn)
 }
@@ -1251,7 +1278,11 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         ));
     }
 
-    for (table, expected_columns) in [("ocr_handoffs", 31_u32), ("ocr_lineage", 4_u32)] {
+    for (table, expected_columns) in [
+        ("ocr_handoffs", 31_u32),
+        ("ocr_lineage", 4_u32),
+        ("ocr_text_corrections", 9_u32),
+    ] {
         let columns: u32 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1)",
             [table],
@@ -1275,7 +1306,12 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
             "ocr handoff ownership is invalid".to_string(),
         ));
     }
-    for trigger in ["ocr_lineage_no_update", "ocr_lineage_no_delete"] {
+    for trigger in [
+        "ocr_lineage_no_update",
+        "ocr_lineage_no_delete",
+        "ocr_text_corrections_no_update",
+        "ocr_text_corrections_no_delete",
+    ] {
         let present: u32 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
             [trigger],

@@ -1885,6 +1885,50 @@ fn persist_received_run_to_ingested(
     Ok(ingested)
 }
 
+pub(crate) fn persist_corrected_document(
+    tx: &Transaction<'_>,
+    document: &IngestedDocument,
+    run: &PipelineRun,
+    parsed: &ParsedDocument,
+    source_run_id: &str,
+) -> Result<PipelineRun, StoreError> {
+    let profile = get_run_summary_profile(tx, source_run_id)?
+        .ok_or_else(|| StoreError::SummaryProfileUnavailable(source_run_id.to_string()))?;
+    let ingested = persist_ingestion_in_transaction(tx, document, run, profile)?;
+    let model_profile = get_run_model_profile(tx, source_run_id)?;
+    ensure_run_model_profile(tx, &run.run_id, model_profile.as_ref())?;
+    let parsing = transition_in_tx(
+        tx,
+        &run.run_id,
+        PipelineState::Ingested,
+        ingested.state_version,
+        PipelineState::Parsing,
+        Some(PipelineStage::Parse),
+        Some("operator_ocr_correction".to_string()),
+        TransitionPatch::default(),
+    )?;
+    insert_parsed_document(tx, &run.run_id, parsed)?;
+    let warnings = parsed
+        .warnings
+        .iter()
+        .chain(parsed.pages.iter().flat_map(|page| page.warnings.iter()))
+        .cloned()
+        .collect();
+    transition_in_tx(
+        tx,
+        &run.run_id,
+        PipelineState::Parsing,
+        parsing.state_version,
+        PipelineState::Parsed,
+        Some(PipelineStage::Parse),
+        Some("operator_ocr_correction".to_string()),
+        TransitionPatch {
+            warnings: Some(warnings),
+            ..TransitionPatch::default()
+        },
+    )
+}
+
 pub(crate) fn validate_retry_source(
     conn: &Connection,
     source_run_id: &str,

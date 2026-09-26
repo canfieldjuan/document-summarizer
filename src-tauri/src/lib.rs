@@ -15,6 +15,7 @@ use pipeline::contracts::{
     ModelRuntimeFailure, NormalizedDocument, ParsedDocument, PipelineFailure, PipelineRun,
     StructureInterpreter, StructuredDocument, SummaryProfile,
 };
+use pipeline::corrections::{self, CorrectionError, OcrReview, SaveCorrection};
 use pipeline::db::{get_or_create_profile_suggestion_owner, init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion, IngestError};
 use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
@@ -163,6 +164,12 @@ impl From<PipelineFailure> for CommandError {
 
 impl From<WorkspaceError> for CommandError {
     fn from(error: WorkspaceError) -> Self {
+        Self::new(error.code(), error.to_string())
+    }
+}
+
+impl From<CorrectionError> for CommandError {
+    fn from(error: CorrectionError) -> Self {
         Self::new(error.code(), error.to_string())
     }
 }
@@ -541,6 +548,48 @@ fn get_persisted_summary(
     load_persisted_summary(&conn, &run_id).map_err(CommandError::from)
 }
 
+#[tauri::command]
+fn get_ocr_review(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<Option<OcrReview>, CommandError> {
+    let conn = open_database(&state)?;
+    let review = corrections::get_review(&conn, &run_id)?;
+    if let Some(review) = &review {
+        if state.jobs.status_activity(&run_id, &review.run_id)?.0 {
+            return Ok(None);
+        }
+    }
+    Ok(review)
+}
+
+#[tauri::command]
+fn save_ocr_correction(
+    state: State<'_, AppState>,
+    request: SaveCorrection,
+) -> Result<RunHistoryItem, CommandError> {
+    if state.jobs.is_active(&request.run_id)? {
+        return Err(CorrectionError::NotAllowed.into());
+    }
+    let mut conn = open_database(&state)?;
+    let run = corrections::save(&mut conn, &request)?;
+    load_run(&conn, &run.run_id).map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn open_ocr_source(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<(), CommandError> {
+    use tauri_plugin_opener::OpenerExt;
+    let conn = open_database(&state)?;
+    let path = corrections::verified_source_path(&conn, &run_id)?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|_| CorrectionError::SourceUnavailable.into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn Error>> {
     let builder = tauri::Builder::default();
@@ -619,7 +668,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             install_connect_entitlement,
             list_recent_runs,
             get_run_status,
-            get_persisted_summary
+            get_persisted_summary,
+            get_ocr_review,
+            save_ocr_correction,
+            open_ocr_source
         ])
         .build(tauri::generate_context!())?;
     app.run(|app_handle, event| {
