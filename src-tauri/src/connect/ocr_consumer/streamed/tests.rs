@@ -329,6 +329,7 @@ fn output_http_framing_refuses_duplicate_content_length() {
     let (url, worker) = server(vec![reply]);
     provider.base_url = url;
     let result = download(
+        &HttpOcrTransport,
         &provider,
         &handoff.provider_job_id,
         descriptor,
@@ -369,6 +370,7 @@ fn download_notices_cancellation_while_body_stalls() {
     });
     let start = Instant::now();
     let result = download(
+        &HttpOcrTransport,
         &provider,
         &handoff.provider_job_id,
         descriptor,
@@ -609,6 +611,7 @@ fn output_framing_and_integrity_fail_closed() {
         let (url, worker) = server(vec![reply]);
         provider.base_url = url;
         let result = download(
+            &HttpOcrTransport,
             &provider,
             &handoff.provider_job_id,
             descriptor,
@@ -1025,6 +1028,7 @@ fn progressing_body_cannot_extend_the_parent_deadline() {
     });
     let start = Instant::now();
     assert!(download(
+        &HttpOcrTransport,
         &provider,
         &handoff.provider_job_id,
         descriptor,
@@ -1226,6 +1230,7 @@ fn exact_pdf_and_text_caps_transfer_over_http() {
         let (url, worker) = server(vec![artifact(path, &bytes)]);
         provider.base_url = url;
         let file = download(
+            &HttpOcrTransport,
             &provider,
             &job,
             &descriptor,
@@ -1235,5 +1240,196 @@ fn exact_pdf_and_text_caps_transfer_over_http() {
         .unwrap();
         assert_eq!(file.metadata().unwrap().len(), size as u64);
         assert_eq!(worker.join().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn review_concurrent_completion_saves_preserve_first_descriptors() {
+    use std::sync::{mpsc, Arc, Barrier};
+    for different in [false, true] {
+        let (dir, conn, _, handoff, status, _, _) = fixture();
+        let mut processing = status.clone();
+        processing.status = JobState::Processing;
+        processing.result = None;
+        save_status(&conn, &handoff, &processing).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let (sent, received) = mpsc::channel();
+        let mut receiver = Some(received);
+        let mut workers = Vec::new();
+        for (index, changed) in [false, different].into_iter().enumerate() {
+            let database = dir.path().join("summarizer.db");
+            let id = handoff.handoff_id.clone();
+            let barrier = barrier.clone();
+            let mut answer = status.clone();
+            if changed {
+                answer.result.as_mut().unwrap().outputs[0].display_name = "changed.pdf".into();
+            }
+            // Both connections capture a pre-completion snapshot. The second
+            // poll deliberately finishes after the first completion is durable.
+            let sender = if index == 0 { Some(sent.clone()) } else { None };
+            let wait = if index == 1 { receiver.take() } else { None };
+            workers.push(thread::spawn(move || {
+                let conn = db::init_db(database).unwrap();
+                let snapshot = reload(&conn, &id).unwrap();
+                barrier.wait();
+                if let Some(wait) = wait {
+                    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                let result = save_status(&conn, &snapshot, &answer);
+                if let Some(sender) = sender {
+                    sender.send(()).unwrap();
+                }
+                result
+            }));
+        }
+        let first = workers.remove(0).join().unwrap();
+        let second = workers.remove(0).join().unwrap();
+        assert!(first.is_ok());
+        assert_eq!(second.is_err(), different, "stale save: {second:?}");
+        let saved = reload(&conn, &handoff.handoff_id).unwrap();
+        assert_eq!(
+            saved.provider_status_json,
+            Some(serde_json::to_string(&status).unwrap())
+        );
+        assert_eq!(saved.phase, if different { "failed" } else { "running" });
+        assert!(saved.ocr_pdf_bytes.is_none() && saved.text_bytes.is_none());
+    }
+}
+
+struct FailingLocalFile {
+    read_only_path: Option<std::path::PathBuf>,
+}
+impl OcrTransport for FailingLocalFile {
+    fn temporary_output_file(&self) -> io::Result<fs::File> {
+        match &self.read_only_path {
+            Some(path) => fs::File::open(path),
+            None => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "test temp directory unavailable",
+            )),
+        }
+    }
+    fn submit(
+        &self,
+        _: &LiveOcrProvider,
+        _: &JobRequest,
+        _: &[u8],
+        _: Instant,
+    ) -> Result<ReceivedStatus, TransportError> {
+        panic!("must not rerun completed OCR")
+    }
+    fn status(
+        &self,
+        provider: &LiveOcrProvider,
+        job: &str,
+        deadline: Instant,
+    ) -> Result<ReceivedStatus, TransportError> {
+        HttpOcrTransport.status(provider, job, deadline)
+    }
+}
+
+fn local_file_failure_is_recoverable(write_failure: bool) {
+    let (dir, mut conn, mut provider, handoff, status, pdf, text) = fixture();
+    save_status(&conn, &handoff, &status).unwrap();
+    let (pdf_desc, text_desc) = pair(&status).unwrap();
+    let read_only_path = dir.path().join("read-only-output");
+    fs::write(&read_only_path, []).unwrap();
+    let transport = FailingLocalFile {
+        read_only_path: write_failure.then_some(read_only_path),
+    };
+    let (url, worker) = server(vec![
+        status_reply(&handoff, &status),
+        artifact(output_path(&handoff, pdf_desc), &pdf),
+    ]);
+    provider.base_url = url;
+    let result = run_handoff(
+        &mut conn,
+        reload_for_test(&dir),
+        dir.path(),
+        &provider,
+        &transport,
+        &UNCONTROLLED_EXECUTION,
+    );
+    assert_eq!(worker.join().unwrap().len(), 2);
+    assert!(matches!(result, Err(OcrConsumerError::Io(_))), "{result:?}");
+    let saved = reload(&conn, &handoff.handoff_id).unwrap();
+    assert_eq!(saved.phase, "running");
+    assert!(saved.ocr_pdf_bytes.is_none() && saved.text_bytes.is_none());
+    assert_eq!(
+        saved.provider_status_json,
+        Some(serde_json::to_string(&status).unwrap())
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    let (url, worker) = server(vec![
+        status_reply(&handoff, &status),
+        artifact(output_path(&handoff, pdf_desc), &pdf),
+        artifact(output_path(&handoff, text_desc), &text),
+    ]);
+    provider.base_url = url;
+    assert_eq!(
+        run_handoff(
+            &mut conn,
+            saved,
+            dir.path(),
+            &provider,
+            &HttpOcrTransport,
+            &UNCONTROLLED_EXECUTION
+        )
+        .unwrap(),
+        handoff.child_run_id
+    );
+    assert_eq!(worker.join().unwrap().len(), 3);
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn review_temp_creation_failure_is_recoverable() {
+    local_file_failure_is_recoverable(false);
+}
+#[test]
+fn review_temp_write_failure_is_recoverable() {
+    local_file_failure_is_recoverable(true);
+}
+
+#[test]
+fn review_stale_nonterminal_status_cannot_replace_completion_or_advanced_phase() {
+    for failure in [false, true] {
+        let (_dir, conn, _, handoff, status, _, _) = fixture();
+        let mut processing = status.clone();
+        processing.status = JobState::Processing;
+        processing.result = None;
+        save_status(&conn, &handoff, &processing).unwrap();
+        let stale = reload(&conn, &handoff.handoff_id).unwrap();
+        save_status(&conn, &stale, &status).unwrap();
+        if failure {
+            processing.status = JobState::Failed;
+            processing.error = Some(serde_json::from_value(serde_json::json!({"code":"OCR_ENGINE_FAILED","message":"OCR engine failed","retryable":false})).unwrap());
+        }
+        let result = save_status(&conn, &stale, &processing);
+        assert!(matches!(result, Err(OcrConsumerError::InvalidOutput(_))));
+        let saved = reload(&conn, &handoff.handoff_id).unwrap();
+        assert_eq!(saved.phase, "failed");
+        assert_eq!(
+            saved.provider_status_json,
+            Some(serde_json::to_string(&status).unwrap())
+        );
+        // A late poll must also leave the advanced phase and first descriptors alone.
+        assert!(save_status(&conn, &stale, &processing).is_ok());
+        assert_eq!(
+            reload(&conn, &handoff.handoff_id)
+                .unwrap()
+                .provider_status_json,
+            saved.provider_status_json
+        );
     }
 }

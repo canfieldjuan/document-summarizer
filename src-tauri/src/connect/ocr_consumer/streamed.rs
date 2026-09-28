@@ -317,6 +317,15 @@ pub(super) fn save_status(
     handoff: &OcrHandoff,
     status: &Status,
 ) -> Result<(), OcrConsumerError> {
+    // Phase alone is not a compare-and-set for running -> running. Reload
+    // and compare the durable completion under the same write lock as its save.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(StoreError::from)?;
+    let current = reload(&tx, &handoff.handoff_id)?;
+    if current.phase != handoff.phase {
+        return Ok(());
+    }
+    let handoff = &current;
     let checked = validate(handoff, status).and_then(|()| {
         if has_saved_completion(handoff)? {
             let previous: Status = decode_metadata(
@@ -334,35 +343,38 @@ pub(super) fn save_status(
     });
     if let Err(error) = checked {
         db::fail_ocr_handoff(
-            conn,
+            &tx,
             &handoff.handoff_id,
             &handoff.phase,
             "OCR_OUTPUT_INVALID",
             &error.to_string(),
             false,
         )?;
+        tx.commit().map_err(StoreError::from)?;
         return Err(error);
     }
     if let Some(error) = &status.error {
         db::fail_ocr_handoff(
-            conn,
+            &tx,
             &handoff.handoff_id,
             &handoff.phase,
             &error.code,
             &error.message,
             error.retryable,
         )?;
+        tx.commit().map_err(StoreError::from)?;
         return Err(OcrConsumerError::ProviderFailed(error.message.clone()));
     }
     let encoded = serde_json::to_string(status)
         .map_err(|e| OcrConsumerError::InvalidOutput(e.to_string()))?;
     db::transition_ocr_handoff(
-        conn,
+        &tx,
         &handoff.handoff_id,
         &handoff.phase,
         "running",
         Some(&encoded),
     )?;
+    tx.commit().map_err(StoreError::from)?;
     Ok(())
 }
 
@@ -456,6 +468,7 @@ fn retrieve_verified(
         for attempt in 0..3 {
             cancellation_checkpoint(conn, handoff, control)?;
             let result = download(
+                transport,
                 &provider,
                 &handoff.provider_job_id,
                 descriptor,
@@ -533,6 +546,7 @@ fn http_failure(error: reqwest::Error) -> TransportError {
 }
 
 fn download(
+    transport: &dyn OcrTransport,
     provider: &LiveOcrProvider,
     job: &str,
     descriptor: &Descriptor,
@@ -545,10 +559,9 @@ fn download(
         .ok_or_else(|| TransportError::Uncertain("retrieval deadline expired".to_string()))?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()
-        .map_err(|e| invalid(e.to_string()))?;
+        .build()?;
     runtime.block_on(download_async(
-        provider, job, descriptor, control, deadline, remaining,
+        transport, provider, job, descriptor, control, deadline, remaining,
     ))
 }
 
@@ -578,6 +591,7 @@ async fn cancellable<F: std::future::Future>(
 }
 
 async fn download_async(
+    transport: &dyn OcrTransport,
     provider: &LiveOcrProvider,
     job: &str,
     descriptor: &Descriptor,
@@ -671,7 +685,7 @@ async fn download_async(
     {
         return Err(invalid("invalid OCR output HTTP framing"));
     }
-    let mut file = tempfile::tempfile().map_err(|e| invalid(e.to_string()))?;
+    let mut file = transport.temporary_output_file()?;
     let (mut count, mut hash) = (0_u64, Sha256::new());
     while let Some(bytes) = cancellable(response.chunk(), deadline, control)
         .await?
@@ -683,7 +697,7 @@ async fn download_async(
                 return Err(invalid("OCR output exceeded declared length"));
             }
             hash.update(chunk);
-            file.write_all(chunk).map_err(|e| invalid(e.to_string()))?;
+            file.write_all(chunk)?;
         }
     }
     if count != descriptor.byte_size || format!("{:x}", hash.finalize()) != descriptor.sha256 {

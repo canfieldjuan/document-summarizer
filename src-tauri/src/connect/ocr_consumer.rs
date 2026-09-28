@@ -92,6 +92,8 @@ pub(crate) enum OcrConsumerError {
 
 #[derive(Debug, Error)]
 enum TransportError {
+    #[error("local OCR retrieval I/O failed: {0}")]
+    LocalIo(#[from] io::Error),
     #[error("provider token is stale")]
     Unauthorized,
     #[error("job not found")]
@@ -105,6 +107,10 @@ enum TransportError {
 }
 
 trait OcrTransport {
+    fn temporary_output_file(&self) -> io::Result<fs::File> {
+        tempfile::tempfile()
+    }
+
     fn rediscover(&self, provider: &LiveOcrProvider) -> Result<LiveOcrProvider, OcrConsumerError> {
         discover_selected_provider(&provider.instance_id, provider.protocol_version)
     }
@@ -995,6 +1001,7 @@ fn reload(conn: &Connection, handoff_id: &str) -> Result<OcrHandoff, OcrConsumer
 
 fn map_transport(error: TransportError) -> OcrConsumerError {
     match error {
+        TransportError::LocalIo(error) => OcrConsumerError::Io(error),
         TransportError::Unauthorized => {
             OcrConsumerError::Transport("provider token is stale".to_string())
         }

@@ -244,3 +244,30 @@ identical completions, stale processing/error replies, and advanced phases;
 creation/write failures through real HTTP leave no pair/child and recover
 the same job once local I/O works. Run the failing-before regressions, adjacent
 consumer tests, format and clippy. Existing CI owns broad platform suites.
+
+### Review correction evidence
+
+The three failing-before probes reproduced both defects: stale completion save
+returned Ok, and temp creation/write returned InvalidOutput. After the fix,
+all three passed. The adjacent consumer suite passed 33 tests with 2 opt-in
+ignores (13.75s); formatting, all-targets/all-features clippy and diff checks
+passed. A new stale-status test initially dropped its temporary directory;
+that test lifetime was corrected before the successful adjacent run.
+
+Cold diff: ocr_consumer.rs:95,110,1004 defines the typed local-I/O conversion
+and default anonymous-file seam; streamed.rs:322 reloads/compares/saves under
+one IMMEDIATE lock; :559,688,700 propagate runtime/create/write I/O. Existing
+seek/read already returns the same recoverable I/O variant. Tests exercise
+actual HTTP and two database connections with pre-completion snapshots,
+identical/conflicting completion, stale nonterminal status and advanced phase.
+No database schema or v2 behavior changed. No network call moved under a lock.
+
+Boundary-probe: invalid framing still fails, valid output survives local I/O
+failure and resumes the same job into one child; conflicting completion fails
+without replacing the first descriptors, identical completion succeeds.
+Effect-trace: preserve recoverability and immutable completion | typed I/O
+and serialized save_status | the exact three failing-before cases pass.
+
+DONE locally for both review defects; NOT DONE for merge until the new head
+passes CI and review. The frozen corpus receipt above remains at its recorded
+commit; it is not relabeled as a run of this follow-up.
