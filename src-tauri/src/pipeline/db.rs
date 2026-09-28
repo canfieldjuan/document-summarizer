@@ -1,3 +1,5 @@
+#[cfg(all(test, unix))]
+pub(crate) use super::schema::create_v21_fixture;
 use crate::pipeline::contracts::{
     AnalyzedDocument, ChunkedDocument, CitationArtifact, IngestedDocument, ModelProfileSnapshot,
     NormalizedDocument, ParsedDocument, PipelineEvent, PipelineFailure, PipelineRun, PipelineStage,

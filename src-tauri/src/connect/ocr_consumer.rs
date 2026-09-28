@@ -1,8 +1,10 @@
+mod streamed;
+
 use crate::connect::contracts::{CapabilityRef, InputArtifact, JobState, APP_ID};
 #[cfg(any(unix, test))]
-use crate::connect::v2::{AppManifest, RuntimeRegistration, TRANSPORT_KIND};
+use crate::connect::v2::{AppManifest, RuntimeRegistration};
 use crate::connect::v2::{
-    ErrorEnvelope, JobRequest, JobStatus, OutputArtifact, OCR_INPUT_MEDIA_TYPE, PROTOCOL_VERSION,
+    ErrorEnvelope, JobRequest, JobStatus, OutputArtifact, OCR_INPUT_MEDIA_TYPE,
 };
 use crate::pipeline::contracts::{
     IngestedDocument, ParsedDocument, PipelineRun, PipelineState, SourceType,
@@ -57,6 +59,7 @@ pub(crate) struct LiveOcrProvider {
     pub instance_id: String,
     pub base_url: String,
     token: String,
+    protocol_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +92,8 @@ pub(crate) enum OcrConsumerError {
 
 #[derive(Debug, Error)]
 enum TransportError {
+    #[error("provider token is stale")]
+    Unauthorized,
     #[error("job not found")]
     NotFound,
     #[error("provider refused the request: {message}")]
@@ -100,20 +105,36 @@ enum TransportError {
 }
 
 trait OcrTransport {
+    fn rediscover(&self, provider: &LiveOcrProvider) -> Result<LiveOcrProvider, OcrConsumerError> {
+        discover_selected_provider(&provider.instance_id, provider.protocol_version)
+    }
+
     fn submit(
         &self,
         provider: &LiveOcrProvider,
         request: &JobRequest,
         source: &[u8],
         deadline: Instant,
-    ) -> Result<JobStatus, TransportError>;
+    ) -> Result<ReceivedStatus, TransportError>;
 
     fn status(
         &self,
         provider: &LiveOcrProvider,
         job_id: &str,
         deadline: Instant,
-    ) -> Result<JobStatus, TransportError>;
+    ) -> Result<ReceivedStatus, TransportError>;
+}
+
+#[derive(Debug)]
+enum ReceivedStatus {
+    Inline(JobStatus),
+    Streamed(streamed::Status),
+}
+
+impl From<JobStatus> for ReceivedStatus {
+    fn from(status: JobStatus) -> Self {
+        Self::Inline(status)
+    }
 }
 
 struct HttpOcrTransport;
@@ -139,6 +160,16 @@ impl HttpOcrTransport {
             .timeout(REQUEST_IO_TIMEOUT.min(remaining))
             .build()
             .map_err(|error| TransportError::Uncertain(error.to_string()))
+    }
+
+    fn answer_for(response: Response, protocol: u32) -> Result<ReceivedStatus, TransportError> {
+        match protocol {
+            2 => Self::answer(response, MAX_STATUS_BYTES).map(ReceivedStatus::Inline),
+            3 => streamed::answer(response).map(ReceivedStatus::Streamed),
+            _ => Err(TransportError::Invalid(
+                "unsupported OCR protocol".to_string(),
+            )),
+        }
     }
 
     fn answer(response: Response, limit: u64) -> Result<JobStatus, TransportError> {
@@ -178,7 +209,7 @@ impl OcrTransport for HttpOcrTransport {
         request: &JobRequest,
         source: &[u8],
         deadline: Instant,
-    ) -> Result<JobStatus, TransportError> {
+    ) -> Result<ReceivedStatus, TransportError> {
         let client = Self::client(deadline)?;
         let form = multipart::Form::new()
             .part(
@@ -198,12 +229,15 @@ impl OcrTransport for HttpOcrTransport {
                     .map_err(|error| TransportError::Invalid(error.to_string()))?,
             );
         let response = client
-            .post(endpoint(&provider.base_url, "v2/jobs")?)
+            .post(endpoint(
+                &provider.base_url,
+                &format!("v{}/jobs", provider.protocol_version),
+            )?)
             .bearer_auth(&provider.token)
             .multipart(form)
             .send()
             .map_err(|error| TransportError::Uncertain(error.to_string()))?;
-        Self::answer(response, MAX_STATUS_BYTES)
+        Self::answer_for(response, provider.protocol_version)
     }
 
     fn status(
@@ -211,14 +245,17 @@ impl OcrTransport for HttpOcrTransport {
         provider: &LiveOcrProvider,
         job_id: &str,
         deadline: Instant,
-    ) -> Result<JobStatus, TransportError> {
+    ) -> Result<ReceivedStatus, TransportError> {
         let client = Self::client(deadline)?;
         let response = client
-            .get(endpoint(&provider.base_url, &format!("v2/jobs/{job_id}"))?)
+            .get(endpoint(
+                &provider.base_url,
+                &format!("v{}/jobs/{job_id}", provider.protocol_version),
+            )?)
             .bearer_auth(&provider.token)
             .send()
             .map_err(|error| TransportError::Uncertain(error.to_string()))?;
-        Self::answer(response, MAX_STATUS_BYTES)
+        Self::answer_for(response, provider.protocol_version)
     }
 }
 
@@ -271,7 +308,9 @@ pub(crate) fn process_scanned_document(
         return Err(OcrConsumerError::Cancelled);
     }
     let provider = match existing {
-        Some(handoff) => discover_selected_provider(&handoff.provider_instance_id)?,
+        Some(handoff) => {
+            discover_selected_provider(&handoff.provider_instance_id, saved_protocol(&handoff)?)?
+        }
         None => discover_one_provider()?,
     };
     process_scanned_document_with(
@@ -298,6 +337,7 @@ fn process_scanned_document_with(
     };
     if handoff.provider_app_id != provider.app_id
         || handoff.provider_instance_id != provider.instance_id
+        || saved_protocol(&handoff)? != provider.protocol_version
     {
         return Err(OcrConsumerError::ProviderUnavailable(
             handoff.provider_instance_id,
@@ -338,11 +378,13 @@ fn prepare_handoff(
     let child_document_id = Uuid::new_v4().to_string();
     let child_run_id = Uuid::new_v4().to_string();
     let request = JobRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: provider.protocol_version,
         job_id: provider_job_id.clone(),
         capability: CapabilityRef {
             id: OCR_CAPABILITY_ID.to_string(),
-            version: OCR_CAPABILITY_VERSION.to_string(),
+            version: capability_version(provider.protocol_version)
+                .unwrap()
+                .to_string(),
         },
         inputs: vec![InputArtifact {
             artifact_id: source_artifact_id.clone(),
@@ -390,7 +432,8 @@ fn run_handoff(
     transport: &dyn OcrTransport,
     control: &dyn ExecutionControl,
 ) -> Result<String, OcrConsumerError> {
-    run_handoff_until(
+    let handoff_id = handoff.handoff_id.clone();
+    let result = run_handoff_until(
         conn,
         handoff,
         app_data_dir,
@@ -398,7 +441,26 @@ fn run_handoff(
         transport,
         control,
         Instant::now() + REQUEST_TIMEOUT,
-    )
+    );
+    if provider.protocol_version == 3 {
+        if let Err(OcrConsumerError::InvalidOutput(message)) = &result {
+            let current = reload(conn, &handoff_id)?;
+            if !matches!(
+                current.phase.as_str(),
+                "failed" | "child_admitted" | "completed"
+            ) {
+                db::fail_ocr_handoff(
+                    conn,
+                    &handoff_id,
+                    &current.phase,
+                    "OCR_OUTPUT_INVALID",
+                    message,
+                    false,
+                )?;
+            }
+        }
+    }
+    result
 }
 
 fn run_handoff_until(
@@ -485,6 +547,11 @@ fn run_handoff_until(
                 }
             }
             "running" => {
+                if streamed::has_saved_completion(&handoff)? {
+                    streamed::retrieve(conn, &handoff, provider, transport, control, deadline)?;
+                    handoff = reload(conn, &handoff.handoff_id)?;
+                    continue;
+                }
                 let status = transport.status(provider, &handoff.provider_job_id, deadline);
                 cancellation_checkpoint(conn, &handoff, control)?;
                 match status {
@@ -578,10 +645,10 @@ fn validate_saved_request(handoff: &OcrHandoff) -> Result<JobRequest, OcrConsume
     }
     let request: JobRequest = serde_json::from_str(&handoff.provider_request_json)
         .map_err(|error| OcrConsumerError::InvalidOutput(error.to_string()))?;
-    if request.protocol_version != PROTOCOL_VERSION
+    if capability_version(request.protocol_version).is_none()
         || request.job_id != handoff.provider_job_id
         || request.capability.id != OCR_CAPABILITY_ID
-        || request.capability.version != OCR_CAPABILITY_VERSION
+        || Some(request.capability.version.as_str()) != capability_version(request.protocol_version)
         || !request.parameters.is_empty()
         || request.inputs.len() != 1
         || request.inputs[0].artifact_id != handoff.source_artifact_id
@@ -598,7 +665,35 @@ fn validate_saved_request(handoff: &OcrHandoff) -> Result<JobRequest, OcrConsume
     Ok(request)
 }
 
+fn capability_version(protocol: u32) -> Option<&'static str> {
+    match protocol {
+        2 => Some(OCR_CAPABILITY_VERSION),
+        3 => Some("1.1"),
+        _ => None,
+    }
+}
+
+fn saved_protocol(handoff: &OcrHandoff) -> Result<u32, OcrConsumerError> {
+    let request: JobRequest = serde_json::from_str(&handoff.provider_request_json)
+        .map_err(|error| OcrConsumerError::InvalidOutput(error.to_string()))?;
+    capability_version(request.protocol_version).ok_or_else(|| {
+        OcrConsumerError::InvalidOutput("unsupported saved OCR protocol".to_string())
+    })?;
+    Ok(request.protocol_version)
+}
+
 fn apply_status(
+    conn: &Connection,
+    handoff: &OcrHandoff,
+    status: impl Into<ReceivedStatus>,
+) -> Result<(), OcrConsumerError> {
+    match status.into() {
+        ReceivedStatus::Inline(status) => apply_inline_status(conn, handoff, status),
+        ReceivedStatus::Streamed(status) => streamed::save_status(conn, handoff, &status),
+    }
+}
+
+fn apply_inline_status(
     conn: &Connection,
     handoff: &OcrHandoff,
     status: JobStatus,
@@ -674,14 +769,14 @@ fn apply_status(
     Ok(())
 }
 
-fn validate_status_identity(
+fn validate_status_identity<T>(
     handoff: &OcrHandoff,
-    status: &JobStatus,
+    status: &crate::connect::v2::JobStatus<T>,
 ) -> Result<(), OcrConsumerError> {
-    if status.protocol_version != PROTOCOL_VERSION
+    if status.protocol_version != saved_protocol(handoff)?
         || status.job_id != handoff.provider_job_id
         || status.capability.id != OCR_CAPABILITY_ID
-        || status.capability.version != OCR_CAPABILITY_VERSION
+        || Some(status.capability.version.as_str()) != capability_version(status.protocol_version)
         || status.provider.app_id != handoff.provider_app_id
         || status.provider.instance_id != handoff.provider_instance_id
         || status.input_artifacts.len() != 1
@@ -735,8 +830,24 @@ fn validate_completed_outputs(
     }
     let pdf_bytes = decode_output(pdf, MAX_PDF_BYTES)?;
     let text_bytes = decode_output(text, MAX_TEXT_BYTES)?;
+    validate_pair_bytes(handoff, &pdf_bytes, &text_bytes)?;
+    Ok(ValidatedOutputs {
+        pdf_artifact_id: pdf.artifact_id.clone(),
+        pdf_sha256: pdf.sha256.clone(),
+        pdf_bytes,
+        text_artifact_id: text.artifact_id.clone(),
+        text_sha256: text.sha256.clone(),
+        text_bytes,
+    })
+}
+
+fn validate_pair_bytes(
+    handoff: &OcrHandoff,
+    pdf_bytes: &[u8],
+    text_bytes: &[u8],
+) -> Result<(), OcrConsumerError> {
     if text_bytes.starts_with(&[0xef, 0xbb, 0xbf])
-        || std::str::from_utf8(&text_bytes)
+        || std::str::from_utf8(text_bytes)
             .map_err(|_| OcrConsumerError::InvalidOutput("OCR text is not UTF-8".to_string()))?
             .trim()
             .is_empty()
@@ -751,7 +862,7 @@ fn validate_completed_outputs(
             "OCR text page segmentation does not match the source".to_string(),
         ));
     }
-    let canonical = canonical_tagged_ocr_text(&pdf_bytes).map_err(|error| {
+    let canonical = canonical_tagged_ocr_text(pdf_bytes).map_err(|error| {
         OcrConsumerError::InvalidOutput(format!("tagged OCR PDF is invalid: {}", error.message))
     })?;
     if canonical != text_bytes {
@@ -759,14 +870,7 @@ fn validate_completed_outputs(
             "OCR PDF canonical text does not match the paired text output".to_string(),
         ));
     }
-    Ok(ValidatedOutputs {
-        pdf_artifact_id: pdf.artifact_id.clone(),
-        pdf_sha256: pdf.sha256.clone(),
-        pdf_bytes,
-        text_artifact_id: text.artifact_id.clone(),
-        text_sha256: text.sha256.clone(),
-        text_bytes,
-    })
+    Ok(())
 }
 
 fn one_output<'a>(
@@ -853,6 +957,7 @@ fn recover_ocr_handoffs_with(
                 } else if let Some(provider) = providers.iter().find(|provider| {
                     provider.app_id == handoff.provider_app_id
                         && provider.instance_id == handoff.provider_instance_id
+                        && saved_protocol(&handoff).ok() == Some(provider.protocol_version)
                 }) {
                     run_handoff(
                         conn,
@@ -890,6 +995,9 @@ fn reload(conn: &Connection, handoff_id: &str) -> Result<OcrHandoff, OcrConsumer
 
 fn map_transport(error: TransportError) -> OcrConsumerError {
     match error {
+        TransportError::Unauthorized => {
+            OcrConsumerError::Transport("provider token is stale".to_string())
+        }
         TransportError::Refused { message, .. } => OcrConsumerError::ProviderFailed(message),
         TransportError::NotFound => {
             OcrConsumerError::Transport("the provider job is unavailable".to_string())
@@ -929,6 +1037,9 @@ fn validate_retained_derived<'a>(
     let bytes = handoff.ocr_pdf_bytes.as_ref().ok_or_else(|| {
         OcrConsumerError::InvalidOutput("retained OCR PDF is missing".to_string())
     })?;
+    if saved_protocol(handoff)? == 3 {
+        streamed::validate_retained_pair(handoff)?;
+    }
     if sha256_hex(bytes) != handoff.ocr_pdf_sha256.as_deref().unwrap_or_default() {
         return Err(OcrConsumerError::InvalidOutput(
             "retained OCR PDF integrity is invalid".to_string(),
@@ -998,7 +1109,18 @@ fn materialize_derived(app_data_dir: &Path, handoff: &OcrHandoff) -> Result<(), 
 }
 
 fn discover_one_provider() -> Result<LiveOcrProvider, OcrConsumerError> {
-    let providers = discover_providers()?;
+    choose_provider(discover_providers()?)
+}
+
+fn choose_provider(
+    mut providers: Vec<LiveOcrProvider>,
+) -> Result<LiveOcrProvider, OcrConsumerError> {
+    providers.sort_by(|a, b| {
+        a.instance_id
+            .cmp(&b.instance_id)
+            .then(b.protocol_version.cmp(&a.protocol_version))
+    });
+    providers.dedup_by(|a, b| a.instance_id == b.instance_id);
     match providers.as_slice() {
         [provider] => Ok(provider.clone()),
         [] => Err(OcrConsumerError::Discovery(
@@ -1010,10 +1132,15 @@ fn discover_one_provider() -> Result<LiveOcrProvider, OcrConsumerError> {
     }
 }
 
-fn discover_selected_provider(instance_id: &str) -> Result<LiveOcrProvider, OcrConsumerError> {
+fn discover_selected_provider(
+    instance_id: &str,
+    protocol: u32,
+) -> Result<LiveOcrProvider, OcrConsumerError> {
     discover_providers()?
         .into_iter()
-        .find(|provider| provider.instance_id == instance_id)
+        .find(|provider| {
+            provider.instance_id == instance_id && provider.protocol_version == protocol
+        })
         .ok_or_else(|| OcrConsumerError::ProviderUnavailable(instance_id.to_string()))
 }
 
@@ -1048,78 +1175,101 @@ fn discover_providers() -> Result<Vec<LiveOcrProvider>, OcrConsumerError> {
             "runtime directory is not owned by the current user".to_string(),
         ));
     }
-    let directory = runtime.join("local-connect/v2/providers");
-    let metadata = fs::symlink_metadata(&directory).map_err(|error| {
-        OcrConsumerError::Discovery(format!("provider directory is unavailable: {error}"))
-    })?;
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != owner_uid
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        return Err(OcrConsumerError::Discovery(
-            "provider directory is not owner-private".to_string(),
-        ));
-    }
-    let client = Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(DISCOVERY_TIMEOUT)
-        .timeout(DISCOVERY_TIMEOUT)
-        .build()
-        .map_err(|error| OcrConsumerError::Discovery(error.to_string()))?;
     let mut providers = Vec::new();
-    for entry in
-        fs::read_dir(&directory).map_err(|error| OcrConsumerError::Discovery(error.to_string()))?
-    {
-        let path = match entry {
-            Ok(entry) => entry.path(),
-            Err(_) => continue,
-        };
-        let Some(registration) = read_registration(&path, owner_uid) else {
-            continue;
-        };
-        if registration.app_id != OCR_APP_ID
-            || registration.protocol_version != PROTOCOL_VERSION
-            || registration.transport.kind != TRANSPORT_KIND
-            || registration.auth.scheme != "bearer"
-            || registration.auth.token.is_empty()
-            || !valid_uuid_v4(&registration.instance_id)
-            || validate_base_url(&registration.transport.base_url).is_none()
-        {
+    for protocol in [3, 2] {
+        let directory = runtime.join(format!("local-connect/v{protocol}/providers"));
+        if !directory.try_exists().map_err(OcrConsumerError::Io)? {
             continue;
         }
-        let response = match client
-            .get(endpoint(&registration.transport.base_url, "v2/manifest").map_err(map_transport)?)
-            .bearer_auth(&registration.auth.token)
-            .send()
+        let metadata = fs::symlink_metadata(&directory).map_err(|error| {
+            OcrConsumerError::Discovery(format!("provider directory is unavailable: {error}"))
+        })?;
+        if !metadata.file_type().is_dir()
+            || metadata.uid() != owner_uid
+            || metadata.permissions().mode() & 0o077 != 0
         {
-            Ok(response) if response.status() == StatusCode::OK => response,
-            _ => continue,
-        };
-        let bytes = match read_bounded_response(response, MAX_MANIFEST_BYTES) {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-        let manifest: AppManifest = match serde_json::from_slice(&bytes) {
-            Ok(manifest) => manifest,
-            Err(_) => continue,
-        };
-        if valid_ocr_manifest(&manifest, &registration) {
-            providers.push(LiveOcrProvider {
-                app_id: registration.app_id,
-                instance_id: registration.instance_id,
-                base_url: registration.transport.base_url,
-                token: registration.auth.token,
-            });
+            return Err(OcrConsumerError::Discovery(
+                "provider directory is not owner-private".to_string(),
+            ));
+        }
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(DISCOVERY_TIMEOUT)
+            .timeout(DISCOVERY_TIMEOUT)
+            .build()
+            .map_err(|error| OcrConsumerError::Discovery(error.to_string()))?;
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| OcrConsumerError::Discovery(error.to_string()))?
+        {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(_) => continue,
+            };
+            let Some(registration) = read_registration(&path, owner_uid, protocol) else {
+                continue;
+            };
+            if registration.app_id != OCR_APP_ID
+                || registration.protocol_version != protocol
+                || registration.transport.kind != format!("http-loopback-v{protocol}")
+                || registration.auth.scheme != "bearer"
+                || registration.auth.token.is_empty()
+                || !valid_uuid_v4(&registration.instance_id)
+                || (protocol == 3 && !streamed::canonical_uuid(&registration.instance_id))
+                || validate_base_url(&registration.transport.base_url).is_none()
+            {
+                continue;
+            }
+            let response = match client
+                .get(
+                    endpoint(
+                        &registration.transport.base_url,
+                        &format!("v{protocol}/manifest"),
+                    )
+                    .map_err(map_transport)?,
+                )
+                .bearer_auth(&registration.auth.token)
+                .send()
+            {
+                Ok(response) if response.status() == StatusCode::OK => response,
+                _ => continue,
+            };
+            let bytes = match read_bounded_response(response, MAX_MANIFEST_BYTES) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            let manifest: AppManifest = match if protocol == 3 {
+                streamed::decode_metadata(&bytes, MAX_MANIFEST_BYTES as usize).ok()
+            } else {
+                serde_json::from_slice(&bytes).ok()
+            } {
+                Some(manifest) => manifest,
+                None => continue,
+            };
+            if valid_ocr_manifest(&manifest, &registration) {
+                providers.push(LiveOcrProvider {
+                    app_id: registration.app_id,
+                    instance_id: registration.instance_id,
+                    base_url: registration.transport.base_url,
+                    token: registration.auth.token,
+                    protocol_version: protocol,
+                });
+            }
         }
     }
-    providers.sort_by(|left, right| left.instance_id.cmp(&right.instance_id));
-    providers.dedup_by(|left, right| left.instance_id == right.instance_id);
+    providers.sort_by(|left, right| {
+        left.instance_id
+            .cmp(&right.instance_id)
+            .then(left.protocol_version.cmp(&right.protocol_version))
+    });
+    providers.dedup_by(|left, right| {
+        left.instance_id == right.instance_id && left.protocol_version == right.protocol_version
+    });
     Ok(providers)
 }
 
 #[cfg(unix)]
-fn read_registration(path: &Path, owner_uid: u32) -> Option<RuntimeRegistration> {
+fn read_registration(path: &Path, owner_uid: u32, protocol: u32) -> Option<RuntimeRegistration> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.file_type().is_file()
@@ -1146,12 +1296,17 @@ fn read_registration(path: &Path, owner_uid: u32) -> Option<RuntimeRegistration>
     if bytes.len() as u64 > MAX_REGISTRATION_BYTES {
         return None;
     }
-    serde_json::from_slice(&bytes).ok()
+    if protocol == 3 {
+        streamed::decode_metadata(&bytes, MAX_REGISTRATION_BYTES as usize).ok()
+    } else {
+        serde_json::from_slice(&bytes).ok()
+    }
 }
 
 #[cfg(any(unix, test))]
 fn valid_ocr_manifest(manifest: &AppManifest, registration: &RuntimeRegistration) -> bool {
-    if manifest.protocol_version != PROTOCOL_VERSION
+    if capability_version(manifest.protocol_version).is_none()
+        || manifest.protocol_version != registration.protocol_version
         || manifest.instance_id != registration.instance_id
         || manifest.app.id != OCR_APP_ID
         || manifest.capabilities.len() != 1
@@ -1160,7 +1315,7 @@ fn valid_ocr_manifest(manifest: &AppManifest, registration: &RuntimeRegistration
     }
     let capability = &manifest.capabilities[0];
     capability.id == OCR_CAPABILITY_ID
-        && capability.version == OCR_CAPABILITY_VERSION
+        && Some(capability.version.as_str()) == capability_version(manifest.protocol_version)
         && capability.accepts.len() == 1
         && capability.accepts[0].media_type == PDF_MEDIA_TYPE
         && capability.accepts[0].max_bytes == MAX_INPUT_BYTES as u64
@@ -1182,7 +1337,6 @@ fn valid_ocr_manifest(manifest: &AppManifest, registration: &RuntimeRegistration
         && !capability.effects.confirmation_required
 }
 
-#[cfg(unix)]
 fn validate_base_url(value: &str) -> Option<Url> {
     let url = Url::parse(value).ok()?;
     (url.scheme() == "http"
@@ -1211,6 +1365,7 @@ mod tests {
     use crate::connect::contracts::{ArtifactProvenance, ProviderRef};
     #[cfg(unix)]
     use crate::connect::v2::JobResult;
+    use crate::connect::v2::{PROTOCOL_VERSION, TRANSPORT_KIND};
     use crate::pipeline::contracts::{
         ModelProfileSnapshot, ModelStageProfileSnapshot, ParsedPage, PipelineWarning,
         SummaryProfile,
@@ -1221,7 +1376,7 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::TempDir;
 
-    fn image_only_pdf() -> Vec<u8> {
+    pub(super) fn image_only_pdf() -> Vec<u8> {
         let mut document = Document::with_version("1.5");
         let pages_id = document.new_object_id();
         let image_id = document.add_object(Stream::new(
@@ -1286,7 +1441,7 @@ mod tests {
         bytes
     }
 
-    fn snapshot() -> ModelProfileSnapshot {
+    pub(super) fn snapshot() -> ModelProfileSnapshot {
         let stage = ModelStageProfileSnapshot {
             runtime_kind: Default::default(),
             profile_id: "ocr-test-profile".to_string(),
@@ -1303,12 +1458,13 @@ mod tests {
         }
     }
 
-    fn live_provider() -> LiveOcrProvider {
+    pub(super) fn live_provider() -> LiveOcrProvider {
         LiveOcrProvider {
             app_id: OCR_APP_ID.to_string(),
             instance_id: "11111111-1111-4111-8111-111111111111".to_string(),
             base_url: "http://127.0.0.1:4545/".to_string(),
             token: "fixture-token".to_string(),
+            protocol_version: 2,
         }
     }
 
@@ -1419,7 +1575,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn completed_status(handoff: &OcrHandoff) -> JobStatus {
+    pub(super) fn completed_status(handoff: &OcrHandoff) -> JobStatus {
         let pdf = include_bytes!("../../tests/fixtures/ocr_tagged.pdf").to_vec();
         let text = canonical_tagged_ocr_text(&pdf).unwrap();
         let output = |artifact_id: &str, media_type: &str, bytes: Vec<u8>| OutputArtifact {
@@ -1485,7 +1641,7 @@ mod tests {
             _request: &JobRequest,
             _source: &[u8],
             _deadline: Instant,
-        ) -> Result<JobStatus, TransportError> {
+        ) -> Result<ReceivedStatus, TransportError> {
             self.calls.lock().unwrap().push("submit");
             Err(TransportError::Uncertain(
                 "lost acknowledgement".to_string(),
@@ -1497,7 +1653,7 @@ mod tests {
             _provider: &LiveOcrProvider,
             _job_id: &str,
             _deadline: Instant,
-        ) -> Result<JobStatus, TransportError> {
+        ) -> Result<ReceivedStatus, TransportError> {
             let mut calls = self.calls.lock().unwrap();
             let first_status = !calls.contains(&"status");
             calls.push("status");
@@ -1511,6 +1667,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .clone()
+                .map(ReceivedStatus::Inline)
                 .ok_or_else(|| TransportError::Invalid("status response is invalid".to_string()))
         }
     }
@@ -1529,7 +1686,7 @@ mod tests {
             _request: &JobRequest,
             _source: &[u8],
             _deadline: Instant,
-        ) -> Result<JobStatus, TransportError> {
+        ) -> Result<ReceivedStatus, TransportError> {
             panic!("a saved uncertain job must be reconciled before replay")
         }
 
@@ -1538,7 +1695,7 @@ mod tests {
             _provider: &LiveOcrProvider,
             _job_id: &str,
             _deadline: Instant,
-        ) -> Result<JobStatus, TransportError> {
+        ) -> Result<ReceivedStatus, TransportError> {
             *self.status_calls.lock().unwrap() += 1;
             Err(TransportError::Uncertain(
                 "status remains unavailable".to_string(),
@@ -1572,7 +1729,7 @@ mod tests {
             _request: &JobRequest,
             _source: &[u8],
             _deadline: Instant,
-        ) -> Result<JobStatus, TransportError> {
+        ) -> Result<ReceivedStatus, TransportError> {
             self.calls.lock().unwrap().push("submit");
             assert!(!self.cancel_during_status);
             self.cancel();
@@ -1586,7 +1743,7 @@ mod tests {
             _provider: &LiveOcrProvider,
             _job_id: &str,
             _deadline: Instant,
-        ) -> Result<JobStatus, TransportError> {
+        ) -> Result<ReceivedStatus, TransportError> {
             self.calls.lock().unwrap().push("status");
             assert!(self.cancel_during_status);
             self.cancel();
@@ -1629,7 +1786,7 @@ mod tests {
 
     #[test]
     fn manifest_profile_checks_both_sides_of_the_exact_boundary() {
-        let registration = RuntimeRegistration {
+        let mut registration = RuntimeRegistration {
             protocol_version: PROTOCOL_VERSION,
             instance_id: live_provider().instance_id,
             app_id: OCR_APP_ID.to_string(),
@@ -1679,6 +1836,17 @@ mod tests {
         assert!(!valid_ocr_manifest(&manifest, &registration));
         manifest.capabilities[0].produces[1] = TEXT_MEDIA_TYPE.to_string();
         manifest.capabilities[0].effects.external = true;
+        assert!(!valid_ocr_manifest(&manifest, &registration));
+        manifest.capabilities[0].effects.external = false;
+        registration.protocol_version = 3;
+        registration.transport.kind = "http-loopback-v3".to_string();
+        manifest.protocol_version = 3;
+        manifest.capabilities[0].version = "1.1".to_string();
+        assert!(
+            valid_ocr_manifest(&manifest, &registration),
+            "v3 OCR profile rejected"
+        );
+        manifest.capabilities[0].version = "1.0".to_string();
         assert!(!valid_ocr_manifest(&manifest, &registration));
     }
 
