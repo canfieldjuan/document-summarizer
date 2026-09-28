@@ -7556,7 +7556,7 @@ mod tests {
     }
 
     struct RecordingRuntime<'a> {
-        inner: &'a OllamaRuntime,
+        inner: &'a dyn ModelRuntime,
         responses: Mutex<Vec<ModelResponse>>,
     }
 
@@ -7630,7 +7630,7 @@ mod tests {
     }
 
     impl<'a> RecordingRuntime<'a> {
-        fn new(inner: &'a OllamaRuntime) -> Self {
+        fn new(inner: &'a dyn ModelRuntime) -> Self {
             Self {
                 inner,
                 responses: Mutex::new(Vec::new()),
@@ -8440,6 +8440,9 @@ mod tests {
 
         fn context_tokens(&self, stage: PipelineStage) -> u32 {
             self.inner.context_tokens(stage)
+        }
+        fn profile_snapshot(&self) -> Option<crate::pipeline::contracts::ModelProfileSnapshot> {
+            self.inner.profile_snapshot()
         }
     }
 
@@ -13451,12 +13454,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires configured Ollama; prints a synthetic non-private selected Story example"]
+    #[ignore = "requires explicit model settings or DOC_SUM_QUALIFICATION_GGUF; prints a synthetic selected Story"]
     fn live_story_profile_selects_then_generates_a_source_bound_synopsis() {
         let catalog = story_catalog();
-        let ollama = OllamaRuntime::from_environment().expect("Ollama runtime should configure");
-        let runtime = RecordingRuntime::new(&ollama);
-        runtime.health().expect("Ollama should be available");
+        let database = tempfile::NamedTempFile::new().expect("isolated acceptance database");
+        let (selected, _runtime_directory) =
+            crate::pipeline::live_runtime::configured_live_runtime(database.path());
+        let runtime = RecordingRuntime::new(selected.as_ref());
+        runtime
+            .health()
+            .expect("selected model should be available");
         let (full_prompt, full_schema) =
             prompt_and_schema(SummaryProfile::Story, &catalog).unwrap();
         let forced_input_limit =
@@ -14148,12 +14155,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires configured Ollama; prints a synthetic non-private selected Contract example"]
+    #[ignore = "requires explicit model settings or DOC_SUM_QUALIFICATION_GGUF; prints a synthetic selected Contract"]
     fn live_contract_profile_selects_then_generates_a_source_bound_overview() {
         let catalog = long_contract_catalog();
-        let ollama = OllamaRuntime::from_environment().expect("Ollama runtime should configure");
-        let runtime = RecordingRuntime::new(&ollama);
-        runtime.health().expect("Ollama should be available");
+        let database = tempfile::NamedTempFile::new().expect("isolated acceptance database");
+        let (selected, _runtime_directory) =
+            crate::pipeline::live_runtime::configured_live_runtime(database.path());
+        let runtime = RecordingRuntime::new(selected.as_ref());
+        runtime
+            .health()
+            .expect("selected model should be available");
         let (full_prompt, full_schema) =
             prompt_and_schema(SummaryProfile::Contract, &catalog).unwrap();
         let forced_input_limit =

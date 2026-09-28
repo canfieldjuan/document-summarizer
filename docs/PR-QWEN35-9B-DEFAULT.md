@@ -28,7 +28,7 @@ The server's reasoning option does not apply a chat template to raw completion.
   lanes as well. Their prompts and assertions stay unchanged; recording accepts
   any ModelRuntime. Update profile-release-acceptance.sh to invoke the new
   production default rather than requiring a resident 30B Ollama model.
-- README.md: describe the new default and existing explicit legacy choices,
+- README.md and docs/OFFICE_ACCEPTANCE.md: describe the new default and existing explicit legacy choices,
   including manual GGUF registration and the Linux-only direct runtime.
 - Existing saved selections keep their values. No version bump or migration:
   the operator's issue update says there are no deployed settings to migrate.
@@ -98,3 +98,11 @@ The failure receipt is retained. Live model acceptance remains pending.
 ## Gap audit
 
 NOT DONE: live acceptance evidence and current-head review/CI remain required.
+
+Shared live selection checks: 61 focused model/runtime/routing tests passed,
+1 live test ignored (7.95s); 4 office checks passed, 3 live tests ignored.
+All live binaries compile, and all-targets/all-features clippy passed (3.58s).
+The second synthetic run executed 13 requests / 433 completion tokens, then
+failed the unchanged omitted-page versus cited-page disjointness assertion.
+No response contained a thinking marker; the raw completion API provides no
+separate reasoning-token counter. This is not a successful acceptance run.
