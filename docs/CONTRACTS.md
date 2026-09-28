@@ -510,9 +510,15 @@ claims cannot fit their exact downstream verification requests, synthesis
 discards them before persistence. Both cases persist presentation mode
 `claimLedgerFallback`, warning `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`, and
 the existing source-ordered claim ledger, with the warning message identifying
-the applicable boundary. Invalid budgets, invalid model output, unknown or
-duplicate source identifiers and non-context runtime failures still fail the
-stage; they do not silently choose the fallback.
+the applicable boundary. Invalid budgets and non-context runtime failures still
+fail the stage. General prose generation may use the independently verified
+claim ledger when existing bounded recovery cannot produce a usable draft for
+a model-output reason, disclosed by `COHERENT_SUMMARY_MODEL_OUTPUT_INVALID`.
+Only a typed rejection of model-produced content admits that fallback; transport,
+identity, cancellation, runtime-admission and artifact/invariant failures do not.
+Rejected prose and citations are never delivered. The fallback still requires
+semantic verification and final page coverage. Story, Contract and source-ID
+selection failures retain their existing behavior.
 
 A narrow deterministic guard compares modal predicates in each prose unit with
 matching statements in its cited quotations. Predicate, bounded subject context,

@@ -121,3 +121,56 @@ an ad hoc acceptance exception. This is separate from Contract admission #92.
 The live failed attempt remains in the denominator. Exact-head review and CI
 also remain required. Private raw source/model artifacts stay local; only
 opaque labels, hashes and aggregate evidence belong in the public PR.
+
+## Recovery contract revision
+
+New evidence: the retained A response fails General synthesis before a coherent
+artifact exists, although its unchanged per-page ledger previously delivered
+9/10 pages after verification. Increasing admitted context must not discard that
+independently verifiable fallback merely because the initial prose is malformed,
+clipped or unfinished. The current repair classification depends on selection
+windows and an exact decoder limit; changing those two predicates alone would
+not handle every recorded unit and is not this fix.
+
+Revised root cause: a rejected model-produced draft and an operational failure
+leave synthesis through the same untyped error channel. The caller consequently
+fails the entire job rather than preserving the independently verified ledger.
+
+Revised required surface:
+- Reuse the typed model-output versus runtime/invariant distinction already
+  developed in draft #92 at the coherent generation owner. Port only that shared
+  mechanism; do not import Contract admission, versioning or omission changes.
+- For General prose generation, if bounded existing recovery produces no usable
+  draft for a model-output reason, use the existing claim-ledger fallback with
+  the explicit `COHERENT_SUMMARY_MODEL_OUTPUT_INVALID` warning. Full and selected
+  catalogs receive the same delivery floor. Do not accept any rejected prose or
+  citations, add a new repair loop, or treat error-code text alone as provenance.
+- Preserve valid prior drafts and valid siblings under the existing recovery
+  rules. Verify fallback ledger claims independently, apply existing semantic
+  guards and require final coverage before completion. Inadequate or unsupported
+  ledgers must still fail without final artifacts.
+- Preserve operational failure behavior: transport, runtime response identity,
+  cancellation, invalid budgets, artifact/invariant failures, and non-context
+  admission failures must not become successful model-output fallbacks. Existing
+  context-overflow selection/fallback behavior stays unchanged.
+- The warning's exact code, message, stage and allowed presentation must agree
+  across authoring, runtime validation and persisted-artifact validation.
+
+Revised non-scope: no prompt or output-limit change, new clipping acceptance,
+source segmentation, new retry budget, preset promotion, automatic profile
+routing, storage migration, Contract/Story model-output admission, or semantic
+verification relaxation. Source-selection response failures remain outside this
+General prose-generation fix. Draft #92 remains separate.
+
+Verification: first reproduce the initial-invalid-output failure in the real
+pipeline with a synthetic response and replay A's retained response privately.
+Then prove A restores the prior disclosed 9/10 fallback with the normal verifier
+and coverage gate. Cover malformed, clipped and below-limit unfinished output;
+reject operational failures even if their error text resembles a model-output
+error. Test insufficient/unsupported fallback, preserved valid draft behavior,
+unchanged Story/Contract failure behavior and warning validation after reopen.
+Run focused regressions, the affected summary suite, formatting and strict
+clippy; repeat live A/B only after replay passes and GPU exclusivity is available.
+
+Recovery implementation is pending. The existing live failure remains a merge
+blocker until the new behavior is proven; green CI alone does not clear it.
