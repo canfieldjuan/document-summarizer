@@ -221,3 +221,26 @@ coordinator (terminal failure before any output GET or child), and a 200
 application/json body in the framing matrix. Removing the two guards makes
 exactly these tests fail; restoring them yields 18 streamed tests passed,
 2 intentionally ignored, in 4.98s. Only tests and this evidence note changed.
+
+## Review correction: local I/O and concurrent status saves
+
+Root cause: download creation/write errors were labeled provider-invalid,
+while saved-completion comparison read a stale caller snapshot before a
+phase-only update. Valid outputs could become permanently failed or the first
+completion could be overwritten by a concurrent poll.
+
+Required surface: the internal OcrTransport file-creation boundary supplies
+an anonymous file by default and permits fault injection without global temp
+settings. Typed local I/O maps to recoverable OcrConsumerError::Io for create,
+write, seek and read. Framing, length and digest remain Invalid.
+The streamed save_status owner reloads, compares and saves inside one short
+IMMEDIATE transaction. The first saved completion is immutable even for stale
+callers; a conflicting completion fails visibly without replacing it. An
+already-advanced phase is never regressed. No network I/O runs in this
+transaction. No schema, protocol, v2, model or provider changes.
+
+Verification: deterministic two-poller stale snapshots with differing and
+identical completions, stale processing/error replies, and advanced phases;
+creation/write failures through real HTTP leave no pair/child and recover
+the same job once local I/O works. Run the failing-before regressions, adjacent
+consumer tests, format and clippy. Existing CI owns broad platform suites.
