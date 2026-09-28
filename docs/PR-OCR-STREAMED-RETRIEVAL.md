@@ -338,3 +338,29 @@ The wrapper must preserve output_ready and both exact bytes, then recovery
 admits one child without another request. Retain the malformed-status and
 nonretryable-error controls that fail before a pair exists. Run this probe
 failing first, adjacent consumer tests, formatting and clippy.
+
+### Retrieval phase ownership evidence
+
+The fail-first stale_retrieval_failure_preserves_verified_pair_and_one_child
+probe failed with actual phase failed, expected output_ready, after the peer
+completed verified retrieval and the losing GET returned a validated
+OUTPUT_UNAVAILABLE. The final adjacent consumer suite passed 36, with 2
+opt-in ignores (16.58s). Formatting and diff checks passed.
+
+Cold diff: ocr_consumer.rs:454-456 now explicitly admits only prepared,
+submission_uncertain and running to the outer InvalidOutput failure handler.
+The existing db.rs:506-508 phase-conditioned UPDATE also prevents a subsequent
+advance from being overwritten. The desktop finalizer at desktop.rs:652-656
+already leaves nonfailed OCR handoffs resumable; it needs no change.
+
+Boundary-probe: a genuine invalid response before verified storage still
+fails in the existing malformed-status/nonretryable-error cases; the new
+deterministic interleaving uses separate connections and actual HTTP, retains
+the exact pair, and resumes twice into the same single lineage with its HTTP
+server stopped. Cancellation retains its separate existing phase policy.
+Effect-trace: stale retrieval cannot discard a verified pair | explicit
+retrieval phase ownership plus existing compare-and-set | fail-first case
+now preserves output_ready and reaches one child.
+
+DONE locally for this runtime correction; NOT DONE for merge until new-head
+CI and independent review. No additional hardening is included.

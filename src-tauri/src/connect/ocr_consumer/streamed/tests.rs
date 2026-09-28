@@ -1210,6 +1210,111 @@ fn concurrent_retrievals_share_one_child_without_holding_a_write_transaction() {
 }
 
 #[test]
+fn stale_retrieval_failure_preserves_verified_pair_and_one_child() {
+    struct WinningPeer {
+        database: std::path::PathBuf,
+        handoff: OcrHandoff,
+        status: Status,
+    }
+    impl OcrTransport for WinningPeer {
+        fn submit(
+            &self,
+            _: &LiveOcrProvider,
+            _: &JobRequest,
+            _: &[u8],
+            _: Instant,
+        ) -> Result<ReceivedStatus, TransportError> {
+            panic!("completed job resubmitted")
+        }
+        fn status(
+            &self,
+            provider: &LiveOcrProvider,
+            _: &str,
+            deadline: Instant,
+        ) -> Result<ReceivedStatus, TransportError> {
+            // The other coordinator completes while this caller still owns
+            // its running snapshot. Exercise the real retrieval/storage path.
+            let conn = db::init_db(&self.database).unwrap();
+            retrieve(
+                &conn,
+                &self.handoff,
+                provider,
+                &HttpOcrTransport,
+                &UNCONTROLLED_EXECUTION,
+                deadline,
+            )
+            .unwrap();
+            assert_eq!(
+                reload(&conn, &self.handoff.handoff_id).unwrap().phase,
+                "output_ready"
+            );
+            Ok(ReceivedStatus::Streamed(self.status.clone()))
+        }
+    }
+    let (dir, mut conn, mut provider, handoff, status, pdf, text) = fixture();
+    save_status(&conn, &handoff, &status).unwrap();
+    let saved = reload(&conn, &handoff.handoff_id).unwrap();
+    let (pdf_desc, text_desc) = pair(&status).unwrap();
+    let body = br#"{"protocol_version":3,"error":{"code":"OUTPUT_UNAVAILABLE","message":"output unavailable","retryable":false}}"#;
+    let (url, worker) = server(vec![
+        status_reply(&handoff, &status),
+        artifact(output_path(&handoff, pdf_desc), &pdf),
+        artifact(output_path(&handoff, text_desc), &text),
+        Reply {
+            path: output_path(&handoff, pdf_desc),
+            headers: format!("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()),
+            body: body.to_vec(),
+        },
+    ]);
+    provider.base_url = url;
+    let peer = WinningPeer {
+        database: dir.path().join("summarizer.db"),
+        handoff: saved.clone(),
+        status: status.clone(),
+    };
+    let result = run_handoff(
+        &mut conn,
+        saved,
+        dir.path(),
+        &provider,
+        &peer,
+        &UNCONTROLLED_EXECUTION,
+    );
+    assert_eq!(worker.join().unwrap().len(), 4);
+    assert!(
+        matches!(&result, Err(OcrConsumerError::InvalidOutput(message)) if message.contains("OUTPUT_UNAVAILABLE")),
+        "{result:?}"
+    );
+    let saved = reload(&conn, &handoff.handoff_id).unwrap();
+    assert_eq!(saved.phase, "output_ready");
+    assert_eq!(saved.ocr_pdf_bytes.as_deref(), Some(pdf.as_slice()));
+    assert_eq!(saved.text_bytes.as_deref(), Some(text.as_slice()));
+    assert!(saved.error_code.is_none());
+    // The HTTP server is gone. Both resumes must reuse the saved pair.
+    for _ in 0..2 {
+        let saved = reload(&conn, &handoff.handoff_id).unwrap();
+        assert_eq!(
+            run_handoff(
+                &mut conn,
+                saved,
+                dir.path(),
+                &provider,
+                &HttpOcrTransport,
+                &UNCONTROLLED_EXECUTION
+            )
+            .unwrap(),
+            handoff.child_run_id
+        );
+    }
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn exact_pdf_and_text_caps_transfer_over_http() {
     let mut provider = live_provider();
     provider.protocol_version = 3;

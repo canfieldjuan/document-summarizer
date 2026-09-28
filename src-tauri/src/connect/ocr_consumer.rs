@@ -451,9 +451,9 @@ fn run_handoff(
     if provider.protocol_version == 3 {
         if let Err(OcrConsumerError::InvalidOutput(message)) = &result {
             let current = reload(conn, &handoff_id)?;
-            if !matches!(
+            if matches!(
                 current.phase.as_str(),
-                "failed" | "child_admitted" | "completed"
+                "prepared" | "submission_uncertain" | "running"
             ) {
                 db::fail_ocr_handoff(
                     conn,
