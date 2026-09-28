@@ -63,13 +63,34 @@ fn configured_live_runtime(db_path: &Path) -> (Box<dyn ModelRuntime>, Option<tem
     let model = env::var_os("DOC_SUM_QUALIFICATION_GGUF").expect(
         "default live acceptance requires DOC_SUM_QUALIFICATION_GGUF or explicit model settings",
     );
-    let directory = tempfile::tempdir().expect("isolated model settings directory");
+    let directory = isolated_runtime_directory();
     let path = settings_path(directory.path());
     register_gguf(&path, Path::new(&model)).expect("default GGUF should register");
     let runtime =
         runtime_from_settings(&path, db_path).expect("default model profile should configure");
     // Keep the private socket directory alive until the acceptance run ends.
     (runtime, Some(directory))
+}
+
+fn isolated_runtime_directory() -> tempfile::TempDir {
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir().expect("isolated model settings directory")
+}
+
+#[test]
+#[cfg(unix)]
+fn isolated_runtime_directory_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = isolated_runtime_directory();
+    assert_eq!(
+        fs::metadata(directory.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
 }
 
 fn coverage_at_least_sixty_percent(cited: usize, total: usize) -> bool {

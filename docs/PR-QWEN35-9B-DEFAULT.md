@@ -83,7 +83,10 @@ all-features clippy passed. A legacy test's assumption that default meant Ollama
 was corrected to explicitly select the old profile; its original invariant
 is still tested. The pinned GGUF template's enable_thinking=false branch exactly
 matches the new trusted suffix. Runtime binary and library hashes match the
-existing registry. Live acceptance remains pending.
+existing registry. The first live attempt failed before inference because the test helper created
+a group-writable settings directory under this shell umask. The helper now
+creates it with owner-only permissions; production ancestry checks stay intact.
+The failure receipt is retained. Live model acceptance remains pending.
 
 ## Gap audit
 
