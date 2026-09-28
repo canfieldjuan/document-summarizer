@@ -328,6 +328,11 @@ pub(super) fn save_status(
     let handoff = &current;
     let checked = validate(handoff, status).and_then(|()| {
         if has_saved_completion(handoff)? {
+            // Overlapping polls can deliver an older nonterminal reply after
+            // completion. It cannot supersede the durable completed result.
+            if matches!(status.status, JobState::Accepted | JobState::Processing) {
+                return Ok(false);
+            }
             let previous: Status = decode_metadata(
                 handoff.provider_status_json.as_ref().unwrap().as_bytes(),
                 MAX_METADATA,
@@ -339,19 +344,23 @@ pub(super) fn save_status(
                 ));
             }
         }
-        Ok(())
+        Ok(true)
     });
-    if let Err(error) = checked {
-        db::fail_ocr_handoff(
-            &tx,
-            &handoff.handoff_id,
-            &handoff.phase,
-            "OCR_OUTPUT_INVALID",
-            &error.to_string(),
-            false,
-        )?;
-        tx.commit().map_err(StoreError::from)?;
-        return Err(error);
+    match checked {
+        Ok(false) => return Ok(()),
+        Ok(true) => {}
+        Err(error) => {
+            db::fail_ocr_handoff(
+                &tx,
+                &handoff.handoff_id,
+                &handoff.phase,
+                "OCR_OUTPUT_INVALID",
+                &error.to_string(),
+                false,
+            )?;
+            tx.commit().map_err(StoreError::from)?;
+            return Err(error);
+        }
     }
     if let Some(error) = &status.error {
         db::fail_ocr_handoff(
@@ -643,16 +652,15 @@ async fn download_async(
         }
         let error: ErrorEnvelope = decode_metadata(&bytes, MAX_METADATA)?;
         let refusal = error_response(status, &bytes)?;
-        if status == StatusCode::TOO_MANY_REQUESTS
-            && error.protocol_version == 3
-            && error.error.code == "OUTPUT_BUSY"
-            && error.error.retryable
-            && retry_after
-        {
-            return Err(TransportError::Uncertain("OCR output is busy".to_string()));
+        if error.error.code == "OUTPUT_BUSY" && !retry_after {
+            return Err(invalid("OUTPUT_BUSY requires Retry-After: 1"));
         }
         return Err(match refusal {
             TransportError::Unauthorized => TransportError::Unauthorized,
+            TransportError::Refused {
+                message,
+                retryable: true,
+            } => TransportError::Uncertain(message),
             _ => invalid(format!(
                 "OCR output retrieval refused: {}",
                 error.error.code

@@ -292,3 +292,28 @@ change. The shared status/error owners must decide these rules once.
 
 This corrects one runtime regression introduced by the preceding race fix;
 further bookkeeping does not justify another implementation round.
+
+### Monotonic/retry correction evidence
+
+Before the fix: late-nonterminal and not-ready HTTP regressions both failed
+with InvalidOutput (22 other streamed tests passed, 2 ignored). Afterward the
+adjacent consumer suite passed 35, with 2 opt-in ignores (16.87s); formatting,
+clippy (all targets/features), and diff checks passed.
+
+Cold diff: streamed.rs:329 validates before deciding whether a late nonterminal
+reply can be ignored under the existing lock; :654 consumes the validated
+refusal's retryable flag while retaining the busy-header requirement. Tests
+at streamed/tests.rs:1405,1485,1571 cover Accepted/Processing after completion
+through one child, Failed/different completion conflicts, retry exhaustion
+with preserved completion, later successful retry, and malformed/nonretryable
+controls. No other production file changed.
+
+Boundary-probe: late nonterminal is ignored; failed/different completion is
+rejected; retryable refusal recovers, malformed/nonretryable refusal fails.
+Effect-trace: avoid permanently losing a valid document to an old poll or
+retryable refusal | atomic status owner and typed HTTP policy | failing-before
+cases now pass through actual retrieval/child admission.
+
+DONE for these runtime corrections locally. NOT DONE for merge until new-head
+review and required CI. Prior corpus receipts keep their original commit;
+this follow-up claims the focused production-coordinator evidence above.

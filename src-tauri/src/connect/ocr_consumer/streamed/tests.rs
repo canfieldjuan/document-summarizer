@@ -1402,34 +1402,203 @@ fn review_temp_write_failure_is_recoverable() {
 }
 
 #[test]
-fn review_stale_nonterminal_status_cannot_replace_completion_or_advanced_phase() {
-    for failure in [false, true] {
-        let (_dir, conn, _, handoff, status, _, _) = fixture();
+fn late_nonterminal_reply_keeps_completion_and_retrieves_one_child() {
+    for state in [JobState::Accepted, JobState::Processing, JobState::Failed] {
+        let (dir, mut conn, mut provider, handoff, status, pdf, text) = fixture();
         let mut processing = status.clone();
         processing.status = JobState::Processing;
         processing.result = None;
         save_status(&conn, &handoff, &processing).unwrap();
         let stale = reload(&conn, &handoff.handoff_id).unwrap();
         save_status(&conn, &stale, &status).unwrap();
+        processing.status = state;
+        let failure = processing.status == JobState::Failed;
         if failure {
-            processing.status = JobState::Failed;
-            processing.error = Some(serde_json::from_value(serde_json::json!({"code":"OCR_ENGINE_FAILED","message":"OCR engine failed","retryable":false})).unwrap());
+            processing.error = Some(
+                serde_json::from_value(serde_json::json!({
+                    "code":"OCR_ENGINE_FAILED", "message":"OCR engine failed", "retryable":false
+                }))
+                .unwrap(),
+            );
         }
         let result = save_status(&conn, &stale, &processing);
-        assert!(matches!(result, Err(OcrConsumerError::InvalidOutput(_))));
+        assert_eq!(result.is_err(), failure, "late poll: {result:?}");
         let saved = reload(&conn, &handoff.handoff_id).unwrap();
-        assert_eq!(saved.phase, "failed");
+        assert_eq!(saved.phase, if failure { "failed" } else { "running" });
         assert_eq!(
             saved.provider_status_json,
             Some(serde_json::to_string(&status).unwrap())
         );
-        // A late poll must also leave the advanced phase and first descriptors alone.
+        if failure {
+            continue;
+        }
+        let (pdf_desc, text_desc) = pair(&status).unwrap();
+        let (url, worker) = server(vec![
+            status_reply(&handoff, &status),
+            artifact(output_path(&handoff, pdf_desc), &pdf),
+            artifact(output_path(&handoff, text_desc), &text),
+        ]);
+        provider.base_url = url;
+        assert_eq!(
+            run_handoff(
+                &mut conn,
+                saved,
+                dir.path(),
+                &provider,
+                &HttpOcrTransport,
+                &UNCONTROLLED_EXECUTION
+            )
+            .unwrap(),
+            handoff.child_run_id
+        );
+        assert_eq!(worker.join().unwrap().len(), 3);
+        let advanced = reload(&conn, &handoff.handoff_id).unwrap();
         assert!(save_status(&conn, &stale, &processing).is_ok());
         assert_eq!(
-            reload(&conn, &handoff.handoff_id)
-                .unwrap()
-                .provider_status_json,
-            saved.provider_status_json
+            reload(&conn, &handoff.handoff_id).unwrap().phase,
+            advanced.phase
         );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |r| r
+                .get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+    }
+}
+
+fn output_refusal(path: String, code: &str, http: u16, retryable: bool) -> Reply {
+    let body = serde_json::to_vec(&serde_json::json!({"protocol_version":3,
+        "error":{"code":code,"message":"test refusal","retryable":retryable}}))
+    .unwrap();
+    Reply {
+        path,
+        headers: format!(
+            "HTTP/1.1 {http} Refused\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        ),
+        body,
+    }
+}
+
+#[test]
+fn not_ready_exhaustion_is_recoverable_and_later_retry_completes_same_job() {
+    let (dir, mut conn, mut provider, handoff, status, pdf, text) = fixture();
+    save_status(&conn, &handoff, &status).unwrap();
+    let (pdf_desc, text_desc) = pair(&status).unwrap();
+    let (url, worker) = server(vec![
+        status_reply(&handoff, &status),
+        output_refusal(
+            output_path(&handoff, pdf_desc),
+            "OUTPUT_NOT_READY",
+            409,
+            true,
+        ),
+        output_refusal(
+            output_path(&handoff, pdf_desc),
+            "OUTPUT_NOT_READY",
+            409,
+            true,
+        ),
+        output_refusal(
+            output_path(&handoff, pdf_desc),
+            "OUTPUT_NOT_READY",
+            409,
+            true,
+        ),
+    ]);
+    provider.base_url = url;
+    let result = run_handoff(
+        &mut conn,
+        reload_for_test(&dir),
+        dir.path(),
+        &provider,
+        &HttpOcrTransport,
+        &UNCONTROLLED_EXECUTION,
+    );
+    assert!(
+        matches!(result, Err(OcrConsumerError::Transport(_))),
+        "{result:?}"
+    );
+    assert_eq!(worker.join().unwrap().len(), 4);
+    let saved = reload(&conn, &handoff.handoff_id).unwrap();
+    assert_eq!(saved.phase, "running");
+    assert!(saved.ocr_pdf_bytes.is_none() && saved.text_bytes.is_none());
+    assert_eq!(
+        saved.provider_status_json,
+        Some(serde_json::to_string(&status).unwrap())
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    let (url, worker) = server(vec![
+        status_reply(&handoff, &status),
+        output_refusal(
+            output_path(&handoff, pdf_desc),
+            "OUTPUT_NOT_READY",
+            409,
+            true,
+        ),
+        artifact(output_path(&handoff, pdf_desc), &pdf),
+        artifact(output_path(&handoff, text_desc), &text),
+    ]);
+    provider.base_url = url;
+    assert_eq!(
+        run_handoff(
+            &mut conn,
+            saved,
+            dir.path(),
+            &provider,
+            &HttpOcrTransport,
+            &UNCONTROLLED_EXECUTION
+        )
+        .unwrap(),
+        handoff.child_run_id
+    );
+    assert_eq!(worker.join().unwrap().len(), 4);
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn output_refusal_policy_rejects_invalid_and_nonretryable_errors() {
+    for (code, http, retryable) in [
+        ("OUTPUT_NOT_READY", 409, false),
+        ("OUTPUT_NOT_READY", 500, true),
+        ("OUTPUT_UNAVAILABLE", 500, false),
+        ("OUTPUT_NOT_FOUND", 404, false),
+        ("OUTPUT_BUSY", 429, true), // Missing required Retry-After remains invalid.
+    ] {
+        let (dir, mut conn, mut provider, handoff, status, _, _) = fixture();
+        save_status(&conn, &handoff, &status).unwrap();
+        let (pdf, _) = pair(&status).unwrap();
+        let (url, worker) = server(vec![
+            status_reply(&handoff, &status),
+            output_refusal(output_path(&handoff, pdf), code, http, retryable),
+        ]);
+        provider.base_url = url;
+        let result = run_handoff(
+            &mut conn,
+            reload_for_test(&dir),
+            dir.path(),
+            &provider,
+            &HttpOcrTransport,
+            &UNCONTROLLED_EXECUTION,
+        );
+        assert!(
+            matches!(result, Err(OcrConsumerError::InvalidOutput(_))),
+            "{code}: {result:?}"
+        );
+        assert_eq!(worker.join().unwrap().len(), 2);
+        let saved = reload(&conn, &handoff.handoff_id).unwrap();
+        assert_eq!(saved.phase, "failed");
+        assert!(saved.ocr_pdf_bytes.is_none() && saved.text_bytes.is_none());
     }
 }
