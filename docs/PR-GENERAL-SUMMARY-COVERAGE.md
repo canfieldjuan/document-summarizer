@@ -129,3 +129,15 @@ fallback ownership at verification for General: an exhausted or context-limited
 coverage repair passes the structurally valid draft to normal semantic checks.
 Only a nonempty supported result may take coverage fallback; zero-supported
 prose still fails closed. Existing Connect synthesis behavior is unchanged.
+
+## Live correction failure and bounded repair ownership
+
+The first real-contract-A live correction produced a clipped, noncanonical unit
+at the existing text ceiling and crossed source windows. The validator correctly
+rejected it; the failed run is retained. Do not modify clipping/window admission.
+A successfully received but unusable coverage correction must retain the prior
+structurally valid draft, as a context-limited correction already does, and send
+that draft through normal verification and coverage fallback. It does not accept
+the invalid correction or bypass verification. Initial invalid output, transport,
+identity and cancellation failures still fail. Add clipped/foreign-ID/malformed
+correction controls and a transport-error negative; the same repair budget holds.
