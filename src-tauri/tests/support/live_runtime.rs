@@ -2,7 +2,7 @@ use crate::pipeline::contracts::ModelRuntime;
 use crate::pipeline::model_settings::{
     register_gguf, runtime_from_settings, settings_path, QwenProfileRuntime,
 };
-use std::{env, fs, path::Path};
+use std::{env, path::Path};
 
 pub fn configured_live_runtime(
     db_path: &Path,
@@ -51,7 +51,7 @@ fn isolated_runtime_directory() -> tempfile::TempDir {
     builder.prefix("docsum-accept-");
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::{fs, os::unix::fs::PermissionsExt};
         builder.permissions(fs::Permissions::from_mode(0o700));
     }
     builder
@@ -62,7 +62,7 @@ fn isolated_runtime_directory() -> tempfile::TempDir {
 #[test]
 #[cfg(unix)]
 fn isolated_runtime_directory_is_owner_only() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::{fs, os::unix::fs::PermissionsExt};
     let directory = isolated_runtime_directory();
     assert_eq!(
         fs::metadata(directory.path()).unwrap().permissions().mode() & 0o777,

@@ -97,7 +97,10 @@ The failure receipt is retained. Live model acceptance remains pending.
 
 ## Gap audit
 
-NOT DONE: live acceptance evidence and current-head review/CI remain required.
+NOT DONE for merge: existing live acceptance has not passed. Real-document and
+selected-profile runs remain pending on the shared inference lock, and CI and
+current-head review are required. No minimum-hardware or all-documents quality
+claim is made.
 
 Shared live selection checks: 61 focused model/runtime/routing tests passed,
 1 live test ignored (7.95s); 4 office checks passed, 3 live tests ignored.
@@ -106,3 +109,26 @@ The second synthetic run executed 13 requests / 433 completion tokens, then
 failed the unchanged omitted-page versus cited-page disjointness assertion.
 No response contained a thinking marker; the raw completion API provides no
 separate reasoning-token counter. This is not a successful acceptance run.
+
+The synthetic run's 13 raw responses are all JSON objects, with zero generated
+thinking markers (log SHA-256
+93582e883fa04d09d67eb587951b4c76ca667e909ab05398c86cde95ae139003).
+This proves the observed response form, not a separately measured reasoning
+counter. Production model/framing code is unchanged from that tested revision
+51d02e4; subsequent changes select it from the other existing acceptance lanes.
+A real-contract attempt stopped at lock acquisition, before inference, while
+another managed evaluation owned the resource. No overlap was forced.
+
+The omitted/cited-page contradiction is tracked as
+[document-summarizer#99](https://github.com/canfieldjuan/document-summarizer/issues/99).
+Its existence is a record of this run, not independent corroboration. The preset
+change does not resolve it or claim that the old model reproduced it.
+
+Cold audit of the completed surface: the shared acceptance helper is test-only;
+the three library lanes retain their prompts/assertions and use the production
+factory. Office acceptance retains all coverage gates. The shell entrypoint no
+longer asserts Ollama GPU residency; it documents external lock/hardware proof
+instead. No new production path bypasses identity, context or completion checks.
+Formatting and all-targets/all-features clippy passed after final test-helper
+changes (2.69s); frontend sources and dependencies have not changed since the
+successful build. Windows runtime execution remains outside this slice.
