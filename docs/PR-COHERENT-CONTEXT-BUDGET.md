@@ -85,10 +85,39 @@ reserve/legacy-stage boundaries. No runtime defaults or source text changed.
 
 ## Gap audit
 
-NOT DONE for merge: implementation and fail-first regression are complete.
-The affected summary suite passed 210 tests (10 live tests ignored); formatting
-and frontend build passed. The first regression attempt hit missing frontend
-assets, and the first synthetic response was invalid before admission could be
-asserted; both setup failures were corrected before the valid fail-first run.
-Strict all-target/all-feature clippy passed. Saved-catalog/live proof, exact-head
-review and CI remain.
+NOT DONE for merge. The admission fix and deterministic verification pass:
+210 summary tests passed, 10 live tests ignored; formatting, frontend build and
+strict all-target/all-feature clippy passed. The saved real-catalog diagnostic
+passed and both full retained catalogs fit 32k, with the 8k behavior preserved.
+The initial regression setup failures (missing frontend assets, then an invalid
+synthetic response) preceded the valid fail-first assertion and are not its proof.
+
+The isolated production comparison on implementation `aa2def4` proves admission,
+but fails the no-regression requirement. The private test composition uses the
+same 9B/32k profile, framing and unchanged acceptance wrapper as the baseline;
+input hashes match and both runs verify exclusive GPU and actual 32k context.
+
+| General mode | Before | After |
+|---|---|---|
+| Real contract A | Disclosed fallback, 9/10 pages | Synthesis failure, no delivered summary |
+| Real contract B | Disclosed fallback, 14/14 text pages | Same disclosed fallback, 14/14 |
+| B supported coherent pages | 1/14 | 5/14, still below coverage gate |
+
+A received all 64 retained sources; B received all 135. A returned incomplete
+paragraphs, including two at the existing 1,200-character limit; the parser
+rejected them as MODEL_SUMMARY_RESPONSE_INVALID. Its clipped-unit repair is
+limited to selected/windowed General catalogs, so the newly admitted full
+catalog does not enter that path. Another incomplete unit is below that exact
+limit. No invalid output was delivered or validator relaxed.
+
+B's first draft cited five pages; its correction cited four. The application
+retained and verified the initial draft, then used the disclosed ledger fallback.
+Single-run elapsed times were A 142.21 seconds and B 175.28 seconds; no latency
+qualification is claimed. Source passage omissions remain unchanged.
+
+Hold merge and the 32k preset promotion. Next define and replay the bounded
+incomplete-output recovery contract at the coherent response owner; do not add
+an ad hoc acceptance exception. This is separate from Contract admission #92.
+The live failed attempt remains in the denominator. Exact-head review and CI
+also remain required. Private raw source/model artifacts stay local; only
+opaque labels, hashes and aggregate evidence belong in the public PR.
