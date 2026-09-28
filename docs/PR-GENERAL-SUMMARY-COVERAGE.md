@@ -63,3 +63,31 @@ Only this contract is introduced. Production prompts, routes and gates unchanged
 
 NOT DONE: selected-page mapping, deterministic reproduction, source fix,
 regressions, live comparison, current-head review and CI remain.
+
+## Evidence-based contract revision
+
+Offline replay through the production parser and summary stages reproduced both
+failures with every request schema/system length/user length matching the saved
+run. Real contract A selected six native pages and delivered four; real contract
+B selected ten and delivered one. Both had sufficient selected coverage before
+generation. No inference was run for this reproduction.
+
+The fix is confined to summary.rs and summary/coherent.rs:
+- General generation checks cited pages with the existing coverage owner. If a
+  structurally valid draft is undercovered, use the existing single validation
+  repair budget with explicit coverage feedback and available uncited pages.
+  Initial prompts, selection, context and output ceilings remain unchanged.
+- If coverage correction is exhausted, reuse disclosed claim-ledger fallback.
+  That fallback must pass existing source and semantic checks. Other runtime,
+  cancellation and invalid-output failures keep their existing behavior.
+- General verification applies the existing verified coverage fallback when
+  semantic withholding reduces coverage. Final General completion requires the
+  same coverage gate as Connect, including fallback results; insufficient verified
+  evidence cannot persist a completed summary. Historical artifacts stay intact.
+- Story and Contract defaults remain unchanged. Connect retains its current
+  routing, byte cap and coverage requirements.
+
+Regression cases: adequate first draft (no repair), inadequate draft corrected
+(one repair), repeated inadequate draft (disclosed fallback), verification loss,
+and insufficient verified fallback (no completed artifacts). Reuse existing
+coverage boundary tests and semantic guard tests. Retain source receipts locally.
