@@ -53,16 +53,47 @@ strict clippy; CI owns duplicate broad suites. Retain before/after live receipts
 
 ## Implementation summary
 
-Investigation and regression plan only; no production change yet.
+General now uses the existing validation-repair budget for coverage feedback.
+The original request, source catalog, schema and limits stay unchanged. A valid
+undercovered draft still passes through semantic verification; only supported
+claims may take the existing disclosed fallback. General final persistence shares
+Connect's exact coverage owner. The previous fallback-warning text remains
+readable through an exact legacy match; unknown warning text still fails.
+
+Synthetic regressions cover a repaired draft, no retry for a good draft, bounded
+exhaustion, insufficient verified fallback, semantic coverage loss and historical
+warning readability. The existing tight-context test now requires disclosed
+verified fallback instead of expecting undercovered prose to complete.
 
 ## Cold diff audit
 
-Only this contract is introduced. Production prompts, routes and gates unchanged.
+- summary/coherent.rs: GeneralCoverage uses the shared page accounting; the
+  existing generation loop adds corrective feedback within its original repair
+  counter. Context-limited or exhausted valid drafts remain subject to semantic
+  verification. The test-only wrapper preserves unrelated focused repair tests.
+- summary.rs: a shared policy enables coverage for General and existing Connect
+  paths; finalization checks presented citations before the existing atomic
+  completion. The existing verified fallback reapplies ledger semantic guards.
+  Zero-supported General prose still fails. Exact legacy warning compatibility
+  preserves stored artifacts without allowing arbitrary audit metadata.
+- Boundary-probe: adequate first output stays coherent; inadequate output repairs
+  once or uses supported disclosed fallback; insufficient fallback leaves no final
+  summary/citation artifacts. Existing raw/adjusted thresholds, material versus
+  technical omissions and undisplayed-evidence negatives passed.
+- Effect-trace: recorded real responses reproduce the unchanged coverage failure;
+  synthetic production-stage tests fail before this change, then pass through the
+  same generation, verification and persistence entrypoints.
+- State/version fencing, ownership, cancellation and atomic storage are unchanged.
+  Untrusted source/model text still cannot bypass source or semantic validation.
 
 ## Gap audit
 
-NOT DONE: selected-page mapping, deterministic reproduction, source fix,
-regressions, live comparison, current-head review and CI remain.
+NOT DONE for merge: source fix and deterministic regressions are implemented.
+The affected summary suite passed 204 tests (10 live tests ignored); final focused
+General checks passed 8 (1 ignored), adjacent Connect checks passed 92 (4 ignored),
+and all-target/all-feature clippy passed. The frontend build and formatting passed.
+Live comparison, exact-head review and required CI remain. Earlier failed probes
+and live runs are retained; no production-quality success is inferred from mocks.
 
 ## Evidence-based contract revision
 

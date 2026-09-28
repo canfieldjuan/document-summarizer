@@ -2932,7 +2932,7 @@ fn synthesize_with_delivery_coverage(
         claims: summary_claims,
         evidence: synthesis_evidence,
         withheld_unit_kind,
-    } = generate_summary_with_validation_repair(
+    } = generate_summary_with_coverage_repair(
         profile,
         runtime,
         &analyzed.document_id,
@@ -2943,6 +2943,10 @@ fn synthesize_with_delivery_coverage(
         next_request_ordinal,
         generation_seed,
         control,
+        (profile == SummaryProfile::General).then_some(GeneralCoverage {
+            normalized,
+            omissions: &analyzed.omissions,
+        }),
     )?;
     let summary_text = render_cited_summary_with_evidence(&summary_claims, &synthesis_evidence)?;
     let mut warnings = analyzed.warnings.clone();
@@ -3761,8 +3765,71 @@ fn source_selection_failure(
     stage_failure(PipelineStage::Synthesize, code, message, recoverable)
 }
 
+#[derive(Clone, Copy)]
+struct GeneralCoverage<'a> {
+    normalized: &'a NormalizedDocument,
+    omissions: &'a [AnalysisPageOmission],
+}
+
+impl GeneralCoverage<'_> {
+    fn feedback(
+        &self,
+        claims: &[CitedClaim],
+        evidence: &[EvidenceItem],
+        catalog: &SourceCatalog,
+    ) -> Option<String> {
+        if claims_satisfy_delivery_page_coverage(claims, evidence, self.omissions, self.normalized)
+        {
+            return None;
+        }
+        let cited = claim_pages(claims, evidence).unwrap_or_default();
+        let mut available = catalog
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evidence.source_span.page_start)
+            .filter(|page| !cited.contains(page))
+            .collect::<Vec<_>>();
+        available.sort_unstable();
+        available.dedup();
+        let native = native_text_pages(self.normalized).len();
+        Some(format!(
+            "The draft cites only {} source pages out of {native} native-text pages. Add supported material from additional available pages {available:?} until citations cover at least 50 percent of all native-text pages and 60 percent after excluding only non-substantive analysis omissions. Cite only sources that actually support each unit, preserve window/framing boundaries and maximum_units, and do not invent citations or add unsupported text.",
+            cited.len(),
+        ))
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn generate_summary_with_validation_repair(
+    profile: SummaryProfile,
+    runtime: &dyn ModelRuntime,
+    document_id: &str,
+    catalog: &SourceCatalog,
+    user_prompt: String,
+    output_schema: Value,
+    input_limit: usize,
+    starting_request_ordinal: u32,
+    generation_seed: u64,
+    control: &dyn ExecutionControl,
+) -> Result<GeneratedSummaryContent, PipelineFailure> {
+    generate_summary_with_coverage_repair(
+        profile,
+        runtime,
+        document_id,
+        catalog,
+        user_prompt,
+        output_schema,
+        input_limit,
+        starting_request_ordinal,
+        generation_seed,
+        control,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_summary_with_coverage_repair(
     profile: SummaryProfile,
     runtime: &dyn ModelRuntime,
     document_id: &str,
@@ -3773,6 +3840,7 @@ fn generate_summary_with_validation_repair(
     starting_request_ordinal: u32,
     generation_seed: u64,
     control: &dyn ExecutionControl,
+    coverage: Option<GeneralCoverage<'_>>,
 ) -> Result<GeneratedSummaryContent, PipelineFailure> {
     let mut request_prompt = user_prompt;
     let mut request_ordinal = 0;
@@ -3782,6 +3850,7 @@ fn generate_summary_with_validation_repair(
         1
     };
     let mut validation_repairs = 0;
+    let mut coverage_draft: Option<GeneratedSummaryContent> = None;
     let mut window_repairs = 0;
     let mut window_fallback: Option<GeneratedSummaryContent> = None;
     let mut window_repair_requirements: Option<WindowRepairRequirements> = None;
@@ -3816,6 +3885,9 @@ fn generate_summary_with_validation_repair(
                 &mut clipped_fallback,
             ) {
                 return Ok(generated);
+            }
+            if let Some(draft) = coverage_draft.take() {
+                return Ok(draft);
             }
             return Err(stage_failure(
                 PipelineStage::Synthesize,
@@ -4133,6 +4205,16 @@ fn generate_summary_with_validation_repair(
                 required_clauses.as_deref(),
             ));
         }
+        let otherwise_valid = feedback.is_empty();
+        let coverage_feedback =
+            coverage.and_then(|rule| rule.feedback(&parsed.0, &parsed.1, catalog));
+        coverage_draft =
+            (otherwise_valid && coverage_feedback.is_some()).then(|| GeneratedSummaryContent {
+                claims: parsed.0.clone(),
+                evidence: parsed.1.clone(),
+                withheld_unit_kind: None,
+            });
+        feedback.extend(coverage_feedback);
         if feedback.is_empty() {
             return Ok(GeneratedSummaryContent {
                 claims: parsed.0,
@@ -4147,6 +4229,9 @@ fn generate_summary_with_validation_repair(
                 &mut clipped_fallback,
             ) {
                 return Ok(generated);
+            }
+            if let Some(draft) = coverage_draft.take() {
+                return Ok(draft);
             }
             return Err(if profile == SummaryProfile::Contract {
                 contract_validation_failure()
@@ -4166,6 +4251,9 @@ fn generate_summary_with_validation_repair(
                 &mut clipped_fallback,
             ) {
                 return Ok(generated);
+            }
+            if let Some(draft) = coverage_draft.take() {
+                return Ok(draft);
             }
             return Err(stage_failure(
                 PipelineStage::Synthesize,
