@@ -166,3 +166,12 @@ warning metadata. Exercise both routes and existing final persistence checks.
 Surface: summary.rs, summary/coherent.rs and their existing regressions only.
 Run fail-first targeted tests, the affected summary suite and strict clippy;
 CI owns the full platform matrix. No model or runtime settings change.
+
+The three review regressions failed before the fix: parsed undercoverage replaced
+the original text, modal strengthening failed synthesis, and Connect warning text
+changed. After the fix, focused General checks passed 11 (1 ignored) and the
+summary suite passed 207 (10 ignored). Strict clippy passed. First valid draft
+ownership is now stable across loop iterations; only a feedback-free correction
+can replace it. Connect warning/error wording is preserved at the shared owner.
+Prior live evidence remains tied to its tested composition; the final correction
+requires a fresh frozen comparison. Exact-head review/CI still gate merge.

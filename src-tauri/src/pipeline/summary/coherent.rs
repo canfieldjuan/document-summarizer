@@ -4216,12 +4216,15 @@ fn generate_summary_with_coverage_repair(
         let otherwise_valid = feedback.is_empty();
         let coverage_feedback =
             coverage.and_then(|rule| rule.feedback(&parsed.0, &parsed.1, catalog));
-        coverage_draft =
-            (otherwise_valid && coverage_feedback.is_some()).then(|| GeneratedSummaryContent {
+        // A rejected correction cannot replace or clear the first valid draft.
+        // Only the feedback-free return below may accept a new candidate.
+        if coverage_draft.is_none() && otherwise_valid && coverage_feedback.is_some() {
+            coverage_draft = Some(GeneratedSummaryContent {
                 claims: parsed.0.clone(),
                 evidence: parsed.1.clone(),
                 withheld_unit_kind: None,
             });
+        }
         feedback.extend(coverage_feedback);
         if feedback.is_empty() {
             return Ok(GeneratedSummaryContent {

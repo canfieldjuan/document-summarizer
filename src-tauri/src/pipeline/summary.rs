@@ -726,6 +726,7 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
             &persisted_analysis,
             &normalized,
             require_coverage,
+            delivery_policy.is_some(),
         )?;
         validate_verified_document(
             &verified,
@@ -965,7 +966,11 @@ pub(crate) fn complete_verified_document_with_delivery(
             stage_failure(
                 PipelineStage::Verify,
                 "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED",
-                "The supported summary does not satisfy raw and omission-adjusted page coverage",
+                if delivery_policy.is_some() {
+                    "The supported Connect summary does not satisfy raw and omission-adjusted page coverage"
+                } else {
+                    "The supported summary does not satisfy raw and omission-adjusted page coverage"
+                },
                 false,
             ),
         ));
@@ -3574,11 +3579,14 @@ fn claims_satisfy_delivery_page_coverage(
     delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
 }
 
-fn delivery_coverage_fallback_warning() -> PipelineWarning {
+fn delivery_coverage_fallback_warning(connect_delivery: bool) -> PipelineWarning {
     PipelineWarning {
         code: SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE.to_string(),
-        message: "The supported coherent summary does not satisfy page coverage; showing verified source claims instead"
-            .to_string(),
+        message: if connect_delivery {
+            "Semantic verification reduced coherent page coverage; showing the verified source claims instead"
+        } else {
+            "The supported coherent summary does not satisfy page coverage; showing verified source claims instead"
+        }.to_string(),
         stage: Some(PipelineStage::Verify),
     }
 }
@@ -3589,6 +3597,7 @@ fn apply_verified_delivery_coverage_fallback(
     analyzed: &AnalyzedDocument,
     normalized: &NormalizedDocument,
     require_coverage: bool,
+    connect_delivery: bool,
 ) -> Result<VerifiedDocument, PipelineFailure> {
     if !require_coverage
         || synthesized.presentation_mode != SummaryPresentationMode::Coherent
@@ -3633,7 +3642,9 @@ fn apply_verified_delivery_coverage_fallback(
     verified.presentation_mode = SummaryPresentationMode::ClaimLedgerFallback;
     verified.summary_text = render_cited_summary(&verified.claims, analyzed)?;
     verified.summary_claims.clear();
-    verified.warnings.push(delivery_coverage_fallback_warning());
+    verified
+        .warnings
+        .push(delivery_coverage_fallback_warning(connect_delivery));
     Ok(verified)
 }
 
@@ -4332,18 +4343,11 @@ fn validate_coherent_verified_document(
         .collect::<Vec<_>>();
     let mut expected_warnings = verification_warnings(synthesized, &all_verifications, false);
     if delivery_coverage_fallback {
-        let mut warning = delivery_coverage_fallback_warning();
-        // Older checkpoints used this exact wording. Preserve their readability
-        // without admitting arbitrary warning text, codes, stages or verdicts.
-        const PREVIOUS_MESSAGE: &str = "Semantic verification reduced coherent page coverage; showing the verified source claims instead";
-        if verified
-            .warnings
-            .last()
-            .is_some_and(|w| w.message == PREVIOUS_MESSAGE)
-        {
-            warning.message = PREVIOUS_MESSAGE.into();
-        }
-        expected_warnings.push(warning);
+        // Both exact route-specific forms remain readable; arbitrary warning
+        // text, codes, stages and verdicts still fail validation.
+        let connect_warning = delivery_coverage_fallback_warning(true);
+        let use_connect_warning = verified.warnings.last() == Some(&connect_warning);
+        expected_warnings.push(delivery_coverage_fallback_warning(use_connect_warning));
     }
     if !ledger_coverage_valid
         || !summary_coverage_valid
@@ -10806,6 +10810,13 @@ mod tests {
                             "clipped" => json!({"units":[{"text":"x".repeat(1199)+" ","source_ids":[prompt["source_segments"][0]["source_id"].clone()]}]}).to_string(),
                             "foreign" => json!({"units":[{"text":"Unsupported repair content.","source_ids":["foreign-source"]}]}).to_string(),
                             "malformed" => "{".to_string(),
+                            "undercovered" => json!({"units":[{"text":"The document outlines other supporting details.","source_ids":[prompt["source_segments"][0]["source_id"].clone()]}]}).to_string(),
+                            "modal" => {
+                                let source = prompt["source_segments"].as_array().unwrap().iter()
+                                    .find(|source| source["exact_quote"].as_str().unwrap().contains("The interpreter should retain"))
+                                    .expect("modal control requires the source's weaker predicate");
+                                json!({"units":[{"text":"The interpreter must retain it under Section 1 across the page boundary.","source_ids":[source["source_id"].clone()]}]}).to_string()
+                            },
                             _ => unreachable!(),
                         };
                         return Ok(ModelResponse {
@@ -10941,40 +10952,61 @@ mod tests {
     #[test]
     fn general_coverage_invalid_correction_preserves_only_the_prior_valid_draft() {
         for kind in ["clipped", "foreign", "malformed", "transport"] {
-            let database = TestDatabase::new();
-            let (mut conn, run_id) = chunked_run(&database);
-            let runtime = GeneralCoverageRuntime {
-                requests: Mutex::new(vec![]),
-                good_initial: false,
-                corrects: false,
-                withhold_ledger: false,
-                bad_repair: Some(kind),
-            };
-            let result = summarize_chunked_document(&mut conn, &runtime, &run_id);
-            if kind == "transport" {
-                assert!(result.is_err());
-                assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
-                assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
-            } else {
-                let completed = result
-                    .expect("unusable correction must retain the valid draft for verification");
-                assert_eq!(
-                    completed.citations.presentation_mode,
-                    SummaryPresentationMode::ClaimLedgerFallback
-                );
-                assert_eq!(summary_cited_pages(&completed.citations).unwrap().len(), 5);
-                assert!(!completed
-                    .summary
-                    .text
-                    .contains("Unsupported repair content"));
-                assert!(completed
-                    .citations
-                    .evidence
-                    .iter()
-                    .all(|e| e.evidence_id != "foreign-source"));
-            }
-            assert_eq!(runtime.requests.lock().unwrap().iter().filter(|r|matches!(&r.output_format,ModelOutputFormat::JsonSchema{name,..} if name == coherent::SCHEMA_NAME)).count(),2);
+            assert_general_coverage_retains_initial_draft(kind);
         }
+    }
+
+    #[test]
+    fn general_coverage_parsed_undercovered_correction_preserves_initial_draft() {
+        assert_general_coverage_retains_initial_draft("undercovered");
+    }
+
+    #[test]
+    fn general_coverage_parsed_modal_correction_preserves_initial_draft() {
+        assert_general_coverage_retains_initial_draft("modal");
+    }
+
+    fn assert_general_coverage_retains_initial_draft(kind: &'static str) {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = GeneralCoverageRuntime {
+            requests: Mutex::new(vec![]),
+            good_initial: false,
+            corrects: false,
+            withhold_ledger: false,
+            bad_repair: Some(kind),
+        };
+        let result = summarize_chunked_document(&mut conn, &runtime, &run_id);
+        if kind == "transport" {
+            assert!(result.is_err());
+            assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+            assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+        } else {
+            let completed =
+                result.expect("unusable correction must retain the valid draft for verification");
+            assert_eq!(
+                completed.citations.presentation_mode,
+                SummaryPresentationMode::ClaimLedgerFallback
+            );
+            assert_eq!(summary_cited_pages(&completed.citations).unwrap().len(), 5);
+            let synthesis = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+            assert_eq!(synthesis.summary_claims.len(), 1);
+            assert_eq!(
+                synthesis.summary_claims[0].text,
+                "The document presents its central information, supporting details, and material qualifications.",
+                "the first valid draft must survive an unusable {kind} correction"
+            );
+            assert!(!completed
+                .summary
+                .text
+                .contains("Unsupported repair content"));
+            assert!(completed
+                .citations
+                .evidence
+                .iter()
+                .all(|e| e.evidence_id != "foreign-source"));
+        }
+        assert_eq!(runtime.requests.lock().unwrap().iter().filter(|r|matches!(&r.output_format,ModelOutputFormat::JsonSchema{name,..} if name == coherent::SCHEMA_NAME)).count(),2);
     }
 
     #[test]
@@ -11063,6 +11095,20 @@ mod tests {
                 delivery,
             )
             .unwrap();
+            let fallback_warning = verified
+                .warnings
+                .iter()
+                .find(|warning| warning.code == SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE)
+                .unwrap();
+            assert_eq!(
+                fallback_warning.message,
+                if delivery.is_some() {
+                    "Semantic verification reduced coherent page coverage; showing the verified source claims instead"
+                } else {
+                    "The supported coherent summary does not satisfy page coverage; showing verified source claims instead"
+                },
+                "Connect must preserve its existing public warning"
+            );
             let mut legacy = verified.clone();
             legacy.warnings.last_mut().unwrap().message = "Semantic verification reduced coherent page coverage; showing the verified source claims instead".into();
             validate_verified_document(
