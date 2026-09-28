@@ -1158,3 +1158,36 @@ fn concurrent_retrievals_share_one_child_without_holding_a_write_transaction() {
         2
     );
 }
+
+#[test]
+fn exact_pdf_and_text_caps_transfer_over_http() {
+    let mut provider = live_provider();
+    provider.protocol_version = 3;
+    let job = Uuid::new_v4().to_string();
+    for (media_type, size) in [
+        (OCR_INPUT_MEDIA_TYPE, MAX_PDF),
+        (TEXT_MEDIA_TYPE, MAX_TEXT_BYTES),
+    ] {
+        let bytes = vec![b'x'; size];
+        let descriptor = Descriptor {
+            artifact_id: Uuid::new_v4().to_string(),
+            media_type: media_type.into(),
+            display_name: "boundary".into(),
+            byte_size: size as u64,
+            sha256: sha256_hex(&bytes),
+        };
+        let path = format!("/v3/jobs/{job}/outputs/{}", descriptor.artifact_id);
+        let (url, worker) = server(vec![artifact(path, &bytes)]);
+        provider.base_url = url;
+        let file = download(
+            &provider,
+            &job,
+            &descriptor,
+            Instant::now() + Duration::from_secs(10),
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(file.metadata().unwrap().len(), size as u64);
+        assert_eq!(worker.join().unwrap().len(), 1);
+    }
+}
