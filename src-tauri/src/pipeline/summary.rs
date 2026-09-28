@@ -1204,6 +1204,7 @@ fn verify(
 ) -> Result<VerifiedDocument, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Verify)?;
     validate_synthesized_document_without_runtime(synthesized, analyzed, chunked, normalized)?;
+    coherent::validate_model_output_fallback_boundary(summary_profile, synthesized)?;
     let ledger_evidence = analyzed
         .chunks
         .iter()
@@ -11019,6 +11020,208 @@ mod tests {
                 model_id: self.model_id().into(),
                 request_attempts: vec![],
             })
+        }
+    }
+
+    struct RejectedGeneralRuntime {
+        inner: GeneralCoverageRuntime,
+        kind: &'static str,
+    }
+
+    impl ModelRuntime for RejectedGeneralRuntime {
+        fn runtime_id(&self) -> &str {
+            self.inner.runtime_id()
+        }
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn context_tokens(&self, stage: PipelineStage) -> u32 {
+            if self.kind == "selected" && stage == PipelineStage::Synthesize {
+                4_050
+            } else {
+                LEGACY_MODEL_CONTEXT_TOKENS
+            }
+        }
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            if matches!(&request.output_format, ModelOutputFormat::JsonSchema { name, .. } if matches!(name.as_str(), coherent::SCHEMA_NAME | coherent::STORY_SCHEMA_NAME | coherent::CONTRACT_SCHEMA_NAME))
+            {
+                self.inner.requests.lock().unwrap().push(request.clone());
+                if self.kind == "transport" {
+                    return Err(ModelRuntimeFailure {
+                        code: "MODEL_SUMMARY_RESPONSE_INVALID".into(),
+                        message: "Operational failure with a model-output-looking code".into(),
+                        recoverable: true,
+                        request_attempts: vec![],
+                    });
+                }
+                let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                let source = prompt["source_segments"][0]["source_id"].clone();
+                let text = match self.kind {
+                    "malformed" | "selected" => "{".to_string(),
+                    "empty" => json!({"units":[]}).to_string(),
+                    "foreign" => json!({"units":[{"text":"Rejected model prose.","source_ids":["foreign-source"]}]}).to_string(),
+                    "limit" => json!({"units":[{"text":"x".repeat(1200),"source_ids":[source]}]}).to_string(),
+                    "clipped" => json!({"units":[{"text":"x".repeat(1198),"source_ids":[source]}]}).to_string(),
+                    "identity" => "{".to_string(),
+                    _ => unreachable!(),
+                };
+                return Ok(ModelResponse {
+                    text,
+                    runtime_id: if self.kind == "identity" {
+                        "foreign-runtime"
+                    } else {
+                        self.runtime_id()
+                    }
+                    .into(),
+                    model_id: self.model_id().into(),
+                    request_attempts: vec![],
+                });
+            }
+            self.inner.generate(request)
+        }
+    }
+
+    fn rejected_general_runtime(
+        kind: &'static str,
+        withhold_ledger: bool,
+    ) -> RejectedGeneralRuntime {
+        RejectedGeneralRuntime {
+            kind,
+            inner: GeneralCoverageRuntime {
+                requests: Mutex::new(vec![]),
+                good_initial: false,
+                corrects: false,
+                withhold_ledger,
+                bad_repair: None,
+            },
+        }
+    }
+
+    #[test]
+    fn general_rejected_prose_requires_independently_verified_adequate_ledger() {
+        for kind in [
+            "clipped",
+            "limit",
+            "malformed",
+            "empty",
+            "foreign",
+            "selected",
+        ] {
+            for withhold_ledger in [false, true] {
+                let database = TestDatabase::new();
+                let (mut conn, run_id) = chunked_run(&database);
+                let runtime = rejected_general_runtime(kind, withhold_ledger);
+                let result = summarize_chunked_document(&mut conn, &runtime, &run_id);
+                if withhold_ledger {
+                    assert_eq!(
+                        result.unwrap_err().code(),
+                        "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED"
+                    );
+                    assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+                    assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+                } else {
+                    let completed =
+                        result.expect("rejected prose must retain the verified delivery floor");
+                    assert_eq!(
+                        completed.citations.presentation_mode,
+                        SummaryPresentationMode::ClaimLedgerFallback
+                    );
+                    assert_eq!(summary_cited_pages(&completed.citations).unwrap().len(), 5);
+                    assert!(completed
+                        .summary
+                        .warnings
+                        .iter()
+                        .any(|w| w.code == "COHERENT_SUMMARY_MODEL_OUTPUT_INVALID"));
+                    assert!(!completed.summary.text.contains("Rejected model prose"));
+                    let saved = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+                    assert!(saved.summary_claims.is_empty());
+                    assert!(saved.synthesis_evidence.is_empty());
+                    let analyzed = get_analyzed_document(&conn, &run_id).unwrap().unwrap();
+                    let chunked = get_chunked_document(&conn, &run_id).unwrap().unwrap();
+                    let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
+                    coherent::validate_content(&saved, &analyzed, &chunked, &normalized).unwrap();
+                    for mutation in [
+                        "message",
+                        "stage",
+                        "duplicate",
+                        "code",
+                        "version",
+                        "presentation",
+                    ] {
+                        let mut invalid = saved.clone();
+                        let index = invalid
+                            .warnings
+                            .iter()
+                            .position(|w| w.code == "COHERENT_SUMMARY_MODEL_OUTPUT_INVALID")
+                            .unwrap();
+                        match mutation {
+                            "message" => invalid.warnings[index].message.push('!'),
+                            "stage" => invalid.warnings[index].stage = Some(PipelineStage::Analyze),
+                            "duplicate" => invalid.warnings.push(invalid.warnings[index].clone()),
+                            "code" => {
+                                invalid.warnings[index].code =
+                                    coherent::FALLBACK_WARNING_CODE.into()
+                            }
+                            "version" => {
+                                invalid.synthesis_version = PRE_CONTEXT_SYNTHESIS_VERSION.into()
+                            }
+                            "presentation" => {
+                                invalid.presentation_mode = SummaryPresentationMode::Coherent
+                            }
+                            _ => unreachable!(),
+                        }
+                        assert!(
+                            coherent::validate_content(&invalid, &analyzed, &chunked, &normalized)
+                                .is_err(),
+                            "warning boundary: {mutation}"
+                        );
+                    }
+                    for profile in [SummaryProfile::Story, SummaryProfile::Contract] {
+                        assert!(
+                            coherent::validate_model_output_fallback_boundary(profile, &saved)
+                                .is_err()
+                        );
+                    }
+                }
+                let requests = runtime.inner.requests.lock().unwrap();
+                if kind == "selected" {
+                    assert!(requests.iter().any(|r| matches!(&r.output_format, ModelOutputFormat::JsonSchema {name, ..} if name == coherent::SOURCE_SELECTION_SCHEMA_NAME)));
+                }
+                assert_eq!(requests.iter().filter(|r| matches!(&r.output_format, ModelOutputFormat::JsonSchema {name, ..} if name == coherent::SCHEMA_NAME)).count(), 1);
+                assert!(requests.iter().any(|r| matches!(&r.output_format, ModelOutputFormat::JsonSchema {name, ..} if name == VERIFICATION_SCHEMA_NAME)), "fallback claims must reach independent verification");
+            }
+        }
+    }
+
+    #[test]
+    fn general_rejected_prose_does_not_mask_operational_failures() {
+        for kind in ["transport", "identity"] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run(&database);
+            let runtime = rejected_general_runtime(kind, false);
+            assert!(summarize_chunked_document(&mut conn, &runtime, &run_id).is_err());
+            assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+            assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+            assert!(!runtime.inner.requests.lock().unwrap().iter().any(|r| matches!(&r.output_format, ModelOutputFormat::JsonSchema {name, ..} if name == VERIFICATION_SCHEMA_NAME)));
+        }
+    }
+
+    #[test]
+    fn rejected_prose_keeps_story_and_contract_failure_behavior() {
+        for profile in [SummaryProfile::Story, SummaryProfile::Contract] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
+            let runtime = rejected_general_runtime("malformed", false);
+            assert_eq!(
+                summarize_chunked_document(&mut conn, &runtime, &run_id)
+                    .unwrap_err()
+                    .code(),
+                "MODEL_SUMMARY_RESPONSE_INVALID"
+            );
+            assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
         }
     }
 
