@@ -83,9 +83,9 @@ reserve/legacy-stage boundaries. No runtime defaults or source text changed.
 - No shared mutable state or admission queue changed. Exact source identity,
   semantic verification and final delivery coverage remain enforced.
 
-## Gap audit
+## Initial verification before recovery
 
-NOT DONE for merge. The admission fix and deterministic verification pass:
+The budget-only implementation was NOT DONE for merge. The admission fix and deterministic verification pass:
 210 summary tests passed, 10 live tests ignored; formatting, frontend build and
 strict all-target/all-feature clippy passed. The saved real-catalog diagnostic
 passed and both full retained catalogs fit 32k, with the 8k behavior preserved.
@@ -172,5 +172,83 @@ unchanged Story/Contract failure behavior and warning validation after reopen.
 Run focused regressions, the affected summary suite, formatting and strict
 clippy; repeat live A/B only after replay passes and GPU exclusivity is available.
 
-Recovery implementation is pending. The existing live failure remains a merge
-blocker until the new behavior is proven; green CI alone does not clear it.
+## Recovery implementation and verification
+
+Implemented in `7f387b5` after the contract-only `a0e6009` commit. The generation
+owner now returns an explicit model-output rejection separately from operational
+or application failures. Only General prose rejection selects the existing
+ledger fallback. The warning is authored and checked through the same reason
+mapping. Verification also enforces the General-only profile boundary.
+
+Fail-first: `general_rejected_prose_requires_independently_verified_adequate_ledger`
+failed with `MODEL_SUMMARY_RESPONSE_INVALID` before implementation. It now passes
+for full and selected catalogs and still rejects an inadequate verified ledger.
+Malformed, empty, foreign-reference, exact-limit and below-limit unfinished
+responses are covered. Operational errors and application-owned schema corruption
+remain fatal even when their codes resemble model-output errors. Story/Contract
+behavior and prior valid draft retention are unchanged.
+
+The affected summary suite passed: 214 tests, 10 live tests ignored. Formatting
+and strict all-target/all-feature clippy passed. Test-only setup errors (an error
+accessor, a draft-only fixture helper and private replay serialization) were
+corrected; none is counted as the fail-first behavior proof.
+
+A's private production replay reused its 19 retained pre-verification responses
+and nine recorded real verifier verdicts, mapping verdict IDs only after exact
+claim-text and quote equality. It restored the disclosed 9/10 fallback through
+the existing verifier and coverage gate. Persisted artifacts matched after
+independent database reopen. Request comparisons exclude per-run block IDs and
+seeds; this replay is separate from fresh model verification.
+
+| General document | Budget-only result | Fresh recovery result |
+|---|---|---|
+| A | Failed; no delivered summary | Disclosed verified fallback, 9/10 pages |
+| B | Disclosed verified fallback, 14/14 pages | Same delivered fallback, 14/14 pages |
+
+Fresh A returned identical text for all 19 pre-verification responses, including
+the invalid draft; delivery changed because of the application fix. It made
+20 total requests. Fresh B made 30 requests and also returned unfinished prose,
+so this run used invalid-output fallback instead of the earlier run's
+valid-but-undercovered draft. Neither fresh run delivered coherent prose.
+
+Both fresh runs verified exclusive GPU ownership, actual 32k context and unchanged
+input hashes, with the same 9B Q4_K_M, template, thinking setting, output budget
+and acceptance wrapper as before. A took 150.61 seconds, B 163.90 seconds including
+startup; no timing qualification is claimed. The original failed A attempt stays
+in the evidence. No installed defaults or settings changed.
+
+Recovery aggregate SHA-256: `dd0efba3a28a7bab5f22b81bcf38068eb300cf1264bb60f50570504d6dea1766`.
+Private raw artifacts remain local; public evidence uses opaque document labels.
+
+## Recovery cold diff audit
+
+- `summary/coherent.rs:2941`: typed generation rejection chooses the existing
+  fallback only for General. Runtime/invariant errors keep their original path.
+- `summary/coherent.rs:3857`: rejection is tagged at response validation, not
+  inferred from a caller-wide error-code match; budgets and operational failures
+  default to the fatal variant. Existing bounded repairs are unchanged.
+- `summary/coherent.rs:6360` and `:7651`: producer/runtime/persisted warning
+  validation agrees on code, exact message, stage, version and presentation.
+- `summary.rs:1207`: verification checks the profile boundary, then uses the
+  existing independent ledger verification, semantic guards and final coverage.
+- Regression tests at `summary.rs:11104`, `:11200`, `:11213` and
+  `summary/coherent.rs:8729` cover both successful recovery and fatal boundaries.
+- `docs/CONTRACTS.md`: the recovery invariant was committed before implementation.
+- boundary-probe: valid prior drafts still pass; malformed/unfinished/foreign
+  output recovers only through adequate verified claims; inadequate ledgers,
+  operational failures, corrupted warning metadata and non-General admission fail.
+- effect-trace: the typed result at the generation caller controls recovery;
+  fail-first, saved-response replay and identical fresh A response text demonstrate
+  that the edit changes delivery without accepting the rejected model prose.
+- Concurrency: no shared state, queue, retry budget or model-runtime ownership
+  changed. Local artifacts continue through the existing atomic completion path.
+
+## Gap audit
+
+NOT DONE for merge: implementation, deterministic checks, private replay and fresh
+A/B production proof are complete; fresh CI and exact-head review are pending.
+The observed delivery regression is fixed. A's missing page and source passage
+omissions remain; this is fallback delivery proof, not coherent-prose quality
+qualification. Contract admission, clipping repair improvements and preset/context
+promotion remain separate. No production code changed after the tested commit;
+this evidence update does not require repeating code tests.
