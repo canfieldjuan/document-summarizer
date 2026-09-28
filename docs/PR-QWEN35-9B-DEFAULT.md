@@ -161,7 +161,7 @@ passes with 13 identical raw responses. The reviewer's nonblocking count ask is
 covered by asserting the recovery warning's exact count in both the offline
 production-stage regression and office acceptance, using final citation pages.
 
-Live gap remains explicit: Red Cross final presented citations cover 4/10 native
+Live gap remains explicit: real contract A final presented citations cover 4/10 native
 pages despite 9 retained analysis pages, so the unchanged 50 percent raw / 60
 percent adjusted coverage gate failed. Both failed selected-profile attempts
 remain recorded as test-wrapper failures pending a corrected live rerun. No
