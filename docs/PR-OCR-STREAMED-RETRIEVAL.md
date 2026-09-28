@@ -271,3 +271,24 @@ and serialized save_status | the exact three failing-before cases pass.
 DONE locally for both review defects; NOT DONE for merge until the new head
 passes CI and review. The frozen corpus receipt above remains at its recorded
 commit; it is not relabeled as a run of this follow-up.
+
+## Contract correction: monotonic completion and retryable refusals
+
+The prior race correction wrongly classified a late Accepted/Processing reply
+as a conflicting completion. In save_status, after validating identity/shape
+and reloading under the existing IMMEDIATE transaction, a saved completion
+dominates nonterminal replies: ignore them without a write. A different
+completed result or Failed reply remains a visible conflict. Retrieval still
+reconciles against the provider before GET. Correct the test that asserted the
+wrong failure, and prove a late nonterminal response still reaches one child.
+
+The validated HTTP refusal policy owns retryability. Output retrieval honors
+its retryable flag inside the existing three-attempt/parent-deadline budget,
+including OUTPUT_NOT_READY. OUTPUT_BUSY still requires Retry-After: 1; wrong
+status/flag/framing and nonretryable refusals remain terminal. Test immediate
+recovery, exhausted attempts retaining the same completion, later resume, and
+malformed/nonretryable controls. No new queue, schema, retry budget or model
+change. The shared status/error owners must decide these rules once.
+
+This corrects one runtime regression introduced by the preceding race fix;
+further bookkeeping does not justify another implementation round.
