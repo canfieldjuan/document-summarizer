@@ -58,13 +58,33 @@ reasoning-token counter if the raw API does not supply one.
 
 ## Implementation summary
 
-Pending implementation.
+The exact 9B entry now owns the default, model metadata and non-thinking
+policy. The runtime cache includes that policy and trusted assistant framing
+closes the thinking block. Acceptance uses isolated production settings and
+keeps the private runtime directory alive for the entire run. Explicit saved
+selections and the old Ollama profile are preserved.
 
 ## Cold diff audit
 
-Pending final diff and verification.
+- model_settings.rs: default/registry/registered_descriptors/stage_runtime
+  implement the profile contract; tests cover identity/context/runtime mismatch,
+  unchanged legacy settings, correct model metadata and same-model verification.
+- llama_cpp.rs: PromptFraming::load consumes the profile policy, and
+  runtime_cache_key distinguishes it. The unchanged prompt_tokens owner supplies
+  both preflight and generation. Existing untrusted-special-token checks pass.
+- office_acceptance.rs: configured_live_runtime creates an isolated registered
+  default profile, retains its temporary socket directory, and removes the
+  implicit 30B verifier fallback. No acceptance criterion was changed.
+
+Fail-first: both new default/framing tests failed at their expected assertions.
+Final affected model/runtime tests: 54 passed (8.79s). Acceptance offline checks:
+3 passed, 3 opt-in ignored. Frontend build, format, diff checks and all-targets/
+all-features clippy passed. A legacy test's assumption that default meant Ollama
+was corrected to explicitly select the old profile; its original invariant
+is still tested. The pinned GGUF template's enable_thinking=false branch exactly
+matches the new trusted suffix. Runtime binary and library hashes match the
+existing registry. Live acceptance remains pending.
 
 ## Gap audit
 
-NOT DONE: implementation, deterministic verification, live acceptance evidence,
-and current-head review/CI remain required.
+NOT DONE: live acceptance evidence and current-head review/CI remain required.

@@ -10,9 +10,8 @@ use document_summarizer_lib::pipeline::db::{
     get_synthesis_attempt, get_verified_document, init_db, list_pipeline_events,
 };
 use document_summarizer_lib::pipeline::ingest::ingest_pdf;
-use document_summarizer_lib::pipeline::model::OllamaRuntime;
 use document_summarizer_lib::pipeline::model_settings::{
-    runtime_from_settings, QwenProfileRuntime,
+    register_gguf, runtime_from_settings, settings_path, QwenProfileRuntime,
 };
 use document_summarizer_lib::pipeline::normalize::{normalize_document, CanonicalNormalizer};
 use document_summarizer_lib::pipeline::parser::{parse_document, PdfExtractParser};
@@ -33,29 +32,44 @@ use uuid::Uuid;
 
 struct TestDatabase(PathBuf);
 
-fn configured_live_runtime(db_path: &Path) -> Box<dyn ModelRuntime> {
+fn configured_live_runtime(db_path: &Path) -> (Box<dyn ModelRuntime>, Option<tempfile::TempDir>) {
     if let Some(settings_path) = env::var_os("DOC_SUM_MODEL_SETTINGS_PATH") {
-        return runtime_from_settings(Path::new(&settings_path), db_path)
-            .expect("selected product model settings should configure");
+        return (
+            runtime_from_settings(Path::new(&settings_path), db_path)
+                .expect("selected product model settings should configure"),
+            None,
+        );
     }
     if let Ok(analysis_model) = env::var("DOC_SUM_QUALIFICATION_ANALYSIS_MODEL") {
         let verification_model = env::var("DOC_SUM_QUALIFICATION_VERIFICATION_MODEL")
-            .unwrap_or_else(|_| "qwen3-30b-a3b:latest".to_string());
+            .unwrap_or_else(|_| analysis_model.clone());
         let context_tokens = env::var("DOC_SUM_QUALIFICATION_CONTEXT_TOKENS")
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(8_192);
-        return Box::new(
-            QwenProfileRuntime::qualification_candidate(
-                &analysis_model,
-                &verification_model,
-                context_tokens,
-            )
-            .expect("qualification stage models should configure"),
+        return (
+            Box::new(
+                QwenProfileRuntime::qualification_candidate(
+                    &analysis_model,
+                    &verification_model,
+                    context_tokens,
+                )
+                .expect("qualification stage models should configure"),
+            ),
+            None,
         );
     }
-    Box::new(OllamaRuntime::from_environment().expect("Ollama should configure"))
+    let model = env::var_os("DOC_SUM_QUALIFICATION_GGUF").expect(
+        "default live acceptance requires DOC_SUM_QUALIFICATION_GGUF or explicit model settings",
+    );
+    let directory = tempfile::tempdir().expect("isolated model settings directory");
+    let path = settings_path(directory.path());
+    register_gguf(&path, Path::new(&model)).expect("default GGUF should register");
+    let runtime =
+        runtime_from_settings(&path, db_path).expect("default model profile should configure");
+    // Keep the private socket directory alive until the acceptance run ends.
+    (runtime, Some(directory))
 }
 
 fn coverage_at_least_sixty_percent(cited: usize, total: usize) -> bool {
@@ -742,16 +756,16 @@ fn office_pdf_deterministic_checkpoints_survive_reopen() {
 }
 
 #[test]
-#[ignore = "requires one external PDF in DOC_SUM_OFFICE_PDF and configured Ollama"]
+#[ignore = "requires DOC_SUM_OFFICE_PDF and explicit model settings or DOC_SUM_QUALIFICATION_GGUF"]
 fn office_pdf_live_ollama_analysis_satisfies_evidence_contract() {
     let paths = configured_paths("DOC_SUM_OFFICE_PDF");
     assert_eq!(paths.len(), 1, "DOC_SUM_OFFICE_PDF must contain one path");
     let source = &paths[0];
     let database = TestDatabase::new("analysis");
-    let ollama = configured_live_runtime(&database.0);
+    let (ollama, _runtime_directory) = configured_live_runtime(&database.0);
     ollama
         .health()
-        .expect("selected Ollama model should be available");
+        .expect("selected production model should be available");
     let runtime = RecordingRuntime::new(ollama.as_ref());
     let mut conn = init_db(&database.0).expect("analysis database should initialize");
     let (_, run) = ingest_pdf(
@@ -801,7 +815,7 @@ fn office_pdf_live_ollama_analysis_satisfies_evidence_contract() {
 }
 
 #[test]
-#[ignore = "requires one external PDF in DOC_SUM_OFFICE_PDF and configured Ollama"]
+#[ignore = "requires DOC_SUM_OFFICE_PDF and explicit model settings or DOC_SUM_QUALIFICATION_GGUF"]
 fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let started = std::time::Instant::now();
     let paths = configured_paths("DOC_SUM_OFFICE_PDF");
@@ -809,10 +823,10 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let source = &paths[0];
     let database = TestDatabase::new("live");
     let (source_bytes, source_hash, source_size) = file_identity(source);
-    let ollama = configured_live_runtime(&database.0);
+    let (ollama, _runtime_directory) = configured_live_runtime(&database.0);
     ollama
         .health()
-        .expect("selected Ollama model should be available");
+        .expect("selected production model should be available");
     let runtime = RecordingRuntime::new(ollama.as_ref());
     let parser = PdfExtractParser::new();
     let normalizer = CanonicalNormalizer::new();
