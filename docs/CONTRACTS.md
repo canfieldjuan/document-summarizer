@@ -478,6 +478,12 @@ chunks, independent of the analyzed claim ledger. Segments retain canonical
 chunk, block and within-block order before request-local IDs are assigned. The
 complete catalog, prompts and serialized response schema, including its
 source-ID enum, must fit one request under the synthesis-stage context budget.
+Coherent generation and its runtime validator share one character-budget owner.
+At or below 8,192 context tokens the existing 16,000-character maximum remains;
+above that context the allowance is three times the tokens remaining after
+reserving 2,048 output tokens and 512 framing tokens, using checked arithmetic.
+Source-reduction admission and bounded repairs use that same allowance. Analysis,
+selection-window requests and verification retain their separate existing caps.
 After this conservative application bound, the selected qualified runtime
 preflights the exact request it will generate. Ollama tokenizes the complete
 serialized chat payload and llama.cpp counts its exact framed prompt; a runtime
