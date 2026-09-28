@@ -19,7 +19,9 @@ use document_summarizer_lib::pipeline::service::{process_pdf_to_summary, Summary
 use document_summarizer_lib::pipeline::structure::{
     structure_document, DeterministicStructureInterpreter,
 };
-use document_summarizer_lib::pipeline::summary::analyze_chunked_document;
+use document_summarizer_lib::pipeline::summary::{
+    analyze_chunked_document, remaining_page_omissions, summary_cited_pages,
+};
 use live_runtime::configured_live_runtime;
 use serde::Serialize;
 use serde_json::json;
@@ -844,12 +846,9 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .filter(|page| page.requires_visual_processing)
         .map(|page| page.page_number)
         .collect::<Vec<_>>();
-    let mut cited_pages = result
-        .citations
-        .evidence
-        .iter()
-        .flat_map(|evidence| evidence.source_span.page_start..=evidence.source_span.page_end)
-        .collect::<Vec<_>>();
+    let presented_pages = summary_cited_pages(&result.citations)
+        .expect("presented claims must reference validated citation evidence");
+    let mut cited_pages = presented_pages.iter().copied().collect::<Vec<_>>();
     cited_pages.sort_unstable();
     cited_pages.dedup();
     let native_text_pages = normalized
@@ -929,7 +928,25 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .map(|o| o.page_number)
         .collect::<HashSet<_>>();
     assert!(omitted_pages.is_subset(&native_text_pages));
-    assert!(omitted_pages.is_disjoint(&cited_native_text_pages));
+    let remaining_omissions = remaining_page_omissions(&analyzed.omissions, &presented_pages);
+    let remaining_omitted_pages = remaining_omissions
+        .iter()
+        .map(|omission| omission.page_number)
+        .collect::<HashSet<_>>();
+    let recovered_pages = omitted_pages
+        .difference(&remaining_omitted_pages)
+        .copied()
+        .collect::<HashSet<_>>();
+    assert!(remaining_omitted_pages.is_disjoint(&cited_native_text_pages));
+    assert_eq!(
+        result
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "SUMMARY_ANALYSIS_PAGES_RECOVERED"),
+        !recovered_pages.is_empty(),
+        "final recovery must be disclosed without erasing analysis history"
+    );
     let material_omitted_pages = analyzed
         .omissions
         .iter()
@@ -942,8 +959,13 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         .filter(|omission| !omission_reduces_adjusted_denominator(&omission.reason))
         .map(|omission| omission.page_number)
         .collect::<HashSet<_>>();
+    let remaining_material_omitted_pages = remaining_omissions
+        .iter()
+        .filter(|omission| omission_reduces_adjusted_denominator(&omission.reason))
+        .map(|omission| omission.page_number)
+        .collect::<HashSet<_>>();
     let adjusted_native_text_pages = native_text_pages
-        .difference(&material_omitted_pages)
+        .difference(&remaining_material_omitted_pages)
         .copied()
         .collect::<HashSet<_>>();
     let acceptance_pages = (native_text_pages.len() * 3).div_ceil(5);
@@ -979,6 +1001,9 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
             "omitted_pages": analyzed.omissions.iter().map(|omission| omission.page_number).collect::<Vec<_>>(),
             "material_omitted_pages": material_omitted_pages,
             "technical_omitted_pages": technical_omitted_pages,
+            "remaining_omitted_pages": remaining_omitted_pages,
+            "remaining_material_omitted_pages": remaining_material_omitted_pages,
+            "recovered_pages": recovered_pages,
             "cited_evidence_count": cited_evidence_ids.len(),
             "synthesized_evidence_count": synthesized_evidence_ids.len(),
             "supported_evidence_fraction": cited_evidence_ids.len() as f64 / evidence_ids.len() as f64,
@@ -1128,6 +1153,10 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         "cited_native_text_page_count": cited_native_text_pages.len(),
         "visual_pages": visual_pages,
         "cited_pages": cited_pages,
+        "analysis_omitted_pages": omitted_pages,
+        "remaining_omitted_pages": remaining_omitted_pages,
+        "remaining_material_omitted_pages": remaining_material_omitted_pages,
+        "recovered_pages": recovered_pages,
         "warning_codes": expected_summary
             .warnings
             .iter()

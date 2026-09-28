@@ -110,6 +110,7 @@ const QUOTE_BOUNDARY_OMITTED_WARNING_CODE: &str = "ANALYSIS_QUOTE_BOUNDARY_OMITT
 pub const MAX_DELIVERY_SUMMARY_TEXT_BYTES: usize = 1024 * 1024;
 pub const SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE: &str = "SUMMARY_TRUNCATED_FOR_DELIVERY";
 const SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE: &str = "SUMMARY_DELIVERY_COVERAGE_FALLBACK";
+const SUMMARY_ANALYSIS_PAGES_RECOVERED_WARNING_CODE: &str = "SUMMARY_ANALYSIS_PAGES_RECOVERED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryDeliveryPolicy {
@@ -839,6 +840,43 @@ pub(crate) fn complete_verified_document_with_delivery(
             ),
         ));
     }
+    let presented_claims = presented_claims(
+        &verified.presentation_mode,
+        &verified.claims,
+        &verified.summary_claims,
+    );
+    let Some(cited_pages) = claim_pages(
+        presented_claims,
+        persisted_analysis
+            .chunks
+            .iter()
+            .flat_map(|chunk| &chunk.evidence)
+            .chain(&verified.synthesis_evidence),
+    ) else {
+        return Err(persist_final_failure(
+            conn,
+            run_id,
+            run.state_version,
+            stage_failure(
+                PipelineStage::Verify,
+                "INVALID_CITATION_ARTIFACT",
+                "The presented summary references unavailable evidence",
+                false,
+            ),
+        ));
+    };
+    let mut warnings = verified.warnings.clone();
+    let recovered_count = persisted_analysis.omissions.len()
+        - remaining_page_omissions(&persisted_analysis.omissions, &cited_pages).len();
+    if recovered_count > 0 {
+        warnings.push(PipelineWarning {
+            code: SUMMARY_ANALYSIS_PAGES_RECOVERED_WARNING_CODE.to_string(),
+            message: format!(
+                "Pages omitted during analysis and recovered through verified summary citations: {recovered_count}. Original analysis decisions are retained."
+            ),
+            stage: Some(PipelineStage::Verify),
+        });
+    }
     let summary_version = match verified.verification_version.as_str() {
         LEGACY_VERIFICATION_VERSION => LEGACY_SUMMARY_VERSION,
         PREVIOUS_VERIFICATION_VERSION => PREVIOUS_SUMMARY_VERSION,
@@ -857,7 +895,7 @@ pub(crate) fn complete_verified_document_with_delivery(
         document_id: verified.document_id.clone(),
         summary_version: summary_version.to_string(),
         text: verified.summary_text.clone(),
-        warnings: verified.warnings.clone(),
+        warnings,
         created_at: Utc::now(),
         integrity_hash: String::new(),
     };
@@ -909,29 +947,22 @@ pub(crate) fn complete_verified_document_with_delivery(
             ));
         }
     };
-    if delivery_policy.is_some() {
-        let cited_pages = citations
-            .evidence
-            .iter()
-            .map(|evidence| evidence.source_span.page_start)
-            .collect::<HashSet<_>>();
-        if !delivery_page_coverage_satisfied(
+    if delivery_policy.is_some()
+        && !delivery_page_coverage_satisfied(
             &cited_pages,
             &persisted_analysis.omissions,
             &normalized,
-        ) {
-            return Err(persist_final_failure(
-                conn,
-                run_id,
-                run.state_version,
-                stage_failure(
-                    PipelineStage::Verify,
-                    "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED",
-                    "The supported Connect summary does not satisfy raw and omission-adjusted page coverage",
-                    false,
-                ),
-            ));
-        }
+        )
+    {
+        return Err(persist_final_failure(
+            conn, run_id, run.state_version,
+            stage_failure(
+                PipelineStage::Verify,
+                "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED",
+                "The supported Connect summary does not satisfy raw and omission-adjusted page coverage",
+                false,
+            ),
+        ));
     }
     if let Err(source) = db::complete_summary(conn, run_id, run.state_version, &summary, &citations)
     {
@@ -2515,6 +2546,60 @@ fn analysis_scope_minimum(page_count: usize) -> Result<usize, PipelineFailure> {
         })
 }
 
+/// Historical analysis decisions still unresolved by the delivered citation pages.
+/// Callers must obtain these pages from validated, presented claims, not all evidence.
+pub fn remaining_page_omissions<'a>(
+    omissions: &'a [AnalysisPageOmission],
+    cited_pages: &HashSet<u32>,
+) -> Vec<&'a AnalysisPageOmission> {
+    omissions
+        .iter()
+        .filter(|omission| !cited_pages.contains(&omission.page_number))
+        .collect()
+}
+
+fn presented_claims<'a>(
+    mode: &SummaryPresentationMode,
+    claims: &'a [CitedClaim],
+    summary_claims: &'a [CitedClaim],
+) -> &'a [CitedClaim] {
+    match mode {
+        SummaryPresentationMode::Coherent => summary_claims,
+        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList => {
+            claims
+        }
+    }
+}
+
+fn claim_pages<'a>(
+    claims: &[CitedClaim],
+    evidence: impl IntoIterator<Item = &'a EvidenceItem>,
+) -> Option<HashSet<u32>> {
+    let evidence_by_id = evidence
+        .into_iter()
+        .map(|item| (item.evidence_id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    let mut pages = HashSet::new();
+    for evidence_id in claims.iter().flat_map(|claim| &claim.evidence_ids) {
+        let evidence = evidence_by_id.get(evidence_id.as_str())?;
+        pages.extend(evidence.source_span.page_start..=evidence.source_span.page_end);
+    }
+    Some(pages)
+}
+
+/// Citation pages actually presented by an already validated final artifact.
+/// Evidence kept only for the undisplayed claim ledger does not contribute.
+pub fn summary_cited_pages(citations: &CitationArtifact) -> Option<HashSet<u32>> {
+    claim_pages(
+        presented_claims(
+            &citations.presentation_mode,
+            &citations.claims,
+            &citations.summary_claims,
+        ),
+        &citations.evidence,
+    )
+}
+
 fn delivery_page_coverage_satisfied(
     cited_pages: &HashSet<u32>,
     omissions: &[AnalysisPageOmission],
@@ -2533,8 +2618,14 @@ fn delivery_page_coverage_satisfied(
     if native_pages.is_empty() || !cited_pages.is_subset(&native_pages) {
         return false;
     }
-    let material_omissions = omissions
+    if omissions
         .iter()
+        .any(|omission| !native_pages.contains(&omission.page_number))
+    {
+        return false;
+    }
+    let material_omissions = remaining_page_omissions(omissions, cited_pages)
+        .into_iter()
         .filter(|omission| {
             matches!(
                 omission.reason,
@@ -2544,10 +2635,6 @@ fn delivery_page_coverage_satisfied(
         })
         .map(|omission| omission.page_number)
         .collect::<HashSet<_>>();
-    if !material_omissions.is_subset(&native_pages) || !material_omissions.is_disjoint(cited_pages)
-    {
-        return false;
-    }
     let adjusted_total = native_pages.len() - material_omissions.len();
     cited_pages.len() <= adjusted_total
         && (cited_pages.len() as u128) * 2 >= native_pages.len() as u128
@@ -2561,30 +2648,20 @@ pub(crate) fn delivery_claim_prefix_coverage_satisfied(
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
 ) -> bool {
-    let presented_claims = match citations.presentation_mode {
-        SummaryPresentationMode::Coherent => &citations.summary_claims,
-        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList => {
-            &citations.claims
-        }
-    };
+    let presented_claims = presented_claims(
+        &citations.presentation_mode,
+        &citations.claims,
+        &citations.summary_claims,
+    );
     if delivered_claim_count == 0 || delivered_claim_count > presented_claims.len() {
         return false;
     }
-    let evidence_by_id = citations
-        .evidence
-        .iter()
-        .map(|evidence| (evidence.evidence_id.as_str(), evidence))
-        .collect::<HashMap<_, _>>();
-    let mut cited_pages = HashSet::new();
-    for evidence_id in presented_claims[..delivered_claim_count]
-        .iter()
-        .flat_map(|claim| &claim.evidence_ids)
-    {
-        let Some(evidence) = evidence_by_id.get(evidence_id.as_str()) else {
-            return false;
-        };
-        cited_pages.insert(evidence.source_span.page_start);
-    }
+    let Some(cited_pages) = claim_pages(
+        &presented_claims[..delivered_claim_count],
+        &citations.evidence,
+    ) else {
+        return false;
+    };
     delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
 }
 
@@ -3460,12 +3537,12 @@ fn no_supported_claims_failure() -> PipelineFailure {
 }
 
 fn presented_claims_empty(verified: &VerifiedDocument) -> bool {
-    match verified.presentation_mode {
-        SummaryPresentationMode::Coherent => verified.summary_claims.is_empty(),
-        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList => {
-            verified.claims.is_empty()
-        }
-    }
+    presented_claims(
+        &verified.presentation_mode,
+        &verified.claims,
+        &verified.summary_claims,
+    )
+    .is_empty()
 }
 
 fn claims_satisfy_delivery_page_coverage(
@@ -3474,17 +3551,9 @@ fn claims_satisfy_delivery_page_coverage(
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
 ) -> bool {
-    let evidence_by_id = evidence
-        .iter()
-        .map(|item| (item.evidence_id.as_str(), item))
-        .collect::<HashMap<_, _>>();
-    let mut cited_pages = HashSet::new();
-    for evidence_id in claims.iter().flat_map(|claim| &claim.evidence_ids) {
-        let Some(item) = evidence_by_id.get(evidence_id.as_str()) else {
-            return false;
-        };
-        cited_pages.insert(item.source_span.page_start);
-    }
+    let Some(cited_pages) = claim_pages(claims, evidence) else {
+        return false;
+    };
     delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
 }
 
@@ -4610,12 +4679,11 @@ pub(crate) fn render_citation_claim_lines(
         .iter()
         .map(|item| (item.evidence_id.as_str(), item))
         .collect::<HashMap<_, _>>();
-    let presented_claims = match artifact.presentation_mode {
-        SummaryPresentationMode::Coherent => &artifact.summary_claims,
-        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList => {
-            &artifact.claims
-        }
-    };
+    let presented_claims = presented_claims(
+        &artifact.presentation_mode,
+        &artifact.claims,
+        &artifact.summary_claims,
+    );
     let lines = render_claim_lines(presented_claims, &evidence)?;
     if lines.join("\n\n") != artifact.rendered_text {
         return Err(stage_failure(
@@ -9679,6 +9747,308 @@ mod tests {
         .expect_err("permanent input failure must take precedence over runtime health");
         assert_eq!(error.code, "VERIFICATION_INPUT_TOO_LARGE");
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[derive(Default)]
+    struct OmittedTitleRuntime {
+        withheld_quotes: HashSet<String>,
+    }
+
+    impl ModelRuntime for OmittedTitleRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let omit = matches!(&request.output_format,
+                ModelOutputFormat::JsonSchema { name, schema }
+                    if name.starts_with("document_quote_paraphrase_")
+                        && schema.get("anyOf").is_some() && request.ordinal == 1);
+            Ok(ModelResponse {
+                text: if omit {
+                    r#"{"outcome":"no_substantive_content"}"#.into()
+                } else if matches!(&request.output_format,
+                    ModelOutputFormat::JsonSchema { name, .. } if name == VERIFICATION_SCHEMA_NAME)
+                {
+                    let prompt: VerificationPrompt =
+                        serde_json::from_str(&request.user_prompt).unwrap();
+                    let verdicts = prompt
+                        .claims
+                        .into_iter()
+                        .map(|claim| RawClaimVerdict {
+                            verdict: if claim.evidence.iter().any(|evidence| {
+                                self.withheld_quotes.contains(&evidence.exact_quote)
+                            }) {
+                                ClaimVerdict::Unsupported
+                            } else {
+                                ClaimVerdict::Supported
+                            },
+                            claim_id: claim.claim_id,
+                        })
+                        .collect();
+                    serde_json::to_string(&RawVerificationResponse { verdicts }).unwrap()
+                } else {
+                    fixture_model_output(request)
+                },
+                runtime_id: self.runtime_id().into(),
+                model_id: self.model_id().into(),
+                request_attempts: Vec::new(),
+            })
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "omitted-title-runtime"
+        }
+        fn model_id(&self) -> &str {
+            "omitted-title-model"
+        }
+    }
+
+    #[test]
+    fn final_summary_discloses_recovered_page_without_rewriting_analysis() {
+        for (profile, delivery, recovered) in [
+            (SummaryProfile::General, None, true),
+            (
+                SummaryProfile::Story,
+                Some(SummaryDeliveryPolicy::connect()),
+                true,
+            ),
+            (
+                SummaryProfile::General,
+                Some(SummaryDeliveryPolicy::connect()),
+                false,
+            ),
+        ] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
+            let runtime = OmittedTitleRuntime::default();
+            let analyzed = analyze_chunked_document(&mut conn, &runtime, &run_id).unwrap();
+            assert_eq!(analyzed.omissions.len(), 1);
+            assert_eq!(analyzed.omissions[0].page_number, 1);
+            assert_eq!(
+                analyzed.omissions[0].reason,
+                AnalysisOmissionReason::NoSubstantiveContent
+            );
+            let original = serde_json::to_vec(&analyzed).unwrap();
+            synthesize_analyzed_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            verify_synthesized_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            let final_result =
+                complete_verified_document_with_delivery(&mut conn, &run_id, delivery).unwrap();
+            assert_eq!(
+                final_result.summary.warnings.iter().any(|warning| warning.code == "SUMMARY_ANALYSIS_PAGES_RECOVERED"),
+                recovered,
+                "final summary must disclose actual recovery independently of historical analysis omissions"
+            );
+            assert_eq!(
+                serde_json::to_vec(&get_analyzed_document(&conn, &run_id).unwrap().unwrap())
+                    .unwrap(),
+                original
+            );
+            assert_eq!(
+                final_result.summary.calculate_integrity_hash().unwrap(),
+                final_result.summary.integrity_hash
+            );
+            assert_eq!(
+                final_result.citations.calculate_integrity_hash().unwrap(),
+                final_result.citations.integrity_hash
+            );
+            assert_eq!(
+                final_result.citations.summary_integrity_hash,
+                final_result.summary.integrity_hash
+            );
+            assert_eq!(
+                get_summary_artifact(&conn, &run_id).unwrap().unwrap(),
+                final_result.summary
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_material_page_returns_to_the_coverage_denominator() {
+        let (normalized, _) = materiality_fixture(&[
+            "A source sentence.".into(),
+            "Another source sentence.".into(),
+        ]);
+        let omission = AnalysisPageOmission {
+            page_number: 1,
+            chunk_id: "fixture".into(),
+            reason: AnalysisOmissionReason::NoSubstantiveContent,
+            origin: AnalysisOmissionOrigin::ModelNoSubstantiveContent,
+            filter_version: "fixture".into(),
+            source_fingerprint: "fixture".into(),
+            catalog_fingerprint: Some("fixture".into()),
+        };
+        assert!(
+            delivery_page_coverage_satisfied(
+                &HashSet::from([1, 2]),
+                std::slice::from_ref(&omission),
+                &normalized
+            ),
+            "supported recovery must not conflict with the earlier stage omission"
+        );
+        assert!(
+            !delivery_page_coverage_satisfied(
+                &HashSet::from([1]),
+                std::slice::from_ref(&omission),
+                &normalized
+            ),
+            "recovered material cannot stay excluded to inflate adjusted coverage"
+        );
+        assert!(delivery_page_coverage_satisfied(
+            &HashSet::from([2]),
+            std::slice::from_ref(&omission),
+            &normalized
+        ));
+        assert!(!delivery_page_coverage_satisfied(
+            &HashSet::new(),
+            std::slice::from_ref(&omission),
+            &normalized
+        ));
+        assert!(!delivery_page_coverage_satisfied(
+            &HashSet::from([1, 2, 3]),
+            &[omission],
+            &normalized
+        ));
+    }
+
+    #[test]
+    fn rejected_recovery_cannot_complete_or_clear_analysis_omission() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let mut runtime = OmittedTitleRuntime::default();
+        let analyzed = analyze_chunked_document(&mut conn, &runtime, &run_id).unwrap();
+        let synthesized = synthesize_analyzed_document(&mut conn, &runtime, &run_id).unwrap();
+        runtime.withheld_quotes = synthesized
+            .synthesis_evidence
+            .iter()
+            .filter(|evidence| evidence.source_span.page_start == 1)
+            .map(|evidence| evidence.exact_quote.clone())
+            .collect();
+        assert!(
+            !runtime.withheld_quotes.is_empty(),
+            "synthesis must propose recovery before verification rejects it"
+        );
+        let error = verify_synthesized_document(&mut conn, &runtime, &run_id)
+            .expect_err("rejecting the only coherent claim must prevent recovery and delivery");
+        assert_eq!(error.code(), "NO_SEMANTICALLY_SUPPORTED_CLAIMS");
+        assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+        assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+        assert_eq!(
+            get_analyzed_document(&conn, &run_id).unwrap().unwrap(),
+            analyzed
+        );
+    }
+
+    #[test]
+    fn final_page_accounting_ignores_undisplayed_evidence_and_checks_delivered_prefix() {
+        let (normalized, _) = materiality_fixture(&[
+            "First source sentence.".into(),
+            "Second source sentence.".into(),
+        ]);
+        let evidence = normalized
+            .pages
+            .iter()
+            .map(|page| {
+                let block = &page.content[0];
+                EvidenceItem {
+                    evidence_id: format!("e{}", page.page_number),
+                    chunk_id: "fixture".into(),
+                    block_id: block.block_id.clone(),
+                    claim_text: block.text.clone(),
+                    exact_quote: block.text.clone(),
+                    source_span: block.source.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let claims = evidence
+            .iter()
+            .map(|item| CitedClaim {
+                claim_id: item.evidence_id.clone(),
+                text: item.claim_text.clone(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            })
+            .collect::<Vec<_>>();
+        // A technical omission stays in the denominator even when not recovered.
+        let omissions = vec![AnalysisPageOmission {
+            page_number: 2,
+            chunk_id: "fixture".into(),
+            reason: AnalysisOmissionReason::QuoteBoundaryUnusable,
+            origin: AnalysisOmissionOrigin::QuoteBoundaryUnusable,
+            filter_version: "fixture".into(),
+            source_fingerprint: "fixture".into(),
+            catalog_fingerprint: None,
+        }];
+        let mut citations = CitationArtifact {
+            document_id: normalized.document_id.clone(),
+            citation_version: CITATION_VERSION.into(),
+            summary_integrity_hash: "fixture".into(),
+            rendered_text: "fixture".into(),
+            presentation_mode: SummaryPresentationMode::Coherent,
+            claims: claims.clone(),
+            summary_claims: claims.clone(),
+            evidence,
+            created_at: Utc::now(),
+            integrity_hash: "fixture".into(),
+        };
+        for mode in [
+            SummaryPresentationMode::Coherent,
+            SummaryPresentationMode::ClaimLedgerFallback,
+            SummaryPresentationMode::LegacyClaimList,
+        ] {
+            citations.presentation_mode = mode;
+            assert!(delivery_claim_prefix_coverage_satisfied(
+                &citations,
+                2,
+                &omissions,
+                &normalized
+            ));
+            for count in [0, 1, 3, usize::MAX] {
+                assert!(!delivery_claim_prefix_coverage_satisfied(
+                    &citations,
+                    count,
+                    &omissions,
+                    &normalized
+                ));
+            }
+        }
+        citations.presentation_mode = SummaryPresentationMode::Coherent;
+        citations.summary_claims.truncate(1);
+        assert_eq!(summary_cited_pages(&citations), Some(HashSet::from([1])));
+        assert_eq!(
+            remaining_page_omissions(&omissions, &summary_cited_pages(&citations).unwrap()),
+            omissions.iter().collect::<Vec<_>>()
+        );
+        // Keeping ledger evidence for page 2 cannot rescue absent prose citations.
+        assert!(!delivery_claim_prefix_coverage_satisfied(
+            &citations,
+            1,
+            &omissions,
+            &normalized
+        ));
+        citations.summary_claims[0]
+            .evidence_ids
+            .push("missing-evidence".into());
+        assert_eq!(summary_cited_pages(&citations), None);
+        assert!(!delivery_claim_prefix_coverage_satisfied(
+            &citations,
+            1,
+            &omissions,
+            &normalized
+        ));
+        citations.summary_claims.clear();
+        assert_eq!(summary_cited_pages(&citations), Some(HashSet::new()));
     }
 
     #[test]
