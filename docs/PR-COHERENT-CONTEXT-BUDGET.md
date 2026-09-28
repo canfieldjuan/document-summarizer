@@ -63,12 +63,32 @@ live evidence may still show fallback, poor coverage or model failure.
 
 ## Implementation summary
 
-Pending implementation.
+The coherent-only helper now owns generation and runtime-validation admission.
+The existing limit is passed into selection stop checks and bounded repairs.
+Three regressions cover full-catalog admission, exact-runtime rejection and
+reserve/legacy-stage boundaries. No runtime defaults or source text changed.
 
 ## Cold diff audit
 
-Pending implementation and verification.
+- `summary/coherent.rs`: two callers now share the coherent budget owner; exact
+  runtime checks and response schema are unchanged. Its boundary regression
+  covers reserves, the request threshold and unchanged neighboring stage caps.
+- `summary.rs`: test-only additions exercise real synthesis and validation,
+  preserve 8k selection, and reject a 32k request when runtime admission fails.
+- `docs/CONTRACTS.md`: records the new coherent budget at the canonical seam.
+- Boundary-probe: the large valid catalog no longer selects at 32k; 8k still
+  selects. Exact runtime rejection still produces no synthesis inference.
+- Effect-trace: effective Synthesize context controls the shared input limit;
+  the production-path no-selection assertion failed before and passed after.
+- No shared mutable state or admission queue changed. Exact source identity,
+  semantic verification and final delivery coverage remain enforced.
 
 ## Gap audit
 
-NOT DONE: implementation, fail-first proof, verification and review remain.
+NOT DONE for merge: implementation and fail-first regression are complete.
+The affected summary suite passed 210 tests (10 live tests ignored); formatting
+and frontend build passed. The first regression attempt hit missing frontend
+assets, and the first synthetic response was invalid before admission could be
+asserted; both setup failures were corrected before the valid fail-first run.
+Strict all-target/all-feature clippy passed. Saved-catalog/live proof, exact-head
+review and CI remain.

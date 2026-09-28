@@ -2851,18 +2851,15 @@ fn synthesize_with_delivery_coverage(
         validate_for_runtime(profile, &result, analyzed, chunked, normalized, runtime)?;
         return Ok(result);
     }
-    let input_limit = generation_input_character_limit_for_context(
-        runtime.context_tokens(PipelineStage::Synthesize),
-        OUTPUT_TOKENS,
-    )
-    .ok_or_else(|| {
-        stage_failure(
-            PipelineStage::Synthesize,
-            "INVALID_SYNTHESIS_BUDGET",
-            "The synthesis model context cannot hold output and framing reserves",
-            false,
-        )
-    })?;
+    let input_limit = input_character_limit(runtime.context_tokens(PipelineStage::Synthesize))
+        .ok_or_else(|| {
+            stage_failure(
+                PipelineStage::Synthesize,
+                "INVALID_SYNTHESIS_BUDGET",
+                "The synthesis model context cannot hold output and framing reserves",
+                false,
+            )
+        })?;
     let mut next_request_ordinal = 0;
     let (full_user_prompt, full_output_schema) = prompt_and_schema(profile, &catalog)?;
     let full_request_characters =
@@ -4655,6 +4652,21 @@ fn request_exceeds_runtime_context(
             failure,
         )),
     }
+}
+
+fn input_character_limit(context_tokens: u32) -> Option<usize> {
+    if context_tokens <= LEGACY_MODEL_CONTEXT_TOKENS {
+        return generation_input_character_limit_for_context(context_tokens, OUTPUT_TOKENS);
+    }
+    // Coherent synthesis may use the full retained catalog in a larger context.
+    // Analysis and selection windows retain their independent bounded helper.
+    // This character proxy never replaces exact runtime token admission.
+    context_tokens
+        .checked_sub(OUTPUT_TOKENS)
+        .and_then(|remaining| remaining.checked_sub(VERIFICATION_CONTEXT_RESERVE_TOKENS))
+        .filter(|remaining| *remaining > 0)
+        .and_then(|remaining| usize::try_from(remaining).ok())
+        .and_then(|remaining| remaining.checked_mul(3))
 }
 
 fn synthesis_request_characters(
@@ -7345,18 +7357,15 @@ pub(super) fn validate_for_runtime(
         Some(FallbackReason::IncompleteCatalog)
     } else {
         let (user_prompt, output_schema) = prompt_and_schema(profile, &catalog)?;
-        let input_limit = generation_input_character_limit_for_context(
-            runtime.context_tokens(PipelineStage::Synthesize),
-            OUTPUT_TOKENS,
-        )
-        .ok_or_else(|| {
-            stage_failure(
-                PipelineStage::Synthesize,
-                "INVALID_SYNTHESIS_BUDGET",
-                "The synthesis model context cannot hold output and framing reserves",
-                false,
-            )
-        })?;
+        let input_limit = input_character_limit(runtime.context_tokens(PipelineStage::Synthesize))
+            .ok_or_else(|| {
+                stage_failure(
+                    PipelineStage::Synthesize,
+                    "INVALID_SYNTHESIS_BUDGET",
+                    "The synthesis model context cannot hold output and framing reserves",
+                    false,
+                )
+            })?;
         let request_characters =
             synthesis_request_characters(profile, &user_prompt, &output_schema)?;
         match (request_characters > input_limit).then_some(FallbackReason::RequestTooLarge) {
@@ -11834,6 +11843,41 @@ mod tests {
         assert_eq!(
             prompt["source_segments"][6]["source_claim"],
             "Later extracted claim."
+        );
+    }
+
+    #[test]
+    fn coherent_input_budget_preserves_reserves_and_legacy_stage_limits() {
+        for context in [
+            0,
+            OUTPUT_TOKENS,
+            OUTPUT_TOKENS + VERIFICATION_CONTEXT_RESERVE_TOKENS,
+        ] {
+            assert_eq!(input_character_limit(context), None);
+        }
+        assert_eq!(input_character_limit(2_561), Some(3));
+        assert_eq!(input_character_limit(8_191), Some(16_000));
+        assert_eq!(input_character_limit(8_192), Some(16_000));
+        assert_eq!(input_character_limit(8_193), Some(16_899));
+        assert_eq!(input_character_limit(32_768), Some(90_624));
+        let limit = input_character_limit(32_768).unwrap();
+        for size in [limit - 1, limit, limit + 1] {
+            assert_eq!(
+                source_context_fallback_reason(&catalog(), size, limit),
+                (size > limit).then_some(FallbackReason::RequestTooLarge)
+            );
+        }
+        assert_eq!(
+            generation_input_character_limit_for_context(32_768, ANALYSIS_OUTPUT_TOKENS),
+            Some(16_000)
+        );
+        assert_eq!(
+            generation_input_character_limit_for_context(32_768, SOURCE_SELECTION_OUTPUT_TOKENS),
+            Some(16_000)
+        );
+        assert_eq!(
+            verification_request_character_limit(32_768, VERIFICATION_OUTPUT_TOKENS).unwrap(),
+            16_000
         );
     }
 

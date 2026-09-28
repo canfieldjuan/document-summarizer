@@ -10442,6 +10442,156 @@ mod tests {
     }
 
     #[test]
+    fn coherent_larger_context_keeps_full_catalog_before_generation() {
+        struct CatalogRuntime(LowSynthesisContextRuntime);
+        impl ModelRuntime for CatalogRuntime {
+            fn generate(
+                &self,
+                request: &ModelRequest,
+            ) -> Result<ModelResponse, ModelRuntimeFailure> {
+                let mut response = self.0.generate(request)?;
+                if matches!(&request.output_format, ModelOutputFormat::JsonSchema { name, .. }
+                    if name == coherent::SCHEMA_NAME)
+                {
+                    let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                    let sources = prompt["source_segments"].as_array().unwrap();
+                    // One exact source per unit keeps the fixture valid under either
+                    // selected-window or full-catalog admission.
+                    let maximum = prompt["maximum_units"].as_u64().unwrap() as usize;
+                    let units = sources
+                        .iter()
+                        .take(maximum)
+                        .map(|source| {
+                            json!({
+                                "text": source["exact_quote"],
+                                "source_ids": [source["source_id"]],
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    response.text = json!({"units": units}).to_string();
+                }
+                Ok(response)
+            }
+            fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+                self.0.preflight_request(request)
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                self.0.health()
+            }
+            fn runtime_id(&self) -> &str {
+                self.0.runtime_id()
+            }
+            fn model_id(&self) -> &str {
+                self.0.model_id()
+            }
+            fn context_tokens(&self, stage: PipelineStage) -> u32 {
+                self.0.context_tokens(stage)
+            }
+        }
+        let (normalized, chunked) = sparse_page_scope_fixture(30, 500);
+        for context in [32_768, LEGACY_MODEL_CONTEXT_TOKENS] {
+            let runtime = CatalogRuntime(
+                LowSynthesisContextRuntime::with_synthesis_context_tokens(context),
+            );
+            let analyzed = analyze(
+                &runtime,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            let synthesized = coherent::synthesize(
+                SummaryProfile::General,
+                &runtime,
+                &analyzed,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            coherent::validate_for_runtime(
+                SummaryProfile::General,
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+                &runtime,
+            )
+            .unwrap();
+            let selected = runtime
+                .0
+                .schema_names
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|name| name == coherent::SOURCE_SELECTION_SCHEMA_NAME);
+            assert_eq!(
+                selected,
+                context == LEGACY_MODEL_CONTEXT_TOKENS,
+                "32k must not reduce a retained catalog that fits; 8k must still select"
+            );
+            assert_eq!(
+                synthesized
+                    .warnings
+                    .iter()
+                    .any(|warning| { warning.code == coherent::SOURCE_SELECTION_WARNING_CODE }),
+                selected
+            );
+            assert!(runtime.0.preflight_calls.load(Ordering::SeqCst) > 0);
+            assert!(
+                runtime
+                    .0
+                    .verification_preflight_calls
+                    .load(Ordering::SeqCst)
+                    > 0
+            );
+        }
+    }
+
+    #[test]
+    fn coherent_larger_context_still_requires_exact_runtime_admission() {
+        let (normalized, chunked) = sparse_page_scope_fixture(30, 500);
+        let runtime = LowSynthesisContextRuntime {
+            synthesis_context_tokens: 32_768,
+            ..LowSynthesisContextRuntime::rejecting_exact_synthesis_admission()
+        };
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let synthesized = coherent::synthesize(
+            SummaryProfile::General,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(!runtime
+            .requests
+            .lock()
+            .unwrap()
+            .contains(&PipelineStage::Synthesize));
+        assert!(runtime.preflight_calls.load(Ordering::SeqCst) > 0);
+        assert!(synthesized
+            .warnings
+            .iter()
+            .any(|w| w.code == coherent::FALLBACK_WARNING_CODE));
+    }
+
+    #[test]
     fn oversized_general_context_selects_then_discloses_verified_coverage_fallback() {
         let runtime = LowSynthesisContextRuntime::new();
         let database = TestDatabase::new();
