@@ -213,3 +213,11 @@ new package) to inspect its typed `is_parse()` error through reqwest's cause
 chain. Parse failures become Invalid; timeouts and connection loss retain
 Uncertain. Do not match error prose or replace the HTTP stack. The existing
 framing matrix and interrupted-transfer recovery test cover both directions.
+
+## Review follow-up at 9bac68c
+The reviewer identified two missing regression cases, with no production-code
+change required. Added an input-aliased output status through the actual HTTP
+coordinator (terminal failure before any output GET or child), and a 200
+application/json body in the framing matrix. Removing the two guards makes
+exactly these tests fail; restoring them yields 18 streamed tests passed,
+2 intentionally ignored, in 4.98s. Only tests and this evidence note changed.

@@ -260,6 +260,46 @@ fn metadata_and_descriptor_boundaries_reject_before_download() {
 }
 
 #[test]
+fn input_aliased_output_is_rejected_before_output_get() {
+    let (directory, mut conn, mut provider, handoff, mut status, _, _) = fixture();
+    let mut processing = status.clone();
+    processing.status = JobState::Processing;
+    processing.result = None;
+    save_status(&conn, &handoff, &processing).unwrap();
+    status.result.as_mut().unwrap().outputs[0].artifact_id =
+        status.input_artifacts[0].artifact_id.clone();
+    let (url, worker) = server(vec![status_reply(&handoff, &status)]);
+    provider.base_url = url;
+    let saved = reload(&conn, &handoff.handoff_id).unwrap();
+    let result = run_handoff(
+        &mut conn,
+        saved,
+        directory.path(),
+        &provider,
+        &HttpOcrTransport,
+        &UNCONTROLLED_EXECUTION,
+    );
+    assert!(
+        matches!(result, Err(OcrConsumerError::InvalidOutput(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        worker.join().unwrap(),
+        vec![format!("/v3/jobs/{}", handoff.provider_job_id)]
+    );
+    let saved = reload(&conn, &handoff.handoff_id).unwrap();
+    assert_eq!(saved.phase, "failed");
+    assert!(saved.ocr_pdf_bytes.is_none());
+    assert!(saved.text_bytes.is_none());
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn changed_completed_descriptors_never_replace_saved_pair() {
     let (_directory, conn, _provider, handoff, status, _pdf, _text) = fixture();
     save_status(&conn, &handoff, &status).unwrap();
@@ -493,6 +533,7 @@ fn output_framing_and_integrity_fail_closed() {
     let (_, descriptor) = pair(&status).unwrap();
     for case in [
         "valid",
+        "wrong-content-type",
         "missing-length",
         "conflicting-length",
         "length-mismatch",
@@ -507,6 +548,11 @@ fn output_framing_and_integrity_fail_closed() {
     ] {
         let mut reply = artifact(output_path(&handoff, descriptor), &text);
         match case {
+            "wrong-content-type" => {
+                reply.headers = reply
+                    .headers
+                    .replace("application/octet-stream", "application/json");
+            }
             "missing-length" => {
                 reply.headers = reply
                     .headers
