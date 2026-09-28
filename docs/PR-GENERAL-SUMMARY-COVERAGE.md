@@ -91,3 +91,10 @@ Regression cases: adequate first draft (no repair), inadequate draft corrected
 (one repair), repeated inadequate draft (disclosed fallback), verification loss,
 and insufficient verified fallback (no completed artifacts). Reuse existing
 coverage boundary tests and semantic guard tests. Retain source receipts locally.
+
+The first adjacent-suite run exposed a sequencing hazard: a synthesis-stage
+coverage fallback could bypass semantic rejection of the proposed prose. Keep
+fallback ownership at verification for General: an exhausted or context-limited
+coverage repair passes the structurally valid draft to normal semantic checks.
+Only a nonempty supported result may take coverage fallback; zero-supported
+prose still fails closed. Existing Connect synthesis behavior is unchanged.
