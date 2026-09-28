@@ -147,3 +147,22 @@ then passed after the prior valid draft was retained for verification. Foreign-I
 and malformed corrections follow the same rule; a transport failure still leaves
 no final artifacts. The affected summary suite passed 205 tests (10 ignored).
 The failed first live run remains a failure; the fixed revision requires a new run.
+
+## Review correction contract
+
+The retained draft currently belongs to a loop iteration, so a parsed but
+undercovered or modally strengthened correction can replace or clear it. Keep
+the first structurally valid coverage draft for the whole bounded attempt. Only
+a correction that satisfies all feedback may return as the replacement; any
+exhausted unusable correction goes back to the retained draft for verification.
+Existing transport/identity/cancellation failures still propagate. Regressions
+must distinguish the initial draft from a parsed undercovered correction and a
+parsed modally strengthened correction, in addition to existing parse failures.
+
+The shared fallback warning also changed Connect's public message. Preserve the
+existing Connect wording and scope the new explanatory wording to standalone
+General. Keep both exact historical forms readable while rejecting arbitrary
+warning metadata. Exercise both routes and existing final persistence checks.
+Surface: summary.rs, summary/coherent.rs and their existing regressions only.
+Run fail-first targeted tests, the affected summary suite and strict clippy;
+CI owns the full platform matrix. No model or runtime settings change.
