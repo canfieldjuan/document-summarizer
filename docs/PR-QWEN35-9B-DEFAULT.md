@@ -132,3 +132,23 @@ instead. No new production path bypasses identity, context or completion checks.
 Formatting and all-targets/all-features clippy passed after final test-helper
 changes (2.69s); frontend sources and dependencies have not changed since the
 successful build. Windows runtime execution remains outside this slice.
+
+## Live recording-wrapper correction
+
+The first selected Story/Contract runs on the composed source failed with
+MODEL_RESPONSE_INVALID after receiving nonempty JSON. The coherent-test
+RecordingRuntime forwards generic identities but inherits stage-specific
+identity defaults. QwenProfileRuntime reports its profile name generically and
+the selected concrete runtime/model for each stage; validation correctly rejects
+the wrapper's mismatched expectation. This is a test-wrapper defect introduced
+by broadening live selection to the production profile factory, not yet a model
+quality finding. The office recording wrapper already forwards stage identities.
+
+Required surface: coherent.rs test-only RecordingRuntime forwards both
+runtime_id_for_stage and model_id_for_stage to its inner runtime. Add an offline
+regression using distinct profile and stage identities, verify the generated
+response through the existing production identity validator, and retain
+rejection of genuinely mismatched identities. No prompt, production runtime,
+validator, source selection or acceptance-threshold change. First reproduce
+MODEL_RESPONSE_INVALID before forwarding; then rerun the affected tests and
+both live selected-profile probes. Keep the failed live artifacts in the record.
