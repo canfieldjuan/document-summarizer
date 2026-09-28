@@ -40,7 +40,7 @@ coverage threshold or treating unverified claims as recovery.
 Only already validated exact-source evidence can enter the final calculation.
 A rejected/undelivered claim cannot clear an omission. Existing production
 validation and transactional state-version fencing remain authoritative.
-GPU currently has another Ollama model resident; no inference overlap allowed.
+Live inference requires the existing harness lock and an otherwise empty GPU.
 The 9B preset remains in separate PR100 and waits for this fix plus live evidence.
 
 ## Verification plan
@@ -59,12 +59,46 @@ all failures. Do not claim the previously failed run passed retroactively.
 
 ## Implementation summary
 
-Pending.
+The existing finalization path now adds recovery disclosure before calculating
+summary and citation hashes. Presentation selection, cited-page collection and
+remaining omissions have shared owners in summary.rs; coherent admission,
+verification fallback, final completion and Connect delivered-prefix checks use
+the same coverage rule. Only presented supported claims recover pages. Original
+analysis, verification, source fingerprints and stage versions are preserved.
+
+The office acceptance report keeps historical omission metrics, adds remaining
+and recovered pages, and counts citations from presented claims rather than all
+retained evidence. The original failed live run remains a failure. Its incorrect
+historical-omission disjointness assertion is replaced by final-disposition
+accounting; no prompt, fixture, claim/evidence or coverage threshold changes.
 
 ## Cold diff audit
 
-Pending.
+- Required production edits are confined to summary.rs. No model, runtime,
+  verifier, normalized-source admission, storage schema or dependency changes.
+- Boundary-probe: recovered material pages reenter the denominator; incomplete
+  recovery cannot inflate it. Empty, overlong, truncated and unknown-reference
+  claim sets fail coverage. Technical omissions remain in the denominator.
+  Undisplayed ledger evidence cannot count as a presented citation.
+- Effect-trace: a source page omitted during analysis can later appear in the
+  coherent summary; the shared final accounting recognizes only verified
+  presented citations and emits recovery disclosure before integrity hashing.
+  Offline production-stage fixtures prove General GUI and Story Connect
+  recovery, General Connect non-recovery, and rejected recovery with no final
+  artifact. Analysis survives byte-for-byte; persisted final hashes match.
+- Concurrency/data integrity: existing state-version fencing and atomic final
+  persistence are unchanged. The affected suite includes rollback of summary,
+  citations, state and events, plus concurrent Connect admission and ownership.
+- Security: model proposals still pass source and semantic validation before
+  final accounting. This change does not give model output new authority.
+- Verification: two declared fail-first regressions failed on current main;
+  both passed after the fix. The affected summary/Connect provider suite passed
+  (223 passed, 10 live tests ignored). Offline office checks passed (3 passed,
+  3 ignored). Formatting and all-target/all-feature clippy passed. CI owns the
+  broad platform suites; live inference is recorded separately.
 
 ## Gap audit
 
-NOT DONE: implementation, regression proof, live evidence and review pending.
+DONE: source fix and deterministic reproduction/verification.
+NOT DONE for merge: exact-head review, required CI and live evidence pending.
+PR100 remains separate and still requires its preset/profile/real-document gates.
