@@ -802,6 +802,15 @@ including complete delivered text.
   origins and reasons together. A zero adjusted denominator is not success: no
   retained evidence fails explicitly. Verification losses cannot turn into
   omissions after the fact.
+- Analysis omissions remain the original stage audit. Later source-grounded,
+  semantically supported summary claims may recover those pages. Final page
+  accounting subtracts only actually presented citation pages from the historical
+  omission set, preserving the original artifact. Recovered material pages are
+  included again in the adjusted denominator. Technical omissions remain in both
+  denominators. Unsupported, ambiguous, undisplayed or truncated-away claims do
+  not establish recovery. GUI completion, Connect coverage and delivered-prefix
+  checks share this accounting. Final summaries disclose recovered analysis
+  omissions through the existing warning channel; no checkpoint is rewritten.
 - Treat names, organizations, identifiers, dates, reference numbers and
   cross-references as material on form-shaped pages in both selection and
   complete-page omission prompts. Emit `OCR_TEXT_LAYER_STRUCTURE_RISK` when a
