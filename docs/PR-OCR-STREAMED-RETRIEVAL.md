@@ -48,7 +48,7 @@ Authority: merged connect-contracts ADR-0010 and v3 schemas at
 
 ## Explicit non-scope
 
-No provider changes, database migration, new service/queue, model selection,
+No provider changes, new service/queue, model selection,
 prompt, summary scoring, OCR engine, correction UI, native PDF admission,
 Windows discovery enablement, dependency updates or invoice consumer changes.
 The existing Unix-only direct OCR discovery boundary is preserved, including
@@ -56,9 +56,9 @@ Windows compilation and current v1/v2 provider behavior.
 
 ## Assumptions and blockers
 
-The provider is merged. The protocol already lives in the immutable request;
+The provider is merged. The protocol already lives in the saved request;
 the existing running status column can retain completed descriptors until both
-verified outputs are atomically stored, so no new persisted phase is needed.
+verified outputs are atomically stored, so no new persisted phase is needed. The existing PDF-size CHECK does require a schema migration.
 Temporary downloads are anonymous private files and do not survive process
 exit. The bounded parser/storage may allocate verified bytes up to the declared
 cap; this is not a streaming PDF parser or model qualification claim.
@@ -85,3 +85,19 @@ cap; this is not a streaming PDF parser or model qualification claim.
 
 NOT DONE: contract-first stage. Implementation, regressions, production consumer
 proof and exact-head PR review remain. The invoice consumer follows separately.
+
+## Contract revision: persisted output cap
+
+The real large-pair regression reached paired storage and failed SQLite's
+`ocr_pdf_byte_size <= 2097152` CHECK in schema.rs. The first contract incorrectly
+excluded a database migration. Version 22 must rebuild only ocr_handoffs in one
+transaction, preserving every row, index, foreign-key relationship and lineage
+trigger. Its PDF CHECK selects 36 MiB only for a saved protocol 3/profile 1.1
+request; all other rows retain the 2 MiB bound. The application still validates
+the saved request, pair and actual bytes. No new columns or phases are needed.
+
+Use the existing migration owner, restore foreign-key enforcement on every
+outcome, and check foreign-key integrity before commit. Test migration from a
+populated version-21 database, unchanged v2 records/lineage, idempotent reopen,
+rollback on invalid input, and both profile boundaries. Only temporary test
+databases are exercised here; do not open or migrate installed user data.
