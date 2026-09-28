@@ -1050,7 +1050,10 @@ fn delivery_truncation_warning() -> PipelineWarning {
     }
 }
 
-fn quote_boundary_warning(affected_pages: usize, omitted_source_units: usize) -> PipelineWarning {
+pub(super) fn quote_boundary_warning(
+    affected_pages: usize,
+    omitted_source_units: usize,
+) -> PipelineWarning {
     let unit_label = if omitted_source_units == 1 {
         "source unit"
     } else {
