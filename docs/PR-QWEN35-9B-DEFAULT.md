@@ -23,6 +23,13 @@ The server's reasoning option does not apply a chat template to raw completion.
   9B GGUF in isolated settings and uses the production default-profile factory.
   An explicit settings path or named qualification candidate remains possible;
   never fall back silently to a 30B verifier.
+- Live acceptance selection: extract the office helper into test-only shared
+  support, used by the existing automatic-profile and selected Story/Contract
+  lanes as well. Their prompts and assertions stay unchanged; recording accepts
+  any ModelRuntime. Update profile-release-acceptance.sh to invoke the new
+  production default rather than requiring a resident 30B Ollama model.
+- README.md: describe the new default and existing explicit legacy choices,
+  including manual GGUF registration and the Linux-only direct runtime.
 - Existing saved selections keep their values. No version bump or migration:
   the operator's issue update says there are no deployed settings to migrate.
   Missing settings use the new default. Missing/wrong model or runtime stays
