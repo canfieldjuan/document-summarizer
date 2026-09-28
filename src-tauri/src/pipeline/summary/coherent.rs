@@ -8415,6 +8415,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn live_recording_preserves_stage_identity_for_response_validation() {
+        struct ProfileIdentityRuntime;
+        impl ModelRuntime for ProfileIdentityRuntime {
+            fn generate(
+                &self,
+                request: &ModelRequest,
+            ) -> Result<ModelResponse, ModelRuntimeFailure> {
+                Ok(ModelResponse {
+                    text: "{\"source_ids\":[\"s1\"]}".into(),
+                    runtime_id: self.runtime_id_for_stage(request.stage.clone()).into(),
+                    model_id: self.model_id_for_stage(request.stage.clone()).into(),
+                    request_attempts: Vec::new(),
+                })
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+            fn runtime_id(&self) -> &str {
+                "profile-wrapper"
+            }
+            fn model_id(&self) -> &str {
+                "selected-preset"
+            }
+            fn runtime_id_for_stage(&self, _stage: PipelineStage) -> &str {
+                "concrete-runtime"
+            }
+            fn model_id_for_stage(&self, stage: PipelineStage) -> &str {
+                match stage {
+                    PipelineStage::Analyze => "analysis-model",
+                    PipelineStage::Verify => "verification-model",
+                    _ => "synthesis-model",
+                }
+            }
+        }
+        let inner = ProfileIdentityRuntime;
+        let runtime = RecordingRuntime::new(&inner);
+        for stage in [
+            PipelineStage::Analyze,
+            PipelineStage::Synthesize,
+            PipelineStage::Verify,
+        ] {
+            let request = ModelRequest {
+                stage: stage.clone(),
+                ordinal: 0,
+                system_prompt: "Fixture".into(),
+                user_prompt: "Select a source".into(),
+                seed: 0,
+                max_output_tokens: 256,
+                output_format: ModelOutputFormat::JsonSchema {
+                    name: "fixture".into(),
+                    schema: json!({"type":"object"}),
+                },
+            };
+            let response = runtime.generate(&request).unwrap();
+            validate_runtime_response(&runtime, &response, stage.clone())
+                .expect("the recorder must preserve the selected stage identity");
+            let mut wrong_runtime = response.clone();
+            wrong_runtime.runtime_id = "foreign-runtime".into();
+            assert_eq!(
+                validate_runtime_response(&runtime, &wrong_runtime, stage.clone())
+                    .unwrap_err()
+                    .code,
+                "MODEL_RESPONSE_INVALID"
+            );
+            let mut wrong_model = response;
+            wrong_model.model_id = "foreign-model".into();
+            assert_eq!(
+                validate_runtime_response(&runtime, &wrong_model, stage)
+                    .unwrap_err()
+                    .code,
+                "MODEL_RESPONSE_INVALID"
+            );
+        }
+        assert_eq!(runtime.responses().len(), 3);
+    }
+
     impl ModelRuntime for RecordingRuntime<'_> {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             let response = self.inner.generate(request)?;
@@ -8436,6 +8513,14 @@ mod tests {
 
         fn model_id(&self) -> &str {
             self.inner.model_id()
+        }
+
+        fn runtime_id_for_stage(&self, stage: PipelineStage) -> &str {
+            self.inner.runtime_id_for_stage(stage)
+        }
+
+        fn model_id_for_stage(&self, stage: PipelineStage) -> &str {
+            self.inner.model_id_for_stage(stage)
         }
 
         fn context_tokens(&self, stage: PipelineStage) -> u32 {
