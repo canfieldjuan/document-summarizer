@@ -317,3 +317,24 @@ cases now pass through actual retrieval/child admission.
 DONE for these runtime corrections locally. NOT DONE for merge until new-head
 review and required CI. Prior corpus receipts keep their original commit;
 this follow-up claims the focused production-coordinator evidence above.
+
+## Contract correction: retrieval failure phase ownership
+
+The outer v3 coordinator reloads the handoff after InvalidOutput. Its current
+exclusion list lets a stale retrieval failure terminalize output_ready, even
+when another coordinator has verified and atomically saved the pair.
+
+Only prepared, submission_uncertain and running are owned by remote submission
+and retrieval. The outer failure handler must explicitly allow only those
+phases, retaining the existing phase compare-and-set so a concurrent advance
+after the read also wins. Once output_ready is durable, retrieval cannot fail
+it or any later phase. Cancellation keeps its separate existing ownership.
+No new phases, schema, retries, protocol or provider changes.
+
+Regression: interleave two coordinators through the existing transport seam
+and separate SQLite connections. The winning retrieval verifies and stores
+the pair; the losing output GET returns nonretryable OUTPUT_UNAVAILABLE.
+The wrapper must preserve output_ready and both exact bytes, then recovery
+admits one child without another request. Retain the malformed-status and
+nonretryable-error controls that fail before a pair exists. Run this probe
+failing first, adjacent consumer tests, formatting and clippy.
