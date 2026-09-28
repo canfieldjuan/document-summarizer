@@ -50,7 +50,7 @@ Authority: merged connect-contracts ADR-0010 and v3 schemas at
 
 No provider changes, new service/queue, model selection,
 prompt, summary scoring, OCR engine, correction UI, native PDF admission,
-Windows discovery enablement, dependency updates or invoice consumer changes.
+Windows discovery enablement, dependency version updates or invoice consumer changes.
 The existing Unix-only direct OCR discovery boundary is preserved, including
 Windows compilation and current v1/v2 provider behavior.
 
@@ -101,3 +101,14 @@ outcome, and check foreign-key integrity before commit. Test migration from a
 populated version-21 database, unchanged v2 records/lineage, idempotent reopen,
 rollback on invalid input, and both profile boundaries. Only temporary test
 databases are exercised here; do not open or migrate installed user data.
+
+## Contract revision: typed HTTP framing refusal
+
+The conflicting-Content-Length regression failed: reqwest rejects the headers
+before exposing a Response, and the generic send-error mapping called that a
+transient transport loss. ADR-0010 requires bad framing to fail retrieval.
+Declare the already-locked hyper 1 dependency directly (no version update or
+new package) to inspect its typed `is_parse()` error through reqwest's cause
+chain. Parse failures become Invalid; timeouts and connection loss retain
+Uncertain. Do not match error prose or replace the HTTP stack. The existing
+framing matrix and interrupted-transfer recovery test cover both directions.
