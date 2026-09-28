@@ -811,6 +811,14 @@ including complete delivered text.
   not establish recovery. GUI completion, Connect coverage and delivered-prefix
   checks share this accounting. Final summaries disclose recovered analysis
   omissions through the existing warning channel; no checkpoint is rewritten.
+- General desktop summaries apply these coverage thresholds during generation,
+  after semantic verification and before final persistence. A structurally valid
+  undercovered draft receives coverage feedback within the existing single
+  validation-repair budget. Exhausted coverage correction or verification loss
+  uses the disclosed verified-claim fallback; that presented fallback must itself
+  meet coverage or completion fails. Hidden evidence never earns coverage, and
+  unsupported claims cannot be restored. Initial prompts, source selection,
+  runtime/output limits, Story/Contract defaults and Connect routing are unchanged.
 - Treat names, organizations, identifiers, dates, reference numbers and
   cross-references as material on form-shaped pages in both selection and
   complete-page omission prompts. Emit `OCR_TEXT_LAYER_STRUCTURE_RISK` when a
