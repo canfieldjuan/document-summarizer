@@ -95,7 +95,7 @@ pub struct JobRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct JobStatus {
+pub struct JobStatus<T = OutputArtifact> {
     pub protocol_version: u32,
     pub job_id: String,
     pub capability: CapabilityRef,
@@ -105,15 +105,15 @@ pub struct JobStatus {
     pub updated_at: DateTime<Utc>,
     pub input_artifacts: Vec<ArtifactProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<JobResult>,
+    pub result: Option<JobResult<T>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JobError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct JobResult {
-    pub outputs: Vec<OutputArtifact>,
+pub struct JobResult<T = OutputArtifact> {
+    pub outputs: Vec<T>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

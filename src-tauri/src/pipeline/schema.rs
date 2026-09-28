@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 21;
+pub const CURRENT_SCHEMA_VERSION: u32 = 22;
 
 const V20_TO_V21: &str = r#"
 CREATE TABLE ocr_text_corrections (
@@ -1045,8 +1045,9 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V18_TO_V19)?;
         tx.execute_batch(V19_TO_V20)?;
         tx.execute_batch(V20_TO_V21)?;
-        tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", 21)?;
         tx.commit()?;
+        migrate_v21_to_v22(conn)?;
         return validate(conn);
     }
 
@@ -1128,8 +1129,60 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 20 {
         migrate_additive(conn, V20_TO_V21, 21)?;
+        current_version = 21;
+    }
+    if current_version == 21 {
+        migrate_v21_to_v22(conn)?;
     }
     validate(conn)
+}
+
+#[cfg(test)]
+pub(crate) fn create_v21_fixture(conn: &Connection) {
+    for sql in [
+        SCHEMA_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5, V5_TO_V6, V6_TO_V7, V7_TO_V8, V8_TO_V9, V9_TO_V10,
+        V10_TO_V11, V11_TO_V12, V12_TO_V13, V13_TO_V14, V14_TO_V15, V15_TO_V16, V16_TO_V17,
+        V17_TO_V18, V18_TO_V19, V19_TO_V20, V20_TO_V21,
+    ] {
+        conn.execute_batch(sql).unwrap();
+    }
+    conn.pragma_update(None, "user_version", 21).unwrap();
+}
+
+fn migrate_v21_to_v22(conn: &mut Connection) -> Result<(), MigrationError> {
+    let foreign_keys: bool = conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = (|| -> Result<(), MigrationError> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if version(&tx)? == 22 {
+            return Ok(());
+        }
+        let definition = V19_TO_V20.split("CREATE INDEX ocr_handoffs_phase_idx").next().unwrap()
+            .replace("CREATE TABLE ocr_handoffs (", "CREATE TABLE ocr_handoffs_v22 (")
+            .replace("ocr_pdf_byte_size <= 2097152", "ocr_pdf_byte_size <= CASE WHEN json_valid(provider_request_json) THEN CASE WHEN json_extract(provider_request_json, '$.protocol_version') = 3 AND json_extract(provider_request_json, '$.capability.version') = '1.1' THEN 37748736 ELSE 2097152 END ELSE 2097152 END");
+        tx.execute_batch(&definition)?;
+        tx.execute_batch(
+            "INSERT INTO ocr_handoffs_v22 SELECT * FROM ocr_handoffs;
+DROP TABLE ocr_handoffs;
+ALTER TABLE ocr_handoffs_v22 RENAME TO ocr_handoffs;
+CREATE INDEX ocr_handoffs_phase_idx ON ocr_handoffs(phase, created_at);",
+        )?;
+        let violation: Option<String> = tx
+            .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
+            .optional()?;
+        if violation.is_some() {
+            return Err(MigrationError::Invariant(
+                "OCR migration broke a foreign key".to_string(),
+            ));
+        }
+        tx.pragma_update(None, "user_version", 22)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    let restored = conn.pragma_update(None, "foreign_keys", foreign_keys);
+    result?;
+    restored?;
+    Ok(())
 }
 
 pub fn version(conn: &Connection) -> Result<u32, MigrationError> {
@@ -2818,5 +2871,34 @@ mod tests {
                 .unwrap();
             assert_eq!(present, 1, "{table} must exist");
         }
+    }
+    #[test]
+    fn v22_rollback_preserves_v21_and_restores_foreign_keys() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        create_v21_fixture(&conn);
+        // A broken old relationship must not be silently migrated away.
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute("INSERT INTO ocr_lineage VALUES ('missing-handoff','artifact','missing-run','2026-09-28T00:00:00Z')",[]).unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert!(migrate_v21_to_v22(&mut conn).is_err());
+        assert_eq!(version(&conn).unwrap(), 21);
+        assert!(conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get::<_, bool>(0))
+            .unwrap());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |r| r
+                .get::<_, usize>(0))
+                .unwrap(),
+            1
+        );
+        assert!(!table_exists(&conn, "ocr_handoffs_v22").unwrap());
+        let definition: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='ocr_handoffs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(definition.contains("ocr_pdf_byte_size <= 2097152"));
     }
 }
