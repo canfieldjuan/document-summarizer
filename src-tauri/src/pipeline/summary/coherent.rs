@@ -3925,6 +3925,14 @@ fn generate_summary_with_coverage_repair(
             catalog,
             response_maximum_units,
         );
+        // Coverage correction cannot discard a structurally valid prior draft.
+        // This draft still goes through semantic verification and final coverage;
+        // no content or citations from the invalid correction are accepted.
+        if parsed_response.is_err() {
+            if let Some(draft) = coverage_draft.take() {
+                return Ok(draft);
+            }
+        }
         let parsed_response = if profile == SummaryProfile::General
             && window_repairs == 0
             && parsed_response

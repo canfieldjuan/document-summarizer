@@ -10772,6 +10772,7 @@ mod tests {
         good_initial: bool,
         corrects: bool,
         withhold_ledger: bool,
+        bad_repair: Option<&'static str>,
     }
 
     impl ModelRuntime for GeneralCoverageRuntime {
@@ -10791,6 +10792,30 @@ mod tests {
             };
             let text = if name == coherent::SCHEMA_NAME {
                 let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                if prompt.get("validation_feedback").is_some() {
+                    if let Some(kind) = self.bad_repair {
+                        if kind == "transport" {
+                            return Err(ModelRuntimeFailure {
+                                code: "FIXTURE_TRANSPORT_FAILED".into(),
+                                message: "fixture transport failure".into(),
+                                recoverable: true,
+                                request_attempts: vec![],
+                            });
+                        }
+                        let bad = match kind {
+                            "clipped" => json!({"units":[{"text":"x".repeat(1199)+" ","source_ids":[prompt["source_segments"][0]["source_id"].clone()]}]}).to_string(),
+                            "foreign" => json!({"units":[{"text":"Unsupported repair content.","source_ids":["foreign-source"]}]}).to_string(),
+                            "malformed" => "{".to_string(),
+                            _ => unreachable!(),
+                        };
+                        return Ok(ModelResponse {
+                            text: bad,
+                            runtime_id: self.runtime_id().into(),
+                            model_id: self.model_id().into(),
+                            request_attempts: vec![],
+                        });
+                    }
+                }
                 let good = self.good_initial
                     || (self.corrects && prompt.get("validation_feedback").is_some());
                 let mut pages = HashSet::new();
@@ -10846,6 +10871,7 @@ mod tests {
                 good_initial,
                 corrects: true,
                 withhold_ledger: false,
+                bad_repair: None,
             };
             let completed = summarize_chunked_document(&mut conn, &runtime, &run_id).unwrap();
             assert_eq!(
@@ -10884,6 +10910,7 @@ mod tests {
                 good_initial: false,
                 corrects: false,
                 withhold_ledger,
+                bad_repair: None,
             };
             let result = summarize_chunked_document(&mut conn, &runtime, &run_id);
             if withhold_ledger {
@@ -10906,6 +10933,45 @@ mod tests {
                     .warnings
                     .iter()
                     .any(|w| w.code == SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE));
+            }
+            assert_eq!(runtime.requests.lock().unwrap().iter().filter(|r|matches!(&r.output_format,ModelOutputFormat::JsonSchema{name,..} if name == coherent::SCHEMA_NAME)).count(),2);
+        }
+    }
+
+    #[test]
+    fn general_coverage_invalid_correction_preserves_only_the_prior_valid_draft() {
+        for kind in ["clipped", "foreign", "malformed", "transport"] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run(&database);
+            let runtime = GeneralCoverageRuntime {
+                requests: Mutex::new(vec![]),
+                good_initial: false,
+                corrects: false,
+                withhold_ledger: false,
+                bad_repair: Some(kind),
+            };
+            let result = summarize_chunked_document(&mut conn, &runtime, &run_id);
+            if kind == "transport" {
+                assert!(result.is_err());
+                assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+                assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+            } else {
+                let completed = result
+                    .expect("unusable correction must retain the valid draft for verification");
+                assert_eq!(
+                    completed.citations.presentation_mode,
+                    SummaryPresentationMode::ClaimLedgerFallback
+                );
+                assert_eq!(summary_cited_pages(&completed.citations).unwrap().len(), 5);
+                assert!(!completed
+                    .summary
+                    .text
+                    .contains("Unsupported repair content"));
+                assert!(completed
+                    .citations
+                    .evidence
+                    .iter()
+                    .all(|e| e.evidence_id != "foreign-source"));
             }
             assert_eq!(runtime.requests.lock().unwrap().iter().filter(|r|matches!(&r.output_format,ModelOutputFormat::JsonSchema{name,..} if name == coherent::SCHEMA_NAME)).count(),2);
         }

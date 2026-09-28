@@ -141,3 +141,9 @@ that draft through normal verification and coverage fallback. It does not accept
 the invalid correction or bypass verification. Initial invalid output, transport,
 identity and cancellation failures still fail. Add clipped/foreign-ID/malformed
 correction controls and a transport-error negative; the same repair budget holds.
+
+The clipped-correction regression failed with MODEL_SUMMARY_RESPONSE_INVALID,
+then passed after the prior valid draft was retained for verification. Foreign-ID
+and malformed corrections follow the same rule; a transport failure still leaves
+no final artifacts. The affected summary suite passed 205 tests (10 ignored).
+The failed first live run remains a failure; the fixed revision requires a new run.
