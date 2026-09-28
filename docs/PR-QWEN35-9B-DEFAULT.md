@@ -152,3 +152,18 @@ rejection of genuinely mismatched identities. No prompt, production runtime,
 validator, source selection or acceptance-threshold change. First reproduce
 MODEL_RESPONSE_INVALID before forwarding; then rerun the affected tests and
 both live selected-profile probes. Keep the failed live artifacts in the record.
+
+The recording-wrapper regression failed with the expected identity error before
+forwarding and passed afterward; adjacent coherent tests passed (40 passed,
+6 live checks ignored), as did all-target/all-feature clippy. PR101's reviewed
+page reconciliation is composed into this branch; its synthetic live replay
+passes with 13 identical raw responses. The reviewer's nonblocking count ask is
+covered by asserting the recovery warning's exact count in both the offline
+production-stage regression and office acceptance, using final citation pages.
+
+Live gap remains explicit: Red Cross final presented citations cover 4/10 native
+pages despite 9 retained analysis pages, so the unchanged 50 percent raw / 60
+percent adjusted coverage gate failed. Both failed selected-profile attempts
+remain recorded as test-wrapper failures pending a corrected live rerun. No
+quality or coverage threshold is changed, and the production preset is not yet
+qualified for merge by these results.

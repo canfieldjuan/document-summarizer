@@ -947,6 +947,17 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         !recovered_pages.is_empty(),
         "final recovery must be disclosed without erasing analysis history"
     );
+    if let Some(warning) = result
+        .summary
+        .warnings
+        .iter()
+        .find(|warning| warning.code == "SUMMARY_ANALYSIS_PAGES_RECOVERED")
+    {
+        assert_eq!(warning.message, format!(
+            "Pages omitted during analysis and recovered through verified summary citations: {}. Original analysis decisions are retained.",
+            recovered_pages.len()
+        ), "recovery disclosure must report the actual number of recovered pages");
+    }
     let material_omitted_pages = analyzed
         .omissions
         .iter()
