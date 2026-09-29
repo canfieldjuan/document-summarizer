@@ -197,10 +197,17 @@ fn label_value(line: &str) -> bool {
     };
     let words = label.split_whitespace().count();
     (1..=8).contains(&words)
-        && label.chars().any(char::is_alphabetic)
+        // Digits can belong to a field name, but number-led clause headings
+        // must still reach prose segmentation, even inside parentheses.
         && label
             .chars()
-            .all(|c| c.is_alphabetic() || c.is_whitespace() || matches!(c, '-' | '/' | '(' | ')'))
+            .find(|c| c.is_alphanumeric())
+            .is_some_and(char::is_alphabetic)
+        && label.chars().all(|c| {
+            c.is_alphanumeric()
+                || c.is_whitespace()
+                || matches!(c, '-' | '/' | '(' | ')' | '\'' | '’' | '&' | '#')
+        })
         && !value.trim().is_empty()
 }
 

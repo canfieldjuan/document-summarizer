@@ -8130,6 +8130,128 @@ mod tests {
     }
 
     #[test]
+    fn source_preservation_keeps_common_form_labels() {
+        let complete = format!("{}.", "a".repeat(599));
+        let unfinished = "Unfinished preceding prose";
+        for label in [
+            "Address Line 1",
+            "Address Line 2",
+            "Owner's Name",
+            "Owner’s Name",
+            "R&D Contact",
+            "Reference #",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                for size in [599, 600, 601] {
+                    let rows = format!("{label}: recorded value{newline}Details: ");
+                    let form = format!("{rows}{}", "x".repeat(size - rows.chars().count()));
+                    let source =
+                        format!("{complete}{newline}{newline}{unfinished}{newline}{newline}{form}");
+                    let (normalized, chunked) = materiality_fixture(&[source]);
+                    let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+                    let chunk = &chunked.chunks[0];
+                    let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+                        ANALYSIS_VERSION,
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                    )
+                    .unwrap();
+                    let expected = if size <= MAX_ANALYSIS_QUOTE_CHARACTERS {
+                        vec![complete.as_str(), form.as_str()]
+                    } else {
+                        vec![complete.as_str()]
+                    };
+                    assert_eq!(
+                        catalog.candidates.iter().map(|c| c.exact_quote.as_str()).collect::<Vec<_>>(),
+                        expected,
+                        "bounded form lost or oversized form admitted: {label}, {newline:?}, {size}"
+                    );
+                    assert_eq!(catalog.omitted_source_units, 1);
+                    validate_analysis_quote_catalog_for_blocks(
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                        &catalog.candidates,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_preservation_keeps_numbered_prose_out_of_form_groups() {
+        for (first_label, second_label) in [
+            ("1", "2"),
+            ("3.2 Termination", "3.3 Renewal"),
+            ("1 Termination", "2 Renewal"),
+            ("(1) Termination", "(2) Renewal"),
+            ("1) Termination", "2) Renewal"),
+        ] {
+            let first = format!(
+                "{first_label}: The parties {} recorded.",
+                "discussed details ".repeat(20)
+            );
+            let second = format!(
+                "{second_label}: The reviewer {} completed.",
+                "verified records ".repeat(20)
+            );
+            for newline in ["\n", "\r\n"] {
+                let source = format!("{first}{newline}{second}");
+                assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+                let (normalized, chunked) = materiality_fixture(&[source]);
+                let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+                let chunk = &chunked.chunks[0];
+                let old = build_versioned_analysis_quote_catalog_for_blocks(
+                    SENTENCE_ANALYSIS_VERSION,
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                )
+                .unwrap();
+                assert_eq!(old.omitted_source_units, 0);
+                assert_eq!(
+                    old.candidates
+                        .iter()
+                        .map(|c| c.exact_quote.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![first.as_str(), second.as_str()]
+                );
+                let current = build_versioned_analysis_quote_catalog_for_blocks(
+                    ANALYSIS_VERSION,
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                )
+                .unwrap();
+                assert_eq!(
+                    current.omitted_source_units, 0,
+                    "numbered prose became a form: {first_label}"
+                );
+                assert_eq!(
+                    current
+                        .candidates
+                        .iter()
+                        .map(|c| c.exact_quote.as_str())
+                        .collect::<Vec<_>>(),
+                    old.candidates
+                        .iter()
+                        .map(|c| c.exact_quote.as_str())
+                        .collect::<Vec<_>>()
+                );
+                validate_analysis_quote_catalog_for_blocks(
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                    &current.candidates,
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn source_preservation_keeps_forms_after_short_unfinished_prose() {
         let complete = format!("{}.", "intro".repeat(119));
         let unfinished = "Unfinished preceding prose";
