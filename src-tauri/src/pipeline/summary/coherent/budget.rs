@@ -119,11 +119,7 @@ pub(super) fn admit(
     let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
         return Err(invalid_budget());
     };
-    let maximum = schema["properties"]["units"]["items"]["properties"]["text"]["maxLength"]
-        .as_u64()
-        .and_then(|n| usize::try_from(n).ok())
-        .filter(|n| *n > 0 && *n <= MAX_UNIT_CHARACTERS)
-        .ok_or_else(invalid_budget)?;
+    let maximum = maximum_characters(request)?;
     let estimate = response_tokens(schema, maximum).ok_or_else(invalid_budget)?;
     let Some(capacity) = available_output(runtime, request, resize)? else {
         return Ok(None);
@@ -171,21 +167,28 @@ pub(super) fn admit(
     Ok(Some(candidate))
 }
 
+/// The admitted schema owns the ceiling for parsing and every recovery path.
+pub(super) fn maximum_characters(request: &ModelRequest) -> Result<usize, PipelineFailure> {
+    let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
+        return Err(invalid_budget());
+    };
+    schema["properties"]["units"]["items"]["properties"]["text"]["maxLength"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| *n > 0 && *n <= MAX_UNIT_CHARACTERS)
+        .ok_or_else(invalid_budget)
+}
+
 pub(super) fn validate_response(
     request: &ModelRequest,
     response: &str,
 ) -> Result<(), PipelineFailure> {
-    let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
-        return Err(invalid_budget());
-    };
-    let maximum = schema["properties"]["units"]["items"]["properties"]["text"]["maxLength"]
-        .as_u64()
-        .ok_or_else(invalid_budget)?;
+    let maximum = maximum_characters(request)?;
     let raw: RawResponse = serde_json::from_str(response).map_err(|_| invalid_response())?;
     if raw
         .units
         .iter()
-        .any(|unit| unit.text.chars().count() as u64 > maximum)
+        .any(|unit| unit.text.chars().count() > maximum)
     {
         return Err(invalid_response());
     }

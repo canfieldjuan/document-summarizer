@@ -3948,13 +3948,15 @@ fn generate_summary_with_coverage_repair(
             initial_maximum_units
         };
         let response_maximum_units = framing_maximum_units.max(window_maximum_units);
+        let maximum_characters = budget::maximum_characters(&request)?;
         let parsed_response = budget::validate_response(&request, &response.text).and_then(|()| {
-            parse_response_with_maximum_units(
+            parse_response_with_limits(
                 profile,
                 &response.text,
                 document_id,
                 catalog,
                 response_maximum_units,
+                maximum_characters,
             )
         });
         // Coverage correction cannot discard a structurally valid prior draft.
@@ -3977,6 +3979,7 @@ fn generate_summary_with_coverage_repair(
                 document_id,
                 catalog,
                 response_maximum_units,
+                maximum_characters,
             ) {
                 Ok(requirements) => {
                     window_repair_requirements = Some(requirements);
@@ -3993,12 +3996,13 @@ fn generate_summary_with_coverage_repair(
                     || failure.code == WINDOW_MIXED_RESPONSE_CODE
             })
         {
-            clipped_fallback = parse_response_without_clipped_units_with_maximum(
+            clipped_fallback = parse_response_without_clipped_units_with_limits(
                 profile,
                 &response.text,
                 document_id,
                 catalog,
                 response_maximum_units,
+                maximum_characters,
             )
             .ok()
             .and_then(|fallback| retain_individually_modal_safe_claims(fallback, document_id));
@@ -4018,7 +4022,7 @@ fn generate_summary_with_coverage_repair(
             }
             if clipped_fallback.is_some() {
                 let feedback = vec![format!(
-                    "One or more text fields reached the {MAX_UNIT_CHARACTERS}-character decoder limit before the sentence ended. Keep every complete unit and its source_ids unchanged; shorten each incomplete unit to a complete short paragraph ending in terminal punctuation"
+                    "One or more text fields reached the {maximum_characters}-character decoder limit before the sentence ended. Keep every complete unit and its source_ids unchanged; shorten each incomplete unit to a complete short paragraph ending in terminal punctuation"
                 )];
                 request_prompt = prompt_with_validation_feedback(&request_prompt, &feedback)?;
                 if synthesis_request_characters(profile, &request_prompt, &output_schema)?
@@ -4056,6 +4060,7 @@ fn generate_summary_with_coverage_repair(
                         document_id,
                         catalog,
                         response_maximum_units,
+                        maximum_characters,
                     )
                     .map_err(SynthesisFailure::ModelOutputRejected)?,
                 );
@@ -4110,6 +4115,7 @@ fn generate_summary_with_coverage_repair(
                             document_id,
                             catalog,
                             response_maximum_units,
+                            maximum_characters,
                         )
                         .map_err(SynthesisFailure::ModelOutputRejected)?,
                     );
@@ -4119,6 +4125,7 @@ fn generate_summary_with_coverage_repair(
                     &response.text,
                     document_id,
                     catalog,
+                    maximum_characters,
                 )
                 .ok()
                 .filter(|parsed| {
@@ -6522,27 +6529,30 @@ fn prompt_and_schema(
     Ok((serialized, schema))
 }
 
+#[cfg(test)]
 fn parse_response(
     profile: SummaryProfile,
     response: &str,
     document_id: &str,
     catalog: &SourceCatalog,
 ) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
-    parse_response_with_maximum_units(
+    parse_response_with_limits(
         profile,
         response,
         document_id,
         catalog,
         maximum_summary_units_for_catalog(profile, catalog),
+        MAX_UNIT_CHARACTERS,
     )
 }
 
-fn parse_response_with_maximum_units(
+fn parse_response_with_limits(
     profile: SummaryProfile,
     response: &str,
     document_id: &str,
     catalog: &SourceCatalog,
     maximum_units: usize,
+    maximum_characters: usize,
 ) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
     let raw: RawResponse = serde_json::from_str(response).map_err(|_| invalid_response())?;
     if raw.units.is_empty() || raw.units.len() > maximum_units {
@@ -6559,7 +6569,7 @@ fn parse_response_with_maximum_units(
     let mut validated = Vec::with_capacity(raw.units.len());
     let windowed_general = is_windowed_general_catalog(profile, catalog);
     for unit in raw.units {
-        let text_is_canonical = canonical_bounded_text(&unit.text, MAX_UNIT_CHARACTERS);
+        let text_is_canonical = canonical_bounded_text(&unit.text, maximum_characters);
         let text_is_complete = pages::completion_valid(&unit.text);
         let clipped_source_ids = unit.source_ids.iter().collect::<HashSet<_>>();
         let clipped_source_ids_are_valid = !unit.source_ids.is_empty()
@@ -6570,7 +6580,7 @@ fn parse_response_with_maximum_units(
                 .all(|source_id| candidates.contains_key(source_id.as_str()));
         if windowed_general
             && text_is_canonical
-            && unit.text.chars().count() == MAX_UNIT_CHARACTERS
+            && unit.text.chars().count() == maximum_characters
             && !text_is_complete
             && clipped_source_ids_are_valid
         {
@@ -6707,6 +6717,7 @@ fn parse_window_repair_requirements(
     document_id: &str,
     catalog: &SourceCatalog,
     maximum_units: usize,
+    maximum_characters: usize,
 ) -> Result<WindowRepairRequirements, PipelineFailure> {
     if profile != SummaryProfile::General {
         return Err(window_mixed_response());
@@ -6756,7 +6767,14 @@ fn parse_window_repair_requirements(
             && (selection_windows.len() != 1 || has_unwindowed_source);
         let singleton = serde_json::to_string(&RawResponse { units: vec![unit] })
             .map_err(|_| invalid_response())?;
-        match parse_response_with_maximum_units(profile, &singleton, document_id, catalog, 1) {
+        match parse_response_with_limits(
+            profile,
+            &singleton,
+            document_id,
+            catalog,
+            1,
+            maximum_characters,
+        ) {
             Ok((mut claims, evidence)) => {
                 if modal_strengthening_feedback(&claims, &evidence)?.is_empty() {
                     retained.append(&mut claims);
@@ -6789,6 +6807,7 @@ fn parse_response_without_mixed_source_framing_units(
     document_id: &str,
     catalog: &SourceCatalog,
     maximum_units: usize,
+    maximum_characters: usize,
 ) -> Result<SourceFramingRepairRequirements, PipelineFailure> {
     if profile != SummaryProfile::General {
         return Err(mixed_source_framing_response());
@@ -6803,7 +6822,14 @@ fn parse_response_without_mixed_source_framing_units(
         let source_ids = unit.source_ids.clone();
         let singleton = serde_json::to_string(&RawResponse { units: vec![unit] })
             .map_err(|_| invalid_response())?;
-        match parse_response_with_maximum_units(profile, &singleton, document_id, catalog, 1) {
+        match parse_response_with_limits(
+            profile,
+            &singleton,
+            document_id,
+            catalog,
+            1,
+            maximum_characters,
+        ) {
             Ok((mut claims, _)) => retained.append(&mut claims),
             Err(failure) if failure.code == SOURCE_FRAMING_MIXED_RESPONSE_CODE => {
                 let mut evidence_positions = Vec::with_capacity(source_ids.len());
@@ -6850,6 +6876,7 @@ fn parse_response_without_mixed_windows(
     response: &str,
     document_id: &str,
     catalog: &SourceCatalog,
+    maximum_characters: usize,
 ) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
     if !supports_long_source_selection(profile) {
         return Err(window_mixed_response());
@@ -6888,7 +6915,14 @@ fn parse_response_without_mixed_windows(
     }
     let retained =
         serde_json::to_string(&RawResponse { units: retained }).map_err(|_| invalid_response())?;
-    parse_response(profile, &retained, document_id, catalog)
+    parse_response_with_limits(
+        profile,
+        &retained,
+        document_id,
+        catalog,
+        maximum_summary_units_for_catalog(profile, catalog),
+        maximum_characters,
+    )
 }
 
 #[cfg(test)]
@@ -6898,21 +6932,23 @@ fn parse_response_without_clipped_units(
     document_id: &str,
     catalog: &SourceCatalog,
 ) -> Result<SafeSiblingFallback, PipelineFailure> {
-    parse_response_without_clipped_units_with_maximum(
+    parse_response_without_clipped_units_with_limits(
         profile,
         response,
         document_id,
         catalog,
         maximum_summary_units_for_catalog(profile, catalog),
+        MAX_UNIT_CHARACTERS,
     )
 }
 
-fn parse_response_without_clipped_units_with_maximum(
+fn parse_response_without_clipped_units_with_limits(
     profile: SummaryProfile,
     response: &str,
     document_id: &str,
     catalog: &SourceCatalog,
     maximum_units: usize,
+    maximum_characters: usize,
 ) -> Result<SafeSiblingFallback, PipelineFailure> {
     if !is_windowed_general_catalog(profile, catalog) {
         return Err(clipped_unit_response());
@@ -6933,8 +6969,8 @@ fn parse_response_without_clipped_units_with_maximum(
     let mut required_clipped_evidence_ids = Vec::new();
     let mut withheld_cross_window_unit = false;
     for unit in raw.units {
-        let clipped = canonical_bounded_text(&unit.text, MAX_UNIT_CHARACTERS)
-            && unit.text.chars().count() == MAX_UNIT_CHARACTERS
+        let clipped = canonical_bounded_text(&unit.text, maximum_characters)
+            && unit.text.chars().count() == maximum_characters
             && !pages::completion_valid(&unit.text);
         if clipped {
             let unique_source_ids = unit
@@ -6963,7 +6999,14 @@ fn parse_response_without_clipped_units_with_maximum(
                 units: vec![unit.clone()],
             })
             .map_err(|_| invalid_response())?;
-            match parse_response(profile, &singleton, document_id, catalog) {
+            match parse_response_with_limits(
+                profile,
+                &singleton,
+                document_id,
+                catalog,
+                1,
+                maximum_characters,
+            ) {
                 Ok(_) => retained.push(unit),
                 Err(failure) if failure.code == WINDOW_MIXED_RESPONSE_CODE => {
                     required_mixed_window_sibling_evidence.push(
@@ -6991,7 +7034,14 @@ fn parse_response_without_clipped_units_with_maximum(
     } else {
         let retained = serde_json::to_string(&RawResponse { units: retained })
             .map_err(|_| invalid_response())?;
-        parse_response_with_maximum_units(profile, &retained, document_id, catalog, maximum_units)?
+        parse_response_with_limits(
+            profile,
+            &retained,
+            document_id,
+            catalog,
+            maximum_units,
+            maximum_characters,
+        )?
     };
     Ok(SafeSiblingFallback {
         claims,
@@ -12564,6 +12614,7 @@ mod tests {
             &contaminated,
             "document-1",
             &windowed,
+            MAX_UNIT_CHARACTERS,
         )
         .is_err());
         assert!(parse_response_without_mixed_windows(
@@ -12571,6 +12622,7 @@ mod tests {
             &contaminated,
             "document-1",
             &windowed,
+            MAX_UNIT_CHARACTERS,
         )
         .is_err());
         assert!(parse_response_without_mixed_windows(
@@ -12578,6 +12630,7 @@ mod tests {
             &contaminated,
             "document-1",
             &windowed,
+            MAX_UNIT_CHARACTERS,
         )
         .is_err());
         let repairable = json!({
@@ -12592,6 +12645,7 @@ mod tests {
             &repairable,
             "document-1",
             &windowed,
+            MAX_UNIT_CHARACTERS,
         )
         .expect("a valid Contract sibling should survive cross-window repair");
         assert_eq!(repaired.0.len(), 1);
@@ -14938,6 +14992,283 @@ mod tests {
         .is_err());
     }
 
+    // Exercise the real budget selector and repair loop with a completed JSON
+    // response clipped at the schema's admitted ceiling, not a token-limit stop.
+    struct CapacityLimitedClipRuntime {
+        inner: ClippedUnitRepairRuntime,
+        complete_at_ceiling: bool,
+    }
+
+    impl ModelRuntime for CapacityLimitedClipRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let mut response = self.inner.generate(request)?;
+            let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
+                panic!("the production request must carry its schema");
+            };
+            let ceiling = schema["properties"]["units"]["items"]["properties"]["text"]["maxLength"]
+                .as_u64()
+                .unwrap() as usize;
+            let mut raw: RawResponse = serde_json::from_str(&response.text).unwrap();
+            for unit in &mut raw.units {
+                if unit.text == "x".repeat(MAX_UNIT_CHARACTERS) {
+                    unit.text = if self.complete_at_ceiling {
+                        format!("{}.", "x".repeat(ceiling - 1))
+                    } else {
+                        "x".repeat(ceiling)
+                    };
+                }
+            }
+            response.text = serde_json::to_string(&raw).unwrap();
+            Ok(response)
+        }
+
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+
+        fn runtime_id(&self) -> &str {
+            self.inner.runtime_id()
+        }
+
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+
+        fn context_tokens(&self, _: PipelineStage) -> u32 {
+            8_192
+        }
+
+        fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            if crate::pipeline::qwen_tokenizer::request_fits_context(
+                5_000,
+                request.max_output_tokens,
+                8_192,
+            ) {
+                Ok(())
+            } else {
+                Err(ModelRuntimeFailure {
+                    code: "MODEL_CONTEXT_EXCEEDED".into(),
+                    message: "the fixture's prompt and output exceed its context".into(),
+                    recoverable: false,
+                    request_attempts: vec![],
+                })
+            }
+        }
+    }
+
+    fn reduced_ceiling_catalog() -> SourceCatalog {
+        SourceCatalog {
+            candidates: (1..=24)
+                .map(|index| {
+                    let mut source =
+                        candidate(&format!("s{index}"), &format!("evidence-{index}"), index);
+                    source.selection_window = Some((index as usize - 1) / 2);
+                    source
+                })
+                .collect(),
+            omitted_source_units: 0,
+        }
+    }
+
+    #[test]
+    fn reduced_ceiling_clipped_units_use_existing_repair_and_safe_fallback() {
+        let catalog = reduced_ceiling_catalog();
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        for (behavior, complete_at_ceiling) in [
+            (ClippedRepairBehavior::Correct, false),
+            (ClippedRepairBehavior::Repeat, false),
+            (ClippedRepairBehavior::Correct, true),
+        ] {
+            let runtime = CapacityLimitedClipRuntime {
+                inner: ClippedUnitRepairRuntime::new(behavior),
+                complete_at_ceiling,
+            };
+            let generated = generate_summary_with_validation_repair(
+                SummaryProfile::General,
+                &runtime,
+                "document-1",
+                &catalog,
+                prompt.clone(),
+                schema.clone(),
+                usize::MAX,
+                0,
+                1,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .expect("the admitted decoder ceiling must trigger bounded repair or safe fallback");
+            let requests = runtime.inner.requests();
+            assert_eq!(requests.len(), if complete_at_ceiling { 1 } else { 2 });
+            let ModelOutputFormat::JsonSchema { schema, .. } = &requests[0].output_format else {
+                panic!("schema required");
+            };
+            let ceiling = schema["properties"]["units"]["items"]["properties"]["text"]["maxLength"]
+                .as_u64()
+                .unwrap() as usize;
+            assert!(ceiling > 0 && ceiling < MAX_UNIT_CHARACTERS);
+            if complete_at_ceiling {
+                assert_eq!(generated.claims[1].text.chars().count(), ceiling);
+                assert!(generated.claims[1].text.ends_with('.'));
+            } else {
+                assert_eq!(requests[0].output_format, requests[1].output_format);
+                let feedback: Value = serde_json::from_str(&requests[1].user_prompt).unwrap();
+                assert!(feedback["validation_feedback"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| {
+                        entry
+                            .as_str()
+                            .unwrap()
+                            .contains(&format!("{ceiling}-character decoder limit"))
+                    }));
+            }
+            assert_eq!(
+                generated.claims[0].text,
+                "The first source remains supported."
+            );
+            if matches!(behavior, ClippedRepairBehavior::Correct) {
+                assert_eq!(generated.claims.len(), 2);
+                assert_eq!(generated.evidence.len(), 3);
+                assert_eq!(generated.withheld_unit_kind, None);
+            } else {
+                assert_eq!(generated.claims.len(), 1);
+                assert_eq!(generated.evidence.len(), 1);
+                assert_eq!(
+                    generated.withheld_unit_kind,
+                    Some(WithheldUnitKind::DecoderClipped)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_ceiling_parser_and_recovery_keep_boundaries() {
+        let mut catalog = reduced_ceiling_catalog();
+        catalog.candidates[1].source_framing = Some(SourceFraming::Problem);
+        let ceiling = 512;
+        let profile = SummaryProfile::General;
+        let units = maximum_summary_units_for_catalog(profile, &catalog);
+        for (length, complete, expected_code) in [
+            (ceiling - 1, true, None),
+            (ceiling, true, None),
+            (ceiling - 1, false, Some("MODEL_SUMMARY_RESPONSE_INVALID")),
+            (ceiling, false, Some(UNIT_CLIPPED_RESPONSE_CODE)),
+            (ceiling + 1, true, Some("MODEL_SUMMARY_RESPONSE_INVALID")),
+            (ceiling + 1, false, Some("MODEL_SUMMARY_RESPONSE_INVALID")),
+        ] {
+            let text = if complete {
+                format!("{}.", "x".repeat(length - 1))
+            } else {
+                "x".repeat(length)
+            };
+            let sibling = json!({"text":text,"source_ids":["s5"]});
+            let response = json!({"units":[sibling.clone()]}).to_string();
+            let parsed = parse_response_with_limits(
+                profile,
+                &response,
+                "document-1",
+                &catalog,
+                units,
+                ceiling,
+            );
+            assert_eq!(
+                parsed.as_ref().err().map(|error| error.code.as_str()),
+                expected_code
+            );
+
+            let with_clip = json!({"units":[sibling.clone(),
+                {"text":"x".repeat(ceiling),"source_ids":["s6"]}
+            ]})
+            .to_string();
+            let recovered = parse_response_without_clipped_units_with_limits(
+                profile,
+                &with_clip,
+                "document-1",
+                &catalog,
+                units,
+                ceiling,
+            );
+            assert_eq!(
+                recovered.is_ok(),
+                expected_code.is_none() || expected_code == Some(UNIT_CLIPPED_RESPONSE_CODE)
+            );
+
+            let with_window_mix = json!({"units":[sibling.clone(),
+                {"text":"The mixed source is complete.","source_ids":["s3","s5"]}
+            ]})
+            .to_string();
+            assert_eq!(
+                parse_window_repair_requirements(
+                    profile,
+                    &with_window_mix,
+                    "document-1",
+                    &catalog,
+                    units,
+                    ceiling
+                )
+                .is_ok(),
+                expected_code.is_none() || expected_code == Some(UNIT_CLIPPED_RESPONSE_CODE)
+            );
+            assert_eq!(
+                parse_response_without_mixed_windows(
+                    profile,
+                    &with_window_mix,
+                    "document-1",
+                    &catalog,
+                    ceiling
+                )
+                .is_ok(),
+                expected_code.is_none()
+            );
+
+            let with_framing_mix = json!({"units":[sibling,
+                {"text":"The mixed source is complete.","source_ids":["s1","s2"]}
+            ]})
+            .to_string();
+            assert_eq!(
+                parse_response_without_mixed_source_framing_units(
+                    profile,
+                    &with_framing_mix,
+                    "document-1",
+                    &catalog,
+                    units,
+                    ceiling
+                )
+                .is_ok(),
+                expected_code.is_none()
+            );
+        }
+        for invalid_ids in [vec![], vec!["foreign"], vec!["s5", "s5"]] {
+            let response = json!({"units":[
+                {"text":"The first source remains supported.","source_ids":["s1"]},
+                {"text":"x".repeat(ceiling),"source_ids":invalid_ids}
+            ]})
+            .to_string();
+            assert_eq!(
+                parse_response_with_limits(
+                    profile,
+                    &response,
+                    "document-1",
+                    &catalog,
+                    units,
+                    ceiling
+                )
+                .unwrap_err()
+                .code,
+                "MODEL_SUMMARY_RESPONSE_INVALID"
+            );
+            assert!(parse_response_without_clipped_units_with_limits(
+                profile,
+                &response,
+                "document-1",
+                &catalog,
+                units,
+                ceiling
+            )
+            .is_err());
+        }
+    }
+
     #[test]
     fn clipped_long_general_unit_gets_one_repair_then_safe_fallback() {
         let mut candidates = vec![
@@ -15620,12 +15951,13 @@ mod tests {
             &catalog,
         )
         .is_ok());
-        let failure = parse_response_with_maximum_units(
+        let failure = parse_response_with_limits(
             SummaryProfile::General,
             &repair_sized_response,
             "document-1",
             &catalog,
             2,
+            MAX_UNIT_CHARACTERS,
         )
         .expect_err("the initial response must not consume framing-repair capacity");
         assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID");
@@ -16114,6 +16446,7 @@ mod tests {
             "document-1",
             &catalog,
             maximum_initial_summary_units_for_catalog(SummaryProfile::General, &catalog),
+            MAX_UNIT_CHARACTERS,
         ) {
             Ok(_) => panic!("an unrelated invalid sibling must not be admitted as repairable"),
             Err(failure) => failure,
