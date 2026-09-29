@@ -2353,3 +2353,35 @@ shared mutable state or concurrency behavior changed.
 
 Gap audit: DONE for this correction and local proof; NOT DONE for merge until
 fresh CI and exact-head review pass on the published revision.
+
+
+#### Retained prose boundaries and historical omission replay
+
+Root cause: generic `if`/`when`/`but` prefixes do not establish dependence on a
+previous complete sentence. Also, the relaxed sentence policy can cut inside a
+bounded range already retained by version 13. Historical quote-boundary omission
+reconstruction incorrectly stamps the current version rather than its input
+analysis version; the prior replay test mislabeled a new omission as old.
+
+Required change surface: `quote_segments.rs` must preserve the interior of
+version-13 retained prose ranges, permitting relaxed boundaries only outside
+those ranges. Use the existing version-13 segmenter as authority, not a growing
+abbreviation allowlist. Remove generic `if`/`when`/`but` qualification triggers;
+explicit exception/dependence prefixes retain their context rule. In `pages.rs`,
+pass the analysis version to quote-boundary omission construction. Production
+catalog and replay tests belong in `summary.rs`; frozen historical segmentation,
+model behavior and all other non-scope boundaries remain unchanged.
+
+Verification plan: fail-first regressions comparing versions 13 and 14 for
+independent conditional sentences and unlisted abbreviations (including a
+neutral unknown abbreviation), plus a saved version-13 omission with its actual
+version stamp. Add the inverse version-stamp rejection and preserve explicit
+exception/multi-field form tests. Re-run adjacent summary tests, formatting,
+strict Clippy and private source replay after the complete correction.
+
+The no-regression source-witness claim remains limited to the tracked private
+witnesses. It is not a universal semantic guarantee or permission to detach a
+known exception or table merely because a historical splitter did so.
+
+Implementation summary and cold diff audit: pending failing-before probes.
+Gap audit: NOT DONE until proof and fresh published-head CI/review complete.
