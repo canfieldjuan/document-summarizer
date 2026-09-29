@@ -175,6 +175,10 @@ impl<'a> RecordingRuntime<'a> {
 }
 
 impl ModelRuntime for RecordingRuntime<'_> {
+    fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        self.inner.preflight_request(request)
+    }
+
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
         self.requests
             .lock()
@@ -224,6 +228,63 @@ impl ModelRuntime for RecordingRuntime<'_> {
 
     fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
         self.inner.profile_snapshot()
+    }
+}
+
+#[test]
+fn recording_runtime_preserves_preflight_without_generating() {
+    struct AdmissionRuntime;
+    impl ModelRuntime for AdmissionRuntime {
+        fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            panic!("preflight must not generate");
+        }
+        fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            assert_eq!(request.stage, PipelineStage::Synthesize);
+            if request.user_prompt == "too large" {
+                Err(ModelRuntimeFailure {
+                    code: "MODEL_CONTEXT_EXCEEDED".into(),
+                    message: "exact runtime admission rejected the request".into(),
+                    recoverable: false,
+                    request_attempts: Vec::new(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "admission-runtime"
+        }
+        fn model_id(&self) -> &str {
+            "admission-model"
+        }
+    }
+    let inner = AdmissionRuntime;
+    let recorder = RecordingRuntime::new(&inner);
+    for prompt in ["fits", "too large"] {
+        let request = ModelRequest {
+            stage: PipelineStage::Synthesize,
+            ordinal: 0,
+            system_prompt: "fixture".into(),
+            user_prompt: prompt.into(),
+            output_format: ModelOutputFormat::Text,
+            seed: 0,
+            max_output_tokens: 128,
+        };
+        let expected = inner.preflight_request(&request);
+        let actual = recorder.preflight_request(&request);
+        assert_eq!(
+            actual.as_ref().err().map(|error| &error.code),
+            expected.as_ref().err().map(|error| &error.code)
+        );
+        assert_eq!(
+            actual.as_ref().err().map(|error| &error.message),
+            expected.as_ref().err().map(|error| &error.message)
+        );
+        assert!(recorder.requests().is_empty());
+        assert!(recorder.responses().is_empty());
     }
 }
 
