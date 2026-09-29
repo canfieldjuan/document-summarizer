@@ -650,6 +650,7 @@ impl OllamaRuntime {
         let mut execution_proven = self.expected_digest.is_none();
         let mut saw_non_final = false;
         let mut saw_final = false;
+        let mut final_reason = None;
 
         loop {
             line.clear();
@@ -710,6 +711,7 @@ impl OllamaRuntime {
                     ));
                 }
                 saw_final = true;
+                final_reason = frame.done_reason;
                 final_usage = ModelTokenUsage {
                     prompt_tokens: frame.prompt_eval_count,
                     completion_tokens: frame.eval_count,
@@ -732,6 +734,7 @@ impl OllamaRuntime {
         }
         serde_json::to_vec(&serde_json::json!({
             "message": {"content": content},
+            "done_reason": final_reason,
             "prompt_eval_count": final_usage.prompt_tokens,
             "eval_count": final_usage.completion_tokens
         }))
@@ -1084,6 +1087,31 @@ impl ModelRuntime for OllamaRuntime {
                 attempts.clone(),
             )
         })?;
+        if output.done_reason.as_deref() != Some("stop") {
+            attempts.push(request_attempt_diagnostic(
+                request,
+                attempt_ordinal,
+                transport_attempt,
+                elapsed,
+                usage,
+                false,
+            ));
+            let (code, message) = if output.done_reason.as_deref() == Some("length") {
+                (
+                    "MODEL_OUTPUT_LIMIT_REACHED",
+                    "Local model generation exhausted its output allowance before completion",
+                )
+            } else {
+                (
+                    "MODEL_EXECUTION_UNVERIFIED",
+                    "Local model response omitted a qualified completion reason",
+                )
+            };
+            return Err(with_request_attempts(
+                runtime_failure(code, message, true),
+                attempts,
+            ));
+        }
         let text = Some(output.message.content.trim().to_string())
             .filter(|text| !text.is_empty())
             .ok_or_else(|| {
@@ -1502,6 +1530,7 @@ struct ChatMessage<'a> {
 #[derive(Deserialize)]
 struct ChatResponse {
     message: ChatOutputMessage,
+    done_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1517,6 +1546,8 @@ struct ChatStreamFrame {
     message: Option<ChatOutputMessage>,
     #[serde(default)]
     done: Option<bool>,
+    #[serde(default)]
+    done_reason: Option<String>,
     #[serde(default)]
     prompt_eval_count: Option<u64>,
     #[serde(default)]
@@ -1774,6 +1805,7 @@ mod tests {
                 "model": "fixture-model",
                 "message": {"role": "assistant", "content": ""},
                 "done": true,
+                "done_reason": "stop",
                 "prompt_eval_count": usage.map(|value| value.0),
                 "eval_count": usage.map(|value| value.1)
             }),
@@ -1866,6 +1898,7 @@ mod tests {
                     "model": "fixture-model",
                     "message": {"role": "assistant", "content": "response"},
                     "done": true,
+                    "done_reason": "stop",
                     "prompt_eval_count": 10,
                     "eval_count": 2
                 }),
@@ -2240,6 +2273,41 @@ mod tests {
                         .code,
                     "MODEL_EXECUTION_UNVERIFIED"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_output_limit_is_rejected_with_usage() {
+        for reason in [Some("length"), None, Some("future"), Some("stop")] {
+            let lines = vec![
+                serde_json::json!({"model":"fixture-model","message":{"content":"{}"},"done":false}).to_string(),
+                serde_json::json!({"model":"fixture-model","message":{"content":""},"done":true,
+                    "done_reason":reason,"prompt_eval_count":10,"eval_count":64}).to_string(),
+            ];
+            let (url, server) = raw_chat_stream_server(lines);
+            let runtime =
+                OllamaRuntime::new(&url, "fixture-model", Duration::from_secs(5), None).unwrap();
+            let result = runtime.generate(&digest_guard_request());
+            server.join().unwrap();
+            if reason == Some("stop") {
+                assert_eq!(result.unwrap().text, "{}");
+            } else {
+                let error =
+                    result.expect_err("unqualified completion must not expose even parseable JSON");
+                assert_eq!(
+                    error.code,
+                    if reason == Some("length") {
+                        "MODEL_OUTPUT_LIMIT_REACHED"
+                    } else {
+                        "MODEL_EXECUTION_UNVERIFIED"
+                    }
+                );
+                assert_eq!(
+                    error.request_attempts[0].provider_usage.completion_tokens,
+                    Some(64)
+                );
+                assert!(!error.request_attempts[0].succeeded);
             }
         }
     }

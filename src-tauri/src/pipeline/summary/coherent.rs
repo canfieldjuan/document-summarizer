@@ -4,6 +4,7 @@
 //! request-local source IDs. Rust owns durable evidence and claim identity.
 use super::*;
 
+mod budget;
 mod semantic_support;
 
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
@@ -2884,7 +2885,7 @@ fn synthesize_with_delivery_coverage(
         generation_seed,
     );
     let full_request_too_large = full_request_characters > input_limit
-        || request_exceeds_runtime_context(runtime, &full_request)?;
+        || budget::admit(runtime, &full_request, true)?.is_none();
 
     let mut model_health_checked = false;
     let mut selected_source_counts = None;
@@ -3202,7 +3203,7 @@ fn select_source_catalog(
         );
         if synthesis_request_characters(profile, &summary_prompt, &summary_schema)?
             <= synthesis_input_limit
-            && !request_exceeds_runtime_context(runtime, &summary_request)?
+            && budget::admit(runtime, &summary_request, true)?.is_some()
         {
             return Ok(Some(current));
         }
@@ -3903,7 +3904,7 @@ fn generate_summary_with_coverage_repair(
             ordinal,
             generation_seed,
         );
-        if request_ordinal > 0 && request_exceeds_runtime_context(runtime, &request)? {
+        let Some(request) = budget::admit(runtime, &request, request_ordinal == 0)? else {
             if let Some(generated) = take_generated_fallback(
                 &mut modal_fallback,
                 &mut window_fallback,
@@ -3921,6 +3922,9 @@ fn generate_summary_with_coverage_repair(
                 false,
             )
             .into());
+        };
+        if let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format {
+            output_schema = schema.clone();
         }
         let response = runtime.generate_with_control(&request, control);
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
@@ -3944,13 +3948,15 @@ fn generate_summary_with_coverage_repair(
             initial_maximum_units
         };
         let response_maximum_units = framing_maximum_units.max(window_maximum_units);
-        let parsed_response = parse_response_with_maximum_units(
-            profile,
-            &response.text,
-            document_id,
-            catalog,
-            response_maximum_units,
-        );
+        let parsed_response = budget::validate_response(&request, &response.text).and_then(|()| {
+            parse_response_with_maximum_units(
+                profile,
+                &response.text,
+                document_id,
+                catalog,
+                response_maximum_units,
+            )
+        });
         // Coverage correction cannot discard a structurally valid prior draft.
         // This draft still goes through semantic verification and final coverage;
         // no content or citations from the invalid correction are accepted.
@@ -8181,6 +8187,12 @@ mod tests {
         fn model_id(&self) -> &str {
             "window-repair-model"
         }
+
+        fn context_tokens(&self, _: PipelineStage) -> u32 {
+            // These fixtures exercise semantic repairs at the full decoder
+            // ceiling. Separate capacity tests cover smaller contexts.
+            65_536
+        }
     }
 
     impl ModelRuntime for FramingRepairRuntime {
@@ -8263,6 +8275,10 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "framing-repair-model"
+        }
+
+        fn context_tokens(&self, _: PipelineStage) -> u32 {
+            65_536
         }
     }
 
@@ -8589,6 +8605,10 @@ mod tests {
         fn model_id(&self) -> &str {
             "clipped-unit-repair-model"
         }
+
+        fn context_tokens(&self, _: PipelineStage) -> u32 {
+            65_536
+        }
     }
 
     impl ModelRuntime for ContractCoverageRepairRuntime {
@@ -8637,6 +8657,10 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "contract-coverage-repair-model"
+        }
+
+        fn context_tokens(&self, _: PipelineStage) -> u32 {
+            65_536
         }
     }
 
@@ -8771,7 +8795,7 @@ mod tests {
             .remove("maxItems");
         match classify(missing_ceiling, usize::MAX) {
             Err(SynthesisFailure::Other(failure)) => {
-                assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID")
+                assert_eq!(failure.code, "INVALID_SYNTHESIS_BUDGET")
             }
             other => panic!("application-owned schema corruption must remain fatal: {other:?}"),
         }
@@ -12085,6 +12109,44 @@ mod tests {
             prompt["source_segments"][6]["source_claim"],
             "Later extracted claim."
         );
+    }
+
+    #[test]
+    fn synthesis_capacity_covers_schema_maximal_serialized_response() {
+        let runtime = ModalRepairRuntime::new(true);
+        let catalog = catalog();
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &runtime,
+            "document",
+            &catalog,
+            prompt,
+            schema,
+            input_character_limit(8_192).unwrap(),
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let requests = runtime.requests();
+        for request in requests {
+            let ModelOutputFormat::JsonSchema { schema, .. } = request.output_format else {
+                panic!("synthesis must declare its response shape");
+            };
+            let units = &schema["properties"]["units"];
+            let fields = &units["items"]["properties"];
+            let text = "\u{0001}".repeat(fields["text"]["maxLength"].as_u64().unwrap() as usize);
+            let ids = fields["source_ids"]["items"]["enum"].as_array().unwrap();
+            let payload = json!({"units": vec![json!({"text":text,"source_ids":ids}); units["maxItems"].as_u64().unwrap() as usize]}).to_string();
+            let tokenizer =
+                crate::pipeline::qwen_tokenizer::QwenPromptTokenizer::conservative_byte_counter()
+                    .unwrap();
+            assert!(
+                tokenizer.count(&payload).unwrap() < request.max_output_tokens,
+                "schema-maximal JSON exceeds the synthesis output allowance"
+            );
+        }
     }
 
     #[test]
