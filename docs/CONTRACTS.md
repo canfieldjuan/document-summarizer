@@ -2133,7 +2133,10 @@ implemented.
 
 ### Source-catalog preservation (analysis 14)
 
-Status: implemented and verified locally; remote CI and PR review pending.
+Status: accepted by the operator on 2026-09-29, including the explicit
+qualification trade-off and deferral of colon-less headings and oversized
+question/answer grouping to #105. [Acceptance recorded on PR #106](https://github.com/canfieldjuan/document-summarizer/pull/106#issuecomment-5892400147).
+Contract acceptance does not itself authorize merge or qualify summary quality.
 
 Root cause: native PDF text is commonly one normalized block per page. The
 version-13 sentence-only catalog drops bounded form/layout groups when they
