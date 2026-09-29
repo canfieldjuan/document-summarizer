@@ -2276,6 +2276,28 @@ suite, formatting and strict Clippy. CI owns the duplicated broad suites. The
 previous live proof remains attributed to implementation d5a4760; no new model
 quality claim is made by these deterministic repairs.
 
-Implementation summary and cold diff audit: pending the failing-before probes.
-Gap audit: NOT DONE until both regressions pass and the published correction
-receives green CI and exact-head review.
+Implementation summary: correction 6c040c1 measures the next form itself and
+removes the capitalization-only sentence guard. The former NASA continuation
+fixture encoded the incorrect rule; it now uses dotted N.A.S.A., while undotted
+NASA is explicitly covered as an ordinary sentence-final token. Production
+catalog tests exercise uppercase endings and mixed complete/incomplete/form
+input. Boundary tests cover forms of 599/600/601 characters and short/long
+prefixes, retaining governing colon, semicolon, comma and hyphen attachment.
+
+Verification: both production regressions failed first in the reported way,
+then all four focused catalog/replay tests passed. The adjacent summary suite
+passed 227 tests with 10 opt-in tests ignored. Formatting and all-target,
+all-feature strict Clippy passed. The private source replay reproduced all 24
+historical catalogs; all 40 tracked source-witness comparisons were no worse
+than the earlier PR proof. Witness survival remains A 12/20 and B 12/20. No new
+inference ran; the live proof above remains evidence for d5a4760, not this head.
+
+Cold diff audit: the two production predicates and their regression fixtures
+are the only code changes in this correction. Catalog version dispatch,
+source provenance and the 600-character bound are unchanged; historical replay
+still passes. Both consumers obtain the repaired catalog through the same
+builder. All state remains local to each call, with no concurrency or storage
+changes. CI will repeat the broader platform checks on the revised head.
+
+Gap audit: DONE for the review corrections and local proof. NOT DONE for merge
+until the published correction receives green CI and exact-head review.
