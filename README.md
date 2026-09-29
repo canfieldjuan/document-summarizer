@@ -35,7 +35,7 @@ gateway deployment and release acceptance are completed.
 ## Direct runtime fallback
 
 The default for fresh settings is **Qwen3.5-9B Q4_K_M**, with thinking disabled
-and an 8192-token context for both analysis and verification. Choose **Add GGUF
+and a 32,768-token context for both analysis and verification. Choose **Add GGUF
 file** in the desktop model card and select the existing model file. The app
 admits only the pinned SHA-256
 `cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13`.

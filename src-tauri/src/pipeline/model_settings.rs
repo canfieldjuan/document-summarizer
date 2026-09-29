@@ -114,7 +114,7 @@ const QUALIFIED_PROFILES: &[QualifiedProfile] = &[
         digest: "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
         tokenizer_family: QwenTokenizerFamily::Qwen35,
         tokenizer_version: QWEN35_TOKENIZER_VERSION,
-        safe_context_tokens: 8_192,
+        safe_context_tokens: 32_768,
         analysis: true,
         verifier_rank: Some(80),
         full: true,
@@ -1736,6 +1736,8 @@ mod tests {
         assert!(profile.disable_thinking);
         assert_eq!(catalog.presets.len(), 1);
         let preset = &catalog.presets[0];
+        assert_eq!(preset.analysis_context_tokens, 32_768);
+        assert_eq!(preset.verification_context_tokens, 32_768);
         assert_eq!(preset.analysis_digest, profile.digest);
         assert_eq!(preset.verification_digest, profile.digest);
         assert_eq!(preset.analysis_runtime_kind, ModelRuntimeKind::LlamaCppGguf);
@@ -1755,25 +1757,25 @@ mod tests {
             (
                 "wrong-digest",
                 QwenTokenizerFamily::Qwen35,
-                8_192,
+                32_768,
                 ModelRuntimeKind::LlamaCppGguf,
             ),
             (
                 profile.digest,
                 QwenTokenizerFamily::Qwen3,
-                8_192,
+                32_768,
                 ModelRuntimeKind::LlamaCppGguf,
             ),
             (
                 profile.digest,
                 QwenTokenizerFamily::Qwen35,
-                8_191,
+                32_767,
                 ModelRuntimeKind::LlamaCppGguf,
             ),
             (
                 profile.digest,
                 QwenTokenizerFamily::Qwen35,
-                8_192,
+                32_768,
                 ModelRuntimeKind::OllamaNative,
             ),
         ] {
@@ -1789,6 +1791,47 @@ mod tests {
             assert!(catalog.presets.is_empty());
         }
         assert!(selected_direct_snapshot(&ModelSettings::default()).is_err());
+    }
+
+    #[test]
+    fn qwen35_context_admission_matches_the_stage_snapshot() {
+        let profile = QUALIFIED_PROFILES
+            .iter()
+            .find(|p| p.profile_id == "qwen35-9b-q4km-v1")
+            .unwrap();
+        for maximum in [
+            None,
+            Some(0),
+            Some(32_767),
+            Some(32_768),
+            Some(32_769),
+            Some(262_144),
+        ] {
+            let catalog = catalog_from_descriptors(
+                ModelSettings::default(),
+                vec![(
+                    descriptor(
+                        "renamed.gguf",
+                        profile.digest,
+                        Some(QwenTokenizerFamily::Qwen35),
+                        maximum,
+                    ),
+                    ModelRuntimeKind::LlamaCppGguf,
+                )],
+                QUALIFIED_PROFILES,
+                vec![],
+            )
+            .unwrap();
+            let admitted = maximum.is_some_and(|tokens| tokens >= 32_768);
+            assert_eq!(catalog.selected_preset_available, admitted, "{maximum:?}");
+            if admitted {
+                let preset = &catalog.presets[0];
+                assert_eq!(preset.analysis_context_tokens, 32_768);
+                assert_eq!(preset.verification_context_tokens, 32_768);
+            } else {
+                assert!(catalog.presets.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -1833,6 +1876,8 @@ mod tests {
         let snapshot = selected_direct_snapshot(&settings).unwrap().unwrap();
         assert_eq!(snapshot.analysis, snapshot.verification);
         assert_eq!(snapshot.analysis.model_digest, profile.digest);
+        assert_eq!(snapshot.analysis.context_tokens, 32_768);
+        assert_eq!(snapshot.verification.context_tokens, 32_768);
     }
 
     #[test]
