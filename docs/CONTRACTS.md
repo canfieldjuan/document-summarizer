@@ -2129,3 +2129,84 @@ future trusted broker or OS package identity would be required to change that
 threat model. Launch-on-demand, multiple-provider selection, callbacks,
 workflow automation, remote execution, and cross-machine discovery are not
 implemented.
+
+
+### Source-catalog preservation (analysis 14)
+
+Status: contracted; implementation and verification pending.
+
+Root cause: native PDF text is commonly one normalized block per page. The
+version-13 sentence-only catalog drops bounded form/layout groups when they
+share a page with other text. Its open-set two-to-five-letter abbreviation rule
+also joins ordinary complete sentences into an oversized unit. Both page
+analysis and coherent synthesis consume this lossy catalog.
+
+Required change surface: the shared analysis quote segmenter, its versioned
+catalog reconstruction, page warning/omission validation, and coherent catalog
+reconstruction. New runs use analysis 14.0.0. Keep the exact version-13 and
+version-12 segmentation policies for stored analysis. A coherent artifact built
+from older analysis must keep the pre-change version-13 catalog behavior; new
+analysis uses the new catalog during generation and every validation path.
+Synthesis and other artifact versions do not change.
+
+Required behavior:
+
+- Preserve the existing whole-block admission through 600 Unicode characters.
+  Every candidate remains an exact contiguous source substring with the same
+  block/page provenance; no whitespace normalization, text invention, value
+  substitution or arbitrary character/word cuts are permitted.
+- In larger blocks, recognize blank-line-delimited layout groups before
+  sentence segmentation. Keep a complete bounded prose paragraph or a bounded
+  label/value form group intact. Keep wrapped lines, table labels and their
+  values together; a single newline is not a split boundary. A heading or
+  colon/semicolon/comma-ended lead-in does not authorize an independent quote
+  fragment. Attach an immediately following qualification (such as an exception
+  or condition) to its preceding group. Unrecognized unterminated prose stays
+  subject to omission, including a dangling page tail.
+- Where a layout group is too large, complete sentence units may be packed up
+  to the existing 600-character bound. Use Unicode sentence proposals with
+  explicit initial, acronym, decimal, ellipsis and abbreviation defenses.
+  Token length alone must not classify ordinary words as abbreviations. Keep
+  recognized abbreviations, including Dept., attached to their continuation.
+  Keep immediately following conditional/exception sentences with their
+  governing sentence; omit the combined unit if it cannot fit safely.
+- Do not cut a long operative sentence at arbitrary whitespace, a wrapped line,
+  or a semicolon solely to make it fit. An oversized table or compound clause
+  that cannot be represented with its context remains explicitly omitted.
+  This slice does not claim recovery of every source passage.
+- Preserve source order, candidate identity binding, the 600-character limit,
+  and durable boundary-loss warnings and technical omissions. Reconstruct the
+  same policy in validation, including after save/reload; reject a shortened,
+  reordered, forged or differently versioned catalog. Existing context budgets,
+  coverage denominators and failure/fallback semantics remain authoritative.
+
+Explicit non-scope: model selection/promotion or settings, generation prompts,
+scorer changes, fallback materiality/one-quote-per-page selection, OCR, parser
+normalization, provider scheduling, public schemas, storage migrations,
+dependencies, and historical artifact rewriting. Cross-page clause assembly and
+subdivision of tables/operative clauses requiring shared noncontiguous context
+are later work, not permission to silently admit detached assertions here.
+
+Assumptions/blockers: blank lines and wrapped lines are already present in
+normalized native source. Layout admission is structural source preservation,
+not a guarantee that a model claim is semantically correct. Private source
+content stays in ignored evidence; committed regressions use neutral fixtures.
+
+Verification plan: fail-first production-catalog tests for ordinary short
+sentence endings and bounded form/table groups on a long page. Probe real
+abbreviations, decimal/initial/ellipsis boundaries, wrapped rows, qualifications,
+unterminated tails, and 599/600/601-character limits. Prove generation/validation
+catalog agreement and historical version-13 replay. Run focused Rust tests,
+formatting and strict Clippy; the broad local Rust suite is justified by this
+shared source/provenance boundary. Compare the recorded private A/B passage
+checklist against rebuilt catalogs and report recovered/still-omitted passages
+separately from any live-model/delivered-summary result. A fresh production A/B
+run uses the existing isolated 9B/32k evidence setup when the GPU is exclusive;
+no corpus result is an accuracy qualification without reviewed labels.
+
+Implementation summary: pending.
+
+Cold diff audit: pending.
+
+Gap audit: NOT DONE. Contract precedes code; implementation, regressions and
+source-catalog proof remain outstanding.
