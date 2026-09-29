@@ -416,6 +416,7 @@ fn technical_omission(
 }
 
 fn quote_boundary_omission(
+    analysis_version: &str,
     page_number: u32,
     chunk: &DocumentChunk,
     normalized: &NormalizedDocument,
@@ -430,7 +431,7 @@ fn quote_boundary_omission(
         chunk_id: chunk.chunk_id.clone(),
         reason: AnalysisOmissionReason::QuoteBoundaryUnusable,
         origin: AnalysisOmissionOrigin::QuoteBoundaryUnusable,
-        filter_version: ANALYSIS_VERSION.to_string(),
+        filter_version: analysis_version.to_string(),
         source_fingerprint: fingerprint(&page.content)?,
         catalog_fingerprint: None,
     })
@@ -600,7 +601,12 @@ pub(super) fn versioned_page_scope(
         )
         && catalog.candidates.is_empty()
     {
-        Some(quote_boundary_omission(page_number, chunk, normalized)?)
+        Some(quote_boundary_omission(
+            analysis_version,
+            page_number,
+            chunk,
+            normalized,
+        )?)
     } else {
         omission
     };

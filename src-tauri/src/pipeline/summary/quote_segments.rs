@@ -1,5 +1,8 @@
 //! Version-14 source units. Historical segmentation stays in the parent module.
-use super::{analysis_sentence_boundary, AnalysisQuoteSegmentation, MAX_ANALYSIS_QUOTE_CHARACTERS};
+use super::{
+    analysis_sentence_boundary, analysis_sentence_units_v13, AnalysisQuoteSegmentation,
+    MAX_ANALYSIS_QUOTE_CHARACTERS,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 // These are source ranges, never rewritten text. An unavailable range is retained
@@ -57,11 +60,17 @@ pub(super) fn segment(source: &str) -> AnalysisQuoteSegmentation {
             units.push(group);
             continue;
         }
+        let retained = retained_prose_ranges(text);
         let mut start = group.start;
         let mut group_units: Vec<Unit> = Vec::new();
         for (offset, sentence) in text.split_sentence_bound_indices() {
             let end = group.start + offset + sentence.len();
-            if !analysis_sentence_boundary(source, start, end, group.end, false) {
+            let relative_end = text[..offset + sentence.len()].trim_end().len();
+            if !analysis_sentence_boundary(source, start, end, group.end, false)
+                || retained
+                    .iter()
+                    .any(|&(begin, finish)| begin < relative_end && relative_end < finish)
+            {
                 continue;
             }
             let unit = trimmed_unit(source, start, end, true);
@@ -115,6 +124,16 @@ pub(super) fn segment(source: &str) -> AnalysisQuoteSegmentation {
     }
     flush(source, &mut packed, &mut result.segments);
     result
+}
+
+fn retained_prose_ranges(source: &str) -> Vec<(usize, usize)> {
+    // Keep the frozen policy's bounded units whole. Use its original offsets,
+    // not text matching: an omitted clause can contain an earlier identical copy.
+    analysis_sentence_units_v13(source)
+        .0
+        .into_iter()
+        .filter(|&(start, end)| source[start..end].chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS)
+        .collect()
 }
 
 fn trimmed_unit(source: &str, start: usize, end: usize, complete: bool) -> Unit {
@@ -202,11 +221,8 @@ fn qualification(text: &str) -> bool {
         "provided ",
         "subject to ",
         "however,",
-        "but ",
         "only if ",
         "on condition ",
-        "if ",
-        "when ",
         "notwithstanding ",
     ]
     .iter()
@@ -325,6 +341,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn retained_prose_ranges_use_positions_when_source_text_repeats() {
+        let first = format!("The parties {} days.", "recorded details ".repeat(20));
+        let repeated = format!(
+            "Department staff contacted the Bldg. Records officers {} reviewed.",
+            "checked details ".repeat(22)
+        );
+        let source = format!("{first} {repeated} {repeated}");
+        let old = super::super::analysis_quote_segments_v13(&source);
+        assert_eq!(old.segments, vec![repeated.clone()]);
+        assert_eq!(old.omitted_source_units, 1);
+        let result = segment(&source);
+        assert_eq!(result.segments.last(), Some(&repeated));
+        assert_eq!(result.omitted_source_units, 0);
     }
 
     #[test]

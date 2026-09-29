@@ -3034,22 +3034,7 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
         };
     }
 
-    let mut units = Vec::new();
-    let mut unit_start = source_start;
-    for (relative_start, proposed) in
-        source[source_start..source_end].split_sentence_bound_indices()
-    {
-        let proposed_end = source_start + relative_start + proposed.len();
-        if safe_analysis_sentence_boundary(source, unit_start, proposed_end, source_end) {
-            let start = unit_start + source[unit_start..proposed_end].len()
-                - source[unit_start..proposed_end].trim_start().len();
-            let end = unit_start + source[unit_start..proposed_end].trim_end().len();
-            if start < end {
-                units.push((start, end));
-            }
-            unit_start = proposed_end;
-        }
-    }
+    let (units, unit_start) = analysis_sentence_units_v13(source);
 
     let mut segments = Vec::new();
     let mut omitted_source_units = 0usize;
@@ -3084,6 +3069,32 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
         segments,
         omitted_source_units,
     }
+}
+
+fn analysis_sentence_units_v13(source: &str) -> (Vec<(usize, usize)>, usize) {
+    let source_start = source.len() - source.trim_start().len();
+    let source_end = source.trim_end().len();
+    if source_start >= source_end {
+        return (Vec::new(), source_end);
+    }
+    let mut units = Vec::new();
+    let mut unit_start = source_start;
+    for (relative_start, proposed) in
+        source[source_start..source_end].split_sentence_bound_indices()
+    {
+        let proposed_end = source_start + relative_start + proposed.len();
+        if safe_analysis_sentence_boundary(source, unit_start, proposed_end, source_end) {
+            let start = unit_start + source[unit_start..proposed_end].len()
+                - source[unit_start..proposed_end].trim_start().len();
+            let end = unit_start + source[unit_start..proposed_end].trim_end().len();
+            if start < end {
+                units.push((start, end));
+            }
+            unit_start = proposed_end;
+        }
+    }
+
+    (units, unit_start)
 }
 
 fn safe_analysis_sentence_boundary(
@@ -8033,6 +8044,54 @@ mod tests {
     }
 
     #[test]
+    fn source_preservation_keeps_independent_conditional_sentences() {
+        let first = format!("The supplier {} records.", "maintains detailed ".repeat(20));
+        for prefix in ["If", "When", "But"] {
+            let second = if prefix == "But" {
+                format!("But the client may request {} supporting records, and the supplier must provide the documentation.", "additional records and ".repeat(12))
+            } else {
+                format!("{prefix} the client requests {} supporting records, the supplier must provide the documentation.", "additional records and ".repeat(12))
+            };
+            for separator in [" ", "\n\n"] {
+                let source = format!("{first}{separator}{second}");
+                let old = analysis_quote_segments_v13(&source);
+                assert_eq!(old.omitted_source_units, 0);
+                assert_eq!(old.segments, vec![first.clone(), second.clone()]);
+                let current = analysis_quote_segmentation_for_version(ANALYSIS_VERSION, &source);
+                assert_eq!(current.omitted_source_units, 0, "prefix {prefix}");
+                assert_eq!(current.segments, old.segments);
+            }
+        }
+    }
+
+    #[test]
+    fn source_preservation_retains_bounded_historical_abbreviation_units() {
+        let first = format!("{}.", "a".repeat(549));
+        let cases = ["Bldg", "Twp", "Assn", "Approx", "Govt", "Qzrt"]
+            .into_iter()
+            .flat_map(|word| [word.to_string(), word.to_lowercase()])
+            .map(|word| {
+                let second = format!(
+                    "Department staff contacted the {word}. Records officers completed the review."
+                );
+                let source = format!("{first} {second}");
+                let old = analysis_quote_segments_v13(&source);
+                // Approx. was already outside v13's 2..=5-letter defense.
+                assert_eq!(
+                    old.segments.contains(&second),
+                    !word.eq_ignore_ascii_case("approx")
+                );
+                (word, source, old)
+            })
+            .collect::<Vec<_>>();
+        for (word, source, old) in cases {
+            let current = analysis_quote_segmentation_for_version(ANALYSIS_VERSION, &source);
+            assert_eq!(current.segments, old.segments, "abbreviation {word}");
+            assert_eq!(current.omitted_source_units, old.omitted_source_units);
+        }
+    }
+
+    #[test]
     fn source_preservation_keeps_ordinary_short_sentence_endings() {
         for ending in [
             "days", "work", "loss", "paid", "time", "Owner", "DAYS", "WORK", "LOSS", "PAID",
@@ -8601,7 +8660,13 @@ mod tests {
         validate_analyzed_content(&analyzed, &chunked, &normalized).unwrap();
         let mut historical = analyzed.clone();
         historical.analysis_version = SENTENCE_ANALYSIS_VERSION.into();
+        historical.omissions[0].filter_version = SENTENCE_ANALYSIS_VERSION.into();
+        let saved = serde_json::to_string(&historical).unwrap();
+        let historical: AnalyzedDocument = serde_json::from_str(&saved).unwrap();
         validate_analyzed_content(&historical, &chunked, &normalized).unwrap();
+        let mut wrong_stamp = analyzed.clone();
+        wrong_stamp.omissions[0].filter_version = SENTENCE_ANALYSIS_VERSION.into();
+        assert!(validate_analyzed_content(&wrong_stamp, &chunked, &normalized).is_err());
         let mut missing_warning = analyzed.clone();
         missing_warning
             .warnings
