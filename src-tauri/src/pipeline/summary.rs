@@ -3149,11 +3149,7 @@ fn analysis_sentence_boundary(
         || token.chars().count() == 1 && token.chars().all(char::is_alphabetic)
         || AMBIGUOUS_ABBREVIATIONS.contains(&lower.as_str())
         || legacy_short_abbreviations && short_open_set_abbreviation
-        || !legacy_short_abbreviations
-            && (lower == "dept"
-                || next_non_whitespace.is_some()
-                    && (2..=5).contains(&token_character_count)
-                    && token.chars().all(char::is_uppercase))
+        || !legacy_short_abbreviations && lower == "dept"
     {
         return false;
     }
@@ -7995,7 +7991,10 @@ mod tests {
 
     #[test]
     fn source_preservation_keeps_ordinary_short_sentence_endings() {
-        for ending in ["days", "work", "loss", "paid", "time", "Owner"] {
+        for ending in [
+            "days", "work", "loss", "paid", "time", "Owner", "DAYS", "WORK", "LOSS", "PAID",
+            "TIME", "OWNER", "NASA",
+        ] {
             let first = format!("The parties {} {ending}.", "recorded details ".repeat(20));
             let second = format!("The reviewer {} completed.", "verified records ".repeat(20));
             let source = format!("{first} {second}");
@@ -8026,6 +8025,40 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn source_preservation_keeps_forms_after_short_unfinished_prose() {
+        let complete = format!("{}.", "intro".repeat(119));
+        let unfinished = "Unfinished preceding prose";
+        let form = "Contract value: $800\nOn site: No";
+        let source = format!("{complete}\n\n{unfinished}\n\n{form}");
+        let (normalized, chunked) = materiality_fixture(&[source]);
+        let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+        let chunk = &chunked.chunks[0];
+        let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+            ANALYSIS_VERSION,
+            chunk,
+            &blocks,
+            &chunk.block_ids,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog
+                .candidates
+                .iter()
+                .map(|c| c.exact_quote.as_str())
+                .collect::<Vec<_>>(),
+            vec![complete.as_str(), form]
+        );
+        assert_eq!(catalog.omitted_source_units, 1);
+        validate_analysis_quote_catalog_for_blocks(
+            chunk,
+            &blocks,
+            &chunk.block_ids,
+            &catalog.candidates,
+        )
+        .unwrap();
     }
 
     #[test]

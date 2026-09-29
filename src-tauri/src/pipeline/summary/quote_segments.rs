@@ -29,7 +29,7 @@ pub(super) fn segment(source: &str) -> AnalysisQuoteSegmentation {
             let next = &source[start..end];
             let bounded_form = form_group(next)
                 && !before.ends_with([':', ';', ',', '-'])
-                && source[previous.start..end].chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS;
+                && next.chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS;
             if lead_in(before) && !bounded_form || qualification(next) {
                 previous.end = end;
                 continue;
@@ -230,7 +230,7 @@ mod tests {
             "Staff contacted the dept. Records office for the documented disposition schedule.",
             "Staff contacted the (Dept). Records office for the documented disposition schedule.",
             "Dr. A. Smith inspected the U.S. records with 3.14 units and archived the outcome.",
-            "The NASA. Records office archived the documented disposition schedule and outcome.",
+            "The N.A.S.A. Records office archived the documented disposition schedule and outcome.",
         ] {
             let result = segment(&format!("{first} {continuation}"));
             assert_eq!(result.segments, vec![first.clone(), continuation.into()]);
@@ -290,6 +290,33 @@ mod tests {
         let result = segment(&governed);
         assert!(result.segments.is_empty());
         assert_eq!(result.omitted_source_units, 1);
+    }
+
+    #[test]
+    fn form_admission_uses_its_own_limit_and_keeps_governing_prefixes_attached() {
+        let complete = format!("{}.", "a".repeat(599));
+        for repeats in [1, 30] {
+            let prefix = "unfinished text ".repeat(repeats);
+            for size in [599, 600, 601] {
+                let form = format!("Details: {}", "x".repeat(size - "Details: ".len()));
+                let source = format!("{complete}\n\n{prefix}\n\n{form}");
+                let result = segment(&source);
+                assert_eq!(result.segments.contains(&form), size <= 600);
+                assert!(result
+                    .segments
+                    .iter()
+                    .all(|quote| source.contains(quote) && quote.chars().count() <= 600));
+            }
+            for punctuation in [':', ';', ',', '-'] {
+                let form = "Details: documented procedures";
+                let source = format!("{complete}\n\n{prefix}{punctuation}\n\n{form}");
+                let result = segment(&source);
+                assert!(!result.segments.iter().any(|quote| quote == form));
+                for quote in result.segments.iter().filter(|quote| quote.contains(form)) {
+                    assert!(quote.contains(prefix.trim()));
+                }
+            }
+        }
     }
 
     #[test]
