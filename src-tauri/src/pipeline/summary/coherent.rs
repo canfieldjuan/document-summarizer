@@ -4699,7 +4699,14 @@ fn request_exceeds_runtime_context(
 ) -> Result<bool, PipelineFailure> {
     match runtime.preflight_request(request) {
         Ok(()) => Ok(false),
-        Err(failure) if failure.code == "MODEL_CONTEXT_EXCEEDED" => Ok(true),
+        Err(failure)
+            if matches!(
+                failure.code.as_str(),
+                "MODEL_CONTEXT_EXCEEDED" | "MODEL_OUTPUT_BUDGET_EXCEEDED"
+            ) =>
+        {
+            Ok(true)
+        }
         Err(failure) => Err(runtime_pipeline_failure(
             PipelineStage::Synthesize,
             "MODEL_SYNTHESIS_ADMISSION",

@@ -504,6 +504,10 @@ Unbounded wire whitespace or alternative escaping can still exhaust output;
 an output-limit stop rejects the response with `MODEL_OUTPUT_LIMIT_REACHED`,
 separately from input truncation or an unknown completion boundary. This is not
 permission to salvage partial JSON or bypass content/coverage validation.
+The gateway's existing wire output ceiling is reported during preflight as
+`MODEL_OUTPUT_BUDGET_EXCEEDED`, allowing the same bounded search to reduce the
+request. Gateway preflight checks wire bounds; it does not establish exact
+input token use for the deployed gateway model.
 Rust restores
 canonical source order and materializes durable claim, evidence and page-label
 identity; prose, source locations and durable IDs are never accepted from model

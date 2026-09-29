@@ -270,6 +270,52 @@ mod tests {
     }
 
     #[test]
+    fn output_cap_is_capacity_not_an_unrelated_runtime_failure() {
+        struct CappedRuntime(CapacityRuntime);
+        impl ModelRuntime for CappedRuntime {
+            fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                panic!("no inference")
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+            fn runtime_id(&self) -> &str {
+                self.0.runtime_id()
+            }
+            fn model_id(&self) -> &str {
+                self.0.model_id()
+            }
+            fn context_tokens(&self, stage: PipelineStage) -> u32 {
+                self.0.context_tokens(stage)
+            }
+            fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+                if request.max_output_tokens > crate::pipeline::gateway_client::MAX_OUTPUT_TOKENS {
+                    Err(ModelRuntimeFailure {
+                        code: "MODEL_OUTPUT_BUDGET_EXCEEDED".into(),
+                        message: "cap".into(),
+                        recoverable: false,
+                        request_attempts: vec![],
+                    })
+                } else {
+                    self.0.preflight_request(request)
+                }
+            }
+        }
+        let runtime = CappedRuntime(CapacityRuntime {
+            context: 8192,
+            input: 1000,
+            failure: None,
+        });
+        let admitted = admit(&runtime, &request(), true).unwrap().unwrap();
+        assert!(admitted.max_output_tokens > OUTPUT_TOKENS);
+        assert!(
+            admitted.max_output_tokens + REPAIR_FEEDBACK_TOKENS
+                <= crate::pipeline::gateway_client::MAX_OUTPUT_TOKENS
+        );
+        runtime.preflight_request(&admitted).unwrap();
+    }
+
+    #[test]
     fn repair_keeps_shape_and_readmits_instead_of_shrinking() {
         let runtime = CapacityRuntime {
             context: 32_768,
