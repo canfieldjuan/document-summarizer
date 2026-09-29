@@ -147,10 +147,10 @@ The output allowance comes from runtime preflight, not the text estimate.
 
 ## Gap audit
 
-NOT DONE for merge: corrected implementation, regressions, offline replay and
-live proof pass. Publication, review-thread reconciliation and exact-head
-CI/review remain. #100 remains frozen; there is no model promotion or prose
-qualification.
+NOT DONE for merge: the sizing proof and admitted-ceiling recovery correction
+pass locally. The published recovery correction still needs exact-head CI and
+reconciled review. #100 remains frozen; there is no model promotion or prose
+qualification. See the latest review-correction evidence below.
 
 ## Contract revision: preserve paragraph capacity (#107 review)
 
@@ -219,9 +219,10 @@ the corrected code and proof are published.
 
 ### Gap audit
 
-NOT DONE for merge: sizing correction, regressions, offline and live proof pass;
-publication and exact-head CI/review remain. The earlier
-eight delivery passes did not establish preservation of coherent-summary room.
+Sizing correction, regressions, offline and live proof pass. The subsequent
+admitted-ceiling recovery correction below controls the current merge status.
+The earlier eight delivery passes did not establish preservation of
+coherent-summary room.
 
 
 ## Review correction: carry the admitted ceiling through recovery
@@ -235,8 +236,8 @@ incomplete unit at the reduced decoder ceiling therefore becomes a generic
 invalid response instead of receiving the existing bounded repair or preserving
 valid siblings. This mismatch was introduced by this PR's variable ceiling.
 
-Read the admitted character ceiling once from the request schema using the
-budget owner's accessor. Pass it through primary parsing, window/framing repair
+Read the admitted character ceiling through one shared request-schema accessor
+in the budget owner. Pass it through primary parsing, window/framing repair
 analysis, clipped-unit salvage and retained-sibling parsing. Repair feedback must
 name the same ceiling. Keep existing unit-count limits, source/metadata checks,
 windowed-General eligibility, frozen repair schema and retry counts. The default
@@ -252,8 +253,9 @@ and the existing 1,200-character regressions. Run adjacent synthesis tests,
 formatting and strict clippy. This is deterministic request-limit propagation;
 no model inference or replay of the unchanged full-ceiling live cases is needed.
 
-NOT DONE until the fail-first reproduction, fix and regressions pass and the
-published head is reviewed with green required CI and resolved threads.
+The fail-first reproduction and local correction are complete as recorded below.
+NOT DONE for merge until the published head has green required CI, reconciled
+review and resolved threads.
 
 ### Disposition of nonblocking review suggestions
 
@@ -269,3 +271,49 @@ published head is reviewed with green required CI and resolved threads.
 
 Both suggestions are recorded as nonblocking follow-up work under issue #95;
 they are not merge gates for this admitted-ceiling correction.
+
+
+### Implementation summary and verification of recovery correction
+
+Contract `6040a4f` precedes implementation `9666626`. The generation-loop test
+`reduced_ceiling_clipped_units_use_existing_repair_and_safe_fallback` failed on
+the uncorrected parser with `MODEL_SUMMARY_RESPONSE_INVALID`, before any repair.
+After correction, both new reduced-ceiling tests pass. They cover one existing
+repair, repeated-clipping safe fallback, a complete sentence at the same ceiling
+with no retry, below/at/above-boundary parsing, nested window/framing recovery,
+and empty/foreign/duplicate source IDs. The captured repair schema is unchanged
+and feedback names its actual admitted limit.
+
+On `9666626`, `cargo test --locked --lib pipeline::summary:: -- --quiet` passed
+251 tests with 10 live tests ignored. `cargo fmt --all -- --check` and
+`cargo clippy --locked --all-targets --all-features -- -D warnings` passed.
+The existing 1,200-character clipping, repair, fallback and sizing regressions
+are in that passing adjacent suite. No new inference was run for this
+propagation-only fix. Earlier full-ceiling live evidence remains explicitly
+at `703ede7`; runtime stop handling, tokenizer, sizing formula, generation
+schema defaults and installed model settings did not change here.
+
+### Cold diff audit of recovery correction
+
+- `summary/coherent/budget.rs:171`: one validated admitted-character accessor is
+  shared by admission, response-budget validation and generation. It retains the
+  existing nonzero/1,200 upper-bound check; no sizing or output-cap policy change.
+- `summary/coherent.rs:3951`: the admitted ceiling enters primary parsing, all
+  window/framing and clipped recovery helpers, and repair feedback. The default
+  convenience parser is test-only; production helpers cannot silently select
+  the old ceiling. Unit-count checks and repair eligibility/counts are unchanged.
+- `summary/coherent.rs:15074` and `:15145`: the two new tests reproduce the real
+  generation-loop failure and probe both sides of every affected recovery seam.
+- `docs/CONTRACTS.md`: records the single-ceiling invariant. This PR contract
+  records fail-first proof, current verification and both nonblocking decisions.
+
+boundary-probe: incomplete text exactly at the reduced ceiling repairs or
+salvages valid siblings; equally long complete text succeeds without repair.
+Over-limit text and invalid metadata stay rejected, including nested recovery.
+Existing full-ceiling tests pass. All state remains request-local; no shared
+mutable budget, new network call, retry count or persistence path was added.
+
+effect-trace: the admitted schema controls parsing, clipping recognition and
+feedback through `budget::maximum_characters`. The regression that failed with
+a generic rejection now observes one bounded repair or safe fallback, and the
+opposite complete-sentence case observes one generation call only.
