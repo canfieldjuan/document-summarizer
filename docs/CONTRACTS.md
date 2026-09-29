@@ -2523,3 +2523,41 @@ rule only when an oversized group needs a splitting decision. A question mark
 inside a bounded form must not detach its following printed answer. Add a neutral
 question/answer regression and require no loss against the current private
 witness baseline before publishing this correction.
+
+
+Implementation summary: 1a09c42 keeps bounded layout admission unchanged and
+uses the existing version-13 sentence parser on logical field values only for
+oversized groups. A sentence with continuation, or complete sentences in every
+value, selects the existing prose path. Wrapped values are read as contiguous
+source ranges. Scalar/mixed forms remain indivisible; no clause-name exceptions
+or blanket fallback were added. The mixed-form period fixture now includes a
+scalar value because the operator explicitly requires all-sentence rows to use
+prose segmentation.
+
+Verification: multi-sentence and single-sentence clause regressions reproduced
+before their fixes. The corrected unfinished-continuation fixture fails against
+published 1a21aa8 at the current-versus-historical comparison and passes now.
+A neutral question/answer regression reproduced the loss introduced by the
+unpublished intermediate change and passes with bounded-layout precedence.
+The final summary suite passed 241 tests (10 opt-in ignored); formatting and
+strict all-target/all-feature Clippy passed. Tests cover lettered, Article,
+Section and arbitrary labels, LF/CRLF, mixed scalar/Notes forms at 599/600/601
+characters, wrapped values, abbreviations, decimals, historical quote retention
+and existing qualification safeguards.
+
+All 24 saved version-13 catalogs reproduced. Across 40 private source witnesses,
+none regressed relative to 1a21aa8; final survival remains A 12/20 and B 13/20.
+The intermediate private replay failure is not counted as a pass. No inference
+ran. A neutral unpunctuated-heading probe confirms both policies omit that form;
+this incomplete recovery is deferred to #105 as the reviewer permitted.
+
+Cold diff audit: `quote_segments.rs::form_field_count` owns the oversized-group
+decision and obtains value offsets from `label_value`; `summary.rs` tests the
+production catalog and validator against the real version-13 result. All other
+production functions in this correction are unchanged. There is no shared
+mutable state, new runtime setting, schema, storage or concurrency change.
+Contract revisions preceded implementation; private content remains local.
+
+Gap audit: DONE for the lettered-clause correction and local proof. NOT DONE for
+merge until the published head has fresh CI and review. Unpunctuated headings
+remain a follow-up; source preservation is not a generated-summary quality claim.
