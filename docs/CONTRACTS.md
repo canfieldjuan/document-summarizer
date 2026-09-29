@@ -2133,7 +2133,7 @@ implemented.
 
 ### Source-catalog preservation (analysis 14)
 
-Status: contracted; implementation and verification pending.
+Status: implemented and verified locally; remote CI and PR review pending.
 
 Root cause: native PDF text is commonly one normalized block per page. The
 version-13 sentence-only catalog drops bounded form/layout groups when they
@@ -2204,9 +2204,48 @@ separately from any live-model/delivered-summary result. A fresh production A/B
 run uses the existing isolated 9B/32k evidence setup when the GPU is exclusive;
 no corpus result is an accuracy qualification without reviewed labels.
 
-Implementation summary: pending.
+Implementation summary: analysis 14 owns the new layout/sentence policy in
+`summary/quote_segments.rs`. `summary.rs` dispatches by persisted version and
+shares punctuation defenses; `summary/pages.rs` preserves version-13 warning
+and omission reconstruction. `summary/coherent.rs` binds generation and
+verification catalogs to the analysis policy that produced the run. No model,
+output-schema, public API or storage changes are included.
 
-Cold diff audit: pending.
+Verification: both new production-catalog regressions failed first with source
+omissions and then passed. The all-target/all-feature Rust suite passed (613
+library tests, 3 office checks and 8 release checks; 19 opt-in tests ignored).
+Strict Clippy and formatting passed. Tests cover the stated limits, abbreviations,
+wrapped labels/values, heading chains, qualifications, unsafe tails and historical
+catalog reconstruction. One test-only clone cleanup followed the broad run and
+was recompiled by strict Clippy; production code was unchanged.
 
-Gap audit: NOT DONE. Contract precedes code; implementation, regressions and
-source-catalog proof remain outstanding.
+The private offline probe reproduced all 24 saved version-13 catalogs exactly.
+Full source-range survival of the recorded witness excerpts changed from 10/20
+to 12/20 for A and 11/20 to 12/20 for B, with no previously retained witness lost.
+These are source-passage counts, not extraction or summary accuracy scores.
+Sixteen witness excerpts remain unavailable; oversized tables, compound clauses
+and cross-page context are not solved by this change.
+
+Fresh production-pipeline runs at implementation `d5a4760`, using the existing
+private Qwen3.5-9B Q4_K_M/32k/thinking-off runtime composition, passed in General
+and Contract mode for both A and B. One owned GPU server stayed loaded across
+all four attempts. Input hashes, actual context and exclusive ownership were
+verified; reopened artifacts matched. Both modes delivered fallback summaries:
+A cited 10 pages and B cited 14 text-bearing pages. General rejected the model
+drafts; Contract still took its source-admission fallback. This is a bounded
+source-preservation gain, not coherent-summary or model qualification. Installed
+settings and production presets were untouched.
+
+Cold diff audit: `summary.rs` owns version dispatch and the shared punctuation
+predicate; `quote_segments.rs` owns exact source ranges and bounded packing;
+`pages.rs` keeps historical omission checks; `coherent.rs` carries persisted
+analysis context through catalog reconstruction. The regression and replay tests
+exercise those boundaries. No unrelated files, dependencies or generated
+artifacts changed. All segmentation state is local to the call; no shared queue,
+cache or mutable runtime state was introduced.
+
+Gap audit: DONE for the contracted implementation and local/offline/live proof.
+NOT DONE for merge until exact-head CI and review pass. Remaining source loss,
+coherent drafting and fallback materiality require separate work; page coverage
+is not a claim of complete or correct facts. Follow-up issue #105 tracks shared
+context for oversized source clauses and tables.
