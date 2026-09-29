@@ -2329,6 +2329,27 @@ the existing private catalogs/witnesses. CI owns repeated broad platform tests;
 no new inference or summary-quality claim is required for this deterministic
 repair.
 
-Implementation summary and cold diff audit: pending reproduction.
-Gap audit: NOT DONE until the regression and adjacent checks pass and the
-published correction receives fresh CI and exact-head review.
+Implementation summary: b3415dc shares `form_field_count` between bounded
+field recognition and oversized-form admission. Multiple physical field rows
+remain indivisible; a lone oversized field reaches the existing sentence and
+qualification policy. Prefix names and line wrapping do not select the branch.
+There is no new interpretation of money values or model output.
+
+Verification: the production-catalog regression failed first with one omitted
+unit, then passed for each tested label and space/LF/CRLF separator. The adjacent
+summary suite passed 230 tests with 10 opt-in tests ignored; formatting and
+strict all-target/all-feature Clippy passed. Boundary tests retain qualified
+sentences together and keep multi-field forms indivisible at 599/600/601
+characters, including periods within field values and following usable prose.
+The private replay reproduced all 24 historical catalogs and found no loss
+across 40 tracked witnesses compared with e67ba67. No inference was rerun.
+
+Cold diff audit: `quote_segments.rs:45-55` separates whole-group admission from
+sentence segmentation; `form_field_count` owns recognition for both decisions.
+The surrounding lead-in/qualification grouping is unchanged. Tests in
+`summary.rs` exercise the production catalog and its validator; segmenter tests
+exercise both sides of form admission. No version, model, schema, storage,
+shared mutable state or concurrency behavior changed.
+
+Gap audit: DONE for this correction and local proof; NOT DONE for merge until
+fresh CI and exact-head review pass on the published revision.
