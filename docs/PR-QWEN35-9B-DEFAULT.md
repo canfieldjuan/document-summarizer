@@ -12,7 +12,7 @@ The server's reasoning option does not apply a chat template to raw completion.
 - model_settings.rs: register Qwen3.5-9B Q4_K_M, SHA-256
   cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13,
   as full-qwen35-9b-q4km-v1 and make it the default. Both analysis and
-  verification use that same profile. Keep the existing 8192 context and
+  verification use that same profile. Use 32,768 context tokens for both stages and keep the
   checksum-pinned managed llama.cpp bundle. Profile data owns parameter size,
   quantization and thinking policy instead of generic GGUF assumptions.
 - llama_cpp.rs: for this profile, append <think>\n\n</think>\n\n after the
@@ -38,7 +38,7 @@ The server's reasoning option does not apply a chat template to raw completion.
 ## Explicit non-scope
 
 No shared host extraction, downloads, installer, new runtime service, Windows
-GGUF enablement, context increase, summary prompt/schema/validator changes,
+GGUF enablement, further summary prompt/schema/validator changes,
 OCR changes, hardware-floor claim or rewriting installed settings. The old
 Ollama profile remains selectable and its backend-specific default is retained.
 The separate cross-app checks remain the next slice after this one.
@@ -62,6 +62,47 @@ suites. Run existing live office acceptance lanes on the production 9B profile
 with source/model/runtime receipts and all failures retained. Establish the
 live generated-output reasoning evidence explicitly; do not infer a server
 reasoning-token counter if the raw API does not supply one.
+
+## Contract revision: production 32k qualification
+
+Root cause: the 9B registry entry still supplies 8,192 tokens to every stage.
+The operator requested 32,768 on PR #100. Earlier runtime-only experiments did
+not remove the application's coherent source cap. Main now owns the shared
+coherent request budget, exact token admission and source-catalog repairs; this
+branch incorporates those merged changes instead of copying their logic.
+
+Required change surface: change only the 9B profile's safe context to 32,768 in
+model_settings.rs. Prove the catalog, analysis/verification snapshot and runtime
+stage descriptors carry that value. Test model contexts below, at and above the
+new floor; independently retain wrong-digest, family and backend rejection. Keep
+legacy profiles at their existing contexts. Update the preset documentation.
+
+Profile routing already exists: Automatic maps agreement to Contract, narrative
+to Story, and informational/mixed/other/unknown to General; distributed uncertain
+samples receive one expanded pass. Explicit user selection bypasses suggestion.
+Invalid suggestion output stops with an error. Qualification exercises that
+existing path; it does not introduce another classifier or change the UI.
+
+Verification plan: demonstrate the default-stage context regression fails at
+8,192 before the fix, then run adjacent model/settings, runtime, profile routing
+and coherent-budget checks, formatting and strict clippy. Use the existing live
+acceptance tests and isolated production runtime with the pinned GGUF and binary,
+thinking disabled, actual 32,768 context and exclusive GPU ownership. Run selected
+Story/Contract, automatic-purpose counterexamples, persisted General, and real
+contracts A/B in General and Contract modes. Capture full requests/responses,
+source/runtime identities, observed peak GPU memory and process memory, fallback
+and withholding reasons, and durable reopen results. Retain every failed attempt.
+Existing 30B comparison receipts are historical evidence; no new 30B inference.
+
+Non-scope: installed settings, runtime host/downloads, model promotion outside
+this preset, Windows inference, profile-routing changes, acceptance thresholds,
+summary redesign and the deferred layout follow-ups. A fallback passing exact
+citation/persistence gates is not evidence of generated-summary quality.
+
+Assumptions/blockers: GPU exclusivity is required; registration must verify the
+existing model/runtime checksums without overrides. Passing mechanical gates is
+separate from semantic review. Results that do not meet either requirement keep
+this PR NOT DONE for merge; failures are not waived by changing the scorer.
 
 ## Implementation summary
 
