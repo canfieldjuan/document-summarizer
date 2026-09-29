@@ -89,13 +89,15 @@ NOT DONE. Implementation, regressions and live qualification remain.
 
 The gateway client has a 4,096-token task output cap, independent of its 8,192
 context. Its preflight reports an over-cap request as a protocol error, so
-probing solely by context would introduce an avoidable failure. Add a runtime
-output-capacity method, defaulting to the effective stage context, with the
-gateway override sourced from the existing wire-client cap. Stage dispatch and
-test recorders must forward it. Capacity probes include feedback headroom in
-context admission but must not count that headroom as generated output against
-the transport cap. Prove smaller-cap forwarding and admission without invoking
-inference. No gateway protocol, wire cap, snapshot, or server change.
+probing solely by context would introduce an avoidable failure. Keep the
+existing preflight interface: the gateway runtime reports its wire-client output
+cap as `MODEL_OUTPUT_BUDGET_EXCEEDED`, a capacity rejection the shared search
+can reduce. Source the limit from the existing wire-client constant. Actual
+wire validation remains unchanged. Probe requests also obey that cap, including
+reserved feedback; generated requests exclude the reserve. This conservative
+admission leaves some of the gateway allowance unused. Prove the capped search
+and the gateway's exact boundary without inference. No new runtime API, gateway
+protocol, wire cap, snapshot, or server change.
 
 The direct runtimes perform tokenizer preflight. Gateway preflight checks its
 existing wire bounds; this work cannot establish token-exact input admission
