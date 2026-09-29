@@ -1,226 +1,121 @@
-# Qwen3.5-9B default preset (#71)
+# Qwen3.5-9B production preset (#71 / #100)
 
 ## Root cause
 
-At 922e17e the default selects the 30B Ollama profile. The exact-digest registry
-has no 9B entry. Registered GGUF descriptors always report 27.3B/IQ2_M, and the
-raw completion prompt ends at the assistant marker without closing thinking.
-The server's reasoning option does not apply a chat template to raw completion.
+The previous default selected the 30B Ollama profile. The registry had no exact
+9B entry; GGUF descriptors assumed 27.3B/IQ2_M, and raw completion framing did
+not close the thinking block. A server chat-template option does not change
+raw-completion framing.
+
+The operator subsequently requested 32,768 tokens for the 9B. Raising the server
+allocation alone had left the coherent source-character cap in place. Main now
+owns the shared coherent budget and source-catalog fixes from the separate
+reviewed slices. This branch composes those changes and changes the 9B context
+at the existing profile owner.
+
+Qualification also exposed two recorder defects: the selected-profile recorder
+lost concrete stage identities, and the office recorder inherited permissive
+preflight instead of forwarding runtime admission. Both could make tests behave
+differently from production. Their regressions reproduce the missing identity
+and missing context rejection before the recorder fixes.
 
 ## Required change surface
 
-- model_settings.rs: register Qwen3.5-9B Q4_K_M, SHA-256
-  cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13,
-  as full-qwen35-9b-q4km-v1 and make it the default. Both analysis and
-  verification use that same profile. Use 32,768 context tokens for both stages and keep the
-  checksum-pinned managed llama.cpp bundle. Profile data owns parameter size,
-  quantization and thinking policy instead of generic GGUF assumptions.
-- llama_cpp.rs: for this profile, append <think>\n\n</think>\n\n after the
-  assistant marker, with special-token parsing only for trusted framing.
-  The same framed tokens feed context preflight and generation. Include the
-  policy in the runtime cache identity; preserve the older profile's framing.
-- office_acceptance.rs: the default live lane registers the explicitly supplied
-  9B GGUF in isolated settings and uses the production default-profile factory.
-  An explicit settings path or named qualification candidate remains possible;
-  never fall back silently to a 30B verifier.
-- Live acceptance selection: extract the office helper into test-only shared
-  support, used by the existing automatic-profile and selected Story/Contract
-  lanes as well. Their prompts and assertions stay unchanged; recording accepts
-  any ModelRuntime. Update profile-release-acceptance.sh to invoke the new
-  production default rather than requiring a resident 30B Ollama model.
-- README.md and docs/OFFICE_ACCEPTANCE.md: describe the new default and existing explicit legacy choices,
-  including manual GGUF registration and the Linux-only direct runtime.
-- Existing saved selections keep their values. No version bump or migration:
-  the operator's issue update says there are no deployed settings to migrate.
-  Missing settings use the new default. Missing/wrong model or runtime stays
-  unavailable, never falls back to an unselected model.
+- `model_settings.rs`: make `full-qwen35-9b-q4km-v1` the fresh-settings default.
+  Pin Qwen3.5-9B Q4_K_M SHA-256
+  `cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13`.
+  Analysis and verification use the same profile and 32,768-token context.
+  Model metadata and thinking policy belong to the registry entry. Preserve
+  the existing checksum-pinned managed llama.cpp binary and libraries.
+- `llama_cpp.rs`: append `<think>\n\n</think>\n\n` after the assistant marker for
+  this profile. Tokenize trusted framing with special-token parsing, keeping
+  source text untrusted. Preflight and generation use identical framed tokens.
+  Include thinking policy in the runtime cache identity. Preserve old framing
+  for the older profiles.
+- Shared test-only live selection: register the explicitly supplied GGUF in
+  private temporary settings and call the production default-profile factory.
+  Keep that directory alive for the run. Explicit settings/candidate selection
+  remains possible; never silently substitute the old 30B verifier.
+- Office and selected Story/Contract recording wrappers forward preflight and
+  stage identities. Existing office coverage, exact-quote, modal, persistence
+  and reopen assertions remain unchanged. Record the exact recovered-page count.
+- Existing automatic-purpose and selected-profile tests, the release acceptance
+  script, README and office instructions use the production default selection.
+
+## Profile routing and persisted settings
+
+Automatic already maps agreements to Contract and narratives to Story.
+Informational, mixed, other and unknown map to General. Distributed uncertain
+samples get one expanded inspection; invalid responses fail and ask for explicit
+selection. An explicit user selection bypasses Automatic and remains authoritative.
+This slice qualifies those existing paths; it adds no new classifier or UI.
+
+Saved selections remain unchanged. There is no settings-version bump or migration:
+the operator confirmed no deployed settings need migration. Missing/wrong model,
+runtime or checksum leaves the selection unavailable instead of substituting an
+unselected model. The older explicit presets keep their existing contexts.
 
 ## Explicit non-scope
 
-No shared host extraction, downloads, installer, new runtime service, Windows
-GGUF enablement, further summary prompt/schema/validator changes,
-OCR changes, hardware-floor claim or rewriting installed settings. The old
-Ollama profile remains selectable and its backend-specific default is retained.
-The separate cross-app checks remain the next slice after this one.
+Shared-host extraction, downloads, installer work, runtime replacement, Windows
+GGUF enablement, installed settings, summary prompts/schemas/validators, OCR,
+acceptance-threshold changes, layout follow-ups and hardware-floor claims.
+The broader cross-app checks remain a later slice. No new 30B inference is part
+of this requalification; its authorized prior comparisons remain historical.
 
 ## Assumptions and blockers
 
-The exact model is present on the Dev Drive and its hash was verified. The
-existing direct runtime remains Linux-only; Windows build checks do not prove
-Windows model execution. Live work requires the existing inference lock and
-an idle GPU. Model-quality failures must remain visible and cannot be fixed by
-weakening acceptance gates in this slice.
+The exact model and runtime must pass production checksum verification without
+overrides. Live qualification requires the existing inference lock and an
+exclusive GPU. Reuse the owned loaded server where possible. The direct runtime
+is Linux-only; Windows compilation does not prove Windows model execution.
+
+A passing fallback proves validated delivery and disclosure, not generated-summary
+quality. Keep every failed or incomplete attempt visible. Model-quality failures
+cannot be fixed by weakening acceptance gates in this slice.
 
 ## Verification plan
 
-Fail-first default/profile admission and prompt-framing regressions. Test
-correct/wrong digest, family and context, legacy selections, full-profile
-analysis/verifier identity, cache-policy separation, and trusted framing versus
-untrusted text. Run affected model-settings and llama.cpp tests, acceptance
-unit checks, formatting, clippy, and frontend build. CI owns broad platform
-suites. Run existing live office acceptance lanes on the production 9B profile
-with source/model/runtime receipts and all failures retained. Establish the
-live generated-output reasoning evidence explicitly; do not infer a server
-reasoning-token counter if the raw API does not supply one.
+- Fail first when fresh settings report 8,192 instead of 32,768; verify catalog,
+  analysis/verification snapshots and stage runtime use the profile value.
+- Probe absent/zero/below/at/above context limits, and reject wrong digest,
+  tokenizer family and backend independently. Preserve old selections.
+- Reproduce office preflight rejection being swallowed, then prove both accepted
+  and rejected requests pass through without generation. Preserve stage-identity
+  rejection and untrusted-token framing checks.
+- Run adjacent settings/runtime/routing, coherent-budget and office checks,
+  format, strict clippy and frontend build. CI owns the broad platform suites.
+- Freeze production source and record the private qualification wrapper patch.
+  Reuse the existing unchanged office assertions for contracts A/B in General
+  and Contract modes, the structured fixture and public DOL General fixture.
+  Run the existing Automatic counterexamples and selected Story/Contract lanes.
+- Capture source/model/runtime/binary identities, requests, raw responses,
+  request-attempt diagnostics, delivered artifacts, warning/failure reasons and
+  durable reopen checks. Verify actual 32,768 allocation and exclusivity. Report
+  observed peak GPU allocation and server RSS with sampling limits.
+- Inspect rendered outputs separately from mechanical pass/fail. The raw
+  completion API has no separate reasoning-token counter; report observed
+  response form rather than inventing that counter.
 
-## Contract revision: production 32k qualification
+## Implementation summary and cold diff audit
 
-Root cause: the 9B registry entry still supplies 8,192 tokens to every stage.
-The operator requested 32,768 on PR #100. Earlier runtime-only experiments did
-not remove the application's coherent source cap. Main now owns the shared
-coherent request budget, exact token admission and source-catalog repairs; this
-branch incorporates those merged changes instead of copying their logic.
+The registry owns the 9B identity, default, metadata and 32k stage context.
+The direct runtime owns thinking framing and cache identity. Test-only shared
+selection uses the same factory as the app; both recorders preserve its relevant
+identity/admission behavior. Documentation and the release script describe that
+selection. No production summary behavior is added by this preset diff.
 
-Required change surface: change only the 9B profile's safe context to 32,768 in
-model_settings.rs. Prove the catalog, analysis/verification snapshot and runtime
-stage descriptors carry that value. Test model contexts below, at and above the
-new floor; independently retain wrong-digest, family and backend rejection. Keep
-legacy profiles at their existing contexts. Update the preset documentation.
-
-Profile routing already exists: Automatic maps agreement to Contract, narrative
-to Story, and informational/mixed/other/unknown to General; distributed uncertain
-samples receive one expanded pass. Explicit user selection bypasses suggestion.
-Invalid suggestion output stops with an error. Qualification exercises that
-existing path; it does not introduce another classifier or change the UI.
-
-Verification plan: demonstrate the default-stage context regression fails at
-8,192 before the fix, then run adjacent model/settings, runtime, profile routing
-and coherent-budget checks, formatting and strict clippy. Use the existing live
-acceptance tests and isolated production runtime with the pinned GGUF and binary,
-thinking disabled, actual 32,768 context and exclusive GPU ownership. Run selected
-Story/Contract, automatic-purpose counterexamples, persisted General, and real
-contracts A/B in General and Contract modes. Capture full requests/responses,
-source/runtime identities, observed peak GPU memory and process memory, fallback
-and withholding reasons, and durable reopen results. Retain every failed attempt.
-Existing 30B comparison receipts are historical evidence; no new 30B inference.
-
-Non-scope: installed settings, runtime host/downloads, model promotion outside
-this preset, Windows inference, profile-routing changes, acceptance thresholds,
-summary redesign and the deferred layout follow-ups. A fallback passing exact
-citation/persistence gates is not evidence of generated-summary quality.
-
-Assumptions/blockers: GPU exclusivity is required; registration must verify the
-existing model/runtime checksums without overrides. Passing mechanical gates is
-separate from semantic review. Results that do not meet either requirement keep
-this PR NOT DONE for merge; failures are not waived by changing the scorer.
-
-## Implementation summary
-
-The exact 9B entry now owns the default, model metadata and non-thinking
-policy. The runtime cache includes that policy and trusted assistant framing
-closes the thinking block. Acceptance uses isolated production settings and
-keeps the private runtime directory alive for the entire run. Explicit saved
-selections and the old Ollama profile are preserved.
-
-## Cold diff audit
-
-- model_settings.rs: default/registry/registered_descriptors/stage_runtime
-  implement the profile contract; tests cover identity/context/runtime mismatch,
-  unchanged legacy settings, correct model metadata and same-model verification.
-- llama_cpp.rs: PromptFraming::load consumes the profile policy, and
-  runtime_cache_key distinguishes it. The unchanged prompt_tokens owner supplies
-  both preflight and generation. Existing untrusted-special-token checks pass.
-- office_acceptance.rs: configured_live_runtime creates an isolated registered
-  default profile, retains its temporary socket directory, and removes the
-  implicit 30B verifier fallback. No acceptance criterion was changed.
-
-Fail-first: both new default/framing tests failed at their expected assertions.
-Final affected model/runtime tests: 54 passed (8.79s). Acceptance offline checks:
-3 passed, 3 opt-in ignored. Frontend build, format, diff checks and all-targets/
-all-features clippy passed. A legacy test's assumption that default meant Ollama
-was corrected to explicitly select the old profile; its original invariant
-is still tested. The pinned GGUF template's enable_thinking=false branch exactly
-matches the new trusted suffix. Runtime binary and library hashes match the
-existing registry. The first live attempt failed before inference because the test helper created
-a group-writable settings directory under this shell umask. The helper now
-creates it with owner-only permissions; production ancestry checks stay intact.
-The failure receipt is retained. Live model acceptance remains pending.
+Fail-first context and preflight regressions reproduced their expected failures.
+After the fixes: 25 settings checks, 39 runtime/routing checks, seven budget
+checks and five office checks passed. Formatting, strict all-target/all-feature
+clippy and the frontend build passed. These are local deterministic checks;
+the opt-in live checks are separate. Earlier failed live and build attempts are
+retained in private evidence, not erased or counted as successes.
 
 ## Gap audit
 
-NOT DONE for merge: existing live acceptance has not passed. Real-document and
-selected-profile runs remain pending on the shared inference lock, and CI and
-current-head review are required. No minimum-hardware or all-documents quality
-claim is made.
-
-Shared live selection checks: 61 focused model/runtime/routing tests passed,
-1 live test ignored (7.95s); 4 office checks passed, 3 live tests ignored.
-All live binaries compile, and all-targets/all-features clippy passed (3.58s).
-The second synthetic run executed 13 requests / 433 completion tokens, then
-failed the unchanged omitted-page versus cited-page disjointness assertion.
-No response contained a thinking marker; the raw completion API provides no
-separate reasoning-token counter. This is not a successful acceptance run.
-
-The synthetic run's 13 raw responses are all JSON objects, with zero generated
-thinking markers (log SHA-256
-93582e883fa04d09d67eb587951b4c76ca667e909ab05398c86cde95ae139003).
-This proves the observed response form, not a separately measured reasoning
-counter. Production model/framing code is unchanged from that tested revision
-51d02e4; subsequent changes select it from the other existing acceptance lanes.
-A real-contract attempt stopped at lock acquisition, before inference, while
-another managed evaluation owned the resource. No overlap was forced.
-
-The omitted/cited-page contradiction is tracked as
-[document-summarizer#99](https://github.com/canfieldjuan/document-summarizer/issues/99).
-Its existence is a record of this run, not independent corroboration. The preset
-change does not resolve it or claim that the old model reproduced it.
-
-Cold audit of the completed surface: the shared acceptance helper is test-only;
-the three library lanes retain their prompts/assertions and use the production
-factory. Office acceptance retains all coverage gates. The shell entrypoint no
-longer asserts Ollama GPU residency; it documents external lock/hardware proof
-instead. No new production path bypasses identity, context or completion checks.
-Formatting and all-targets/all-features clippy passed after final test-helper
-changes (2.69s); frontend sources and dependencies have not changed since the
-successful build. Windows runtime execution remains outside this slice.
-
-## Live recording-wrapper correction
-
-The first selected Story/Contract runs on the composed source failed with
-MODEL_RESPONSE_INVALID after receiving nonempty JSON. The coherent-test
-RecordingRuntime forwards generic identities but inherits stage-specific
-identity defaults. QwenProfileRuntime reports its profile name generically and
-the selected concrete runtime/model for each stage; validation correctly rejects
-the wrapper's mismatched expectation. This is a test-wrapper defect introduced
-by broadening live selection to the production profile factory, not yet a model
-quality finding. The office recording wrapper already forwards stage identities.
-
-Required surface: coherent.rs test-only RecordingRuntime forwards both
-runtime_id_for_stage and model_id_for_stage to its inner runtime. Add an offline
-regression using distinct profile and stage identities, verify the generated
-response through the existing production identity validator, and retain
-rejection of genuinely mismatched identities. No prompt, production runtime,
-validator, source selection or acceptance-threshold change. First reproduce
-MODEL_RESPONSE_INVALID before forwarding; then rerun the affected tests and
-both live selected-profile probes. Keep the failed live artifacts in the record.
-
-The recording-wrapper regression failed with the expected identity error before
-forwarding and passed afterward; adjacent coherent tests passed (40 passed,
-6 live checks ignored), as did all-target/all-feature clippy. PR101's reviewed
-page reconciliation is composed into this branch; its synthetic live replay
-passes with 13 identical raw responses. The reviewer's nonblocking count ask is
-covered by asserting the recovery warning's exact count in both the offline
-production-stage regression and office acceptance, using final citation pages.
-
-Live gap remains explicit: real contract A final presented citations cover 4/10 native
-pages despite 9 retained analysis pages, so the unchanged 50 percent raw / 60
-percent adjusted coverage gate failed. Both failed selected-profile attempts
-remain recorded as test-wrapper failures pending a corrected live rerun. No
-quality or coverage threshold is changed, and the production preset is not yet
-qualified for merge by these results.
-
-## Qualification recorder contract correction
-
-Code inspection found that office_acceptance.rs RecordingRuntime forwards
-inference and stage identity but inherits ModelRuntime's permissive preflight.
-The selected-profile recorder already forwards preflight. The office wrapper
-can therefore skip exact source-context admission before generation, changing
-which source catalog is selected compared with production.
-
-Required surface: forward preflight_request to the inner runtime in the office
-recorder; add an offline regression proving both admission and rejection survive
-the wrapper with no generation call. Keep the existing office assertions,
-source selection, model behavior and production runtime unchanged. Reuse this
-corrected recorder in the private A/B qualification export. Reproduce the
-recorder swallowing MODEL_CONTEXT_EXCEEDED before forwarding; then rerun the
-office checks and strict clippy. No other harness or scorer redesign.
+NOT DONE for merge until the current source's live qualification, semantic
+review, required CI and current-head PR review are reconciled. Public receipts
+use only opaque A/B labels and aggregates. No private source names or paths
+belong in Git. Merge this PR by squash only because earlier branch history
+contained a subsequently removed private document name.
