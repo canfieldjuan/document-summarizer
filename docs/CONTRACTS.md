@@ -2415,3 +2415,27 @@ context safeguards. No shared mutable state or model/runtime change was added.
 
 Gap audit: DONE for all known review corrections and local proof. NOT DONE for
 merge until fresh CI and exact-head review pass on the final published revision.
+
+
+#### Common form labels and numbered prose
+
+Root cause: the shared field-row recognizer rejects digits and common label
+punctuation, so a bounded form starting with such a label never reaches layout
+admission. This is a gap in the new feature, not a version-13 regression.
+
+Required change surface: `quote_segments.rs::label_value` must admit digits,
+ASCII/curly apostrophes, ampersands and number signs within otherwise bounded
+label/value rows. Require the first alphanumeric label character to be a letter:
+number-led clause headings remain prose, including parenthesized numbering.
+Do not add period-based sentence heuristics or field-name exceptions. Preserve
+the nonempty value, label word bound, exact source bytes, shared field-count
+ownership and all existing group-size and qualification rules. Historical
+policies, models, prompts and other non-scope boundaries above are unchanged.
+
+Verification plan: fail-first production-catalog coverage for these labels in
+bounded forms after unrelated dangling prose; include LF/CRLF, Unicode character
+limits and 599/600/601-character groups. Compare multi-row numbered prose over
+600 characters against the actual version-13 catalog and validate the current
+catalog. Retain oversized-form and governing-context checks. Run adjacent
+summary tests, formatting, strict Clippy and the private historical/witness
+replay. No new inference is needed to prove this deterministic correction.
