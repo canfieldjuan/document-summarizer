@@ -478,6 +478,12 @@ chunks, independent of the analyzed claim ledger. Segments retain canonical
 chunk, block and within-block order before request-local IDs are assigned. The
 complete catalog, prompts and serialized response schema, including its
 source-ID enum, must fit one request under the synthesis-stage context budget.
+Coherent generation and its runtime validator share one character-budget owner.
+At or below 8,192 context tokens the existing 16,000-character maximum remains;
+above that context the allowance is three times the tokens remaining after
+reserving 2,048 output tokens and 512 framing tokens, using checked arithmetic.
+Source-reduction admission and bounded repairs use that same allowance. Analysis,
+selection-window requests and verification retain their separate existing caps.
 After this conservative application bound, the selected qualified runtime
 preflights the exact request it will generate. Ollama tokenizes the complete
 serialized chat payload and llama.cpp counts its exact framed prompt; a runtime
@@ -504,9 +510,15 @@ claims cannot fit their exact downstream verification requests, synthesis
 discards them before persistence. Both cases persist presentation mode
 `claimLedgerFallback`, warning `COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE`, and
 the existing source-ordered claim ledger, with the warning message identifying
-the applicable boundary. Invalid budgets, invalid model output, unknown or
-duplicate source identifiers and non-context runtime failures still fail the
-stage; they do not silently choose the fallback.
+the applicable boundary. Invalid budgets and non-context runtime failures still
+fail the stage. General prose generation may use the independently verified
+claim ledger when existing bounded recovery cannot produce a usable draft for
+a model-output reason, disclosed by `COHERENT_SUMMARY_MODEL_OUTPUT_INVALID`.
+Only a typed rejection of model-produced content admits that fallback; transport,
+identity, cancellation, runtime-admission and artifact/invariant failures do not.
+Rejected prose and citations are never delivered. The fallback still requires
+semantic verification and final page coverage. Story, Contract and source-ID
+selection failures retain their existing behavior.
 
 A narrow deterministic guard compares modal predicates in each prose unit with
 matching statements in its cited quotations. Predicate, bounded subject context,
@@ -811,6 +823,14 @@ including complete delivered text.
   not establish recovery. GUI completion, Connect coverage and delivered-prefix
   checks share this accounting. Final summaries disclose recovered analysis
   omissions through the existing warning channel; no checkpoint is rewritten.
+- General desktop summaries apply these coverage thresholds during generation,
+  after semantic verification and before final persistence. A structurally valid
+  undercovered draft receives coverage feedback within the existing single
+  validation-repair budget. Exhausted coverage correction or verification loss
+  uses the disclosed verified-claim fallback; that presented fallback must itself
+  meet coverage or completion fails. Hidden evidence never earns coverage, and
+  unsupported claims cannot be restored. Initial prompts, source selection,
+  runtime/output limits, Story/Contract defaults and Connect routing are unchanged.
 - Treat names, organizations, identifiers, dates, reference numbers and
   cross-references as material on form-shaped pages in both selection and
   complete-page omission prompts. Emit `OCR_TEXT_LAYER_STRUCTURE_RISK` when a
@@ -2109,3 +2129,438 @@ future trusted broker or OS package identity would be required to change that
 threat model. Launch-on-demand, multiple-provider selection, callbacks,
 workflow automation, remote execution, and cross-machine discovery are not
 implemented.
+
+
+### Source-catalog preservation (analysis 14)
+
+Status: accepted by the operator on 2026-09-29, including the explicit
+qualification trade-off and deferral of colon-less headings and oversized
+question/answer grouping to #105. [Acceptance recorded on PR #106](https://github.com/canfieldjuan/document-summarizer/pull/106#issuecomment-5892400147).
+Contract acceptance does not itself authorize merge or qualify summary quality.
+
+Root cause: native PDF text is commonly one normalized block per page. The
+version-13 sentence-only catalog drops bounded form/layout groups when they
+share a page with other text. Its open-set two-to-five-letter abbreviation rule
+also joins ordinary complete sentences into an oversized unit. Both page
+analysis and coherent synthesis consume this lossy catalog.
+
+Required change surface: the shared analysis quote segmenter, its versioned
+catalog reconstruction, page warning/omission validation, and coherent catalog
+reconstruction. New runs use analysis 14.0.0. Keep the exact version-13 and
+version-12 segmentation policies for stored analysis. A coherent artifact built
+from older analysis must keep the pre-change version-13 catalog behavior; new
+analysis uses the new catalog during generation and every validation path.
+Synthesis and other artifact versions do not change.
+
+Required behavior:
+
+- Preserve the existing whole-block admission through 600 Unicode characters.
+  Every candidate remains an exact contiguous source substring with the same
+  block/page provenance; no whitespace normalization, text invention, value
+  substitution or arbitrary character/word cuts are permitted.
+- In larger blocks, recognize blank-line-delimited layout groups before
+  sentence segmentation. Keep a complete bounded prose paragraph or a bounded
+  label/value form group intact. Keep wrapped lines, table labels and their
+  values together; a single newline is not a split boundary. A heading or
+  colon/semicolon/comma-ended lead-in does not authorize an independent quote
+  fragment. Attach an immediately following qualification (such as an exception
+  or condition) to its preceding group. Unrecognized unterminated prose stays
+  subject to omission, including a dangling page tail.
+- Where a layout group is too large, complete sentence units may be packed up
+  to the existing 600-character bound. Use Unicode sentence proposals with
+  explicit initial, acronym, decimal, ellipsis and abbreviation defenses.
+  Token length alone must not classify ordinary words as abbreviations. Keep
+  recognized abbreviations, including Dept., attached to their continuation.
+  Keep immediately following conditional/exception sentences with their
+  governing sentence; omit the combined unit if it cannot fit safely.
+- Do not cut a long operative sentence at arbitrary whitespace, a wrapped line,
+  or a semicolon solely to make it fit. An oversized table or compound clause
+  that cannot be represented with its context remains explicitly omitted.
+  This slice does not claim recovery of every source passage.
+- Preserve source order, candidate identity binding, the 600-character limit,
+  and durable boundary-loss warnings and technical omissions. Reconstruct the
+  same policy in validation, including after save/reload; reject a shortened,
+  reordered, forged or differently versioned catalog. Existing context budgets,
+  coverage denominators and failure/fallback semantics remain authoritative.
+
+Explicit non-scope: model selection/promotion or settings, generation prompts,
+scorer changes, fallback materiality/one-quote-per-page selection, OCR, parser
+normalization, provider scheduling, public schemas, storage migrations,
+dependencies, and historical artifact rewriting. Cross-page clause assembly and
+subdivision of tables/operative clauses requiring shared noncontiguous context
+are later work, not permission to silently admit detached assertions here.
+
+Assumptions/blockers: blank lines and wrapped lines are already present in
+normalized native source. Layout admission is structural source preservation,
+not a guarantee that a model claim is semantically correct. Private source
+content stays in ignored evidence; committed regressions use neutral fixtures.
+
+Verification plan: fail-first production-catalog tests for ordinary short
+sentence endings and bounded form/table groups on a long page. Probe real
+abbreviations, decimal/initial/ellipsis boundaries, wrapped rows, qualifications,
+unterminated tails, and 599/600/601-character limits. Prove generation/validation
+catalog agreement and historical version-13 replay. Run focused Rust tests,
+formatting and strict Clippy; the broad local Rust suite is justified by this
+shared source/provenance boundary. Compare the recorded private A/B passage
+checklist against rebuilt catalogs and report recovered/still-omitted passages
+separately from any live-model/delivered-summary result. A fresh production A/B
+run uses the existing isolated 9B/32k evidence setup when the GPU is exclusive;
+no corpus result is an accuracy qualification without reviewed labels.
+
+Implementation summary: analysis 14 owns the new layout/sentence policy in
+`summary/quote_segments.rs`. `summary.rs` dispatches by persisted version and
+shares punctuation defenses; `summary/pages.rs` preserves version-13 warning
+and omission reconstruction. `summary/coherent.rs` binds generation and
+verification catalogs to the analysis policy that produced the run. No model,
+output-schema, public API or storage changes are included.
+
+Verification: both new production-catalog regressions failed first with source
+omissions and then passed. The all-target/all-feature Rust suite passed (613
+library tests, 3 office checks and 8 release checks; 19 opt-in tests ignored).
+Strict Clippy and formatting passed. Tests cover the stated limits, abbreviations,
+wrapped labels/values, heading chains, qualifications, unsafe tails and historical
+catalog reconstruction. One test-only clone cleanup followed the broad run and
+was recompiled by strict Clippy; production code was unchanged.
+
+The private offline probe reproduced all 24 saved version-13 catalogs exactly.
+Full source-range survival of the recorded witness excerpts changed from 10/20
+to 12/20 for A and 11/20 to 12/20 for B, with no previously retained witness lost.
+These are source-passage counts, not extraction or summary accuracy scores.
+Sixteen witness excerpts remain unavailable; oversized tables, compound clauses
+and cross-page context are not solved by this change.
+
+Fresh production-pipeline runs at implementation `d5a4760`, using the existing
+private Qwen3.5-9B Q4_K_M/32k/thinking-off runtime composition, passed in General
+and Contract mode for both A and B. One owned GPU server stayed loaded across
+all four attempts. Input hashes, actual context and exclusive ownership were
+verified; reopened artifacts matched. Both modes delivered fallback summaries:
+A cited 10 pages and B cited 14 text-bearing pages. General rejected the model
+drafts; Contract still took its source-admission fallback. This is a bounded
+source-preservation gain, not coherent-summary or model qualification. Installed
+settings and production presets were untouched.
+
+Cold diff audit: `summary.rs` owns version dispatch and the shared punctuation
+predicate; `quote_segments.rs` owns exact source ranges and bounded packing;
+`pages.rs` keeps historical omission checks; `coherent.rs` carries persisted
+analysis context through catalog reconstruction. The regression and replay tests
+exercise those boundaries. No unrelated files, dependencies or generated
+artifacts changed. All segmentation state is local to the call; no shared queue,
+cache or mutable runtime state was introduced.
+
+Gap audit: DONE for the contracted implementation and local/offline/live proof.
+NOT DONE for merge until exact-head CI and review pass. Remaining source loss,
+coherent drafting and fallback materiality require separate work; page coverage
+is not a claim of complete or correct facts. Follow-up issue #105 tracks shared
+context for oversized source clauses and tables.
+
+
+#### PR 106 review correction contract
+
+Root cause: the form-separation predicate measures the preceding paragraph plus
+form instead of the form itself, so an unrelated short unfinished paragraph can
+hide a bounded form. The sentence predicate also treats every short uppercase
+word as an abbreviation, repeating the length-only loss for emphatic ordinary
+words. Both findings originate in the shared segmentation policy.
+
+Required change surface: `summary/quote_segments.rs` must recognize a bounded
+next form independently of the preceding range while retaining governing
+punctuation and qualification attachment. `summary.rs` must remove the general
+uppercase-word defense from analysis 14; explicit abbreviations, initials and
+dotted acronyms remain protected. An undotted acronym can end a sentence and
+must not acquire abbreviation status from capitalization alone. Historical
+analysis policies and all other scope boundaries above remain unchanged.
+
+Verification plan: add fail-first production-catalog regressions for a long
+page containing complete prose, a short unfinished paragraph and a bounded
+form, and for ordinary uppercase sentence endings. Retain long-prefix and
+punctuated governing-prefix tests; exercise bounded/oversized forms and dotted
+acronyms, explicit abbreviations, and version-13 replay. Run the adjacent summary
+suite, formatting and strict Clippy. CI owns the duplicated broad suites. The
+previous live proof remains attributed to implementation d5a4760; no new model
+quality claim is made by these deterministic repairs.
+
+Implementation summary: correction 6c040c1 measures the next form itself and
+removes the capitalization-only sentence guard. The former NASA continuation
+fixture encoded the incorrect rule; it now uses dotted N.A.S.A., while undotted
+NASA is explicitly covered as an ordinary sentence-final token. Production
+catalog tests exercise uppercase endings and mixed complete/incomplete/form
+input. Boundary tests cover forms of 599/600/601 characters and short/long
+prefixes, retaining governing colon, semicolon, comma and hyphen attachment.
+
+Verification: both production regressions failed first in the reported way,
+then all four focused catalog/replay tests passed. The adjacent summary suite
+passed 227 tests with 10 opt-in tests ignored. Formatting and all-target,
+all-feature strict Clippy passed. The private source replay reproduced all 24
+historical catalogs; all 40 tracked source-witness comparisons were no worse
+than the earlier PR proof. Witness survival remains A 12/20 and B 12/20. No new
+inference ran; the live proof above remains evidence for d5a4760, not this head.
+
+Cold diff audit: the two production predicates and their regression fixtures
+are the only code changes in this correction. Catalog version dispatch,
+source provenance and the 600-character bound are unchanged; historical replay
+still passes. Both consumers obtain the repaired catalog through the same
+builder. All state remains local to each call, with no concurrency or storage
+changes. CI will repeat the broader platform checks on the revised head.
+
+Gap audit: DONE for the review corrections and local proof. NOT DONE for merge
+until the published correction receives green CI and exact-head review.
+
+
+#### Colon-prefixed prose review correction
+
+Root cause: one predicate currently serves two different decisions: recognizing
+bounded label/value content and declaring an oversized group indivisible. A
+single colon-prefixed prose field is enough for the first decision but provides
+no multi-row form structure for the second. Consequently complete sentences in
+long prose such as `Summary: ...` bypass the shared sentence segmenter.
+
+Required change surface: share field-row recognition in
+`summary/quote_segments.rs`, but require multiple physical label/value rows to
+make an oversized form indivisible. A single field, including a wrapped prose
+value, must use the existing sentence/qualification rules when oversized.
+Bounded fields remain intact; heading/lead-in grouping must not change. Keep
+multi-row tables indivisible so values cannot detach from their labels. No
+label-name exceptions, model/prompt changes, limit increases or historical
+policy changes are permitted. Other scope boundaries above remain unchanged.
+
+Verification plan: fail-first production-catalog regression for differently
+named colon prefixes and single-line/wrapped prose. Probe the opposite boundary
+with bounded and oversized multi-field forms, periods in field values, following
+usable prose, and a conditional sentence which must stay with its governing
+sentence. Run adjacent summary tests, formatting and strict Clippy, and replay
+the existing private catalogs/witnesses. CI owns repeated broad platform tests;
+no new inference or summary-quality claim is required for this deterministic
+repair.
+
+Implementation summary: b3415dc shares `form_field_count` between bounded
+field recognition and oversized-form admission. Multiple physical field rows
+remain indivisible; a lone oversized field reaches the existing sentence and
+qualification policy. Prefix names and line wrapping do not select the branch.
+There is no new interpretation of money values or model output.
+
+Verification: the production-catalog regression failed first with one omitted
+unit, then passed for each tested label and space/LF/CRLF separator. The adjacent
+summary suite passed 230 tests with 10 opt-in tests ignored; formatting and
+strict all-target/all-feature Clippy passed. Boundary tests retain qualified
+sentences together and keep multi-field forms indivisible at 599/600/601
+characters, including periods within field values and following usable prose.
+The private replay reproduced all 24 historical catalogs and found no loss
+across 40 tracked witnesses compared with e67ba67. No inference was rerun.
+
+Cold diff audit: `quote_segments.rs:45-55` separates whole-group admission from
+sentence segmentation; `form_field_count` owns recognition for both decisions.
+The surrounding lead-in/qualification grouping is unchanged. Tests in
+`summary.rs` exercise the production catalog and its validator; segmenter tests
+exercise both sides of form admission. No version, model, schema, storage,
+shared mutable state or concurrency behavior changed.
+
+Gap audit: DONE for this correction and local proof; NOT DONE for merge until
+fresh CI and exact-head review pass on the published revision.
+
+
+#### Retained prose boundaries and historical omission replay
+
+Root cause: generic `if`/`when`/`but` prefixes do not establish dependence on a
+previous complete sentence. Also, the relaxed sentence policy can cut inside a
+bounded range already retained by version 13. Historical quote-boundary omission
+reconstruction incorrectly stamps the current version rather than its input
+analysis version; the prior replay test mislabeled a new omission as old.
+
+Required change surface: `quote_segments.rs` must preserve the interior of
+version-13 retained prose ranges, permitting relaxed boundaries only outside
+those ranges. Use the existing version-13 segmenter as authority, not a growing
+abbreviation allowlist. Remove generic `if`/`when`/`but` qualification triggers;
+explicit exception/dependence prefixes retain their context rule. In `pages.rs`,
+pass the analysis version to quote-boundary omission construction. Production
+catalog and replay tests belong in `summary.rs`; frozen historical segmentation,
+model behavior and all other non-scope boundaries remain unchanged.
+
+Verification plan: fail-first regressions comparing versions 13 and 14 for
+independent conditional sentences and unlisted abbreviations (including a
+neutral unknown abbreviation), plus a saved version-13 omission with its actual
+version stamp. Add the inverse version-stamp rejection and preserve explicit
+exception/multi-field form tests. Re-run adjacent summary tests, formatting,
+strict Clippy and private source replay after the complete correction.
+
+The no-regression source-witness claim remains limited to the tracked private
+witnesses. It is not a universal semantic guarantee or permission to detach a
+known exception or table merely because a historical splitter did so.
+
+Implementation summary: 44c7cc7 shares the unchanged version-13 sentence-unit
+enumeration with the current segmenter. Current prose segmentation will not
+cut inside a bounded historical unit. Actual byte offsets preserve the correct
+occurrence when identical text also appears inside an omitted clause. Generic
+`if`/`when`/`but` prefixes no longer attach independent operative sentences.
+`quote_boundary_omission` now stamps the supplied analysis version.
+
+Verification: all three review regressions failed first as reported, then
+passed. A repeated-text regression also failed with an intermediate unpublished
+text-matching implementation; deriving offsets from the original unit owner
+fixed it. The final adjacent summary suite passed 233 tests (10 opt-in ignored);
+formatting and strict all-target/all-feature Clippy passed. A serialized genuine
+version-13 omission validates, while a current run with the old stamp fails.
+
+The historical enumeration loop is byte-for-byte unchanged, and the private
+probe reproduces all 24 saved historical catalogs. Across 40 tracked source
+witnesses, none regressed relative to e67ba67; A retains 12/20 and B now retains
+13/20. This is source coverage only. The review's Approx. example was already
+split by version 13 because it exceeds that policy's short-token range; the
+regression records that limitation rather than claiming a new general-language
+abbreviation detector. No new inference ran.
+
+Cold diff audit: `summary.rs::analysis_sentence_units_v13` owns historical byte
+ranges without changing the old policy; the new range consumer stays within
+`quote_segments.rs`. `pages.rs` receives the persisted version rather than a
+current global constant. Production-catalog and replay tests cover each change,
+including mixed omitted/retained text, duplicate text, and the wrong-version
+negative case. Explicit exceptions and multi-field tables retain their existing
+context safeguards. No shared mutable state or model/runtime change was added.
+
+Gap audit: DONE for all known review corrections and local proof. NOT DONE for
+merge until fresh CI and exact-head review pass on the final published revision.
+
+
+#### Common form labels and numbered prose
+
+Root cause: the shared field-row recognizer rejects digits and common label
+punctuation, so a bounded form starting with such a label never reaches layout
+admission. This is a gap in the new feature, not a version-13 regression.
+
+Required change surface: `quote_segments.rs::label_value` must admit digits,
+ASCII/curly apostrophes, ampersands and number signs within otherwise bounded
+label/value rows. Require the first alphanumeric label character to be a letter:
+number-led clause headings remain prose, including parenthesized numbering.
+Do not add period-based sentence heuristics or field-name exceptions. Preserve
+the nonempty value, label word bound, exact source bytes, shared field-count
+ownership and all existing group-size and qualification rules. Historical
+policies, models, prompts and other non-scope boundaries above are unchanged.
+
+Verification plan: fail-first production-catalog coverage for these labels in
+bounded forms after unrelated dangling prose; include LF/CRLF, Unicode character
+limits and 599/600/601-character groups. Compare multi-row numbered prose over
+600 characters against the actual version-13 catalog and validate the current
+catalog. Retain oversized-form and governing-context checks. Run adjacent
+summary tests, formatting, strict Clippy and the private historical/witness
+replay. No new inference is needed to prove this deterministic correction.
+
+Implementation summary: 84a6066 changes the shared label recognizer, admitting
+common field punctuation and digits after a letter-led label. The same field
+count still controls bounded layout admission and oversized form preservation.
+Number-led headings, including parenthesized numbering, remain on the existing
+sentence path; periods were not added to the label character set.
+
+Verification: the production-catalog test failed first by omitting the bounded
+Address Line 1 form. After the fix, all seven focused preservation tests passed,
+including the new opposite-boundary comparison against version 13. The adjacent
+summary suite passed 235 tests with 10 opt-in tests ignored. Formatting and
+strict all-target/all-feature Clippy passed. Tests exercise all added character
+classes, both apostrophe forms, LF/CRLF and 599/600/601 Unicode-character limits,
+mixed complete/dangling/form input and oversized multi-row numbered prose.
+
+The private probe reproduced all 24 saved historical catalogs and found no
+regressions across 40 tracked witnesses versus 7550fd9. Survival is unchanged
+at A 12/20 and B 13/20. This repair was not a new inference or quality test.
+
+Cold diff audit: only the shared label predicate and production-catalog
+regressions changed in this correction. Admission and validation still consume
+the same versioned catalog. The contract's limits, historical policies and
+per-call state remain unchanged, with no new concurrency, storage or runtime
+behavior. Numbered clauses cannot newly become forms through the added digits.
+
+Gap audit: DONE for the common-label correction and local proof. NOT DONE for
+merge until fresh CI and exact-head review pass on the published revision.
+
+
+#### Prose-valued rows are not indivisible forms
+
+Contract revision: the letter-led label check still admits `(a) Scope`, `Article
+I` and `Section A`. Counting these labels alone makes their multi-sentence
+clauses indivisible and loses quotes that version 13 retained. The form/prose
+decision must inspect the row value as well as the label.
+
+Required change surface: the shared field recognizer returns its parsed value
+to `form_field_count`. If the existing version-13 sentence-unit parser finds a
+complete sentence followed by additional non-whitespace text in that value,
+the group uses the existing prose path, including its retained-range and
+qualification safeguards. This is structural evidence of prose, not an
+exception list of clause names. A single sentence in a field value is not
+sufficient to reclassify a form. True multi-field forms and governing
+qualifications keep their existing bounds and fail-closed behavior.
+
+Explicit non-scope: no universal fallback through version 13 for every omitted
+group, since that would detach deliberately grouped table/exception context.
+Do not extend heading recognition in this correction. The review permits the
+unpunctuated-heading recovery gap to move to #105; version 13 also omitted it.
+Historical segmentation, model/runtime settings, public schemas, storage,
+privacy boundaries and other scope exclusions above remain unchanged.
+
+Verification plan: reproduce the lettered/article/section clause loss through
+the production catalog before changing code, comparing with version 13.
+Include arbitrary letter-led labels to exclude name-specific fixes, LF/CRLF
+and unterminated continuations. Retain opposite-side table, abbreviation,
+qualification and size-boundary checks. Run focused and adjacent summary
+tests, formatting, strict Clippy and the existing private source replay.
+
+
+Contract revision from the operator's one-sentence-clause probe: a group whose
+every logical field value is a complete sentence must also use prose
+segmentation. A mixed form with scalar Name/Phone values and a sentence-valued
+Notes row remains a form. Values include wrapped lines up to the next field;
+checking only the first physical value line could misclassify an unfinished
+wrapped value as a complete sentence. Recognized governing headings remain
+attached. Reuse the version-13 sentence parser for both complete-value and
+sentence-plus-continuation checks, not terminal-character guesses.
+
+Add one-sentence lettered/article rows and arbitrary labels to the production
+catalog regression; preserve mixed forms at the size limits and with wrapped
+values. The initial lowercase-continuation fixture incorrectly assumed version
+13 retained its first sentence; correct that test setup and re-prove it against
+the published code before treating it as fail-first evidence. No new production
+rule is justified by that mistaken baseline assumption.
+
+
+Private replay found a bounded question/answer field losing its final answer
+under the proposed value parser. Correct the decision boundary: existing bounded
+layout groups remain whole before value classification. Apply the prose-value
+rule only when an oversized group needs a splitting decision. A question mark
+inside a bounded form must not detach its following printed answer. Add a neutral
+question/answer regression and require no loss against the current private
+witness baseline before publishing this correction.
+
+
+Implementation summary: 1a09c42 keeps bounded layout admission unchanged and
+uses the existing version-13 sentence parser on logical field values only for
+oversized groups. A sentence with continuation, or complete sentences in every
+value, selects the existing prose path. Wrapped values are read as contiguous
+source ranges. Scalar/mixed forms remain indivisible; no clause-name exceptions
+or blanket fallback were added. The mixed-form period fixture now includes a
+scalar value because the operator explicitly requires all-sentence rows to use
+prose segmentation.
+
+Verification: multi-sentence and single-sentence clause regressions reproduced
+before their fixes. The corrected unfinished-continuation fixture fails against
+published 1a21aa8 at the current-versus-historical comparison and passes now.
+A neutral question/answer regression reproduced the loss introduced by the
+unpublished intermediate change and passes with bounded-layout precedence.
+The final summary suite passed 241 tests (10 opt-in ignored); formatting and
+strict all-target/all-feature Clippy passed. Tests cover lettered, Article,
+Section and arbitrary labels, LF/CRLF, mixed scalar/Notes forms at 599/600/601
+characters, wrapped values, abbreviations, decimals, historical quote retention
+and existing qualification safeguards.
+
+All 24 saved version-13 catalogs reproduced. Across 40 private source witnesses,
+none regressed relative to 1a21aa8; final survival remains A 12/20 and B 13/20.
+The intermediate private replay failure is not counted as a pass. No inference
+ran. A neutral unpunctuated-heading probe confirms both policies omit that form;
+this incomplete recovery is deferred to #105 as the reviewer permitted.
+
+Cold diff audit: `quote_segments.rs::form_field_count` owns the oversized-group
+decision and obtains value offsets from `label_value`; `summary.rs` tests the
+production catalog and validator against the real version-13 result. All other
+production functions in this correction are unchanged. There is no shared
+mutable state, new runtime setting, schema, storage or concurrency change.
+Contract revisions preceded implementation; private content remains local.
+
+Gap audit: DONE for the lettered-clause correction and local proof. NOT DONE for
+merge until the published head has fresh CI and review. Unpunctuated headings
+remain a follow-up; source preservation is not a generated-summary quality claim.
