@@ -11287,7 +11287,7 @@ mod tests {
                 .count(),
             1
         );
-        assert!((1..=24).contains(&runtime.preflight_calls.load(Ordering::SeqCst)));
+        assert!((1..=64).contains(&runtime.preflight_calls.load(Ordering::SeqCst)));
         assert_eq!(
             runtime.verification_preflight_calls.load(Ordering::SeqCst),
             1
@@ -11317,7 +11317,7 @@ mod tests {
         let error = summarize_chunked_document(&mut conn, &runtime, &run_id)
             .expect_err("non-context verification admission must fail synthesis");
         assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
-        assert!((1..=24).contains(&runtime.preflight_calls.load(Ordering::SeqCst)));
+        assert!((1..=64).contains(&runtime.preflight_calls.load(Ordering::SeqCst)));
         assert_eq!(
             runtime.verification_preflight_calls.load(Ordering::SeqCst),
             1
@@ -11709,8 +11709,11 @@ mod tests {
                 assert_eq!(synthesis[0].system_prompt, synthesis[1].system_prompt);
                 assert_eq!(synthesis[0].output_format, synthesis[1].output_format);
                 assert_eq!(synthesis[0].seed, synthesis[1].seed);
+                // This fixture's preflight has no input-token charge. Repair
+                // can consume the initial 512-token feedback headroom while
+                // preserving the schema, seed and single repair limit.
                 assert_eq!(
-                    synthesis[0].max_output_tokens,
+                    synthesis[0].max_output_tokens + 512,
                     synthesis[1].max_output_tokens
                 );
                 assert_eq!(synthesis[1].ordinal, synthesis[0].ordinal + 1);

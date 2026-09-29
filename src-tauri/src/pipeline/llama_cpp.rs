@@ -3228,15 +3228,17 @@ mod tests {
 
     #[test]
     fn output_limit_is_distinct_and_retains_usage() {
-        let error = generation_error_for_completion(
-            r#"{"content":"{}","tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"limit"}"#,
-        );
-        assert_eq!(error.code, "MODEL_OUTPUT_LIMIT_REACHED");
-        assert_eq!(
-            error.request_attempts[0].provider_usage.completion_tokens,
-            Some(1)
-        );
-        assert!(!error.request_attempts[0].succeeded);
+        let escaped = serde_json::json!({"units":[{"text":"\u{0001}\\\"\n界\u{10ffff}".repeat(200),"source_ids":["s1"]}]}).to_string();
+        for content in ["{}", escaped.as_str()] {
+            let body = serde_json::json!({"content":content,"tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"limit"}).to_string();
+            let error = generation_error_for_completion(&body);
+            assert_eq!(error.code, "MODEL_OUTPUT_LIMIT_REACHED");
+            assert_eq!(
+                error.request_attempts[0].provider_usage.completion_tokens,
+                Some(1)
+            );
+            assert!(!error.request_attempts[0].succeeded);
+        }
     }
 
     #[test]

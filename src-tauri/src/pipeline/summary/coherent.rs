@@ -12119,9 +12119,11 @@ mod tests {
     }
 
     #[test]
-    fn synthesis_capacity_covers_schema_maximal_serialized_response() {
+    fn synthesis_requests_keep_paragraph_capacity_through_repair() {
         let runtime = ModalRepairRuntime::new(true);
-        let catalog = catalog();
+        let mut catalog = catalog();
+        catalog.candidates[0].evidence.exact_quote =
+            "The interpreter should retain the section.".into();
         let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
         generate_summary_with_validation_repair(
             SummaryProfile::General,
@@ -12129,7 +12131,7 @@ mod tests {
             "document",
             &catalog,
             prompt,
-            schema,
+            schema.clone(),
             input_character_limit(8_192).unwrap(),
             0,
             1,
@@ -12137,22 +12139,25 @@ mod tests {
         )
         .unwrap();
         let requests = runtime.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "initial generation plus existing modal repair"
+        );
         for request in requests {
-            let ModelOutputFormat::JsonSchema { schema, .. } = request.output_format else {
+            let ModelOutputFormat::JsonSchema { schema: actual, .. } = &request.output_format
+            else {
                 panic!("synthesis must declare its response shape");
             };
-            let units = &schema["properties"]["units"];
-            let fields = &units["items"]["properties"];
-            let text = "\u{0001}".repeat(fields["text"]["maxLength"].as_u64().unwrap() as usize);
-            let ids = fields["source_ids"]["items"]["enum"].as_array().unwrap();
-            let payload = json!({"units": vec![json!({"text":text,"source_ids":ids}); units["maxItems"].as_u64().unwrap() as usize]}).to_string();
-            let tokenizer =
-                crate::pipeline::qwen_tokenizer::QwenPromptTokenizer::conservative_byte_counter()
-                    .unwrap();
-            assert!(
-                tokenizer.count(&payload).unwrap() < request.max_output_tokens,
-                "schema-maximal JSON exceeds the synthesis output allowance"
+            assert_eq!(
+                actual, &schema,
+                "the generation and repair retain the original decoder shape"
             );
+            assert_eq!(
+                actual["properties"]["units"]["items"]["properties"]["text"]["maxLength"],
+                json!(1_200)
+            );
+            assert!(request.max_output_tokens > OUTPUT_TOKENS);
         }
     }
 

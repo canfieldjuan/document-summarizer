@@ -2279,35 +2279,39 @@ mod tests {
 
     #[test]
     fn streamed_output_limit_is_rejected_with_usage() {
-        for reason in [Some("length"), None, Some("future"), Some("stop")] {
-            let lines = vec![
-                serde_json::json!({"model":"fixture-model","message":{"content":"{}"},"done":false}).to_string(),
+        let escaped = serde_json::json!({"units":[{"text":"\u{0001}\\\"\n界\u{10ffff}".repeat(200),"source_ids":["s1"]}]}).to_string();
+        for content in ["{}", escaped.as_str()] {
+            for reason in [Some("length"), None, Some("future"), Some("stop")] {
+                let lines = vec![
+                serde_json::json!({"model":"fixture-model","message":{"content":content},"done":false}).to_string(),
                 serde_json::json!({"model":"fixture-model","message":{"content":""},"done":true,
                     "done_reason":reason,"prompt_eval_count":10,"eval_count":64}).to_string(),
             ];
-            let (url, server) = raw_chat_stream_server(lines);
-            let runtime =
-                OllamaRuntime::new(&url, "fixture-model", Duration::from_secs(5), None).unwrap();
-            let result = runtime.generate(&digest_guard_request());
-            server.join().unwrap();
-            if reason == Some("stop") {
-                assert_eq!(result.unwrap().text, "{}");
-            } else {
-                let error =
-                    result.expect_err("unqualified completion must not expose even parseable JSON");
-                assert_eq!(
-                    error.code,
-                    if reason == Some("length") {
-                        "MODEL_OUTPUT_LIMIT_REACHED"
-                    } else {
-                        "MODEL_EXECUTION_UNVERIFIED"
-                    }
-                );
-                assert_eq!(
-                    error.request_attempts[0].provider_usage.completion_tokens,
-                    Some(64)
-                );
-                assert!(!error.request_attempts[0].succeeded);
+                let (url, server) = raw_chat_stream_server(lines);
+                let runtime =
+                    OllamaRuntime::new(&url, "fixture-model", Duration::from_secs(5), None)
+                        .unwrap();
+                let result = runtime.generate(&digest_guard_request());
+                server.join().unwrap();
+                if reason == Some("stop") {
+                    assert_eq!(result.unwrap().text, content);
+                } else {
+                    let error = result
+                        .expect_err("unqualified completion must not expose even parseable JSON");
+                    assert_eq!(
+                        error.code,
+                        if reason == Some("length") {
+                            "MODEL_OUTPUT_LIMIT_REACHED"
+                        } else {
+                            "MODEL_EXECUTION_UNVERIFIED"
+                        }
+                    );
+                    assert_eq!(
+                        error.request_attempts[0].provider_usage.completion_tokens,
+                        Some(64)
+                    );
+                    assert!(!error.request_attempts[0].succeeded);
+                }
             }
         }
     }

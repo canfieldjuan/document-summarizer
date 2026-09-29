@@ -4,7 +4,11 @@ use crate::pipeline::qwen_tokenizer::TOKENIZER_FRAMING_RESERVE_TOKENS;
 
 const FORMATTING_TOKENS: u32 = 256;
 const REPAIR_FEEDBACK_TOKENS: u32 = 512;
-const CANONICAL_JSON_BYTES_PER_CHARACTER: usize = 6;
+// Pinned Qwen3.5 retained-response p99 = 0.22922983626440266. Rounded up.
+// See the calibration and stress limitations in PR-SYNTHESIS-OUTPUT-BUDGET.md.
+// This estimates normal text; verified completion, not this ratio, is safety.
+const TEXT_TOKENS_NUMERATOR: usize = 23;
+const TEXT_TOKENS_DENOMINATOR: usize = 100;
 
 fn invalid_budget() -> PipelineFailure {
     stage_failure(
@@ -15,10 +19,10 @@ fn invalid_budget() -> PipelineFailure {
     )
 }
 
-/// Qualified byte-level BPE tokenizers cannot emit more tokens than canonical
-/// JSON bytes. Include the longest allowed distinct IDs and all punctuation.
-/// Arbitrary wire whitespace/escape choices still require a verified stop.
-fn response_tokens(schema: &Value, characters: usize) -> Option<u32> {
+/// Bound structural overhead with canonical bytes, including the longest
+/// permitted distinct IDs. Text is calibrated separately, not multiplied by
+/// a worst-case escape expansion.
+fn response_structure(schema: &Value, characters: usize) -> Option<(usize, usize)> {
     let units = &schema["properties"]["units"];
     let count = usize::try_from(units["maxItems"].as_u64()?).ok()?;
     let sources = &units["items"]["properties"]["source_ids"];
@@ -47,21 +51,66 @@ fn response_tokens(schema: &Value, characters: usize) -> Option<u32> {
         .map(|(_, id)| id)
         .collect();
     let empty = json!({"units": vec![json!({"text":"","source_ids":ids}); count]});
-    let text_bytes = count
+    Some((count, serde_json::to_vec(&empty).ok()?.len()))
+}
+
+fn response_tokens(schema: &Value, characters: usize) -> Option<u32> {
+    let (count, overhead) = response_structure(schema, characters)?;
+    let text_tokens = count
         .checked_mul(characters)?
-        .checked_mul(CANONICAL_JSON_BYTES_PER_CHARACTER)?;
-    let bytes = serde_json::to_vec(&empty)
-        .ok()?
-        .len()
-        .checked_add(text_bytes)?;
-    u32::try_from(bytes)
+        .checked_mul(TEXT_TOKENS_NUMERATOR)?
+        .checked_add(TEXT_TOKENS_DENOMINATOR - 1)?
+        / TEXT_TOKENS_DENOMINATOR;
+    u32::try_from(overhead.checked_add(text_tokens)?)
         .ok()?
         .checked_add(FORMATTING_TOKENS)
         .map(|n| n.max(OUTPUT_TOKENS))
 }
 
-/// Search uses the runtime's existing exact preflight, so stage wrappers cannot
-/// accidentally substitute a second tokenizer or a different framing policy.
+/// Diagnostic only: pathological serialization is intentionally not a decoder
+/// ceiling selector. Such output can exceed the estimate and must fail closed
+/// at the runtime stop boundary.
+#[cfg(test)]
+fn canonical_response_byte_bound(schema: &Value, characters: usize) -> Option<usize> {
+    let (count, overhead) = response_structure(schema, characters)?;
+    overhead.checked_add(count.checked_mul(characters)?.checked_mul(6)?)
+}
+
+/// Search the actual runtime boundary, including backend framing and wire caps.
+/// Initial feedback headroom is not sent as part of the generation allowance.
+fn available_output(
+    runtime: &dyn ModelRuntime,
+    request: &ModelRequest,
+    reserve_feedback: bool,
+) -> Result<Option<u32>, PipelineFailure> {
+    let reserve = if reserve_feedback {
+        REPAIR_FEEDBACK_TOKENS
+    } else {
+        0
+    };
+    let Some(mut high) = runtime
+        .context_tokens(PipelineStage::Synthesize)
+        .checked_sub(TOKENIZER_FRAMING_RESERVE_TOKENS)
+        .and_then(|n| n.checked_sub(reserve))
+    else {
+        return Ok(None);
+    };
+    let mut low = OUTPUT_TOKENS;
+    let mut admitted = None;
+    let mut probe = request.clone();
+    while low <= high {
+        let tokens = low + (high - low) / 2;
+        probe.max_output_tokens = tokens.checked_add(reserve).ok_or_else(invalid_budget)?;
+        if !request_exceeds_runtime_context(runtime, &probe)? {
+            admitted = Some(tokens);
+            low = tokens + 1;
+        } else {
+            high = tokens - 1;
+        }
+    }
+    Ok(admitted)
+}
+
 pub(super) fn admit(
     runtime: &dyn ModelRuntime,
     request: &ModelRequest,
@@ -75,35 +124,51 @@ pub(super) fn admit(
         .and_then(|n| usize::try_from(n).ok())
         .filter(|n| *n > 0 && *n <= MAX_UNIT_CHARACTERS)
         .ok_or_else(invalid_budget)?;
-    let mut low = if resize { 1 } else { maximum };
-    let mut high = maximum;
-    let mut admitted = None;
-    while low <= high {
-        let characters = low + (high - low) / 2;
-        let tokens = response_tokens(schema, characters).ok_or_else(invalid_budget)?;
-        let mut candidate = request.clone();
+    let estimate = response_tokens(schema, maximum).ok_or_else(invalid_budget)?;
+    let Some(capacity) = available_output(runtime, request, resize)? else {
+        return Ok(None);
+    };
+    let mut candidate = request.clone();
+    if estimate > capacity {
+        if !resize {
+            return Ok(None);
+        }
+        let mut low = 1;
+        let mut high = maximum;
+        let mut ceiling = None;
+        while low <= high {
+            let characters = low + (high - low) / 2;
+            if response_tokens(schema, characters).ok_or_else(invalid_budget)? <= capacity {
+                ceiling = Some(characters);
+                low = characters + 1;
+            } else {
+                high = characters - 1;
+            }
+        }
+        let Some(characters) = ceiling else {
+            return Ok(None);
+        };
         let ModelOutputFormat::JsonSchema { schema, .. } = &mut candidate.output_format else {
             unreachable!("the request shape was checked above");
         };
         schema["properties"]["units"]["items"]["properties"]["text"]["maxLength"] =
             json!(characters);
-        // A repair consumes the headroom reserved by the initial request.
-        candidate.max_output_tokens = tokens
-            .checked_add(if resize { REPAIR_FEEDBACK_TOKENS } else { 0 })
-            .ok_or_else(invalid_budget)?;
-        let within_context = candidate
-            .max_output_tokens
-            .checked_add(TOKENIZER_FRAMING_RESERVE_TOKENS)
-            .is_some_and(|n| n <= runtime.context_tokens(PipelineStage::Synthesize));
-        if within_context && !request_exceeds_runtime_context(runtime, &candidate)? {
-            candidate.max_output_tokens = tokens;
-            admitted = Some(candidate);
-            low = characters + 1;
-        } else {
-            high = characters - 1;
+        // A changed schema can change the input token count on schema-bearing
+        // transports. Re-admit that final request, including feedback headroom.
+        let Some(final_capacity) = available_output(runtime, &candidate, true)? else {
+            return Ok(None);
+        };
+        let ModelOutputFormat::JsonSchema { schema, .. } = &candidate.output_format else {
+            unreachable!("the request shape was checked above");
+        };
+        if response_tokens(schema, characters).ok_or_else(invalid_budget)? > final_capacity {
+            return Ok(None);
         }
+        candidate.max_output_tokens = final_capacity;
+    } else {
+        candidate.max_output_tokens = capacity;
     }
-    Ok(admitted)
+    Ok(Some(candidate))
 }
 
 pub(super) fn validate_response(
@@ -196,43 +261,107 @@ mod tests {
     }
 
     #[test]
-    fn exact_capacity_and_serialized_unicode_bounds_agree() {
+    fn b_and_small_32k_prompts_preserve_1200_character_sections() {
+        for input in [20_395, 4_000, 1_500] {
+            let runtime = CapacityRuntime {
+                context: 32_768,
+                input,
+                failure: None,
+            };
+            let admitted = admit(&runtime, &request(), true).unwrap().unwrap();
+            assert_eq!(
+                schema(&admitted)["properties"]["units"]["items"]["properties"]["text"]
+                    ["maxLength"],
+                json!(MAX_UNIT_CHARACTERS),
+                "fitting 32k response must preserve the existing paragraph ceiling; input={input}"
+            );
+        }
+    }
+
+    #[test]
+    fn fitting_8k_shapes_keep_the_existing_ceiling_and_all_available_output() {
+        let mut request = request();
+        if let ModelOutputFormat::JsonSchema { schema, .. } = &mut request.output_format {
+            // Production IDs are s + ordinal, including real B's 146 sources.
+            schema["properties"]["units"]["items"]["properties"]["source_ids"]["items"]["enum"] =
+                json!((1..=146).map(|n| format!("s{n}")).collect::<Vec<_>>());
+        }
+        for (context, input) in [(32_768, 20_395), (8_192, 4_000), (8_192, 2_000)] {
+            let runtime = CapacityRuntime {
+                context,
+                input,
+                failure: None,
+            };
+            let admitted = admit(&runtime, &request, true).unwrap().unwrap();
+            assert_eq!(schema(&admitted), schema(&request));
+            assert_eq!(
+                admitted.max_output_tokens,
+                context - input - TOKENIZER_FRAMING_RESERVE_TOKENS - REPAIR_FEEDBACK_TOKENS
+            );
+            let mut probe = admitted.clone();
+            probe.max_output_tokens += REPAIR_FEEDBACK_TOKENS;
+            runtime.preflight_request(&probe).unwrap();
+            probe.max_output_tokens += 1;
+            assert!(runtime.preflight_request(&probe).is_err());
+        }
+    }
+
+    #[test]
+    fn measured_shortfall_alone_reduces_shape_and_locally_enforces_it() {
+        let request = request();
+        let required = response_tokens(schema(&request), MAX_UNIT_CHARACTERS).unwrap();
+        for deficit in [0, 1, 500] {
+            let runtime = CapacityRuntime {
+                context: 8192,
+                input: 8192 - TOKENIZER_FRAMING_RESERVE_TOKENS - REPAIR_FEEDBACK_TOKENS - required
+                    + deficit,
+                failure: None,
+            };
+            let admitted = admit(&runtime, &request, true).unwrap().unwrap();
+            let fields = &schema(&admitted)["properties"]["units"]["items"]["properties"];
+            let length = fields["text"]["maxLength"].as_u64().unwrap() as usize;
+            assert_eq!(length == MAX_UNIT_CHARACTERS, deficit == 0);
+            assert_eq!(admitted.max_output_tokens, required - deficit);
+            assert!(
+                response_tokens(schema(&admitted), length).unwrap() <= admitted.max_output_tokens
+            );
+            if deficit > 0 {
+                assert!(
+                    response_tokens(schema(&admitted), length + 1).unwrap()
+                        > admitted.max_output_tokens
+                );
+            }
+            let payload =
+                json!({"units":[{"text":"x".repeat(length),"source_ids":["s1x"]}]}).to_string();
+            validate_response(&admitted, &payload).unwrap();
+            let too_long =
+                json!({"units":[{"text":"x".repeat(length+1),"source_ids":["s1x"]}]}).to_string();
+            assert!(validate_response(&admitted, &too_long).is_err());
+        }
+    }
+
+    #[test]
+    fn pathological_byte_bound_is_diagnostic_not_an_admission_rule() {
+        let request = request();
+        let diagnostic =
+            canonical_response_byte_bound(schema(&request), MAX_UNIT_CHARACTERS).unwrap();
+        assert!(diagnostic > 32_768);
         let runtime = CapacityRuntime {
             context: 32_768,
             input: 20_395,
             failure: None,
         };
-        let admitted = admit(&runtime, &request(), true).unwrap().unwrap();
-        let fields = &schema(&admitted)["properties"]["units"]["items"]["properties"];
-        let length = fields["text"]["maxLength"].as_u64().unwrap() as usize;
-        assert!(length < MAX_UNIT_CHARACTERS);
-        assert!(admitted.max_output_tokens > OUTPUT_TOKENS);
-        let bound = response_tokens(schema(&admitted), length).unwrap();
-        assert_eq!(bound, admitted.max_output_tokens);
-        let next = response_tokens(schema(&admitted), length + 1).unwrap();
-        assert!(
-            runtime.input + next + REPAIR_FEEDBACK_TOKENS + TOKENIZER_FRAMING_RESERVE_TOKENS
-                > runtime.context
-        );
+        let admitted = admit(&runtime, &request, true).unwrap().unwrap();
+        assert_eq!(schema(&admitted), schema(&request));
+        let text = "\u{0001}\\\"\n界\u{10ffff}".repeat(200);
+        let payload =
+            json!({"units":vec![json!({"text":text,"source_ids":["s1x"]});8]}).to_string();
         let tokenizer = QwenPromptTokenizer::conservative_byte_counter().unwrap();
-        let ids: Vec<_> = fields["source_ids"]["items"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .rev()
-            .take(8)
-            .cloned()
-            .collect();
-        for character in ['x', '\u{0001}', '\n', '"', '\\', '\u{10ffff}', '界'] {
-            let text = character.to_string().repeat(length);
-            let payload =
-                json!({"units":vec![json!({"text":text,"source_ids":ids});8]}).to_string();
-            assert!(tokenizer.count(&payload).unwrap() + FORMATTING_TOKENS <= bound);
-            validate_response(&admitted, &payload).unwrap();
-        }
-        let too_long =
-            json!({"units":[{"text":"x".repeat(length+1),"source_ids":["s1x"]}]}).to_string();
-        assert!(validate_response(&admitted, &too_long).is_err());
+        assert!(tokenizer.count(&payload).unwrap() > admitted.max_output_tokens);
+        assert!(payload.len() <= diagnostic);
+        // A schema-valid answer is not guaranteed to fit. Adapter regressions
+        // independently require a qualified completion before returning text.
+        validate_response(&admitted, &payload).unwrap();
     }
 
     #[test]
@@ -325,12 +454,14 @@ mod tests {
         let first = admit(&runtime, &request(), true).unwrap().unwrap();
         let repair = admit(&runtime, &first, false).unwrap().unwrap();
         assert_eq!(schema(&repair), schema(&first));
+        let required = response_tokens(schema(&first), MAX_UNIT_CHARACTERS).unwrap();
         let full = CapacityRuntime {
             context: 32_768,
-            input: 21_000,
+            input: 32_768 - TOKENIZER_FRAMING_RESERVE_TOKENS - required + 1,
             failure: None,
         };
         assert!(admit(&full, &first, false).unwrap().is_none());
         assert!(admit(&full, &first, true).unwrap().is_some());
+        assert_eq!(schema(&first), schema(&request()));
     }
 }
