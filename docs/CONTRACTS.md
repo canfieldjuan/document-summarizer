@@ -2466,3 +2466,34 @@ behavior. Numbered clauses cannot newly become forms through the added digits.
 
 Gap audit: DONE for the common-label correction and local proof. NOT DONE for
 merge until fresh CI and exact-head review pass on the published revision.
+
+
+#### Prose-valued rows are not indivisible forms
+
+Contract revision: the letter-led label check still admits `(a) Scope`, `Article
+I` and `Section A`. Counting these labels alone makes their multi-sentence
+clauses indivisible and loses quotes that version 13 retained. The form/prose
+decision must inspect the row value as well as the label.
+
+Required change surface: the shared field recognizer returns its parsed value
+to `form_field_count`. If the existing version-13 sentence-unit parser finds a
+complete sentence followed by additional non-whitespace text in that value,
+the group uses the existing prose path, including its retained-range and
+qualification safeguards. This is structural evidence of prose, not an
+exception list of clause names. A single sentence in a field value is not
+sufficient to reclassify a form. True multi-field forms and governing
+qualifications keep their existing bounds and fail-closed behavior.
+
+Explicit non-scope: no universal fallback through version 13 for every omitted
+group, since that would detach deliberately grouped table/exception context.
+Do not extend heading recognition in this correction. The review permits the
+unpunctuated-heading recovery gap to move to #105; version 13 also omitted it.
+Historical segmentation, model/runtime settings, public schemas, storage,
+privacy boundaries and other scope exclusions above remain unchanged.
+
+Verification plan: reproduce the lettered/article/section clause loss through
+the production catalog before changing code, comparing with version 13.
+Include arbitrary letter-led labels to exclude name-specific fixes, LF/CRLF
+and unterminated continuations. Retain opposite-side table, abbreviation,
+qualification and size-boundary checks. Run focused and adjacent summary
+tests, formatting, strict Clippy and the existing private source replay.
