@@ -7990,6 +7990,49 @@ mod tests {
     }
 
     #[test]
+    fn source_preservation_keeps_colon_prefixed_prose() {
+        for label in ["Summary", "The issue is", "Description"] {
+            for separator in [" ", "\n", "\r\n"] {
+                let first = format!(
+                    "{label}: The parties {} recorded.",
+                    "discussed details ".repeat(20)
+                );
+                let second = format!("The reviewer {} completed.", "verified records ".repeat(20));
+                let source = format!("{first}{separator}{second}");
+                let (normalized, chunked) = materiality_fixture(&[source]);
+                let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+                let chunk = &chunked.chunks[0];
+                let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+                    ANALYSIS_VERSION,
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                )
+                .unwrap();
+                assert_eq!(
+                    catalog.omitted_source_units, 0,
+                    "prefix {label}, separator {separator:?}"
+                );
+                assert_eq!(
+                    catalog
+                        .candidates
+                        .iter()
+                        .map(|c| c.exact_quote.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![first.as_str(), second.as_str()]
+                );
+                validate_analysis_quote_catalog_for_blocks(
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                    &catalog.candidates,
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn source_preservation_keeps_ordinary_short_sentence_endings() {
         for ending in [
             "days", "work", "loss", "paid", "time", "Owner", "DAYS", "WORK", "LOSS", "PAID",

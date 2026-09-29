@@ -45,11 +45,14 @@ pub(super) fn segment(source: &str) -> AnalysisQuoteSegmentation {
     let mut units = Vec::new();
     for group in groups {
         let text = &source[group.start..group.end];
-        // A label/value layout group is indivisible, including wrapped rows and
-        // their headings. In particular, periods inside a table are not cuts.
-        if form_group(text)
+        // Multiple physical field rows establish an indivisible form layout.
+        // A single field may instead be colon-prefixed prose: preserve it whole
+        // when bounded, but let oversized prose use the sentence policy below.
+        let fields = form_field_count(text);
+        if fields > 1
             || text.chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS
-                && analysis_sentence_boundary(source, group.start, group.end, group.end, false)
+                && (fields > 0
+                    || analysis_sentence_boundary(source, group.start, group.end, group.end, false))
         {
             units.push(group);
             continue;
@@ -151,17 +154,22 @@ fn paragraphs(source: &str) -> Vec<(usize, usize)> {
 }
 
 fn form_group(text: &str) -> bool {
-    // A form starts with a label/value line, optionally under a colon heading.
-    // A later label must not reclassify preceding prose as an indivisible form.
+    form_field_count(text) > 0
+}
+
+fn form_field_count(text: &str) -> usize {
+    // A field group starts with a label/value row, optionally under headings.
+    // Wrapped value lines do not establish additional fields. A later label
+    // cannot reclassify ordinary preceding prose as a form.
+    let mut fields = 0;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         if label_value(line) {
-            return true;
-        }
-        if !line.trim_end().ends_with(':') {
-            return false;
+            fields += 1;
+        } else if fields == 0 && !line.trim_end().ends_with(':') {
+            return 0;
         }
     }
-    false
+    fields
 }
 
 fn label_value(line: &str) -> bool {
@@ -316,6 +324,52 @@ mod tests {
                     assert!(quote.contains(prefix.trim()));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn multi_field_forms_remain_indivisible_at_the_limit() {
+        let complete = format!("{}.", "a".repeat(599));
+        let labels = "Amount: $1\nDescription: ";
+        for size in [599, 600, 601] {
+            let form = format!("{labels}{}", "x".repeat(size - labels.len()));
+            let result = segment(&format!("{complete}\n\n{form}"));
+            assert_eq!(result.segments.contains(&form), size <= 600);
+            assert_eq!(result.omitted_source_units, usize::from(size > 600));
+        }
+
+        // Sentence punctuation in actual field values must not turn a table
+        // into independent assertions stripped of the other field's context.
+        let first = format!(
+            "Description: {} recorded.",
+            "documented details ".repeat(20)
+        );
+        let second = format!(
+            "Conditions: {} completed.",
+            "required procedures ".repeat(20)
+        );
+        for separator in ["\n", "\r\n"] {
+            let table = format!("{first}{separator}{second}");
+            let source = format!("{table}\n\nRetain the final complete sentence.");
+            let result = segment(&source);
+            assert_eq!(result.segments, vec!["Retain the final complete sentence."]);
+            assert_eq!(result.omitted_source_units, 1);
+        }
+    }
+
+    #[test]
+    fn colon_prefixed_prose_keeps_its_exception_attached() {
+        let rule = format!(
+            "Summary: The supplier {} work.",
+            "must retain scheduled records ".repeat(12)
+        );
+        let exception = format!("Unless {} applies.", "the documented exception ".repeat(8));
+        for separator in [" ", "\n", "\n\n"] {
+            let source =
+                format!("{rule}{separator}{exception}\n\nRetain the final complete sentence.");
+            let result = segment(&source);
+            assert_eq!(result.segments, vec!["Retain the final complete sentence."]);
+            assert_eq!(result.omitted_source_units, 1);
         }
     }
 
