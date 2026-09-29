@@ -2249,3 +2249,33 @@ NOT DONE for merge until exact-head CI and review pass. Remaining source loss,
 coherent drafting and fallback materiality require separate work; page coverage
 is not a claim of complete or correct facts. Follow-up issue #105 tracks shared
 context for oversized source clauses and tables.
+
+
+#### PR 106 review correction contract
+
+Root cause: the form-separation predicate measures the preceding paragraph plus
+form instead of the form itself, so an unrelated short unfinished paragraph can
+hide a bounded form. The sentence predicate also treats every short uppercase
+word as an abbreviation, repeating the length-only loss for emphatic ordinary
+words. Both findings originate in the shared segmentation policy.
+
+Required change surface: `summary/quote_segments.rs` must recognize a bounded
+next form independently of the preceding range while retaining governing
+punctuation and qualification attachment. `summary.rs` must remove the general
+uppercase-word defense from analysis 14; explicit abbreviations, initials and
+dotted acronyms remain protected. An undotted acronym can end a sentence and
+must not acquire abbreviation status from capitalization alone. Historical
+analysis policies and all other scope boundaries above remain unchanged.
+
+Verification plan: add fail-first production-catalog regressions for a long
+page containing complete prose, a short unfinished paragraph and a bounded
+form, and for ordinary uppercase sentence endings. Retain long-prefix and
+punctuated governing-prefix tests; exercise bounded/oversized forms and dotted
+acronyms, explicit abbreviations, and version-13 replay. Run the adjacent summary
+suite, formatting and strict Clippy. CI owns the duplicated broad suites. The
+previous live proof remains attributed to implementation d5a4760; no new model
+quality claim is made by these deterministic repairs.
+
+Implementation summary and cold diff audit: pending the failing-before probes.
+Gap audit: NOT DONE until both regressions pass and the published correction
+receives green CI and exact-head review.
