@@ -1,5 +1,9 @@
 # Synthesis response capacity (#95)
 
+The sizing correction below supersedes the original six-byte selection rule.
+Earlier implementation/live results are historical evidence, not qualification
+of the corrected rule. Review threads remain blocking until corrected proof.
+
 ## Root cause
 
 Coherent synthesis permits up to eight text units of 1,200 Unicode characters,
@@ -190,3 +194,73 @@ The direct runtimes perform tokenizer preflight. Gateway preflight checks its
 existing wire bounds; this work cannot establish token-exact input admission
 or the deployed gateway's private model identity. No such qualification is
 claimed. The response-size bound and existing failure handling still apply.
+
+## Contract revision: preserve paragraph capacity (#107 review)
+
+### Root cause
+
+The original owner treated a worst-case serialized byte upper bound as a normal
+output estimate. Eight times 1,200 times six exceeds 32k before any prompt. This
+made the existing paragraph ceiling impossible to admit and the regression test
+incorrectly required that loss. Limit-stop rejection already provides safety;
+shrinking normal prose to protect against every possible encoding is wrong.
+The issue comments asking for this correction were missed before publication.
+
+### Required change surface
+
+- `coherent/budget.rs`: search exact preflight for the maximum output allowance
+  after the existing framing/initial-feedback reserves and wire cap. Keep 1,200
+  characters whenever the measured estimate fits; reduce only for an estimated
+  capacity shortfall. Re-admit the final schema and preserve repair ceilings.
+- Estimate text at 23/100 tokens per Unicode character, rounded up, plus the
+  canonical JSON/longest-ID byte overhead and 256 formatting/completion tokens.
+  Keep the six-byte bound for diagnostics, never for admission selection.
+- Replace tests that require shrinking. Prove real B and small/tiny prompts at
+  32k retain 1,200, representative 8k requests retain 1,200, and genuinely tight
+  capacity reduces the ceiling. Prove all available admitted output is granted,
+  gateway caps/repair reserves remain, and pathological limit stops reject the
+  whole answer. Keep unrelated runtime stop and content checks unchanged.
+
+### Calibration and assumptions
+
+The fingerprint-verified Qwen3.5 tokenizer
+`d5ea96b68508288e2e6c70c4d80c47ba8471d020019e36a9d842464fcf1ec4b7`
+measured 11 unique retained coherent responses from the prior production runs.
+Nearest-rank p99 is 0.22922983626440266 tokens per text character (minimum
+0.16129032258064516), measured by summing each canonical JSON text-string token
+count and dividing by Unicode text characters. Round p99 upward to 0.23.
+No private text enters the repository; local calibration retains input hashes.
+
+Measure stress fixtures separately from the natural-output percentile: a
+quote/backslash/newline/accent/CJK prose fixture has 361 tokens / 1,332 characters
+(0.27102102102102105); a control/escape/CJK/non-BMP pathology has 2,801 / 1,200
+(2.3341666666666665). They explicitly exceed the estimate. Including the
+pathology as a worst-case selector would recreate the defect; safety remains
+verified-stop rejection, not a claim that p99 bounds all output. The estimate is
+calibrated to this retained sample, not a model-agnostic quality guarantee.
+A long prompt or ID-heavy maximal response may still need a smaller ceiling
+when this measured estimate does not fit. Existing 8k behavior is preserved for
+fitting representative shapes; arbitrary 8k inputs cannot guarantee full shape.
+
+### Non-scope
+
+No prompts, presets, installed settings, additional inference retries, model
+promotion, source/coverage validators, runtime API, dependencies or storage
+change. Keep the stop-classification and gateway fixes already in this PR.
+#100 stays frozen. No unrelated work while this correction is outstanding.
+
+### Verification plan
+
+Fail first on the published selector retaining 1,200 at B's 32k input count.
+Then run the budget/adjacent synthesis tests, adapter stop tests and format/lint.
+Replay saved A/B requests with the pinned tokenizer and full-length representative
+responses; distinguish empirical sizing from pathological upper bounds. Repeat
+the affected A/B General production runs and public coherent-document control
+with unchanged acceptance gates and exclusive GPU before reporting live proof.
+CI owns duplicated broad/platform suites. Do not resolve review threads until
+the corrected code and proof are published.
+
+### Gap audit
+
+NOT DONE: sizing correction and new regression/live proof pending. The earlier
+eight delivery passes did not establish preservation of coherent-summary room.

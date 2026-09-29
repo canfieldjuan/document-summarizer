@@ -493,13 +493,18 @@ one unit for each three source segments and is
 capped at eight; it is a ceiling rather than a target. The model may cite only
 request-local source identifiers supplied in that request. Initial synthesis,
 source-reduction admission and repairs share a response-capacity owner. It
-selects a text ceiling no larger than 1,200 characters by exact runtime
-preflight, counting canonical JSON structure, source IDs and six bytes per
-text character as a conservative byte-token bound. The request reserves 256
-output tokens for formatting/completion and 512 context tokens for repair
-feedback in addition to runtime framing. Schema and output allowance come from
-that same decision; local parsing enforces the admitted text ceiling. Repair
-re-admits its actual prompt without silently shrinking an earlier text ceiling.
+grants the maximum output allowance admitted by the existing runtime preflight,
+after reserving 512 context tokens for initial repair feedback in addition to
+runtime framing and respecting the gateway cap. It preserves the 1,200-character
+ceiling when an empirically calibrated response estimate fits: 23 tokens per
+100 text characters (rounded up), canonical JSON/source-ID bytes, and 256 output
+tokens for formatting/completion. This estimate is sizing, not a hard upper
+bound. Its pinned-tokenizer calibration and Unicode/escape stress measurements
+are recorded in PR-SYNTHESIS-OUTPUT-BUDGET.md. Only an estimated capacity shortfall
+can reduce the initial ceiling; repair re-admits its actual prompt without
+shrinking an earlier ceiling. The six-byte worst-case bound is diagnostic only.
+Schema and output allowance come from the same decision, with the final schema
+preflighted; local parsing enforces the admitted ceiling.
 Unbounded wire whitespace or alternative escaping can still exhaust output;
 an output-limit stop rejects the response with `MODEL_OUTPUT_LIMIT_REACHED`,
 separately from input truncation or an unknown completion boundary. This is not
