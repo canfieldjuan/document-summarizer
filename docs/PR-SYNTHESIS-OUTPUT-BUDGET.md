@@ -222,3 +222,50 @@ the corrected code and proof are published.
 NOT DONE for merge: sizing correction, regressions, offline and live proof pass;
 publication and exact-head CI/review remain. The earlier
 eight delivery passes did not establish preservation of coherent-summary room.
+
+
+## Review correction: carry the admitted ceiling through recovery
+
+### Root cause and required change surface
+
+The sizing owner writes a reduced `maxLength` and the response-budget check
+accepts it, but the coherent parser, clipped-unit salvage and repair feedback
+still use the global 1,200-character default. A completed JSON response with an
+incomplete unit at the reduced decoder ceiling therefore becomes a generic
+invalid response instead of receiving the existing bounded repair or preserving
+valid siblings. This mismatch was introduced by this PR's variable ceiling.
+
+Read the admitted character ceiling once from the request schema using the
+budget owner's accessor. Pass it through primary parsing, window/framing repair
+analysis, clipped-unit salvage and retained-sibling parsing. Repair feedback must
+name the same ceiling. Keep existing unit-count limits, source/metadata checks,
+windowed-General eligibility, frozen repair schema and retry counts. The default
+1,200-character route and all runtime stop checks remain unchanged.
+
+### Verification and non-scope
+
+Reproduce through the generation loop with an actual preflight shortfall that
+reduces the initial schema. Prove one clipped-unit repair, repeated-clipping safe
+fallback, and complete text at the exact admitted ceiling needing no repair.
+Check below/at/above the ceiling, invalid citation metadata, nested helper paths
+and the existing 1,200-character regressions. Run adjacent synthesis tests,
+formatting and strict clippy. This is deterministic request-limit propagation;
+no model inference or replay of the unchanged full-ceiling live cases is needed.
+
+NOT DONE until the fail-first reproduction, fix and regressions pass and the
+published head is reviewed with green required CI and resolved threads.
+
+### Disposition of nonblocking review suggestions
+
+- Defer the proposed output allowance of estimate times 1.25 plus formatting.
+  This changes the authorized all-available-capacity behavior and needs measured
+  latency/completeness evidence. Existing output-stop rejection remains the
+  safety boundary; current proof is not a runaway-latency qualification.
+- Defer source-script density calibration. Runtime preflight currently returns
+  only success/failure, not prompt token counts. Instruction/JSON/identifier
+  density is also not a validated estimate of generated prose density. A shared
+  tokenizer/profile calibration change needs separate evidence; this fix does
+  not introduce that interface or claim the existing ratio covers every script.
+
+Both suggestions are recorded as nonblocking follow-up work under issue #95;
+they are not merge gates for this admitted-ceiling correction.

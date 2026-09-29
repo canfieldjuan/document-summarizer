@@ -504,7 +504,12 @@ are recorded in PR-SYNTHESIS-OUTPUT-BUDGET.md. Only an estimated capacity shortf
 can reduce the initial ceiling; repair re-admits its actual prompt without
 shrinking an earlier ceiling. The six-byte worst-case bound is diagnostic only.
 Schema and output allowance come from the same decision, with the final schema
-preflighted; local parsing enforces the admitted ceiling.
+preflighted; local parsing enforces the admitted ceiling. The same request-local
+ceiling governs decoder-clipping classification, safe-sibling recovery, nested
+window/framing parsing and repair feedback. Only an incomplete unit exactly at
+that ceiling qualifies for existing clipped-unit recovery; a complete sentence
+at the ceiling remains valid. Recovery eligibility, metadata validation and
+retry counts are unchanged.
 Unbounded wire whitespace or alternative escaping can still exhaust output;
 an output-limit stop rejects the response with `MODEL_OUTPUT_LIMIT_REACHED`,
 separately from input truncation or an unknown completion boundary. This is not
