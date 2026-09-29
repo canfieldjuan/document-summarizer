@@ -8130,6 +8130,75 @@ mod tests {
     }
 
     #[test]
+    fn source_preservation_keeps_prose_valued_clause_rows() {
+        for labels in [
+            ["(a) Scope", "(b) Term", "(c) Payment"],
+            ["Article I", "Article II", "Article III"],
+            ["Section A", "Section B", "Section C"],
+            ["Background", "Procedure", "Outcome"],
+        ] {
+            for sentences in [1, 2] {
+                let rows = labels.map(|label| {
+                    format!(
+                        "{label}: The supplier {} records.{}",
+                        "keeps supporting ".repeat(12),
+                        if sentences == 2 {
+                            format!(" The reviewer {} completed.", "verified details ".repeat(6))
+                        } else {
+                            String::new()
+                        }
+                    )
+                });
+                for newline in ["\n", "\r\n"] {
+                    let source = rows.join(newline);
+                    assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+                    let (normalized, chunked) = materiality_fixture(&[source]);
+                    let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+                    let chunk = &chunked.chunks[0];
+                    let old = build_versioned_analysis_quote_catalog_for_blocks(
+                        SENTENCE_ANALYSIS_VERSION,
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                    )
+                    .unwrap();
+                    assert_eq!(old.omitted_source_units, 0);
+                    assert!(!old.candidates.is_empty());
+                    let current = build_versioned_analysis_quote_catalog_for_blocks(
+                        ANALYSIS_VERSION,
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        current.omitted_source_units, 0,
+                        "prose-valued rows dropped: {labels:?}, {newline:?}"
+                    );
+                    assert_eq!(
+                        current
+                            .candidates
+                            .iter()
+                            .map(|c| c.exact_quote.as_str())
+                            .collect::<Vec<_>>(),
+                        old.candidates
+                            .iter()
+                            .map(|c| c.exact_quote.as_str())
+                            .collect::<Vec<_>>()
+                    );
+                    validate_analysis_quote_catalog_for_blocks(
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                        &current.candidates,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
     fn source_preservation_keeps_common_form_labels() {
         let complete = format!("{}.", "a".repeat(599));
         let unfinished = "Unfinished preceding prose";

@@ -180,23 +180,52 @@ fn form_field_count(text: &str) -> usize {
     // A field group starts with a label/value row, optionally under headings.
     // Wrapped value lines do not establish additional fields. A later label
     // cannot reclassify ordinary preceding prose as a form.
-    let mut fields = 0;
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        if label_value(line) {
-            fields += 1;
-        } else if fields == 0 && !line.trim_end().ends_with(':') {
+    let mut fields = Vec::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some(value) = label_value(line) {
+            fields.push((offset, offset + line.trim_end().len() - value.len()));
+        } else if fields.is_empty() && !line.trim().is_empty() && !line.trim_end().ends_with(':') {
             return 0;
         }
+        offset += line.len();
     }
-    fields
+
+    // Bounded layouts already fit without detaching any values. Only decide
+    // prose versus indivisible form when the group needs a splitting decision.
+    if text.chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS {
+        return fields.len();
+    }
+
+    let mut all_sentences = !fields.is_empty();
+    for (index, &(_, value_start)) in fields.iter().enumerate() {
+        let value_end = fields
+            .get(index + 1)
+            .map_or(text.len(), |&(start, _)| start);
+        let value = &text[value_start..value_end];
+        // Labels also introduce operative clauses. Reuse the historical
+        // sentence owner on each full value, preserving wrapped text and its
+        // abbreviation/decimal defenses. No clause-name exceptions are needed.
+        let (sentences, tail) = analysis_sentence_units_v13(value);
+        if sentences
+            .first()
+            .is_some_and(|&(_, end)| !value[end..].trim().is_empty())
+        {
+            return 0;
+        }
+        all_sentences &= !sentences.is_empty() && value[tail..].trim().is_empty();
+    }
+    if all_sentences {
+        0
+    } else {
+        fields.len()
+    }
 }
 
-fn label_value(line: &str) -> bool {
-    let Some((label, value)) = line.trim().split_once(':') else {
-        return false;
-    };
+fn label_value(line: &str) -> Option<&str> {
+    let (label, value) = line.trim().split_once(':')?;
     let words = label.split_whitespace().count();
-    (1..=8).contains(&words)
+    ((1..=8).contains(&words)
         // Digits can belong to a field name, but number-led clause headings
         // must still reach prose segmentation, even inside parentheses.
         && label
@@ -208,7 +237,8 @@ fn label_value(line: &str) -> bool {
                 || c.is_whitespace()
                 || matches!(c, '-' | '/' | '(' | ')' | '\'' | '’' | '&' | '#')
         })
-        && !value.trim().is_empty()
+        && !value.trim().is_empty())
+    .then_some(value)
 }
 
 fn lead_in(text: &str) -> bool {
@@ -367,6 +397,116 @@ mod tests {
     }
 
     #[test]
+    fn prose_values_keep_complete_units_and_omit_unterminated_continuations() {
+        let complete = format!(
+            "Scope: The supplier {} records.",
+            "keeps supporting ".repeat(20)
+        );
+        let source = format!(
+            "{complete} {}\nDetails: {}",
+            "Unresolved material ".repeat(10),
+            "further documentation ".repeat(10)
+        );
+        let old = super::super::analysis_quote_segments_v13(&source);
+        assert_eq!(old.segments, vec![complete.clone()]);
+        let current = segment(&source);
+        assert_eq!(current.segments, old.segments);
+        assert_eq!(current.omitted_source_units, 1);
+    }
+
+    #[test]
+    fn abbreviations_in_single_sentence_values_do_not_make_a_form_prose() {
+        for token in ["Dept.", "Qzx.", "Dr. A.", "3.14"] {
+            let first = format!(
+                "Description: The {token} office {} recorded.",
+                "documented details ".repeat(20)
+            );
+            let second = format!(
+                "Conditions: The supplier {} completed.",
+                "required procedures ".repeat(20)
+            );
+            let source =
+                format!("Name: Example\n{first}\n{second}\n\nRetain the final complete sentence.");
+            let current = segment(&source);
+            assert_eq!(
+                current.segments,
+                vec!["Retain the final complete sentence."],
+                "{token}"
+            );
+            assert_eq!(current.omitted_source_units, 1);
+        }
+    }
+
+    #[test]
+    fn bounded_question_answer_forms_keep_the_printed_answer() {
+        let complete = format!("{}.", "a".repeat(599));
+        for newline in ["\n", "\r\n"] {
+            let form = format!("Total cost: $800{newline}Routine services on site? YES");
+            let source = format!("{complete}{newline}{newline}{form}");
+            let current = segment(&source);
+            assert_eq!(current.segments, vec![complete.clone(), form]);
+            assert_eq!(current.omitted_source_units, 0);
+        }
+    }
+
+    #[test]
+    fn mixed_form_values_remain_together_at_the_character_limit() {
+        let complete = format!("{}.", "a".repeat(599));
+        for newline in ["\n", "\r\n"] {
+            for notes_first in [false, true] {
+                for size in [599, 600, 601] {
+                    let scalar = format!("Name: Example{newline}Phone: 555-0100{newline}Details: ");
+                    let note = "Notes: Call before arrival.";
+                    let padding =
+                        "x".repeat(size - scalar.chars().count() - note.len() - newline.len());
+                    let form = if notes_first {
+                        format!("{note}{newline}{scalar}{padding}")
+                    } else {
+                        format!("{scalar}{padding}{newline}{note}")
+                    };
+                    let source = format!("{complete}{newline}{newline}{form}");
+                    let result = segment(&source);
+                    assert_eq!(result.segments.contains(&form), size <= 600);
+                    assert_eq!(result.omitted_source_units, usize::from(size > 600));
+                    assert!(result
+                        .segments
+                        .iter()
+                        .all(|quote| source.contains(quote) && quote.chars().count() <= 600));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_values_are_evaluated_as_whole_fields() {
+        let first = format!(
+            "Description: The supplier {} completed.",
+            "keeps documentation ".repeat(18)
+        );
+        let second = format!("Instructions: {}", "Unfinished directions ".repeat(18));
+        let third = format!(
+            "Notes: The reviewer {} confirmed.",
+            "verified details ".repeat(18)
+        );
+        // A wrapped complete sentence is prose even though its first line is
+        // not complete. A wrapped fragment must not qualify on its first line.
+        let prose = format!(
+            "Description: The supplier\n{}\n{third}",
+            "keeps documentation ".repeat(18) + "completed."
+        );
+        let old = super::super::analysis_quote_segments_v13(&prose);
+        assert_eq!(old.omitted_source_units, 0);
+        assert_eq!(segment(&prose).segments, old.segments);
+        let form = format!("{first}\n  unfinished continuation\n{second}\n{third}");
+        // A sentence followed by an unfinished continuation is still prose;
+        // preserve its complete sentence, disclose the unusable tail.
+        let old = super::super::analysis_quote_segments_v13(&form);
+        let current = segment(&form);
+        assert_eq!(current.segments, old.segments);
+        assert_eq!(current.omitted_source_units, old.omitted_source_units);
+    }
+
+    #[test]
     fn multi_field_forms_remain_indivisible_at_the_limit() {
         let complete = format!("{}.", "a".repeat(599));
         let labels = "Amount: $1\nDescription: ";
@@ -377,8 +517,8 @@ mod tests {
             assert_eq!(result.omitted_source_units, usize::from(size > 600));
         }
 
-        // Sentence punctuation in actual field values must not turn a table
-        // into independent assertions stripped of the other field's context.
+        // A mixed form stays indivisible even when some values are sentences.
+        // Scalar fields retain their connection to the sentence-valued fields.
         let first = format!(
             "Description: {} recorded.",
             "documented details ".repeat(20)
@@ -388,7 +528,7 @@ mod tests {
             "required procedures ".repeat(20)
         );
         for separator in ["\n", "\r\n"] {
-            let table = format!("{first}{separator}{second}");
+            let table = format!("Name: Example{separator}{first}{separator}{second}");
             let source = format!("{table}\n\nRetain the final complete sentence.");
             let result = segment(&source);
             assert_eq!(result.segments, vec!["Retain the final complete sentence."]);
