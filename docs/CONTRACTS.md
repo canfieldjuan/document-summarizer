@@ -2301,3 +2301,34 @@ changes. CI will repeat the broader platform checks on the revised head.
 
 Gap audit: DONE for the review corrections and local proof. NOT DONE for merge
 until the published correction receives green CI and exact-head review.
+
+
+#### Colon-prefixed prose review correction
+
+Root cause: one predicate currently serves two different decisions: recognizing
+bounded label/value content and declaring an oversized group indivisible. A
+single colon-prefixed prose field is enough for the first decision but provides
+no multi-row form structure for the second. Consequently complete sentences in
+long prose such as `Summary: ...` bypass the shared sentence segmenter.
+
+Required change surface: share field-row recognition in
+`summary/quote_segments.rs`, but require multiple physical label/value rows to
+make an oversized form indivisible. A single field, including a wrapped prose
+value, must use the existing sentence/qualification rules when oversized.
+Bounded fields remain intact; heading/lead-in grouping must not change. Keep
+multi-row tables indivisible so values cannot detach from their labels. No
+label-name exceptions, model/prompt changes, limit increases or historical
+policy changes are permitted. Other scope boundaries above remain unchanged.
+
+Verification plan: fail-first production-catalog regression for differently
+named colon prefixes and single-line/wrapped prose. Probe the opposite boundary
+with bounded and oversized multi-field forms, periods in field values, following
+usable prose, and a conditional sentence which must stay with its governing
+sentence. Run adjacent summary tests, formatting and strict Clippy, and replay
+the existing private catalogs/witnesses. CI owns repeated broad platform tests;
+no new inference or summary-quality claim is required for this deterministic
+repair.
+
+Implementation summary and cold diff audit: pending reproduction.
+Gap audit: NOT DONE until the regression and adjacent checks pass and the
+published correction receives fresh CI and exact-head review.
