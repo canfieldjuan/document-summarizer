@@ -84,3 +84,20 @@ Contract and canonical requirements only. No runtime behavior changed.
 ## Gap audit
 
 NOT DONE. Implementation, regressions and live qualification remain.
+
+## Contract revision: runtime output ceilings
+
+The gateway client has a 4,096-token task output cap, independent of its 8,192
+context. Its preflight reports an over-cap request as a protocol error, so
+probing solely by context would introduce an avoidable failure. Add a runtime
+output-capacity method, defaulting to the effective stage context, with the
+gateway override sourced from the existing wire-client cap. Stage dispatch and
+test recorders must forward it. Capacity probes include feedback headroom in
+context admission but must not count that headroom as generated output against
+the transport cap. Prove smaller-cap forwarding and admission without invoking
+inference. No gateway protocol, wire cap, snapshot, or server change.
+
+The direct runtimes perform tokenizer preflight. Gateway preflight checks its
+existing wire bounds; this work cannot establish token-exact input admission
+or the deployed gateway's private model identity. No such qualification is
+claimed. The response-size bound and existing failure handling still apply.
