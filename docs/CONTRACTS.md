@@ -2439,3 +2439,30 @@ limits and 599/600/601-character groups. Compare multi-row numbered prose over
 catalog. Retain oversized-form and governing-context checks. Run adjacent
 summary tests, formatting, strict Clippy and the private historical/witness
 replay. No new inference is needed to prove this deterministic correction.
+
+Implementation summary: 84a6066 changes the shared label recognizer, admitting
+common field punctuation and digits after a letter-led label. The same field
+count still controls bounded layout admission and oversized form preservation.
+Number-led headings, including parenthesized numbering, remain on the existing
+sentence path; periods were not added to the label character set.
+
+Verification: the production-catalog test failed first by omitting the bounded
+Address Line 1 form. After the fix, all seven focused preservation tests passed,
+including the new opposite-boundary comparison against version 13. The adjacent
+summary suite passed 235 tests with 10 opt-in tests ignored. Formatting and
+strict all-target/all-feature Clippy passed. Tests exercise all added character
+classes, both apostrophe forms, LF/CRLF and 599/600/601 Unicode-character limits,
+mixed complete/dangling/form input and oversized multi-row numbered prose.
+
+The private probe reproduced all 24 saved historical catalogs and found no
+regressions across 40 tracked witnesses versus 7550fd9. Survival is unchanged
+at A 12/20 and B 13/20. This repair was not a new inference or quality test.
+
+Cold diff audit: only the shared label predicate and production-catalog
+regressions changed in this correction. Admission and validation still consume
+the same versioned catalog. The contract's limits, historical policies and
+per-call state remain unchanged, with no new concurrency, storage or runtime
+behavior. Numbered clauses cannot newly become forms through the added digits.
+
+Gap audit: DONE for the common-label correction and local proof. NOT DONE for
+merge until fresh CI and exact-head review pass on the published revision.
