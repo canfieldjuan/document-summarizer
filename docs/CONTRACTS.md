@@ -2383,5 +2383,35 @@ The no-regression source-witness claim remains limited to the tracked private
 witnesses. It is not a universal semantic guarantee or permission to detach a
 known exception or table merely because a historical splitter did so.
 
-Implementation summary and cold diff audit: pending failing-before probes.
-Gap audit: NOT DONE until proof and fresh published-head CI/review complete.
+Implementation summary: 44c7cc7 shares the unchanged version-13 sentence-unit
+enumeration with the current segmenter. Current prose segmentation will not
+cut inside a bounded historical unit. Actual byte offsets preserve the correct
+occurrence when identical text also appears inside an omitted clause. Generic
+`if`/`when`/`but` prefixes no longer attach independent operative sentences.
+`quote_boundary_omission` now stamps the supplied analysis version.
+
+Verification: all three review regressions failed first as reported, then
+passed. A repeated-text regression also failed with an intermediate unpublished
+text-matching implementation; deriving offsets from the original unit owner
+fixed it. The final adjacent summary suite passed 233 tests (10 opt-in ignored);
+formatting and strict all-target/all-feature Clippy passed. A serialized genuine
+version-13 omission validates, while a current run with the old stamp fails.
+
+The historical enumeration loop is byte-for-byte unchanged, and the private
+probe reproduces all 24 saved historical catalogs. Across 40 tracked source
+witnesses, none regressed relative to e67ba67; A retains 12/20 and B now retains
+13/20. This is source coverage only. The review's Approx. example was already
+split by version 13 because it exceeds that policy's short-token range; the
+regression records that limitation rather than claiming a new general-language
+abbreviation detector. No new inference ran.
+
+Cold diff audit: `summary.rs::analysis_sentence_units_v13` owns historical byte
+ranges without changing the old policy; the new range consumer stays within
+`quote_segments.rs`. `pages.rs` receives the persisted version rather than a
+current global constant. Production-catalog and replay tests cover each change,
+including mixed omitted/retained text, duplicate text, and the wrong-version
+negative case. Explicit exceptions and multi-field tables retain their existing
+context safeguards. No shared mutable state or model/runtime change was added.
+
+Gap audit: DONE for all known review corrections and local proof. NOT DONE for
+merge until fresh CI and exact-head review pass on the final published revision.
