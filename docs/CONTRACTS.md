@@ -481,7 +481,7 @@ source-ID enum, must fit one request under the synthesis-stage context budget.
 Coherent generation and its runtime validator share one character-budget owner.
 At or below 8,192 context tokens the existing 16,000-character maximum remains;
 above that context the allowance is three times the tokens remaining after
-reserving 2,048 output tokens and 512 framing tokens, using checked arithmetic.
+reserving a minimum 2,048 output tokens and 512 framing tokens, using checked arithmetic.
 Source-reduction admission and bounded repairs use that same allowance. Analysis,
 selection-window requests and verification retain their separate existing caps.
 After this conservative application bound, the selected qualified runtime
@@ -491,7 +491,34 @@ context rejection selects the same verified-ledger fallback before inference,
 while any other admission error fails the stage. The response ceiling grows by
 one unit for each three source segments and is
 capped at eight; it is a ceiling rather than a target. The model may cite only
-request-local source identifiers supplied in that request. Rust restores
+request-local source identifiers supplied in that request. Initial synthesis,
+source-reduction admission and repairs share a response-capacity owner. It
+grants the maximum output allowance admitted by the existing runtime preflight,
+after reserving 512 context tokens for initial repair feedback in addition to
+runtime framing and respecting the gateway cap. It preserves the 1,200-character
+ceiling when an empirically calibrated response estimate fits: 23 tokens per
+100 text characters (rounded up), canonical JSON/source-ID bytes, and 256 output
+tokens for formatting/completion. This estimate is sizing, not a hard upper
+bound. Its pinned-tokenizer calibration and Unicode/escape stress measurements
+are recorded in PR-SYNTHESIS-OUTPUT-BUDGET.md. Only an estimated capacity shortfall
+can reduce the initial ceiling; repair re-admits its actual prompt without
+shrinking an earlier ceiling. The six-byte worst-case bound is diagnostic only.
+Schema and output allowance come from the same decision, with the final schema
+preflighted; local parsing enforces the admitted ceiling. The same request-local
+ceiling governs decoder-clipping classification, safe-sibling recovery, nested
+window/framing parsing and repair feedback. Only an incomplete unit exactly at
+that ceiling qualifies for existing clipped-unit recovery; a complete sentence
+at the ceiling remains valid. Recovery eligibility, metadata validation and
+retry counts are unchanged.
+Unbounded wire whitespace or alternative escaping can still exhaust output;
+an output-limit stop rejects the response with `MODEL_OUTPUT_LIMIT_REACHED`,
+separately from input truncation or an unknown completion boundary. This is not
+permission to salvage partial JSON or bypass content/coverage validation.
+The gateway's existing wire output ceiling is reported during preflight as
+`MODEL_OUTPUT_BUDGET_EXCEEDED`, allowing the same bounded search to reduce the
+request. Gateway preflight checks wire bounds; it does not establish exact
+input token use for the deployed gateway model.
+Rust restores
 canonical source order and materializes durable claim, evidence and page-label
 identity; prose, source locations and durable IDs are never accepted from model
 output as authoritative metadata.
@@ -1300,6 +1327,10 @@ content assembled. A final-only response, changed model name, oversized,
 missing, ambiguous or mismatched runner catalog, malformed frame, mid-stream
 error, missing final frame or data after the final frame rejects the entire
 output. No partial content reaches a stage parser or artifact.
+
+The final Ollama frame must also declare `done_reason=stop`. A `length` reason
+is `MODEL_OUTPUT_LIMIT_REACHED`, even for parseable content; missing or unknown
+reasons fail closed. Usage counts remain attached to rejected requests.
 
 The running-model record cap is the same explicit 256-record ceiling used for
 installed-model discovery and applies on every provenance query. The bounded
