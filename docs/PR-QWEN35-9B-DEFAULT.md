@@ -208,3 +208,19 @@ percent adjusted coverage gate failed. Both failed selected-profile attempts
 remain recorded as test-wrapper failures pending a corrected live rerun. No
 quality or coverage threshold is changed, and the production preset is not yet
 qualified for merge by these results.
+
+## Qualification recorder contract correction
+
+Code inspection found that office_acceptance.rs RecordingRuntime forwards
+inference and stage identity but inherits ModelRuntime's permissive preflight.
+The selected-profile recorder already forwards preflight. The office wrapper
+can therefore skip exact source-context admission before generation, changing
+which source catalog is selected compared with production.
+
+Required surface: forward preflight_request to the inner runtime in the office
+recorder; add an offline regression proving both admission and rejection survive
+the wrapper with no generation call. Keep the existing office assertions,
+source selection, model behavior and production runtime unchanged. Reuse this
+corrected recorder in the private A/B qualification export. Reproduce the
+recorder swallowing MODEL_CONTEXT_EXCEEDED before forwarding; then rerun the
+office checks and strict clippy. No other harness or scorer redesign.
