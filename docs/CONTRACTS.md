@@ -2514,3 +2514,12 @@ values. The initial lowercase-continuation fixture incorrectly assumed version
 13 retained its first sentence; correct that test setup and re-prove it against
 the published code before treating it as fail-first evidence. No new production
 rule is justified by that mistaken baseline assumption.
+
+
+Private replay found a bounded question/answer field losing its final answer
+under the proposed value parser. Correct the decision boundary: existing bounded
+layout groups remain whole before value classification. Apply the prose-value
+rule only when an oversized group needs a splitting decision. A question mark
+inside a bounded form must not detach its following printed answer. Add a neutral
+question/answer regression and require no loss against the current private
+witness baseline before publishing this correction.
