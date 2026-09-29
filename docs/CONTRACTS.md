@@ -2497,3 +2497,20 @@ Include arbitrary letter-led labels to exclude name-specific fixes, LF/CRLF
 and unterminated continuations. Retain opposite-side table, abbreviation,
 qualification and size-boundary checks. Run focused and adjacent summary
 tests, formatting, strict Clippy and the existing private source replay.
+
+
+Contract revision from the operator's one-sentence-clause probe: a group whose
+every logical field value is a complete sentence must also use prose
+segmentation. A mixed form with scalar Name/Phone values and a sentence-valued
+Notes row remains a form. Values include wrapped lines up to the next field;
+checking only the first physical value line could misclassify an unfinished
+wrapped value as a complete sentence. Recognized governing headings remain
+attached. Reuse the version-13 sentence parser for both complete-value and
+sentence-plus-continuation checks, not terminal-character guesses.
+
+Add one-sentence lettered/article rows and arbitrary labels to the production
+catalog regression; preserve mixed forms at the size limits and with wrapped
+values. The initial lowercase-continuation fixture incorrectly assumed version
+13 retained its first sentence; correct that test setup and re-prove it against
+the published code before treating it as fail-first evidence. No new production
+rule is justified by that mistaken baseline assumption.
