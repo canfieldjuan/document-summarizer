@@ -25,6 +25,7 @@ mod eligibility;
 mod identifiers;
 mod key_points;
 mod pages;
+mod quote_segments;
 #[cfg(test)]
 mod repair;
 #[cfg(test)]
@@ -32,7 +33,8 @@ mod structural;
 #[cfg(test)]
 include!("summary/legacy_generation.rs");
 
-pub const ANALYSIS_VERSION: &str = "13.0.0";
+pub const ANALYSIS_VERSION: &str = "14.0.0";
+const SENTENCE_ANALYSIS_VERSION: &str = "13.0.0";
 const QUOTE_BOUNDARY_ANALYSIS_VERSION: &str = "12.0.0";
 const PUNCTUATION_ANALYSIS_VERSION: &str = "11.0.0";
 const TOLERANT_ANALYSIS_VERSION: &str = "10.0.0";
@@ -735,7 +737,13 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
             &chunked,
             &normalized,
         )?;
-        coherent::validate_verified_profile(summary_profile, &verified, &chunked, &normalized)?;
+        coherent::validate_verified_profile(
+            summary_profile,
+            &verified,
+            &chunked,
+            &normalized,
+            Some(&persisted_analysis),
+        )?;
         Ok(verified)
     }) {
         Ok(verified) => verified,
@@ -1267,9 +1275,12 @@ fn verify(
         &synthesized.synthesis_evidence,
         &mut summary_claim_verifications,
     )?;
-    if let Some(required_evidence_ids) =
-        coherent::required_short_contract_evidence_ids(summary_profile, chunked, normalized)?
-    {
+    if let Some(required_evidence_ids) = coherent::required_short_contract_evidence_ids(
+        summary_profile,
+        chunked,
+        normalized,
+        Some(analyzed),
+    )? {
         apply_contract_material_coverage(
             runtime,
             &synthesized.summary_claims,
@@ -2487,7 +2498,11 @@ fn derive_analysis_quote_catalog_for_blocks(
         }
     }
 
-    if candidates.is_empty() && !(analysis_version == ANALYSIS_VERSION && omitted_source_units > 0)
+    if candidates.is_empty()
+        && !(matches!(
+            analysis_version,
+            ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION
+        ) && omitted_source_units > 0)
     {
         return Err(stage_failure(
             PipelineStage::Analyze,
@@ -2741,6 +2756,7 @@ fn versioned_analysis_selected_pages(
     // Historical plans and identities must not acquire new retention obligations.
     let mut selected = analysis_selected_pages(normalized)?;
     if version != ANALYSIS_VERSION
+        && version != SENTENCE_ANALYSIS_VERSION
         && version != QUOTE_BOUNDARY_ANALYSIS_VERSION
         && version != PUNCTUATION_ANALYSIS_VERSION
         && version != TOLERANT_ANALYSIS_VERSION
@@ -2762,6 +2778,7 @@ fn versioned_analysis_selected_pages(
     let target = if matches!(
         version,
         ANALYSIS_VERSION
+            | SENTENCE_ANALYSIS_VERSION
             | QUOTE_BOUNDARY_ANALYSIS_VERSION
             | PUNCTUATION_ANALYSIS_VERSION
             | TOLERANT_ANALYSIS_VERSION
@@ -2926,6 +2943,8 @@ fn analysis_quote_segmentation_for_version(
     source: &str,
 ) -> AnalysisQuoteSegmentation {
     if analysis_version == ANALYSIS_VERSION {
+        quote_segments::segment(source)
+    } else if analysis_version == SENTENCE_ANALYSIS_VERSION {
         analysis_quote_segments_v13(source)
     } else {
         AnalysisQuoteSegmentation {
@@ -3073,6 +3092,16 @@ fn safe_analysis_sentence_boundary(
     proposed_end: usize,
     source_end: usize,
 ) -> bool {
+    analysis_sentence_boundary(source, unit_start, proposed_end, source_end, true)
+}
+
+fn analysis_sentence_boundary(
+    source: &str,
+    unit_start: usize,
+    proposed_end: usize,
+    source_end: usize,
+    legacy_short_abbreviations: bool,
+) -> bool {
     let candidate = source[unit_start..proposed_end].trim_end();
     let without_closers = candidate.trim_end_matches(is_analysis_sentence_closer);
     let Some(terminal) = without_closers.chars().last() else {
@@ -3119,7 +3148,12 @@ fn safe_analysis_sentence_boundary(
         .any(|character| analysis_sentence_break(character) == SentenceBreak::ATerm)
         || token.chars().count() == 1 && token.chars().all(char::is_alphabetic)
         || AMBIGUOUS_ABBREVIATIONS.contains(&lower.as_str())
-        || short_open_set_abbreviation
+        || legacy_short_abbreviations && short_open_set_abbreviation
+        || !legacy_short_abbreviations
+            && (lower == "dept"
+                || next_non_whitespace.is_some()
+                    && (2..=5).contains(&token_character_count)
+                    && token.chars().all(char::is_uppercase))
     {
         return false;
     }
@@ -3678,6 +3712,7 @@ fn validate_analyzed_content(
         || !matches!(
             analyzed.analysis_version.as_str(),
             ANALYSIS_VERSION
+                | SENTENCE_ANALYSIS_VERSION
                 | QUOTE_BOUNDARY_ANALYSIS_VERSION
                 | PUNCTUATION_ANALYSIS_VERSION
                 | TOLERANT_ANALYSIS_VERSION
@@ -3706,6 +3741,7 @@ fn validate_analyzed_content(
     let materiality_analysis = matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | SENTENCE_ANALYSIS_VERSION
             | QUOTE_BOUNDARY_ANALYSIS_VERSION
             | PUNCTUATION_ANALYSIS_VERSION
             | TOLERANT_ANALYSIS_VERSION
@@ -3837,6 +3873,7 @@ fn validate_analyzed_content(
             );
             let claim_character_limit = match analyzed.analysis_version.as_str() {
                 ANALYSIS_VERSION
+                | SENTENCE_ANALYSIS_VERSION
                 | QUOTE_BOUNDARY_ANALYSIS_VERSION
                 | PUNCTUATION_ANALYSIS_VERSION
                 | TOLERANT_ANALYSIS_VERSION => MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS,
@@ -3861,6 +3898,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | SENTENCE_ANALYSIS_VERSION
                         | QUOTE_BOUNDARY_ANALYSIS_VERSION
                         | PUNCTUATION_ANALYSIS_VERSION
                         | TOLERANT_ANALYSIS_VERSION
@@ -3871,7 +3909,7 @@ fn validate_analyzed_content(
                         | COMPLETION_ANALYSIS_VERSION
                 ) && !(if matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION | QUOTE_BOUNDARY_ANALYSIS_VERSION
+                    ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION | QUOTE_BOUNDARY_ANALYSIS_VERSION
                 ) {
                     pages::completion_valid(&evidence.claim_text)
                 } else {
@@ -3888,6 +3926,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | SENTENCE_ANALYSIS_VERSION
                         | QUOTE_BOUNDARY_ANALYSIS_VERSION
                         | PUNCTUATION_ANALYSIS_VERSION
                         | TOLERANT_ANALYSIS_VERSION
@@ -3941,6 +3980,7 @@ fn validate_analyzed_content(
     if matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | SENTENCE_ANALYSIS_VERSION
             | QUOTE_BOUNDARY_ANALYSIS_VERSION
             | PUNCTUATION_ANALYSIS_VERSION
             | TOLERANT_ANALYSIS_VERSION
@@ -7954,6 +7994,86 @@ mod tests {
     }
 
     #[test]
+    fn source_preservation_keeps_ordinary_short_sentence_endings() {
+        for ending in ["days", "work", "loss", "paid", "time", "Owner"] {
+            let first = format!("The parties {} {ending}.", "recorded details ".repeat(20));
+            let second = format!("The reviewer {} completed.", "verified records ".repeat(20));
+            let source = format!("{first} {second}");
+            let (normalized, chunked) = materiality_fixture(std::slice::from_ref(&source));
+            let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+            let chunk = &chunked.chunks[0];
+            let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+                ANALYSIS_VERSION,
+                chunk,
+                &blocks,
+                &chunk.block_ids,
+            )
+            .unwrap();
+            assert_eq!(catalog.omitted_source_units, 0, "ending {ending}");
+            assert_eq!(
+                catalog
+                    .candidates
+                    .iter()
+                    .map(|c| c.exact_quote.as_str())
+                    .collect::<Vec<_>>(),
+                vec![first.as_str(), second.as_str()]
+            );
+            validate_analysis_quote_catalog_for_blocks(
+                chunk,
+                &blocks,
+                &chunk.block_ids,
+                &catalog.candidates,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn source_preservation_keeps_bounded_form_and_table_groups_on_long_pages() {
+        let party = format!(
+            "Supplier: Example Company\nServices: {}",
+            "routine maintenance ".repeat(13)
+        );
+        let table = format!(
+            "Insurance schedule:\nGeneral liability per event: $500,000\nCoverage description: {}",
+            "equipment and supplies ".repeat(10)
+        );
+        let payment = format!(
+            "Payment method: Bank transfer\nScope: {}",
+            "scheduled cleaning ".repeat(15)
+        );
+        let source = format!("{party}\n\n{table}\n\n{payment}");
+        assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+        let (normalized, chunked) = materiality_fixture(&[source]);
+        let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+        let chunk = &chunked.chunks[0];
+        let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+            ANALYSIS_VERSION,
+            chunk,
+            &blocks,
+            &chunk.block_ids,
+        )
+        .unwrap();
+        assert_eq!(catalog.omitted_source_units, 0);
+        for group in [party, table, payment] {
+            assert!(
+                catalog
+                    .candidates
+                    .iter()
+                    .any(|c| c.exact_quote.contains(group.trim())),
+                "a form or table group lost its label/value context"
+            );
+        }
+        validate_analysis_quote_catalog_for_blocks(
+            chunk,
+            &blocks,
+            &chunk.block_ids,
+            &catalog.candidates,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn sentence_quote_segments_enforce_the_limit_without_partial_source_units() {
         let below_limit = format!("{}.", "a".repeat(MAX_ANALYSIS_QUOTE_CHARACTERS - 2));
         let at_limit = format!("{}.", "a".repeat(MAX_ANALYSIS_QUOTE_CHARACTERS - 1));
@@ -8403,6 +8523,9 @@ mod tests {
                 && warning.stage == Some(PipelineStage::Analyze)
         }));
         validate_analyzed_content(&analyzed, &chunked, &normalized).unwrap();
+        let mut historical = analyzed.clone();
+        historical.analysis_version = SENTENCE_ANALYSIS_VERSION.into();
+        validate_analyzed_content(&historical, &chunked, &normalized).unwrap();
         let mut missing_warning = analyzed.clone();
         missing_warning
             .warnings

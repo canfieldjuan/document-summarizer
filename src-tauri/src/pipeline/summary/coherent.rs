@@ -5249,12 +5249,13 @@ pub(super) fn required_short_contract_evidence_ids(
     profile: SummaryProfile,
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
+    analyzed: Option<&AnalyzedDocument>,
 ) -> Result<Option<Vec<String>>, PipelineFailure> {
     if profile != SummaryProfile::Contract {
         return Ok(None);
     }
     Ok(required_short_contract_clauses(&source_catalog_for_profile(
-        profile, VERSION, chunked, normalized, None,
+        profile, VERSION, chunked, normalized, analyzed,
     )?)
     .map(|clauses| {
         clauses
@@ -7294,6 +7295,11 @@ fn source_catalog_for_synthesis_version(
     normalized: &NormalizedDocument,
     analyzed: Option<&AnalyzedDocument>,
 ) -> Result<SourceCatalog, PipelineFailure> {
+    // Before analysis 14, coherent catalogs used v13 even for older analysis.
+    // Replay that policy rather than rebuilding saved evidence under today's rules.
+    let analysis_version = analyzed
+        .filter(|document| document.analysis_version != ANALYSIS_VERSION)
+        .map_or(ANALYSIS_VERSION, |_| SENTENCE_ANALYSIS_VERSION);
     let blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
     let framing_at_block_starts = source_framing_at_block_starts(normalized);
     let mut candidates = Vec::new();
@@ -7301,7 +7307,7 @@ fn source_catalog_for_synthesis_version(
     let mut evidence_ids = HashSet::new();
     for chunk in &chunked.chunks {
         let catalog = build_versioned_analysis_quote_catalog_for_blocks(
-            ANALYSIS_VERSION,
+            analysis_version,
             chunk,
             &blocks,
             &chunk.block_ids,
@@ -7521,13 +7527,14 @@ pub(super) fn validate_verified_profile(
     verified: &VerifiedDocument,
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
+    analyzed: Option<&AnalyzedDocument>,
 ) -> Result<(), PipelineFailure> {
     if profile != SummaryProfile::Contract
         || verified.presentation_mode != SummaryPresentationMode::Coherent
     {
         return Ok(());
     }
-    let catalog = source_catalog_for_profile(profile, VERSION, chunked, normalized, None)?;
+    let catalog = source_catalog_for_profile(profile, VERSION, chunked, normalized, analyzed)?;
     let required_clauses = required_short_contract_clauses(&catalog);
     if !contract_clause_reference_feedback(&verified.summary_claims, &verified.synthesis_evidence)?
         .is_empty()
@@ -11766,6 +11773,77 @@ mod tests {
     }
 
     #[test]
+    fn source_preservation_replays_the_catalog_owned_by_saved_analysis() {
+        let (mut normalized, mut chunked) = contract_documents();
+        let first = format!("The parties {} days.", "recorded details ".repeat(20));
+        let second = format!("The reviewer {} completed.", "verified records ".repeat(20));
+        normalized.pages[0].content[0].text = format!("{first} {second}");
+        chunked.chunks[0].text = normalized
+            .pages
+            .iter()
+            .flat_map(|p| &p.content)
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut analyzed = AnalyzedDocument {
+            document_id: normalized.document_id.clone(),
+            analysis_version: SENTENCE_ANALYSIS_VERSION.into(),
+            runtime_id: "test-runtime".into(),
+            model_id: "test-model".into(),
+            chunks: Vec::new(),
+            omissions: Vec::new(),
+            inspected_pages: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let saved = serde_json::to_string(&analyzed).unwrap();
+        analyzed = serde_json::from_str(&saved).unwrap();
+        let historical = source_catalog(&chunked, &normalized, Some(&analyzed)).unwrap();
+        assert_eq!(historical.omitted_source_units, 1);
+        assert!(!historical
+            .candidates
+            .iter()
+            .any(|c| c.evidence.block_id == "contract-block-1"));
+        analyzed.analysis_version = ANALYSIS_VERSION.into();
+        let current = source_catalog(&chunked, &normalized, Some(&analyzed)).unwrap();
+        assert_eq!(current.omitted_source_units, 0);
+        assert_eq!(
+            current
+                .candidates
+                .iter()
+                .filter(|c| c.evidence.block_id == "contract-block-1")
+                .map(|c| c.evidence.exact_quote.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.as_str(), second.as_str()]
+        );
+        let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+        let expected = build_versioned_analysis_quote_catalog_for_blocks(
+            ANALYSIS_VERSION,
+            &chunked.chunks[0],
+            &blocks,
+            &chunked.chunks[0].block_ids,
+        )
+        .unwrap();
+        assert_eq!(
+            expected
+                .candidates
+                .iter()
+                .filter(|c| c.block_id == "contract-block-1")
+                .map(|c| c.exact_quote.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.as_str(), second.as_str()]
+        );
+        // Unchanged passages retain the exact evidence identities from the old policy.
+        for before in historical.candidates {
+            let after = current
+                .candidates
+                .iter()
+                .find(|c| c.evidence.block_id == before.evidence.block_id)
+                .unwrap();
+            assert_eq!(before.evidence, after.evidence);
+        }
+    }
+
+    #[test]
     fn source_catalog_carries_split_sections_across_pages_in_order() {
         let first = format!("Common Problems\n\n{}.", "A".repeat(399));
         let second = format!("{}!", "B".repeat(399));
@@ -13512,7 +13590,8 @@ mod tests {
             warnings: Vec::new(),
         };
         let generic = source_catalog(&chunked, &normalized, None).unwrap();
-        assert!(generic.omitted_source_units > 0);
+        assert!(analysis_quote_segments_v13(source).omitted_source_units > 0);
+        assert_eq!(generic.omitted_source_units, 0);
         let profile_catalog = source_catalog_for_profile(
             SummaryProfile::Contract,
             VERSION,
@@ -13600,16 +13679,22 @@ mod tests {
             .zip(CONTRACT_SOURCE_LINES)
             .all(|(candidate, source)| candidate.evidence.exact_quote == source));
         assert_eq!(
-            required_short_contract_evidence_ids(SummaryProfile::Contract, &chunked, &normalized,)
-                .unwrap()
-                .unwrap()
-                .len(),
+            required_short_contract_evidence_ids(
+                SummaryProfile::Contract,
+                &chunked,
+                &normalized,
+                None
+            )
+            .unwrap()
+            .unwrap()
+            .len(),
             CONTRACT_SOURCE_LINES.len()
         );
         assert!(required_short_contract_evidence_ids(
             SummaryProfile::General,
             &chunked,
             &normalized,
+            None,
         )
         .unwrap()
         .is_none());
@@ -13650,15 +13735,24 @@ mod tests {
             warnings: Vec::new(),
         };
 
-        validate_verified_profile(SummaryProfile::Contract, &verified, &chunked, &normalized)
-            .unwrap();
+        validate_verified_profile(
+            SummaryProfile::Contract,
+            &verified,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
 
         verified.summary_claims.truncate(1);
-        let failure =
-            validate_verified_profile(SummaryProfile::Contract, &verified, &chunked, &normalized)
-                .expect_err(
-                    "withholding one unit must not publish a partial short Contract summary",
-                );
+        let failure = validate_verified_profile(
+            SummaryProfile::Contract,
+            &verified,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .expect_err("withholding one unit must not publish a partial short Contract summary");
         assert_eq!(
             failure.code,
             "CONTRACT_SUMMARY_INCOMPLETE_AFTER_VERIFICATION"
@@ -13669,6 +13763,7 @@ mod tests {
             &verified,
             &chunked,
             &normalized,
+            None,
         )
         .is_ok());
 
@@ -13678,6 +13773,7 @@ mod tests {
             &verified,
             &chunked,
             &normalized,
+            None,
         )
         .is_ok());
     }
