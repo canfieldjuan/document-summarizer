@@ -3992,6 +3992,37 @@ fn generate_summary_with_coverage_repair(
                 if let Some(draft) = coverage_draft.take() {
                     return Ok(draft);
                 }
+                // Trimming a correction must not bypass preservation of the
+                // complete siblings from its original window/framing answer.
+                let preservation_failure = window_repair_requirements
+                    .as_ref()
+                    .filter(|requirements| {
+                        preserved_claim_positions(&result.claims, &requirements.preserved_claims)
+                            .is_none()
+                    })
+                    .map(|_| window_repair_integrity_response())
+                    .or_else(|| {
+                        framing_repair_requirements
+                            .as_ref()
+                            .filter(|requirements| {
+                                preserved_claim_positions(
+                                    &result.claims,
+                                    &requirements.preserved_claims,
+                                )
+                                .is_none()
+                            })
+                            .map(|_| source_framing_repair_integrity_response())
+                    });
+                if let Some(failure) = preservation_failure {
+                    if let Some(generated) = take_generated_fallback(
+                        &mut modal_fallback,
+                        &mut window_fallback,
+                        &mut clipped_fallback,
+                    ) {
+                        return Ok(generated);
+                    }
+                    return Err(SynthesisFailure::ModelOutputRejected(failure));
+                }
                 return Ok(result);
             }
         }
@@ -15622,6 +15653,42 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn deterministic_trim_cannot_bypass_prior_sibling_preservation() {
+        let catalog = SourceCatalog {
+            candidates: (1..=7)
+                .map(|n| {
+                    let mut source = candidate(&format!("s{n}"), &format!("evidence-{n}"), n);
+                    source.selection_window = Some((n as usize - 1) / 2);
+                    source
+                })
+                .collect(),
+            omitted_source_units: 0,
+        };
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let runtime =
+            ClippedUnitRepairRuntime::new(ClippedRepairBehavior::WindowThenClipOmitsBaseline);
+        let generated = generate_summary_with_validation_repair(
+            SummaryProfile::General,
+            &runtime,
+            "document-1",
+            &catalog,
+            prompt,
+            schema,
+            usize::MAX,
+            0,
+            1,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(
+            generated.claims[0].text,
+            "The first source remains supported."
+        );
+        assert_eq!(generated.claims.len(), 1);
+        assert_eq!(runtime.requests().len(), 2);
     }
 
     #[test]
