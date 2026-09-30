@@ -45,7 +45,8 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "10.0.0";
+pub const SYNTHESIS_VERSION: &str = "11.0.0";
+const PRE_FURNITURE_SYNTHESIS_VERSION: &str = "10.0.0";
 const PRE_BALANCED_SYNTHESIS_VERSION: &str = "9.0.0";
 pub const VERIFICATION_VERSION: &str = "10.0.0";
 pub const SUMMARY_VERSION: &str = "8.0.0";
@@ -150,6 +151,7 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
         SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
@@ -163,7 +165,10 @@ fn coherent_verification_versions_match(
 ) -> bool {
     (matches!(
         synthesis_version,
-        SYNTHESIS_VERSION | PRE_BALANCED_SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
+            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
     ) && verification_version == VERIFICATION_VERSION)
         || (synthesis_version == PRE_CONTEXT_SYNTHESIS_VERSION
             && verification_version == PRE_CONTEXT_VERIFICATION_VERSION)
@@ -963,10 +968,11 @@ pub(crate) fn complete_verified_document_with_delivery(
         }
     };
     if page_coverage_required(summary_profile, delivery_policy)
-        && !delivery_page_coverage_satisfied(
+        && !delivery_page_coverage_with_warnings(
             &cited_pages,
             &persisted_analysis.omissions,
             &normalized,
+            &persisted_synthesis.warnings,
         )
     {
         return Err(persist_final_failure(
@@ -1353,6 +1359,7 @@ fn verify(
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
         SYNTHESIS_VERSION
+        | PRE_FURNITURE_SYNTHESIS_VERSION
         | PRE_BALANCED_SYNTHESIS_VERSION
         | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
         PRE_CONTEXT_SYNTHESIS_VERSION => PRE_CONTEXT_VERIFICATION_VERSION,
@@ -1821,6 +1828,7 @@ fn verification_claim_budget(
     if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
@@ -2440,6 +2448,22 @@ fn derive_analysis_quote_catalog_for_blocks(
     normalized_blocks: &HashMap<&str, &NormalizedBlock>,
     allowed_block_ids: &[String],
 ) -> Result<AnalysisQuoteCatalog, PipelineFailure> {
+    derive_quote_catalog_with_segmentation(
+        analysis_version,
+        chunk,
+        normalized_blocks,
+        allowed_block_ids,
+        |block| analysis_quote_segmentation_for_version(analysis_version, &block.text),
+    )
+}
+
+fn derive_quote_catalog_with_segmentation(
+    analysis_version: &str,
+    chunk: &crate::pipeline::contracts::DocumentChunk,
+    normalized_blocks: &HashMap<&str, &NormalizedBlock>,
+    allowed_block_ids: &[String],
+    segment: impl Fn(&NormalizedBlock) -> AnalysisQuoteSegmentation,
+) -> Result<AnalysisQuoteCatalog, PipelineFailure> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
     let mut block_segments = Vec::with_capacity(allowed_block_ids.len());
@@ -2454,7 +2478,7 @@ fn derive_analysis_quote_catalog_for_blocks(
                 false,
             )
         })?;
-        let segmentation = analysis_quote_segmentation_for_version(analysis_version, &block.text);
+        let segmentation = segment(block);
         omitted_source_units = omitted_source_units
             .checked_add(segmentation.omitted_source_units)
             .ok_or_else(|| {
@@ -2667,6 +2691,15 @@ fn delivery_page_coverage_satisfied(
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
 ) -> bool {
+    delivery_page_coverage_with_warnings(cited_pages, omissions, normalized, &[])
+}
+
+fn delivery_page_coverage_with_warnings(
+    cited_pages: &HashSet<u32>,
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+    warnings: &[PipelineWarning],
+) -> bool {
     let native_pages = native_text_pages(normalized);
     if native_pages.is_empty() || !cited_pages.is_subset(&native_pages) {
         return false;
@@ -2677,7 +2710,16 @@ fn delivery_page_coverage_satisfied(
     {
         return false;
     }
-    let material_omissions = remaining_page_omissions(omissions, cited_pages)
+    let excluded = coherent::furniture_coverage_exclusions(warnings, normalized);
+    let native_pages = native_pages
+        .difference(&excluded)
+        .copied()
+        .collect::<HashSet<_>>();
+    let cited_pages = cited_pages
+        .difference(&excluded)
+        .copied()
+        .collect::<HashSet<_>>();
+    let material_omissions = remaining_page_omissions(omissions, &cited_pages)
         .into_iter()
         .filter(|omission| {
             matches!(
@@ -2687,6 +2729,7 @@ fn delivery_page_coverage_satisfied(
             )
         })
         .map(|omission| omission.page_number)
+        .filter(|page| native_pages.contains(page))
         .collect::<HashSet<_>>();
     let adjusted_total = native_pages.len() - material_omissions.len();
     cited_pages.len() <= adjusted_total
@@ -2700,6 +2743,7 @@ pub(crate) fn delivery_claim_prefix_coverage_satisfied(
     delivered_claim_count: usize,
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
+    warnings: &[PipelineWarning],
 ) -> bool {
     let presented_claims = presented_claims(
         &citations.presentation_mode,
@@ -2715,7 +2759,7 @@ pub(crate) fn delivery_claim_prefix_coverage_satisfied(
     ) else {
         return false;
     };
-    delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
+    delivery_page_coverage_with_warnings(&cited_pages, omissions, normalized, warnings)
 }
 
 #[cfg(test)]
@@ -3624,16 +3668,33 @@ fn presented_claims_empty(verified: &VerifiedDocument) -> bool {
     .is_empty()
 }
 
+#[cfg(test)]
 fn claims_satisfy_delivery_page_coverage(
     claims: &[CitedClaim],
     evidence: &[EvidenceItem],
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
 ) -> bool {
+    claims_satisfy_delivery_page_coverage_with_warnings(
+        claims,
+        evidence,
+        omissions,
+        normalized,
+        &[],
+    )
+}
+
+fn claims_satisfy_delivery_page_coverage_with_warnings(
+    claims: &[CitedClaim],
+    evidence: &[EvidenceItem],
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+    warnings: &[PipelineWarning],
+) -> bool {
     let Some(cited_pages) = claim_pages(claims, evidence) else {
         return false;
     };
-    delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
+    delivery_page_coverage_with_warnings(&cited_pages, omissions, normalized, warnings)
 }
 
 fn delivery_coverage_fallback_warning(connect_delivery: bool) -> PipelineWarning {
@@ -3658,11 +3719,12 @@ fn apply_verified_delivery_coverage_fallback(
 ) -> Result<VerifiedDocument, PipelineFailure> {
     if !require_coverage
         || synthesized.presentation_mode != SummaryPresentationMode::Coherent
-        || claims_satisfy_delivery_page_coverage(
+        || claims_satisfy_delivery_page_coverage_with_warnings(
             &verified.summary_claims,
             &verified.synthesis_evidence,
             &analyzed.omissions,
             normalized,
+            &synthesized.warnings,
         )
     {
         return Ok(verified);
@@ -4072,6 +4134,7 @@ fn validate_synthesized_document_without_runtime(
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
@@ -4088,6 +4151,7 @@ fn validate_synthesized_document_without_runtime(
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
@@ -4379,11 +4443,12 @@ fn validate_coherent_verified_document(
         .map(|(claim, _)| claim.clone())
         .collect::<Vec<_>>();
     let delivery_coverage_fallback_valid = !delivery_coverage_fallback
-        || !claims_satisfy_delivery_page_coverage(
+        || !claims_satisfy_delivery_page_coverage_with_warnings(
             &supported_summary_claims,
             &synthesized.synthesis_evidence,
             &analyzed.omissions,
             normalized,
+            &synthesized.warnings,
         );
     let expected_summary_claims = if delivery_coverage_fallback {
         Vec::new()
@@ -6111,6 +6176,157 @@ mod tests {
         chunk_document(&mut conn, &DeterministicDocumentChunker::new(), &run.run_id)
             .expect("fixture should chunk");
         (conn, run.run_id)
+    }
+
+    #[test]
+    fn furniture_only_page_delivers_with_disclosed_exclusion() {
+        use crate::pipeline::contracts::{DocumentParser, IngestedDocument, ParsedDocument};
+        struct FurniturePageParser;
+        impl DocumentParser for FurniturePageParser {
+            fn id(&self) -> &'static str {
+                "furniture-page-fixture"
+            }
+            fn version(&self) -> &'static str {
+                "1"
+            }
+            fn parse(
+                &self,
+                document: &IngestedDocument,
+            ) -> Result<ParsedDocument, PipelineFailure> {
+                let mut parsed = PdfExtractParser::new().parse(document)?;
+                let mut pages = parsed.pages.clone();
+                let body = pages[0].text.clone();
+                for (index, page) in pages.iter_mut().enumerate() {
+                    page.page_number = (index + 1) as u32;
+                    if page.text.trim().is_empty() {
+                        page.text = body.clone();
+                        page.requires_visual_processing = false;
+                        page.warnings.clear();
+                    }
+                }
+                pages[1].text = "Page 2".into();
+                parsed.pages = pages;
+                parsed.parser_id = self.id().into();
+                parsed.parser_version = self.version().into();
+                Ok(parsed)
+            }
+        }
+        for fallback in [false, true] {
+            let database = TestDatabase::new();
+            let mut conn = init_db(&database.0).unwrap();
+            let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/structured_report.pdf");
+            let (_, run) = ingest_pdf_with_profiles(
+                &mut conn,
+                source.to_str().unwrap(),
+                None,
+                SummaryProfile::General,
+                None,
+            )
+            .unwrap();
+            let run_id = &run.run_id;
+            parse_document(&mut conn, &FurniturePageParser, run_id).unwrap();
+            normalize_document(&mut conn, &CanonicalNormalizer::new(), run_id).unwrap();
+            structure_document(&mut conn, &DeterministicStructureInterpreter::new(), run_id)
+                .unwrap();
+            chunk_document(&mut conn, &DeterministicDocumentChunker::new(), run_id).unwrap();
+            let runtime =
+                rejected_general_runtime(if fallback { "malformed" } else { "unused" }, false);
+            let good = GeneralCoverageRuntime {
+                requests: Mutex::new(vec![]),
+                good_initial: true,
+                corrects: false,
+                withhold_ledger: false,
+                bad_repair: None,
+            };
+            let completed = summarize_chunked_document(
+                &mut conn,
+                if fallback { &runtime } else { &good },
+                run_id,
+            )
+            .expect("furniture-only page must not fail substantive document delivery");
+            assert_eq!(
+                completed.citations.presentation_mode,
+                if fallback {
+                    SummaryPresentationMode::ClaimLedgerFallback
+                } else {
+                    SummaryPresentationMode::Coherent
+                }
+            );
+            let warning = completed
+                .summary
+                .warnings
+                .iter()
+                .find(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED")
+                .expect("delivery must disclose the excluded page");
+            assert!(warning.message.contains("[2]"));
+            assert!(get_summary_artifact(&conn, run_id).unwrap().is_some());
+            let analyzed = get_analyzed_document(&conn, run_id).unwrap().unwrap();
+            let normalized = get_normalized_document(&conn, run_id).unwrap().unwrap();
+            assert_eq!(normalized.pages.len(), 6);
+            assert!(delivery_claim_prefix_coverage_satisfied(
+                &completed.citations,
+                presented_claims(
+                    &completed.citations.presentation_mode,
+                    &completed.citations.claims,
+                    &completed.citations.summary_claims
+                )
+                .len(),
+                &analyzed.omissions,
+                &normalized,
+                &completed.summary.warnings
+            ));
+            if !fallback {
+                assert!(!summary_cited_pages(&completed.citations)
+                    .unwrap()
+                    .contains(&2));
+                assert!(
+                    !delivery_claim_prefix_coverage_satisfied(
+                        &completed.citations,
+                        completed.citations.summary_claims.len(),
+                        &analyzed.omissions,
+                        &normalized,
+                        &[]
+                    ),
+                    "final prefix needs the disclosed source scope"
+                );
+            }
+            let saved = get_synthesized_document(&conn, run_id).unwrap().unwrap();
+            let chunks = get_chunked_document(&conn, run_id).unwrap().unwrap();
+            for remove in [false, true] {
+                let mut invalid = saved.clone();
+                if remove {
+                    invalid
+                        .warnings
+                        .retain(|w| w.code != "SUMMARY_FURNITURE_PAGES_EXCLUDED");
+                } else {
+                    invalid
+                        .warnings
+                        .iter_mut()
+                        .find(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED")
+                        .unwrap()
+                        .message
+                        .push_str(" [3]");
+                }
+                assert!(coherent::validate_for_runtime(
+                    SummaryProfile::General,
+                    &invalid,
+                    &analyzed,
+                    &chunks,
+                    &normalized,
+                    if fallback { &runtime } else { &good }
+                )
+                .is_err());
+            }
+            // The historical ledger may still display a counter claim, but it
+            // cannot earn coverage credit for an excluded page.
+            assert!(!delivery_page_coverage_with_warnings(
+                &HashSet::from([2]),
+                &analyzed.omissions,
+                &normalized,
+                &completed.summary.warnings
+            ));
+        }
     }
 
     fn sparse_page_scope_fixture(
@@ -10517,14 +10733,16 @@ mod tests {
                 &citations,
                 2,
                 &omissions,
-                &normalized
+                &normalized,
+                &[]
             ));
             for count in [0, 1, 3, usize::MAX] {
                 assert!(!delivery_claim_prefix_coverage_satisfied(
                     &citations,
                     count,
                     &omissions,
-                    &normalized
+                    &normalized,
+                    &[]
                 ));
             }
         }
@@ -10540,7 +10758,8 @@ mod tests {
             &citations,
             1,
             &omissions,
-            &normalized
+            &normalized,
+            &[]
         ));
         citations.summary_claims[0]
             .evidence_ids
@@ -10550,7 +10769,8 @@ mod tests {
             &citations,
             1,
             &omissions,
-            &normalized
+            &normalized,
+            &[]
         ));
         citations.summary_claims.clear();
         assert_eq!(summary_cited_pages(&citations), Some(HashSet::new()));
@@ -12079,7 +12299,8 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "10.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "11.0.0");
+        assert_eq!(PRE_FURNITURE_SYNTHESIS_VERSION, "10.0.0");
         assert_eq!(PRE_BALANCED_SYNTHESIS_VERSION, "9.0.0");
         assert_eq!(PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION, "8.0.0");
         assert_eq!(PRE_CONTEXT_SYNTHESIS_VERSION, "7.0.0");
