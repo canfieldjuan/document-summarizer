@@ -7876,6 +7876,61 @@ mod tests {
     }
 
     #[test]
+    fn unoffered_real_sources_are_rejected_and_corrections_keep_offered_sources() {
+        let catalog = SourceCatalog {
+            candidates: (1..=7)
+                .map(|n| candidate(&format!("s{n}"), &format!("e{n}"), 1))
+                .collect(),
+            omitted_source_units: 0,
+        };
+        let offered = page_balanced_catalog(SummaryProfile::General, VERSION, &catalog);
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &offered).unwrap();
+        let answer = |id: &str| {
+            json!({"units":[{"text":"Exact source statement 1.","source_ids":[id]}]}).to_string()
+        };
+        assert!(
+            parse_response(SummaryProfile::General, &answer("s2"), "doc", &catalog).is_ok(),
+            "s2 really exists in the full catalog"
+        );
+        assert_eq!(
+            parse_response(SummaryProfile::General, &answer("s2"), "doc", &offered)
+                .unwrap_err()
+                .code,
+            "MODEL_SUMMARY_RESPONSE_INVALID"
+        );
+        for id in ["s1", "s4", "s7"] {
+            assert!(parse_response(SummaryProfile::General, &answer(id), "doc", &offered).is_ok());
+        }
+        let expected = json!(["s1", "s4", "s7"]);
+        assert_eq!(
+            schema["properties"]["units"]["items"]["properties"]["source_ids"]["items"]["enum"],
+            expected
+        );
+        let feedback = vec!["Correct the cited source.".to_string()];
+        let correction = prompt_with_validation_feedback(&prompt, &feedback).unwrap();
+        let repair =
+            prompt_with_previous_invalid_response(&prompt, &feedback, &answer("s2")).unwrap();
+        for user_prompt in [&prompt, &correction, &repair] {
+            let value: Value = serde_json::from_str(user_prompt).unwrap();
+            let ids = value["source_segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|source| source["source_id"].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(json!(ids), expected);
+            let request = summary_request(SummaryProfile::General, user_prompt, &schema, 0, 0);
+            let ModelOutputFormat::JsonSchema { schema, .. } = request.output_format else {
+                panic!("strict schema")
+            };
+            assert_eq!(
+                schema["properties"]["units"]["items"]["properties"]["source_ids"]["items"]["enum"],
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn page_balance_is_exact_deterministic_and_versioned() {
         for count in 0..=8 {
             let catalog = SourceCatalog {
