@@ -161,9 +161,14 @@ interface BackgroundRunAccepted {
   summaryProfile: SummaryProfile;
 }
 
-type SummaryPresentationMode = "legacyClaimList" | "coherent" | "claimLedgerFallback";
+type SummaryPresentationMode = "legacyClaimList" | "coherent" | "claimLedgerFallback" | "structuredExtraction";
+
+interface ContractExtraction {
+  clauses: { clauseId: string; heading: string | null; text: string; evidenceIds: string[] }[];
+}
 
 interface SummaryArtifact {
+  contractExtraction: ContractExtraction | null;
   text: string;
   warnings: PipelineWarning[];
   createdAt: string;
@@ -1359,6 +1364,11 @@ function renderClaims(summary: SummaryArtifact): void {
   evidenceLabel.textContent = "";
   evidenceQuote.textContent = "";
 
+  const outputLabel = coherentSummarySection.querySelector(".utility-label");
+  if (outputLabel) {
+    outputLabel.textContent = summary.presentationMode === "structuredExtraction" ? "Contract clauses" : "Overview";
+  }
+
   if (summary.claims.length === 0 && summary.presentationMode !== "coherent") {
     summaryText.hidden = false;
     summaryText.textContent = summary.text;
@@ -1367,6 +1377,31 @@ function renderClaims(summary: SummaryArtifact): void {
 
   summaryText.textContent = "";
   summaryText.hidden = true;
+  if (summary.presentationMode === "structuredExtraction") {
+    coherentSummarySection.hidden = false;
+    const records = summary.contractExtraction?.clauses;
+    if (!records || records.length !== summary.claims.length) {
+      throw new Error("Contract extraction records do not match their citations");
+    }
+    records.forEach((record, index) => {
+      const claim = summary.claims[index];
+      if (record.clauseId !== claim.claimId || record.text !== claim.text) {
+        throw new Error("Contract source record changed after validation");
+      }
+      const item = document.createElement("section");
+      item.className = "summary-paragraph";
+      const heading = document.createElement("h3");
+      heading.textContent = record.heading ?? `Source clause ${index + 1}`;
+      const text = document.createElement("p");
+      text.className = "claim-text";
+      text.style.whiteSpace = "pre-wrap";
+      text.textContent = record.text;
+      item.append(heading, text, citationActions(claim, "contract clause", index));
+      summaryProse.append(item);
+    });
+    return;
+  }
+
   if (summary.presentationMode === "coherent") {
     coherentSummarySection.hidden = false;
     renderProseList(summaryProse, summary.summaryClaims);

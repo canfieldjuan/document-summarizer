@@ -158,6 +158,8 @@ struct PromptSourceSegment {
     #[serde(skip_serializing_if = "Option::is_none")]
     contract_clause: Option<ContractClauseReference>,
     exact_quote: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    full_clause: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -2682,6 +2684,7 @@ struct SourceCandidate {
     source_framing: Option<SourceFraming>,
     drafting_claim: Option<String>,
     contract_clause: Option<ContractClauseReference>,
+    full_clause: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3053,6 +3056,7 @@ fn synthesize_with_delivery_coverage(
         });
     }
     let result = SynthesizedDocument {
+        contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.to_string(),
         runtime_id: runtime
@@ -3489,6 +3493,7 @@ fn source_selection_prompt_and_schema(
         source_segments: candidates
             .iter()
             .map(|candidate| PromptSourceSegment {
+                full_clause: candidate.full_clause.clone(),
                 source_id: candidate.request_id.clone(),
                 chunk_ordinal: candidate.chunk_ordinal,
                 page_number: candidate.evidence.source_span.page_start,
@@ -5167,6 +5172,7 @@ fn contract_source_catalog(
                 return None;
             }
             candidates.push(SourceCandidate {
+                full_clause: None,
                 request_id: String::new(),
                 evidence: EvidenceItem {
                     evidence_id,
@@ -6489,6 +6495,7 @@ fn fallback_document(
         stage: Some(PipelineStage::Synthesize),
     });
     Ok(SynthesizedDocument {
+        contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.to_string(),
         runtime_id: runtime
@@ -6518,7 +6525,9 @@ fn page_balanced_catalog(
     version: &str,
     catalog: &SourceCatalog,
 ) -> SourceCatalog {
-    if profile != SummaryProfile::General || version != VERSION {
+    if profile != SummaryProfile::General
+        || !matches!(version, VERSION | PRE_CLAUSE_SYNTHESIS_VERSION)
+    {
         return catalog.clone();
     }
     let mut by_page: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -6581,6 +6590,7 @@ fn prompt_and_schema_for_version(
             .candidates
             .iter()
             .map(|candidate| PromptSourceSegment {
+                full_clause: candidate.full_clause.clone(),
                 source_id: candidate.request_id.clone(),
                 chunk_ordinal: candidate.chunk_ordinal,
                 page_number: candidate.evidence.source_span.page_start,
@@ -7454,6 +7464,7 @@ fn contract_source_catalog_from_blocks(
                 return Ok(None);
             }
             candidates.push(SourceCandidate {
+                full_clause: None,
                 request_id: format!("s{}", candidates.len() + 1),
                 evidence: EvidenceItem {
                     evidence_id,
@@ -7488,9 +7499,18 @@ fn source_catalog_for_synthesis_version(
 ) -> Result<SourceCatalog, PipelineFailure> {
     // Before analysis 14, coherent catalogs used v13 even for older analysis.
     // Replay that policy rather than rebuilding saved evidence under today's rules.
-    let analysis_version = analyzed
-        .filter(|document| document.analysis_version != ANALYSIS_VERSION)
-        .map_or(ANALYSIS_VERSION, |_| SENTENCE_ANALYSIS_VERSION);
+    let analysis_version = if synthesis_version == VERSION {
+        analyzed.map_or(ANALYSIS_VERSION, |d| d.analysis_version.as_str())
+    } else if analyzed.is_none_or(|d| {
+        matches!(
+            d.analysis_version.as_str(),
+            ANALYSIS_VERSION | PRE_CLAUSE_ANALYSIS_VERSION
+        )
+    }) {
+        PRE_CLAUSE_ANALYSIS_VERSION
+    } else {
+        SENTENCE_ANALYSIS_VERSION
+    };
     let blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
     let framing_at_block_starts = source_framing_at_block_starts(normalized);
     let mut candidates = Vec::new();
@@ -7590,6 +7610,9 @@ fn source_catalog_for_synthesis_version(
                 .filter(|claim| claim != &source.exact_quote)
                 .filter(|_| source_framing.is_none());
             candidates.push(SourceCandidate {
+                full_clause: (synthesis_version == VERSION)
+                    .then(|| clauses::context(&source.block_id, &source.exact_quote, &blocks))
+                    .flatten(),
                 request_id: format!("s{ordinal}"),
                 evidence: EvidenceItem {
                     evidence_id,
@@ -7836,7 +7859,8 @@ pub(super) fn validate_content(
                 return Err(invalid_document());
             }
         }
-        SummaryPresentationMode::LegacyClaimList => return Err(invalid_document()),
+        SummaryPresentationMode::LegacyClaimList
+        | SummaryPresentationMode::StructuredExtraction => return Err(invalid_document()),
     }
     Ok(())
 }
@@ -7892,6 +7916,189 @@ mod tests {
     };
     use crate::pipeline::model::OllamaRuntime;
     use std::sync::Mutex;
+
+    #[test]
+    #[ignore = "requires owner-supplied saved production artifacts; no inference"]
+    fn replay_saved_clause_sources_and_contract_extraction() {
+        let input = std::env::var("DOC_SUM_CLAUSE_REPLAY_INPUT").unwrap();
+        let cases: Vec<Value> = serde_json::from_slice(&std::fs::read(input).unwrap()).unwrap();
+        let mut receipts = Vec::new();
+        for case in cases {
+            let normalized: NormalizedDocument =
+                serde_json::from_value(case["normalized"].clone()).unwrap();
+            let chunked: ChunkedDocument = serde_json::from_value(case["chunked"].clone()).unwrap();
+            let analyzed: AnalyzedDocument =
+                serde_json::from_value(case["analyzed"].clone()).unwrap();
+            let synthesized: SynthesizedDocument =
+                serde_json::from_value(case["synthesized"].clone()).unwrap();
+            let verified: VerifiedDocument =
+                serde_json::from_value(case["verified"].clone()).unwrap();
+            let summary: SummaryArtifact = serde_json::from_value(case["summary"].clone()).unwrap();
+            let citations: CitationArtifact =
+                serde_json::from_value(case["citations"].clone()).unwrap();
+            validate_citation_artifact(
+                &citations,
+                &summary,
+                &verified,
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+            )
+            .unwrap();
+            let old = source_catalog_for_profile(
+                SummaryProfile::General,
+                PRE_CLAUSE_SYNTHESIS_VERSION,
+                &chunked,
+                &normalized,
+                Some(&analyzed),
+            )
+            .unwrap();
+            let current = source_catalog_for_profile(
+                SummaryProfile::General,
+                VERSION,
+                &chunked,
+                &normalized,
+                None,
+            )
+            .unwrap();
+            let (prompt, _) = prompt_and_schema(SummaryProfile::General, &current).unwrap();
+            let prompt: Value = serde_json::from_str(&prompt).unwrap();
+            let footers = |catalog: &SourceCatalog| {
+                catalog
+                    .candidates
+                    .iter()
+                    .filter(|c| {
+                        let t = c.evidence.exact_quote.to_lowercase();
+                        t.contains("copyright") && t.contains("rights reserved")
+                    })
+                    .count()
+            };
+            let extracted =
+                contract_extraction::analyze(&chunked, &normalized, &UNCONTROLLED_EXECUTION)
+                    .unwrap();
+            let extracted = contract_extraction::synthesize(
+                &extracted,
+                &chunked,
+                &normalized,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            let records = extracted.contract_extraction.as_ref().unwrap();
+            let offered_contexts = prompt["source_segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|s| s["full_clause"].is_string())
+                .count();
+            let payment_context = current
+                .candidates
+                .iter()
+                .filter(|c| c.evidence.exact_quote.contains("Such payment"))
+                .map(|c| c.full_clause.as_deref().unwrap_or(""))
+                .any(|text| text.to_lowercase().contains("substantial"));
+            assert_eq!(
+                footers(&current),
+                0,
+                "repeated publisher furniture must not be offered"
+            );
+            assert_eq!(
+                offered_contexts,
+                current.candidates.len(),
+                "every offered quote needs full clause context"
+            );
+            let receipt = json!({"label":case["label"], "historical_artifacts_valid":true, "old_offered":old.candidates.len(), "new_offered":current.candidates.len(), "old_footer_excerpts":footers(&old), "new_footer_excerpts":footers(&current), "offered_with_full_context":offered_contexts, "omitted_units":current.omitted_source_units, "structured_clauses":records.clauses.len(), "payment_lead_in_present":payment_context});
+            println!("CLAUSE_REPLAY {receipt}");
+            receipts.push(receipt);
+        }
+        if let Ok(output) = std::env::var("DOC_SUM_CLAUSE_REPLAY_OUTPUT") {
+            std::fs::write(output, serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn clause_source_policy_handles_footer_before_pdf_body() {
+        let (mut normalized, mut chunked) = contract_documents();
+        for page in &mut normalized.pages {
+            page.content[0].text = format!("Publisher form. Copyright 2020. All rights reserved.\nLicensed reproduction only.\n\n{}\n\n4. Payment\nPayment requires acceptance. Do not remove this operative clause.", page.page_number);
+        }
+        let blocks = normalized
+            .pages
+            .iter()
+            .flat_map(|p| &p.content)
+            .collect::<Vec<_>>();
+        chunked.chunks[0].block_ids = blocks.iter().map(|b| b.block_id.clone()).collect();
+        chunked.chunks[0].source_spans = blocks.iter().map(|b| b.source.clone()).collect();
+        chunked.chunks[0].text = blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let catalog = source_catalog_for_profile(
+            SummaryProfile::General,
+            VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
+        assert_eq!(catalog.candidates.len(), normalized.pages.len());
+        assert!(catalog
+            .candidates
+            .iter()
+            .all(|c| !c.evidence.exact_quote.contains("Copyright")
+                && c.evidence.exact_quote.starts_with("4. Payment")));
+    }
+
+    #[test]
+    fn clause_source_policy_excludes_repeated_footer_and_preserves_payment_clause() {
+        let (mut normalized, mut chunked) = contract_documents();
+        let body = format!("10.2 Substantial completion\nWhen work is substantially complete, payment is due. {} Such payment excludes disputed amounts.\n\n10.3 Final payment\nFinal payment requires final acceptance.", "The owner must inspect each item before certifying payment. ".repeat(12));
+        let footer =
+            "Standard form. Copyright 2020. All rights reserved.\nLicensed reproduction only.";
+        for page in &mut normalized.pages {
+            page.content[0].text = format!("{body}\n\n{footer}");
+        }
+        let blocks = normalized
+            .pages
+            .iter()
+            .flat_map(|p| &p.content)
+            .collect::<Vec<_>>();
+        chunked.chunks[0].block_ids = blocks.iter().map(|b| b.block_id.clone()).collect();
+        chunked.chunks[0].source_spans = blocks.iter().map(|b| b.source.clone()).collect();
+        chunked.chunks[0].text = blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let catalog = source_catalog_for_profile(
+            SummaryProfile::General,
+            VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !catalog
+                .candidates
+                .iter()
+                .any(|c| c.evidence.exact_quote.contains("Licensed reproduction")),
+            "repeated footer entered excerpts"
+        );
+        let payment = catalog
+            .candidates
+            .iter()
+            .find(|c| c.evidence.exact_quote.contains("Such payment"))
+            .expect("complete payment clause retained");
+        assert!(
+            payment
+                .evidence
+                .exact_quote
+                .contains("10.2 Substantial completion"),
+            "clause lead-in detached"
+        );
+    }
 
     #[test]
     fn general_request_balances_uneven_pages_without_changing_source_identity() {
@@ -9593,6 +9800,7 @@ mod tests {
 
     fn candidate(request_id: &str, evidence_id: &str, page: u32) -> SourceCandidate {
         SourceCandidate {
+            full_clause: None,
             request_id: request_id.to_string(),
             evidence: EvidenceItem {
                 evidence_id: evidence_id.to_string(),
@@ -14460,6 +14668,7 @@ mod tests {
         let source = ONE_BLOCK_CONTRACT_SOURCE;
         let base = SourceCatalog {
             candidates: vec![SourceCandidate {
+                full_clause: None,
                 evidence: EvidenceItem {
                     exact_quote: source.into(),
                     claim_text: source.into(),
@@ -14589,6 +14798,7 @@ mod tests {
             format!("{source}\n\n7. Renewal. The Agreement renews for one year.");
         let oversized = SourceCatalog {
             candidates: vec![SourceCandidate {
+                full_clause: None,
                 evidence: EvidenceItem {
                     exact_quote: oversized_source.clone(),
                     claim_text: oversized_source,
@@ -14658,6 +14868,7 @@ mod tests {
         )
         .unwrap();
         let mut verified = VerifiedDocument {
+            contract_extraction: None,
             document_id: "contract-document".into(),
             verification_version: VERIFICATION_VERSION.into(),
             synthesis_attempt_ordinal: 0,
@@ -15449,6 +15660,7 @@ mod tests {
     fn live_one_block_contract_repairs_every_material_term() {
         let base = SourceCatalog {
             candidates: vec![SourceCandidate {
+                full_clause: None,
                 evidence: EvidenceItem {
                     exact_quote: ONE_BLOCK_CONTRACT_SOURCE.into(),
                     claim_text: ONE_BLOCK_CONTRACT_SOURCE.into(),
@@ -16174,6 +16386,7 @@ mod tests {
     fn modal_repair_controls_second_request_and_fails_closed_after_one_retry() {
         let catalog = SourceCatalog {
             candidates: vec![SourceCandidate {
+                full_clause: None,
                 evidence: EvidenceItem {
                     exact_quote: "The interpreter should retain the section.".into(),
                     ..candidate("s1", "evidence-1", 1).evidence

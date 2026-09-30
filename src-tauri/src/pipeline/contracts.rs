@@ -565,10 +565,29 @@ pub enum SummaryPresentationMode {
     LegacyClaimList,
     Coherent,
     ClaimLedgerFallback,
+    StructuredExtraction,
+}
+
+/// Exact source extraction, not generated legal interpretation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ContractExtraction {
+    pub clauses: Vec<ExtractedContractClause>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ExtractedContractClause {
+    pub clause_id: String,
+    pub heading: Option<String>,
+    pub text: String,
+    pub evidence_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SynthesizedDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_extraction: Option<ContractExtraction>,
     pub document_id: String,
     pub synthesis_version: String,
     pub runtime_id: String,
@@ -588,6 +607,8 @@ pub struct SynthesizedDocument {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_extraction: Option<ContractExtraction>,
     pub document_id: String,
     pub verification_version: String,
     #[serde(default)]
@@ -617,6 +638,8 @@ pub struct VerifiedDocument {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CitationArtifact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_extraction: Option<ContractExtraction>,
     pub document_id: String,
     pub citation_version: String,
     pub summary_integrity_hash: String,
@@ -633,6 +656,8 @@ pub struct CitationArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryArtifact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_extraction: Option<ContractExtraction>,
     pub document_id: String,
     pub summary_version: String,
     pub text: String,
@@ -657,6 +682,19 @@ pub struct SummaryArtifacts {
 
 impl SummaryArtifact {
     pub fn calculate_integrity_hash(&self) -> Result<String, serde_json::Error> {
+        if let Some(extraction) = &self.contract_extraction {
+            return Ok(format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&(
+                    &self.document_id,
+                    &self.summary_version,
+                    &self.text,
+                    &self.warnings,
+                    self.created_at,
+                    extraction,
+                ))?)
+            ));
+        }
         let canonical = serde_json::to_vec(&(
             &self.document_id,
             &self.summary_version,
@@ -670,7 +708,20 @@ impl SummaryArtifact {
 
 impl CitationArtifact {
     pub fn calculate_integrity_hash(&self) -> Result<String, serde_json::Error> {
-        let canonical = if self.citation_version == "4.0.0" {
+        let canonical = if self.citation_version == "5.0.0" {
+            serde_json::to_vec(&(
+                &self.document_id,
+                &self.citation_version,
+                &self.summary_integrity_hash,
+                &self.rendered_text,
+                &self.presentation_mode,
+                &self.summary_claims,
+                &self.claims,
+                &self.evidence,
+                self.created_at,
+                &self.contract_extraction,
+            ))?
+        } else if self.citation_version == "4.0.0" {
             serde_json::to_vec(&(
                 &self.document_id,
                 &self.citation_version,

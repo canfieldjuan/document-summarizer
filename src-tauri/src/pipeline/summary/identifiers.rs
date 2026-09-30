@@ -205,6 +205,7 @@ mod tests {
                 text: "First.".into(),
                 source_framing: None,
                 evidence: vec![PromptVerificationEvidence {
+                    full_clause: None,
                     evidence_id: "evidence-private-a".into(),
                     exact_quote: "Shared quotation.".into(),
                 }],
@@ -215,10 +216,12 @@ mod tests {
                 source_framing: None,
                 evidence: vec![
                     PromptVerificationEvidence {
+                        full_clause: None,
                         evidence_id: "evidence-private-a".into(),
                         exact_quote: "Shared quotation.".into(),
                     },
                     PromptVerificationEvidence {
+                        full_clause: None,
                         evidence_id: "evidence-private-b".into(),
                         exact_quote: "Other quotation.".into(),
                     },

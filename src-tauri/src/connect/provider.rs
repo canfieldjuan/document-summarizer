@@ -2549,6 +2549,7 @@ mod tests {
         let now = Utc::now();
         let summary = SummaryArtifacts {
             summary: SummaryArtifact {
+                contract_extraction: None,
                 document_id: document.document_id.clone(),
                 summary_version: crate::pipeline::summary::SUMMARY_VERSION.to_string(),
                 text: rendered_text.clone(),
@@ -2557,6 +2558,7 @@ mod tests {
                 integrity_hash: "summary-integrity".to_string(),
             },
             citations: CitationArtifact {
+                contract_extraction: None,
                 document_id: document.document_id,
                 citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
                 summary_integrity_hash: "summary-integrity".to_string(),
@@ -2676,6 +2678,7 @@ mod tests {
         let now = Utc::now();
         let summary = SummaryArtifacts {
             summary: SummaryArtifact {
+                contract_extraction: None,
                 document_id: document.document_id.clone(),
                 summary_version: crate::pipeline::summary::SUMMARY_VERSION.to_string(),
                 text: rendered_text.clone(),
@@ -2684,6 +2687,7 @@ mod tests {
                 integrity_hash: "summary-integrity".to_string(),
             },
             citations: CitationArtifact {
+                contract_extraction: None,
                 document_id: document.document_id,
                 citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
                 summary_integrity_hash: "summary-integrity".to_string(),

@@ -97,6 +97,7 @@ pub(super) fn synthesize(
     validate_analyzed_document(analyzed, chunked, normalized, runtime)?;
     let claims = source_ordered_claims(analyzed)?;
     let result = SynthesizedDocument {
+        contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.into(),
         runtime_id: runtime.runtime_id_for_stage(PipelineStage::Analyze).into(),

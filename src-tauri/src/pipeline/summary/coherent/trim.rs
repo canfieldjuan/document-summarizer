@@ -356,6 +356,7 @@ mod tests {
         })
         .collect();
         let synthesized = SynthesizedDocument {
+            contract_extraction: None,
             document_id: "doc".into(),
             synthesis_version: VERSION.into(),
             runtime_id: "replay".into(),
