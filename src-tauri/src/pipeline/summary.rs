@@ -45,7 +45,8 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "10.0.0";
+pub const SYNTHESIS_VERSION: &str = "11.0.0";
+const PRE_FURNITURE_SYNTHESIS_VERSION: &str = "10.0.0";
 const PRE_BALANCED_SYNTHESIS_VERSION: &str = "9.0.0";
 pub const VERIFICATION_VERSION: &str = "10.0.0";
 pub const SUMMARY_VERSION: &str = "8.0.0";
@@ -150,6 +151,7 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
         SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
@@ -163,7 +165,10 @@ fn coherent_verification_versions_match(
 ) -> bool {
     (matches!(
         synthesis_version,
-        SYNTHESIS_VERSION | PRE_BALANCED_SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
+            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
     ) && verification_version == VERIFICATION_VERSION)
         || (synthesis_version == PRE_CONTEXT_SYNTHESIS_VERSION
             && verification_version == PRE_CONTEXT_VERIFICATION_VERSION)
@@ -1353,6 +1358,7 @@ fn verify(
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
         SYNTHESIS_VERSION
+        | PRE_FURNITURE_SYNTHESIS_VERSION
         | PRE_BALANCED_SYNTHESIS_VERSION
         | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
         PRE_CONTEXT_SYNTHESIS_VERSION => PRE_CONTEXT_VERIFICATION_VERSION,
@@ -1821,6 +1827,7 @@ fn verification_claim_budget(
     if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
@@ -2440,6 +2447,22 @@ fn derive_analysis_quote_catalog_for_blocks(
     normalized_blocks: &HashMap<&str, &NormalizedBlock>,
     allowed_block_ids: &[String],
 ) -> Result<AnalysisQuoteCatalog, PipelineFailure> {
+    derive_quote_catalog_with_segmentation(
+        analysis_version,
+        chunk,
+        normalized_blocks,
+        allowed_block_ids,
+        |block| analysis_quote_segmentation_for_version(analysis_version, &block.text),
+    )
+}
+
+fn derive_quote_catalog_with_segmentation(
+    analysis_version: &str,
+    chunk: &crate::pipeline::contracts::DocumentChunk,
+    normalized_blocks: &HashMap<&str, &NormalizedBlock>,
+    allowed_block_ids: &[String],
+    segment: impl Fn(&NormalizedBlock) -> AnalysisQuoteSegmentation,
+) -> Result<AnalysisQuoteCatalog, PipelineFailure> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
     let mut block_segments = Vec::with_capacity(allowed_block_ids.len());
@@ -2454,7 +2477,7 @@ fn derive_analysis_quote_catalog_for_blocks(
                 false,
             )
         })?;
-        let segmentation = analysis_quote_segmentation_for_version(analysis_version, &block.text);
+        let segmentation = segment(block);
         omitted_source_units = omitted_source_units
             .checked_add(segmentation.omitted_source_units)
             .ok_or_else(|| {
@@ -4072,6 +4095,7 @@ fn validate_synthesized_document_without_runtime(
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
@@ -4088,6 +4112,7 @@ fn validate_synthesized_document_without_runtime(
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
@@ -12079,7 +12104,8 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "10.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "11.0.0");
+        assert_eq!(PRE_FURNITURE_SYNTHESIS_VERSION, "10.0.0");
         assert_eq!(PRE_BALANCED_SYNTHESIS_VERSION, "9.0.0");
         assert_eq!(PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION, "8.0.0");
         assert_eq!(PRE_CONTEXT_SYNTHESIS_VERSION, "7.0.0");

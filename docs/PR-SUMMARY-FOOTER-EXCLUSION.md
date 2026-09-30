@@ -48,12 +48,60 @@ suites. Fresh A/B inference and private fidelity review follow F1-F3 together.
 
 ## Implementation summary
 
-Pending.
+Implemented General synthesis 11 with a source-range filter before quote packing
+and page-balanced selection. The shared catalog builder owns identities and
+original provenance; the filtered catalog feeds the production prompt, strict
+schema, parser, count disclosure and current-artifact reconstruction. Synthesis
+10 keeps its former reconstruction. No extraction or verifier changes landed.
+
+Fail-first `balanced_selection_excludes_running_furniture_and_keeps_each_page`
+failed with `footer entered balanced excerpts`, then passed. Inverse tests retain
+operative copyright conditions and governing headings, handle footer-before-body
+PDF text and missing blank separators, preserve historical/Story/Contract behavior,
+and reject a wholly excluded page instead of silently losing it.
+
+Verification:
+- `cargo test --offline --lib pipeline::summary::`: 264 passed, 13 opt-in ignored.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --offline --locked --all-targets --all-features -- -D warnings`: passed.
+- `npm run build`: passed (unchanged frontend assets required for Tauri tests).
+- `git diff --check`: passed.
+- Saved A/B replay: historical artifacts validate; A offers 28 excerpts over 10/10
+  text pages with zero detected footer excerpts. B offers 42 excerpts over 14/14
+  text pages; footer-containing excerpts fall from 14 to zero. This metric counts
+  mixed footer/body excerpts as well, unlike the earlier footer-only count of 13.
+  The prompt and source-ID enum match the offered catalog. No inference occurred.
 
 ## Cold diff audit
 
-Pending.
+- `summary/coherent/page_furniture.rs` (`Furniture::new`, `segment`): pure,
+  per-document source ranges; repeated notice/label detection and exact page
+  counters. No source mutation, shared mutable state or model instructions.
+  Public positive/negative tests cover the actual catalog and disclosure boundary.
+- `summary/coherent.rs` (`source_catalog_for_profile`, `validate_content`,
+  `page_balanced_catalog`): versioned General dispatch, canonical evidence
+  reconstruction, consistent count/prompt/schema/parser authority. Story and
+  Contract keep their former source policy; saved A/B artifacts replay.
+- `summary.rs` (`derive_quote_catalog_with_segmentation`, version dispatch):
+  reuse the original identity/bounds owner with a source-segmentation callback;
+  analysis callers retain their exact old segmentation. Version 10 stays admitted.
+- `docs/CONTRACTS.md`: current source policy and synthesis version; no consumer,
+  presentation, storage or runtime contract change.
+
+boundary-probe: publisher footer excluded / operative copyright preserved;
+numbered and substantial-completion headings retained; every saved A/B text page
+represented; wholly furniture page rejected; historical artifacts accepted;
+unoffered-citation regressions remain passing.
+
+effect-trace: footer-free offered excerpts | source-range filtering before quote
+packing and balanced selection | failing-before synthetic production-catalog test
+and saved A/B replay show the changed excerpts without losing observed pages.
 
 ## Gap audit
 
-NOT DONE: implementation, regression proof and review pending.
+DONE for local F1 implementation and deterministic proof. NOT DONE for merge:
+required CI and independent review pending. F2 clause preservation, F3 verification
+of the five failure classes, fresh A/B inference and private fidelity re-review
+remain separate required work. PR111 stays draft and its hold unresolved. PR100
+stays frozen. This filter does not claim to recognize every marginal layout or
+improve model semantic accuracy by itself.

@@ -473,6 +473,19 @@ path. This changes synthesis, verification, citation persistence, reopen
 validation and the desktop projection together; document profiles and automatic
 routing are not part of this contract.
 
+General synthesis 11 excludes recognized page furniture before quote packing
+and page-balanced first/middle/last selection. Exclusions are source byte ranges:
+repeated marginal publisher notices and running labels require cross-page
+corroboration; page-number-only edge lines must match the page. Numbered clause
+headings, operative conditions, unique notices and ambiguous labels remain.
+A publisher notice cannot consume a following numbered clause. PDF text order
+may put the notice and attached page counter before the body. An entirely
+excluded text page fails with
+`SYNTHESIS_PAGE_WITHOUT_SUBSTANTIVE_TEXT` instead of silently losing coverage.
+The prompt, schema and parser share the filtered offered catalog. Saved synthesis
+10 reconstructs its prior unfiltered catalog. Analysis, Story, Contract, semantic
+verification and fallback-ledger behavior are unchanged by this policy.
+
 Synthesis constructs a catalog of exact source segments from the normalized
 chunks, independent of the analyzed claim ledger. Segments retain canonical
 chunk, block and within-block order before request-local IDs are assigned. The
@@ -577,7 +590,7 @@ mode, supported prose claims, ledger claims, their exact evidence and the canoni
 rendered text. The desktop shows coherent paragraphs first and keeps any supported
 ledger claims available as supporting detail.
 
-Current artifacts use synthesis 9.0.0, verification 10.0.0, summary 8.0.0 and
+Current artifacts use synthesis 11.0.0, verification 10.0.0, summary 8.0.0 and
 citation 4.0.0. Completed coherent artifacts from before Contract source
 segmentation retain synthesis 8.0.0 with verification 10.0.0 and summary 8.0.0
 compatibility, while an active coherent synthesis-8 checkpoint must regenerate
