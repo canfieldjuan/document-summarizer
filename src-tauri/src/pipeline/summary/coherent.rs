@@ -2839,6 +2839,31 @@ pub(super) fn synthesize_for_delivery(
     )
 }
 
+pub(super) fn furniture_coverage_exclusions(
+    warnings: &[PipelineWarning],
+    normalized: &NormalizedDocument,
+) -> HashSet<u32> {
+    let supplied = warnings
+        .iter()
+        .filter(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED")
+        .collect::<Vec<_>>();
+    if supplied.is_empty() {
+        return HashSet::new();
+    }
+    // Disclosure activates the versioned policy, but cannot choose exemptions:
+    // both the page set and the exact warning are reconstructed from source.
+    let furniture = page_furniture::Furniture::new(normalized);
+    if furniture
+        .warning()
+        .as_ref()
+        .is_some_and(|expected| supplied == vec![expected])
+    {
+        furniture.excluded_pages
+    } else {
+        HashSet::new()
+    }
+}
+
 fn synthesize_with_delivery_coverage(
     admission: SynthesisAdmission,
     runtime: &dyn ModelRuntime,
@@ -2855,6 +2880,15 @@ fn synthesize_with_delivery_coverage(
     cancellation_checkpoint(control, PipelineStage::Synthesize)?;
     validate_analyzed_document(analyzed, chunked, normalized, runtime)?;
     let ledger_claims = direct::source_ordered_claims(analyzed)?;
+    let furniture_warning = (profile == SummaryProfile::General)
+        .then(|| page_furniture::Furniture::new(normalized).warning())
+        .flatten();
+    let finish = |mut result: SynthesizedDocument| -> Result<SynthesizedDocument, PipelineFailure> {
+        result.warnings.extend(furniture_warning.clone());
+        validate_for_runtime(profile, &result, analyzed, chunked, normalized, runtime)?;
+        cancellation_checkpoint(control, PipelineStage::Synthesize)?;
+        Ok(result)
+    };
     let catalog =
         source_catalog_for_profile(profile, VERSION, chunked, normalized, Some(analyzed))?;
     if incomplete_catalog_requires_fallback(profile, &catalog) {
@@ -2865,8 +2899,7 @@ fn synthesize_with_delivery_coverage(
             ledger_claims,
             FallbackReason::IncompleteCatalog,
         )?;
-        validate_for_runtime(profile, &result, analyzed, chunked, normalized, runtime)?;
-        return Ok(result);
+        return finish(result);
     }
     let input_limit = input_character_limit(runtime.context_tokens(PipelineStage::Synthesize))
         .ok_or_else(|| {
@@ -2914,8 +2947,7 @@ fn synthesize_with_delivery_coverage(
                 ledger_claims,
                 FallbackReason::RequestTooLarge,
             )?;
-            validate_for_runtime(profile, &result, analyzed, chunked, normalized, runtime)?;
-            return Ok(result);
+            return finish(result);
         }
         runtime.health().map_err(|failure| {
             runtime_pipeline_failure(PipelineStage::Synthesize, "MODEL_HEALTH", failure)
@@ -2938,8 +2970,7 @@ fn synthesize_with_delivery_coverage(
                 ledger_claims,
                 FallbackReason::RequestTooLarge,
             )?;
-            validate_for_runtime(profile, &result, analyzed, chunked, normalized, runtime)?;
-            return Ok(result);
+            return finish(result);
         };
         selected_source_counts = (selected.candidates.len() < catalog.candidates.len())
             .then_some((selected.candidates.len(), catalog.candidates.len()));
@@ -2989,9 +3020,7 @@ fn synthesize_with_delivery_coverage(
             if failure.code == UNIT_CLIPPED_RESPONSE_CODE {
                 fallback.warnings.push(trim::withheld_warning());
             }
-            validate_for_runtime(profile, &fallback, analyzed, chunked, normalized, runtime)?;
-            cancellation_checkpoint(control, PipelineStage::Synthesize)?;
-            return Ok(fallback);
+            return finish(fallback);
         }
         Err(failure) => return Err(failure.into_failure()),
     };
@@ -3075,10 +3104,11 @@ fn synthesize_with_delivery_coverage(
         warnings,
     };
     let result = if require_delivery_coverage
-        && !coherent_evidence_satisfies_delivery_page_coverage(
+        && !coherent_evidence_satisfies_delivery_page_coverage_with_warnings(
             &result.synthesis_evidence,
             &analyzed.omissions,
             normalized,
+            &furniture_warning.clone().into_iter().collect::<Vec<_>>(),
         ) {
         fallback_document(
             runtime,
@@ -3109,21 +3139,20 @@ fn synthesize_with_delivery_coverage(
     } else {
         result
     };
-    validate_for_runtime(profile, &result, analyzed, chunked, normalized, runtime)?;
-    cancellation_checkpoint(control, PipelineStage::Synthesize)?;
-    Ok(result)
+    finish(result)
 }
 
-fn coherent_evidence_satisfies_delivery_page_coverage(
+fn coherent_evidence_satisfies_delivery_page_coverage_with_warnings(
     evidence: &[EvidenceItem],
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
+    warnings: &[PipelineWarning],
 ) -> bool {
     let cited_pages = evidence
         .iter()
         .map(|item| item.source_span.page_start)
         .collect::<HashSet<_>>();
-    super::delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
+    super::delivery_page_coverage_with_warnings(&cited_pages, omissions, normalized, warnings)
 }
 
 fn supports_long_source_selection(profile: SummaryProfile) -> bool {
@@ -3826,8 +3855,17 @@ impl GeneralCoverage<'_> {
         evidence: &[EvidenceItem],
         catalog: &SourceCatalog,
     ) -> Option<String> {
-        if claims_satisfy_delivery_page_coverage(claims, evidence, self.omissions, self.normalized)
-        {
+        let warnings = page_furniture::Furniture::new(self.normalized)
+            .warning()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if claims_satisfy_delivery_page_coverage_with_warnings(
+            claims,
+            evidence,
+            self.omissions,
+            self.normalized,
+            &warnings,
+        ) {
             return None;
         }
         let cited = claim_pages(claims, evidence).unwrap_or_default();
@@ -3839,9 +3877,10 @@ impl GeneralCoverage<'_> {
             .collect::<Vec<_>>();
         available.sort_unstable();
         available.dedup();
-        let native = native_text_pages(self.normalized).len();
+        let native = native_text_pages(self.normalized).len()
+            - furniture_coverage_exclusions(&warnings, self.normalized).len();
         Some(format!(
-            "The draft cites only {} source pages out of {native} native-text pages. Add supported material from additional available pages {available:?} until citations cover at least 50 percent of all native-text pages and 60 percent after excluding only non-substantive analysis omissions. Cite only sources that actually support each unit, preserve window/framing boundaries and maximum_units, and do not invent citations or add unsupported text.",
+            "The draft cites only {} source pages out of {native} substantive native-text pages. Add supported material from additional available pages {available:?} until citations cover at least 50 percent of substantive native-text pages and 60 percent after excluding only non-substantive analysis omissions. Cite only sources that actually support each unit, preserve window/framing boundaries and maximum_units, and do not invent citations or add unsupported text.",
             cited.len(),
         ))
     }
@@ -7504,9 +7543,7 @@ fn source_catalog_with_furniture_policy(
     analyzed: Option<&AnalyzedDocument>,
     exclude_furniture: bool,
 ) -> Result<SourceCatalog, PipelineFailure> {
-    let furniture = exclude_furniture
-        .then(|| page_furniture::Furniture::new(normalized))
-        .transpose()?;
+    let furniture = exclude_furniture.then(|| page_furniture::Furniture::new(normalized));
     // Before analysis 14, coherent catalogs used v13 even for older analysis.
     // Replay that policy rather than rebuilding saved evidence under today's rules.
     let analysis_version = analyzed
@@ -7519,6 +7556,15 @@ fn source_catalog_with_furniture_policy(
     let mut evidence_ids = HashSet::new();
     for chunk in &chunked.chunks {
         let catalog = if let Some(furniture) = &furniture {
+            // Boundary validation above owns block identity. A chunk with no retained
+            // source has no quote catalog; it is not a malformed model response.
+            if chunk
+                .block_ids
+                .iter()
+                .all(|id| !furniture.has_retained_text(blocks[id.as_str()]))
+            {
+                continue;
+            }
             derive_quote_catalog_with_segmentation(
                 analysis_version,
                 chunk,
@@ -7663,6 +7709,17 @@ pub(super) fn validate_for_runtime(
         ));
     }
     validate_model_output_fallback_boundary(profile, synthesized)?;
+    let expected = (profile == SummaryProfile::General && synthesized.synthesis_version == VERSION)
+        .then(|| page_furniture::Furniture::new(normalized).warning())
+        .flatten();
+    let actual = synthesized
+        .warnings
+        .iter()
+        .filter(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED")
+        .collect::<Vec<_>>();
+    if actual != expected.as_ref().into_iter().collect::<Vec<_>>() {
+        return Err(invalid_document());
+    }
     let catalog = source_catalog_for_profile(
         profile,
         &synthesized.synthesis_version,
@@ -7799,6 +7856,22 @@ pub(super) fn validate_content(
             false,
         ));
     }
+    let supplied = synthesized
+        .warnings
+        .iter()
+        .filter(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED")
+        .collect::<Vec<_>>();
+    if !supplied.is_empty()
+        && (synthesized.synthesis_version != VERSION
+            || supplied
+                != page_furniture::Furniture::new(normalized)
+                    .warning()
+                    .as_ref()
+                    .into_iter()
+                    .collect::<Vec<_>>())
+    {
+        return Err(invalid_document());
+    }
     let catalog = source_catalog_for_synthesis_version(
         &synthesized.synthesis_version,
         chunked,
@@ -7825,25 +7898,17 @@ pub(super) fn validate_content(
                 normalized,
                 Some(analyzed),
             )?;
-            // This validator also reopens Story artifacts. Their unfiltered source
-            // policy stays valid even when General has no substantive page excerpt.
-            let general_catalog = if synthesized.synthesis_version == VERSION {
-                match source_catalog_for_profile(
-                    SummaryProfile::General,
-                    &synthesized.synthesis_version,
-                    chunked,
-                    normalized,
-                    Some(analyzed),
-                ) {
-                    Ok(catalog) => Some(catalog),
-                    Err(failure) if failure.code == "SYNTHESIS_PAGE_WITHOUT_SUBSTANTIVE_TEXT" => {
-                        None
-                    }
-                    Err(failure) => return Err(failure),
-                }
-            } else {
-                None
-            };
+            let general_catalog = (synthesized.synthesis_version == VERSION)
+                .then(|| {
+                    source_catalog_for_profile(
+                        SummaryProfile::General,
+                        &synthesized.synthesis_version,
+                        chunked,
+                        normalized,
+                        Some(analyzed),
+                    )
+                })
+                .transpose()?;
             let mut canonical = catalog
                 .candidates
                 .iter()
@@ -8097,21 +8162,119 @@ mod tests {
     }
 
     #[test]
-    fn furniture_only_text_page_fails_instead_of_silently_losing_page_coverage() {
+    fn furniture_coverage_excludes_both_totals_but_never_substantive_pages() {
+        let (mut normalized, mut chunked) = contract_documents();
+        set_furniture_fixture(&mut normalized, &mut chunked, |n| {
+            if n == 2 {
+                "Page 2".into()
+            } else {
+                format!("Payment requires acceptance for phase {n}.\nPage {n}")
+            }
+        });
+        let furniture = page_furniture::Furniture::new(&normalized);
+        assert_eq!(furniture.excluded_pages, HashSet::from([2]));
+        let warnings = vec![furniture.warning().unwrap()];
+        let catalog = source_catalog_for_profile(
+            SummaryProfile::General,
+            VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog
+                .candidates
+                .iter()
+                .map(|c| c.evidence.source_span.page_start)
+                .collect::<HashSet<_>>(),
+            HashSet::from([1, 3, 4, 5, 6])
+        );
+        let cites = HashSet::from([1, 3, 4]);
+        // 3/5 satisfies the adjusted 60% floor; 3/6 must not.
+        assert!(delivery_page_coverage_with_warnings(
+            &cites,
+            &[],
+            &normalized,
+            &warnings
+        ));
+        assert!(!delivery_page_coverage_satisfied(&cites, &[], &normalized));
+        // A source-backed footer disclosure never exempts another substantive page.
+        let mut forged = warnings.clone();
+        forged[0].message = forged[0].message.replace("[2]", "[2, 5, 6]");
+        assert!(furniture_coverage_exclusions(&forged, &normalized).is_empty());
+        assert!(!delivery_page_coverage_with_warnings(
+            &cites,
+            &[],
+            &normalized,
+            &forged
+        ));
+        set_furniture_fixture(&mut normalized, &mut chunked, |n| {
+            if n <= 4 {
+                format!("Page {n}")
+            } else {
+                format!("Payment requires acceptance for phase {n}.")
+            }
+        });
+        let warnings = vec![page_furniture::Furniture::new(&normalized)
+            .warning()
+            .unwrap()];
+        // 2/2 passes; leaving furniture in the raw total would make this 2/6.
+        assert!(delivery_page_coverage_with_warnings(
+            &HashSet::from([5, 6]),
+            &[],
+            &normalized,
+            &warnings
+        ));
+        assert!(!delivery_page_coverage_satisfied(
+            &HashSet::from([5, 6]),
+            &[],
+            &normalized
+        ));
+        assert!(!delivery_page_coverage_with_warnings(
+            &HashSet::from([1, 2, 3, 4]),
+            &[],
+            &normalized,
+            &warnings
+        ));
+        assert!(!delivery_page_coverage_with_warnings(
+            &HashSet::from([5]),
+            &[],
+            &normalized,
+            &warnings
+        ));
+        // One substantive sentence on an otherwise marginal page remains required.
+        normalized.pages[1].content[0]
+            .text
+            .push_str("\nThe contractor must obtain acceptance.");
+        assert_eq!(
+            page_furniture::Furniture::new(&normalized).excluded_pages,
+            HashSet::from([1, 3, 4])
+        );
+    }
+
+    #[test]
+    fn furniture_only_text_pages_offer_no_invented_sources() {
         let (mut normalized, mut chunked) = contract_documents();
         set_furniture_fixture(&mut normalized, &mut chunked, |n| format!("Page {n}"));
-        assert_eq!(
-            source_catalog_for_profile(
-                SummaryProfile::General,
-                VERSION,
-                &chunked,
-                &normalized,
-                None
-            )
-            .unwrap_err()
-            .code,
-            "SYNTHESIS_PAGE_WITHOUT_SUBSTANTIVE_TEXT"
-        );
+        let catalog = source_catalog_for_profile(
+            SummaryProfile::General,
+            VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
+        assert!(catalog.candidates.is_empty());
+        assert!(!delivery_page_coverage_with_warnings(
+            &HashSet::new(),
+            &[],
+            &normalized,
+            &page_furniture::Furniture::new(&normalized)
+                .warning()
+                .into_iter()
+                .collect::<Vec<_>>()
+        ));
         assert!(source_catalog_for_profile(
             SummaryProfile::Story,
             VERSION,

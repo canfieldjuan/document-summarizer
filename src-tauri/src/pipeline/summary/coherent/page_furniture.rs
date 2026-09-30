@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) struct Furniture {
     retained: HashMap<String, Vec<(usize, usize)>>,
+    pub(super) excluded_pages: HashSet<u32>,
 }
 
 struct Candidate {
@@ -111,7 +112,7 @@ fn running_label(text: &str, page: u32) -> bool {
 }
 
 impl Furniture {
-    pub(super) fn new(document: &NormalizedDocument) -> Result<Self, PipelineFailure> {
+    pub(super) fn new(document: &NormalizedDocument) -> Self {
         let mut candidates = Vec::new();
         for page in &document.pages {
             for (block_index, block) in page.content.iter().enumerate() {
@@ -195,7 +196,9 @@ impl Furniture {
                 pages.entry(key).or_default().insert(candidate.page);
             }
         }
+        let text_pages = native_text_pages(document);
         let mut retained = HashMap::new();
+        let mut excluded_pages = HashSet::new();
         for page in &document.pages {
             let mut has_substantive_text = false;
             for block in &page.content {
@@ -226,12 +229,33 @@ impl Furniture {
                     .any(|&(start, end)| !block.text[start..end].trim().is_empty());
                 retained.insert(block.block_id.clone(), ranges);
             }
-            if !page.content.is_empty() && !has_substantive_text {
-                return Err(stage_failure(PipelineStage::Synthesize, "SYNTHESIS_PAGE_WITHOUT_SUBSTANTIVE_TEXT",
-                    "A text page contains only recognized page furniture; General synthesis cannot represent it with a substantive excerpt", false));
+            if text_pages.contains(&page.page_number) && !has_substantive_text {
+                excluded_pages.insert(page.page_number);
             }
         }
-        Ok(Self { retained })
+        Self {
+            retained,
+            excluded_pages,
+        }
+    }
+
+    pub(super) fn has_retained_text(&self, block: &NormalizedBlock) -> bool {
+        self.retained[&block.block_id]
+            .iter()
+            .any(|&(start, end)| !block.text[start..end].trim().is_empty())
+    }
+
+    pub(super) fn warning(&self) -> Option<PipelineWarning> {
+        if self.excluded_pages.is_empty() {
+            return None;
+        }
+        let mut pages = self.excluded_pages.iter().copied().collect::<Vec<_>>();
+        pages.sort_unstable();
+        Some(PipelineWarning {
+            code: "SUMMARY_FURNITURE_PAGES_EXCLUDED".into(),
+            message: format!("Pages {pages:?} contain only recognized page furniture; excluded from coherent excerpt selection and both page-coverage totals"),
+            stage: Some(PipelineStage::Synthesize),
+        })
     }
 
     pub(super) fn segment(

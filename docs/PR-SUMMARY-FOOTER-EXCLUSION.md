@@ -58,10 +58,12 @@ Fail-first `balanced_selection_excludes_running_furniture_and_keeps_each_page`
 failed with `footer entered balanced excerpts`, then passed. Inverse tests retain
 operative copyright conditions and governing headings, handle footer-before-body
 PDF text and missing blank separators, preserve historical/Story/Contract behavior,
-and reject a wholly excluded page instead of silently losing it.
+and disclose furniture-only pages without failing the substantive document.
 
 Verification:
-- `cargo test --offline --lib pipeline::summary::`: 264 passed, 13 opt-in ignored.
+- `cargo test --offline --lib pipeline::summary::`: 266 passed, 13 opt-in ignored.
+- `cargo test --offline --lib connect::provider::tests::`: 21 passed.
+- `cargo test --offline --lib pipeline::service::tests::`: 16 passed, 1 opt-in ignored.
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --offline --locked --all-targets --all-features -- -D warnings`: passed.
 - `npm run build`: passed (unchanged frontend assets required for Tauri tests).
@@ -82,15 +84,19 @@ Verification:
   `page_balanced_catalog`): versioned General dispatch, canonical evidence
   reconstruction, consistent count/prompt/schema/parser authority. Story and
   Contract keep their former source policy; saved A/B artifacts replay.
-- `summary.rs` (`derive_quote_catalog_with_segmentation`, version dispatch):
+- `summary.rs` (`derive_quote_catalog_with_segmentation`, coverage gates, version dispatch):
   reuse the original identity/bounds owner with a source-segmentation callback;
-  analysis callers retain their exact old segmentation. Version 10 stays admitted.
+  analysis callers retain their exact old segmentation and coverage policy. Version 10 stays admitted.
+  Synthesis, verification and final delivery share source-reconstructed exclusions;
+  footer citations cannot inflate either coverage count.
+- `connect/provider.rs` and its `pipeline/service.rs` test caller: pass final
+  warnings to the shared claim-prefix gate; no wire-shape change.
 - `docs/CONTRACTS.md`: current source policy and synthesis version; no consumer,
   presentation, storage or runtime contract change.
 
 boundary-probe: publisher footer excluded / operative copyright preserved;
 numbered and substantial-completion headings retained; every saved A/B text page
-represented; wholly furniture page rejected; historical artifacts accepted;
+represented; furniture-only pages disclosed and excluded from coverage; historical artifacts accepted;
 unoffered-citation regressions remain passing.
 
 effect-trace: footer-free offered excerpts | source-range filtering before quote
@@ -136,3 +142,21 @@ exclude furniture, and final Connect prefixes use the same decision. Include
 fallback delivery and source-derived disclosure. Replay saved owner-only A/B
 answers/artifacts, then run adjacent summary tests, format and strict Clippy.
 The earlier fatal-page regression and its success claim are superseded.
+
+
+Correction proof:
+- `furniture_only_page_delivers_with_disclosed_exclusion` failed before the fix
+  with `SYNTHESIS_PAGE_WITHOUT_SUBSTANTIVE_TEXT` at real pipeline delivery.
+  It now passes through parse, normalization, structure, chunking, analysis,
+  synthesis, verification and persisted summary/citations in both coherent and
+  fallback modes. It also exercises the final Connect prefix gate and rejects
+  missing or forged exclusion disclosure during profile validation.
+- Positive/negative scope checks prove three cited substantive pages out of five
+  satisfy 60%, while three out of six do not; two substantive pages out of two
+  pass the raw floor while two out of six do not. Furniture citations alone earn
+  no credit. Mixed pages retain their substantive sentence. An all-furniture
+  catalog cannot qualify for delivery.
+- The analysis ledger remains unchanged and can still display a page-counter
+  claim in fallback. The warning explicitly refers to coherent excerpt selection
+  and coverage totals; that counter earns no coverage credit. Filtering ledger
+  claims is outside F1.

@@ -1182,6 +1182,7 @@ fn persist_completed_summary(
         delivered_claim_count,
         omissions,
         normalized,
+        &summary.summary.warnings,
     ) {
         return Err(
             crate::connect::contracts::ContractBuildError::InvalidSummary(
