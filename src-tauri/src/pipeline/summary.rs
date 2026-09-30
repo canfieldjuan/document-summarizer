@@ -45,7 +45,8 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "9.0.0";
+pub const SYNTHESIS_VERSION: &str = "10.0.0";
+const PRE_BALANCED_SYNTHESIS_VERSION: &str = "9.0.0";
 pub const VERIFICATION_VERSION: &str = "10.0.0";
 pub const SUMMARY_VERSION: &str = "8.0.0";
 pub const CITATION_VERSION: &str = "4.0.0";
@@ -149,6 +150,7 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
         SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -161,7 +163,7 @@ fn coherent_verification_versions_match(
 ) -> bool {
     (matches!(
         synthesis_version,
-        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION | PRE_BALANCED_SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
     ) && verification_version == VERIFICATION_VERSION)
         || (synthesis_version == PRE_CONTEXT_SYNTHESIS_VERSION
             && verification_version == PRE_CONTEXT_VERIFICATION_VERSION)
@@ -1340,7 +1342,9 @@ fn verify(
             Vec::new()
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
-        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
+        SYNTHESIS_VERSION
+        | PRE_BALANCED_SYNTHESIS_VERSION
+        | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
         PRE_CONTEXT_SYNTHESIS_VERSION => PRE_CONTEXT_VERIFICATION_VERSION,
         PRE_DISCLOSURE_SYNTHESIS_VERSION
             if synthesized.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback =>
@@ -1807,6 +1811,7 @@ fn verification_claim_budget(
     if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -4057,6 +4062,7 @@ fn validate_synthesized_document_without_runtime(
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -4072,6 +4078,7 @@ fn validate_synthesized_document_without_runtime(
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -10898,7 +10905,7 @@ mod tests {
     }
 
     #[test]
-    fn coherent_larger_context_keeps_full_catalog_before_generation() {
+    fn page_balanced_sparse_catalog_keeps_pages_or_falls_back_before_generation() {
         struct CatalogRuntime(LowSynthesisContextRuntime);
         impl ModelRuntime for CatalogRuntime {
             fn generate(
@@ -10983,10 +10990,9 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|name| name == coherent::SOURCE_SELECTION_SCHEMA_NAME);
-            assert_eq!(
-                selected,
-                context == LEGACY_MODEL_CONTEXT_TOKENS,
-                "32k must not reduce a retained catalog that fits; 8k must still select"
+            assert!(
+                !selected,
+                "a page-balanced General catalog cannot lose pages to model selection"
             );
             assert_eq!(
                 synthesized
@@ -10995,14 +11001,24 @@ mod tests {
                     .any(|warning| { warning.code == coherent::SOURCE_SELECTION_WARNING_CODE }),
                 selected
             );
-            assert!(runtime.0.preflight_calls.load(Ordering::SeqCst) > 0);
-            assert!(
-                runtime
+            if synthesized.presentation_mode == SummaryPresentationMode::Coherent {
+                assert!(runtime.0.preflight_calls.load(Ordering::SeqCst) > 0);
+                assert!(
+                    runtime
+                        .0
+                        .verification_preflight_calls
+                        .load(Ordering::SeqCst)
+                        > 0
+                );
+            } else {
+                assert!(!runtime
                     .0
-                    .verification_preflight_calls
-                    .load(Ordering::SeqCst)
-                    > 0
-            );
+                    .schema_names
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|n| n == coherent::SCHEMA_NAME));
+            }
         }
     }
 
@@ -11048,59 +11064,34 @@ mod tests {
     }
 
     #[test]
-    fn oversized_general_context_selects_then_discloses_verified_coverage_fallback() {
+    fn oversized_page_balanced_catalog_falls_back_without_silently_losing_pages() {
         let runtime = LowSynthesisContextRuntime::new();
         let database = TestDatabase::new();
         let (mut conn, run_id) = chunked_run(&database);
-
-        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
-            .expect("bounded General selection must not deliver undercovered coherent prose");
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id).unwrap();
         let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
         let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
-
         assert_eq!(
             synthesized.presentation_mode,
-            SummaryPresentationMode::Coherent
+            SummaryPresentationMode::ClaimLedgerFallback
         );
-        assert!(!synthesized.summary_claims.is_empty());
-        assert!(!synthesized.synthesis_evidence.is_empty());
+        assert!(synthesized.summary_claims.is_empty());
+        assert!(synthesized.synthesis_evidence.is_empty());
         assert!(synthesized
             .warnings
             .iter()
-            .all(|warning| warning.code != coherent::FALLBACK_WARNING_CODE));
-        let selection_warning = synthesized
-            .warnings
+            .any(|w| w.code == coherent::FALLBACK_WARNING_CODE));
+        let schemas = runtime.schema_names.lock().unwrap();
+        assert!(!schemas
             .iter()
-            .find(|warning| warning.code == coherent::SOURCE_SELECTION_WARNING_CODE)
-            .expect("bounded General selection should be disclosed");
-        assert_eq!(selection_warning.stage, Some(PipelineStage::Synthesize));
-        assert!(selection_warning
-            .message
-            .contains("available source segments"));
-        let schema_names = runtime.schema_names.lock().unwrap();
-        assert!(schema_names
-            .iter()
-            .any(|name| name == coherent::SOURCE_SELECTION_SCHEMA_NAME));
-        assert!(schema_names
-            .iter()
-            .any(|name| name == coherent::SCHEMA_NAME));
-        assert!(runtime.preflight_calls.load(Ordering::SeqCst) > 0);
+            .any(|n| n == coherent::SOURCE_SELECTION_SCHEMA_NAME || n == coherent::SCHEMA_NAME));
         assert_eq!(
             verified.presentation_mode,
             SummaryPresentationMode::ClaimLedgerFallback
         );
-        assert!(!verified.summary_claim_verifications.is_empty());
+        assert!(!verified.claim_verifications.is_empty());
         assert_eq!(completed.summary.text, verified.summary_text);
-        assert_eq!(
-            completed.citations.presentation_mode,
-            verified.presentation_mode
-        );
         assert!(completed.citations.summary_claims.is_empty());
-        assert!(!completed.citations.claims.is_empty());
-        assert!(verified
-            .warnings
-            .iter()
-            .any(|w| w.code == SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE));
         assert_eq!(summary_cited_pages(&completed.citations).unwrap().len(), 5);
         assert_eq!(completed.summary.warnings, verified.warnings);
     }
@@ -11557,14 +11548,7 @@ mod tests {
 
     #[test]
     fn general_rejected_prose_requires_independently_verified_adequate_ledger() {
-        for kind in [
-            "clipped",
-            "limit",
-            "malformed",
-            "empty",
-            "foreign",
-            "selected",
-        ] {
+        for kind in ["clipped", "limit", "malformed", "empty", "foreign"] {
             for withhold_ledger in [false, true] {
                 let database = TestDatabase::new();
                 let (mut conn, run_id) = chunked_run(&database);
@@ -12085,7 +12069,8 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "9.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "10.0.0");
+        assert_eq!(PRE_BALANCED_SYNTHESIS_VERSION, "9.0.0");
         assert_eq!(PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION, "8.0.0");
         assert_eq!(PRE_CONTEXT_SYNTHESIS_VERSION, "7.0.0");
         assert_eq!(PRE_DISCLOSURE_SYNTHESIS_VERSION, "6.0.0");
