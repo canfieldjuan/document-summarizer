@@ -16,6 +16,13 @@ warning. Stored older artifacts reconstruct with their original policy/version.
 Tests cover uneven page density, empty/single/multiple sources, exact identity,
 determinism, real request construction and historical artifact replay.
 
+Issue #71 clarification (comment 5913148917): synthesis citations are limited to
+the offered subset. Both the schema's `source_ids` enum and the parser catalog
+contain only selected IDs. Correction/repair prompts preserve that subset. A real
+but unoffered source ID must fail `MODEL_SUMMARY_RESPONSE_INVALID`; offered IDs
+must remain accepted. The existing implementation already enforces this boundary;
+add an explicit two-sided regression before publication.
+
 Explicit non-scope: no short-unit paragraph or model-dependent repair; no prompt
 wording, verifier, coverage threshold, model, runtime or other profile changes.
 A short-unit prompt is a separate follow-up only if later evidence justifies it.
