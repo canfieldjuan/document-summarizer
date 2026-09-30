@@ -7871,7 +7871,7 @@ mod tests {
         assert_eq!(
             catalog.candidates.len(),
             9,
-            "canonical grounding catalog stays complete"
+            "selection does not mutate the complete source fixture"
         );
     }
 
@@ -7928,6 +7928,140 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn production_catalog_rejects_unoffered_model_citations() {
+        struct CitingRuntime<'a> {
+            source: &'a SourceCandidate,
+            should_be_offered: bool,
+        }
+        impl ModelRuntime for CitingRuntime<'_> {
+            fn generate(
+                &self,
+                request: &ModelRequest,
+            ) -> Result<ModelResponse, ModelRuntimeFailure> {
+                let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                let shown = prompt["source_segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|source| source["source_id"] == self.source.request_id);
+                assert_eq!(shown, self.should_be_offered);
+                Ok(ModelResponse {
+                    text: json!({"units":[{"text":self.source.evidence.exact_quote,
+                        "source_ids":[self.source.request_id]}]})
+                    .to_string(),
+                    runtime_id: self.runtime_id().into(),
+                    model_id: self.model_id().into(),
+                    request_attempts: Vec::new(),
+                })
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+            fn runtime_id(&self) -> &str {
+                "fixture-runtime"
+            }
+            fn model_id(&self) -> &str {
+                "fixture-model"
+            }
+        }
+
+        let (mut normalized, mut chunked) = contract_documents();
+        let template = normalized.pages[0].content[0].clone();
+        normalized.pages[0].content = (1..=7).map(|n| NormalizedBlock {
+            block_id: format!("dense-source-{n}"),
+            text: format!("Record {n} confirms that the parties reviewed the service schedule and accepted the complete written delivery instructions for the next reporting period."),
+            ..template.clone()
+        }).collect();
+        let blocks = normalized
+            .pages
+            .iter()
+            .flat_map(|page| &page.content)
+            .collect::<Vec<_>>();
+        chunked.chunks[0].block_ids = blocks.iter().map(|b| b.block_id.clone()).collect();
+        chunked.chunks[0].source_spans = blocks.iter().map(|b| b.source.clone()).collect();
+        chunked.chunks[0].text = blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let full = source_catalog(&chunked, &normalized, None).unwrap();
+        // This is the production seam under test. Do not construct the balanced
+        // subset in the test: the prompt balances independently of this return.
+        let production = source_catalog_for_profile(
+            SummaryProfile::General,
+            VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &production).unwrap();
+        let offered: Value = serde_json::from_str(&prompt).unwrap();
+        let shown_ids = offered["source_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["source_id"].as_str().unwrap())
+            .collect::<HashSet<_>>();
+        let shown = full
+            .candidates
+            .iter()
+            .find(|s| shown_ids.contains(s.request_id.as_str()))
+            .unwrap();
+        let hidden = full
+            .candidates
+            .iter()
+            .find(|s| !shown_ids.contains(s.request_id.as_str()))
+            .unwrap();
+        let generate = |source, should_be_offered| {
+            generate_summary_with_validation_repair(
+                SummaryProfile::General,
+                &CitingRuntime {
+                    source,
+                    should_be_offered,
+                },
+                &normalized.document_id,
+                &production,
+                prompt.clone(),
+                schema.clone(),
+                usize::MAX,
+                0,
+                0,
+                &UNCONTROLLED_EXECUTION,
+            )
+        };
+        let accepted = generate(shown, true).unwrap();
+        assert_eq!(
+            accepted.claims[0].evidence_ids,
+            vec![shown.evidence.evidence_id.clone()]
+        );
+        match generate(hidden, false) {
+            Err(failure) => assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID"),
+            Ok(_) => panic!("production accepted an unoffered real source citation"),
+        }
+
+        let text_pages = native_text_pages(&normalized);
+        let catalog_pages = production
+            .candidates
+            .iter()
+            .map(|s| s.evidence.source_span.page_start)
+            .collect::<HashSet<_>>();
+        assert_eq!(catalog_pages, text_pages);
+        assert_eq!(text_pages.len(), 6);
+        assert!(!delivery_page_coverage_satisfied(
+            &HashSet::from([1, 2]),
+            &[],
+            &normalized
+        ));
+        assert!(delivery_page_coverage_satisfied(
+            &text_pages,
+            &[],
+            &normalized
+        ));
     }
 
     #[test]

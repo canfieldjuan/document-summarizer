@@ -72,7 +72,13 @@ unoffered-source/correction regression passes. Strict Clippy and formatting also
 - `source_catalog_for_profile` and `prompt_and_schema_for_version`: shared offered
   subset drives the actual request, schema and response parser. The negative test
   uses an omitted ID that is valid in the complete catalog; the positive side uses
-  offered IDs. Correction builders keep the same segments and schema enum.
+  offered IDs. Correction builders keep the same segments and schema enum. The
+  production-path regression now constructs normalized/chunked input, calls
+  `source_catalog_for_profile` and exercises generation/parsing with fake model
+  answers. Returning the full catalog makes this test fail because the unoffered
+  citation is accepted; restoring the offered subset makes it pass. Selection
+  retains all six text pages in the fixture, and two cited pages still fail the
+  unchanged coverage threshold.
 - `synthesize_with_delivery_coverage`: retain all offered pages, disclose reduced
   source count and use existing fallback on context overflow. No page is silently
   removed by the model selector.
@@ -119,5 +125,7 @@ production source matches the tested `46af52c` exactly. Raw evidence stays local
 
 NOT DONE for merge: remote CI and independent PR review remain. Implementation,
 local regression/lint checks, offline replay and the scoped live confirmation are
-complete. No further model repair or prompt experiment is included. These results
+complete. The PR-review follow-up adds production-wiring mutation proof and corrects
+the grounding description; production behavior and prior live evidence are
+unchanged. No further model repair or prompt experiment is included. These results
 do not complete model qualification; contract A still lacks two cited pages.
