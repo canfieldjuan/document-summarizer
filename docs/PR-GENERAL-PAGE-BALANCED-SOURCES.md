@@ -9,8 +9,9 @@ first/middle/last sources per page, preserving every offered page and source ord
 Required change surface: version the General synthesis source selection policy;
 select the first, lower-middle and last source per page, deduplicating positions
 and retaining original bytes, request IDs, provenance and global source order.
-Keep the complete canonical catalog for grounding; the selected subset belongs to
-the synthesis request. Never discard a page to fit context: if the bounded subset
+The General synthesis request, response parser and verification grounding all use
+the offered subset rebuilt by `source_catalog_for_profile`. Never discard a page
+to fit context: if the bounded subset
 cannot fit, use the existing fallback. Disclose selection using the existing
 warning. Stored older artifacts reconstruct with their original policy/version.
 Tests cover uneven page density, empty/single/multiple sources, exact identity,
@@ -22,6 +23,19 @@ contain only selected IDs. Correction/repair prompts preserve that subset. A rea
 but unoffered source ID must fail `MODEL_SUMMARY_RESPONSE_INVALID`; offered IDs
 must remain accepted. The existing implementation already enforces this boundary;
 add an explicit two-sided regression before publication.
+
+PR #109 review correction: the original test constructed the subset itself and
+did not pin production's use of `source_catalog_for_profile`. Add a regression
+that obtains the catalog through that production function, then exercises the
+generation/parser path with a fake response citing an unoffered but real ID.
+The offered-only response must pass. Replacing the function's final return with
+`Ok(catalog)` must make the negative test fail. This is a test/documentation fix;
+the production boundary is already correct and does not change.
+
+Coverage denominators remain based on all textual pages in the normalized
+document, with the existing non-substantive-page adjustment. They are not derived
+from the selected source count. The new regression also checks that selection
+preserves those pages and the existing coverage threshold.
 
 Explicit non-scope: no short-unit paragraph or model-dependent repair; no prompt
 wording, verifier, coverage threshold, model, runtime or other profile changes.
