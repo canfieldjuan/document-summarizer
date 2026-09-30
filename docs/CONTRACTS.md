@@ -479,9 +479,12 @@ repeated marginal publisher notices and running labels require cross-page
 corroboration; page-number-only edge lines must match the page. Numbered clause
 headings, operative conditions, unique notices and ambiguous labels remain.
 A publisher notice cannot consume a following numbered clause. PDF text order
-may put the notice and attached page counter before the body. An entirely
-excluded text page fails with
-`SYNTHESIS_PAGE_WITHOUT_SUBSTANTIVE_TEXT` instead of silently losing coverage.
+may put the notice and attached page counter before the body. A text page made
+only of recognized furniture is excluded from the must-represent set and both
+coverage denominators, with an explicit source-derived warning naming its page.
+Other substantive pages remain eligible. This policy follows the result through
+verification, persisted delivery and the Connect claim-prefix check; it does not
+relax coverage thresholds or allow an empty substantive document to complete.
 The prompt, schema and parser share the filtered offered catalog. Saved synthesis
 10 reconstructs its prior unfiltered catalog. Analysis, Story, Contract, semantic
 verification and fallback-ledger behavior are unchanged by this policy.

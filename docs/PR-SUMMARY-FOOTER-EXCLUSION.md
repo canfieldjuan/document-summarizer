@@ -19,8 +19,8 @@ The saved fidelity review found footer-only excerpts consuming the offered budge
 - Version the synthesis policy; historical synthesis 10 and its stored results
   reconstruct the old catalog. Analysis behavior, Story and Contract stay unchanged.
 - Preserve representation of every page with substantive quotable text. If all
-  source on a text page is excluded, fail explicitly rather than silently treating
-  the document as fully represented or inventing a source excerpt.
+  native text on a page is recognized furniture, disclose the exclusion and omit
+  that page from both coverage denominators; continue with the substantive pages.
 
 ## Explicit non-scope
 
@@ -105,3 +105,34 @@ of the five failure classes, fresh A/B inference and private fidelity re-review
 remain separate required work. PR111 stays draft and its hold unresolved. PR100
 stays frozen. This filter does not claim to recognize every marginal layout or
 improve model semantic accuracy by itself.
+
+
+## Contract revision: furniture-only pages (PR112 review)
+
+New evidence: the new filter returns SYNTHESIS_PAGE_WITHOUT_SUBSTANTIVE_TEXT
+for a six-page document with only "Page 2" on its second page. That fatal error
+propagates to the run instead of allowing the substantive pages to deliver.
+
+Revised root cause: quote exclusion was incorrectly treated as document failure;
+source admission and delivery coverage need the same deterministic page scope.
+
+Revised required change surface: the existing furniture filter records excluded
+text pages, skips wholly excluded chunks, and discloses exclusions through the
+existing warning channel. General synthesis 11 coverage uses this same scope in
+synthesis, verification, final artifacts and Connect prefix delivery. Warning
+metadata must match source reconstruction; a warning code alone cannot exempt a
+page. Update the internal Connect helper call to carry final warnings. No wire
+schema or storage changes. Preserve earlier synthesis reconstruction and other
+profiles, retain current coverage thresholds, and never count furniture citations
+as substantive coverage.
+
+Revised non-scope: analysis eligibility and model verdicts, F2/F3, extraction,
+presets, inference, dependencies and public output schemas remain unchanged.
+
+Verification: reproduce through parser/normalizer/chunker, model fixture,
+verification and persisted summary delivery, with a page-counter-only page.
+Prove an ordinary substantive page stays eligible, raw and adjusted denominators
+exclude furniture, and final Connect prefixes use the same decision. Include
+fallback delivery and source-derived disclosure. Replay saved owner-only A/B
+answers/artifacts, then run adjacent summary tests, format and strict Clippy.
+The earlier fatal-page regression and its success claim are superseded.
