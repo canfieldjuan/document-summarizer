@@ -248,7 +248,7 @@ fn lead_in(text: &str) -> bool {
     !form_group(text) && !analysis_sentence_boundary(text, 0, text.len(), text.len(), false)
 }
 
-fn qualification(text: &str) -> bool {
+pub(super) fn qualification(text: &str) -> bool {
     let text = text
         .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '(' | '['))
         .to_lowercase();

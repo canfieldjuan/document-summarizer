@@ -1277,6 +1277,16 @@ fn verify(
         &synthesized.synthesis_evidence,
         &mut summary_claim_verifications,
     )?;
+    if summary_profile == SummaryProfile::General {
+        coherent::verify_source_contributions(
+            runtime,
+            synthesized,
+            &mut summary_claim_verifications,
+            generation_seed,
+            &mut next_request_ordinal,
+            control,
+        )?;
+    }
     if let Some(required_evidence_ids) = coherent::required_short_contract_evidence_ids(
         summary_profile,
         chunked,
