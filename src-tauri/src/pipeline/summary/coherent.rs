@@ -2891,9 +2891,21 @@ fn synthesize_with_delivery_coverage(
         || budget::admit(runtime, &full_request, true)?.is_none();
 
     let mut model_health_checked = false;
-    let mut selected_source_counts = None;
+    let available_count = if profile == SummaryProfile::General {
+        source_catalog_for_synthesis_version(VERSION, chunked, normalized, Some(analyzed))?
+            .candidates
+            .len()
+    } else {
+        catalog.candidates.len()
+    };
+    let mut selected_source_counts = (catalog.candidates.len() < available_count)
+        .then_some((catalog.candidates.len(), available_count));
     let synthesis_catalog = if full_request_too_large {
-        if !supports_source_selection_for_catalog(profile, &catalog) {
+        // Every offered General page must survive selection. Do not substitute
+        // a model-selected smaller catalog that can silently lose whole pages.
+        if profile == SummaryProfile::General
+            || !supports_source_selection_for_catalog(profile, &catalog)
+        {
             let result = fallback_document(
                 runtime,
                 analyzed,
@@ -2989,7 +3001,7 @@ fn synthesize_with_delivery_coverage(
         warnings.push(PipelineWarning {
             code: SOURCE_SELECTION_WARNING_CODE.to_string(),
             message: format!(
-                "Long-document synthesis selected {selected_count} of {available_count} available source segments to fit bounded model context; the summary may omit details outside the selected evidence"
+                "Synthesis selected {selected_count} of {available_count} available source segments; the summary may omit details outside the selected evidence"
             ),
             stage: Some(PipelineStage::Synthesize),
         });
@@ -6451,7 +6463,10 @@ pub(super) fn validate_model_output_fallback_boundary(
         .iter()
         .any(|w| w.code == MODEL_OUTPUT_INVALID_WARNING_CODE)
         && (profile != SummaryProfile::General
-            || synthesized.synthesis_version != VERSION
+            || !matches!(
+                synthesized.synthesis_version.as_str(),
+                VERSION | PRE_BALANCED_SYNTHESIS_VERSION
+            )
             || synthesized.presentation_mode != SummaryPresentationMode::ClaimLedgerFallback
             || !has_fallback_warning(synthesized, FallbackReason::ModelOutputInvalid))
     {
@@ -6496,10 +6511,59 @@ fn fallback_document(
     })
 }
 
+// Versioned deterministic subset: source order and identity come from the full
+// catalog, never from HashMap iteration or newly numbered request IDs.
+fn page_balanced_catalog(
+    profile: SummaryProfile,
+    version: &str,
+    catalog: &SourceCatalog,
+) -> SourceCatalog {
+    if profile != SummaryProfile::General || version != VERSION {
+        return catalog.clone();
+    }
+    let mut by_page: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (index, source) in catalog.candidates.iter().enumerate() {
+        by_page
+            .entry(source.evidence.source_span.page_start)
+            .or_default()
+            .push(index);
+    }
+    let positions = by_page
+        .values()
+        .flat_map(|indexes| {
+            [
+                indexes[0],
+                indexes[(indexes.len() - 1) / 2],
+                indexes[indexes.len() - 1],
+            ]
+        })
+        .collect::<HashSet<_>>();
+    SourceCatalog {
+        candidates: catalog
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| positions.contains(index))
+            .map(|(_, source)| source.clone())
+            .collect(),
+        omitted_source_units: catalog.omitted_source_units,
+    }
+}
+
 fn prompt_and_schema(
     profile: SummaryProfile,
     catalog: &SourceCatalog,
 ) -> Result<(String, Value), PipelineFailure> {
+    prompt_and_schema_for_version(profile, VERSION, catalog)
+}
+
+fn prompt_and_schema_for_version(
+    profile: SummaryProfile,
+    version: &str,
+    catalog: &SourceCatalog,
+) -> Result<(String, Value), PipelineFailure> {
+    let balanced = page_balanced_catalog(profile, version, catalog);
+    let catalog = &balanced;
     if catalog.candidates.is_empty() {
         return Err(stage_failure(
             PipelineStage::Synthesize,
@@ -7350,7 +7414,7 @@ fn source_catalog_for_profile(
             return Ok(contract_catalog);
         }
     }
-    Ok(catalog)
+    Ok(page_balanced_catalog(profile, synthesis_version, &catalog))
 }
 
 fn contract_source_catalog_from_blocks(
@@ -7578,7 +7642,8 @@ pub(super) fn validate_for_runtime(
     let expected_fallback = if incomplete_catalog_requires_fallback(profile, &catalog) {
         Some(FallbackReason::IncompleteCatalog)
     } else {
-        let (user_prompt, output_schema) = prompt_and_schema(profile, &catalog)?;
+        let (user_prompt, output_schema) =
+            prompt_and_schema_for_version(profile, &synthesized.synthesis_version, &catalog)?;
         let input_limit = input_character_limit(runtime.context_tokens(PipelineStage::Synthesize))
             .ok_or_else(|| {
                 stage_failure(
@@ -7803,8 +7868,11 @@ fn fallback_warning(synthesized: &SynthesizedDocument) -> Option<&PipelineWarnin
         && warning.stage == Some(PipelineStage::Synthesize)
         && reason_matches
         && (warning.code != MODEL_OUTPUT_INVALID_WARNING_CODE
-            || synthesized.synthesis_version == VERSION))
-        .then_some(warning)
+            || matches!(
+                synthesized.synthesis_version.as_str(),
+                VERSION | PRE_BALANCED_SYNTHESIS_VERSION
+            )))
+    .then_some(warning)
 }
 
 fn invalid_document() -> PipelineFailure {
@@ -7824,6 +7892,340 @@ mod tests {
     };
     use crate::pipeline::model::OllamaRuntime;
     use std::sync::Mutex;
+
+    #[test]
+    fn general_request_balances_uneven_pages_without_changing_source_identity() {
+        let catalog = SourceCatalog {
+            candidates: (1..=9)
+                .map(|n| {
+                    candidate(
+                        &format!("s{n}"),
+                        &format!("e{n}"),
+                        if n <= 7 { 1 } else { n - 6 },
+                    )
+                })
+                .collect(),
+            omitted_source_units: 0,
+        };
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
+        let prompt: Value = serde_json::from_str(&prompt).unwrap();
+        let ids = prompt["source_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|source| source["source_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            ["s1", "s4", "s7", "s8", "s9"],
+            "first/middle/last, then sparse pages"
+        );
+        assert_eq!(
+            schema["properties"]["units"]["items"]["properties"]["source_ids"]["items"]["enum"],
+            json!(ids)
+        );
+        for source in prompt["source_segments"].as_array().unwrap() {
+            let original = catalog
+                .candidates
+                .iter()
+                .find(|c| source["source_id"] == c.request_id)
+                .unwrap();
+            assert_eq!(source["exact_quote"], original.evidence.exact_quote);
+        }
+        assert_eq!(
+            catalog.candidates.len(),
+            9,
+            "selection does not mutate the complete source fixture"
+        );
+    }
+
+    #[test]
+    fn unoffered_real_sources_are_rejected_and_corrections_keep_offered_sources() {
+        let catalog = SourceCatalog {
+            candidates: (1..=7)
+                .map(|n| candidate(&format!("s{n}"), &format!("e{n}"), 1))
+                .collect(),
+            omitted_source_units: 0,
+        };
+        let offered = page_balanced_catalog(SummaryProfile::General, VERSION, &catalog);
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &offered).unwrap();
+        let answer = |id: &str| {
+            json!({"units":[{"text":"Exact source statement 1.","source_ids":[id]}]}).to_string()
+        };
+        assert!(
+            parse_response(SummaryProfile::General, &answer("s2"), "doc", &catalog).is_ok(),
+            "s2 really exists in the full catalog"
+        );
+        assert_eq!(
+            parse_response(SummaryProfile::General, &answer("s2"), "doc", &offered)
+                .unwrap_err()
+                .code,
+            "MODEL_SUMMARY_RESPONSE_INVALID"
+        );
+        for id in ["s1", "s4", "s7"] {
+            assert!(parse_response(SummaryProfile::General, &answer(id), "doc", &offered).is_ok());
+        }
+        let expected = json!(["s1", "s4", "s7"]);
+        assert_eq!(
+            schema["properties"]["units"]["items"]["properties"]["source_ids"]["items"]["enum"],
+            expected
+        );
+        let feedback = vec!["Correct the cited source.".to_string()];
+        let correction = prompt_with_validation_feedback(&prompt, &feedback).unwrap();
+        let repair =
+            prompt_with_previous_invalid_response(&prompt, &feedback, &answer("s2")).unwrap();
+        for user_prompt in [&prompt, &correction, &repair] {
+            let value: Value = serde_json::from_str(user_prompt).unwrap();
+            let ids = value["source_segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|source| source["source_id"].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(json!(ids), expected);
+            let request = summary_request(SummaryProfile::General, user_prompt, &schema, 0, 0);
+            let ModelOutputFormat::JsonSchema { schema, .. } = request.output_format else {
+                panic!("strict schema")
+            };
+            assert_eq!(
+                schema["properties"]["units"]["items"]["properties"]["source_ids"]["items"]["enum"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn production_catalog_rejects_unoffered_model_citations() {
+        struct CitingRuntime<'a> {
+            source: &'a SourceCandidate,
+            should_be_offered: bool,
+        }
+        impl ModelRuntime for CitingRuntime<'_> {
+            fn generate(
+                &self,
+                request: &ModelRequest,
+            ) -> Result<ModelResponse, ModelRuntimeFailure> {
+                let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                let shown = prompt["source_segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|source| source["source_id"] == self.source.request_id);
+                assert_eq!(shown, self.should_be_offered);
+                Ok(ModelResponse {
+                    text: json!({"units":[{"text":self.source.evidence.exact_quote,
+                        "source_ids":[self.source.request_id]}]})
+                    .to_string(),
+                    runtime_id: self.runtime_id().into(),
+                    model_id: self.model_id().into(),
+                    request_attempts: Vec::new(),
+                })
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+            fn runtime_id(&self) -> &str {
+                "fixture-runtime"
+            }
+            fn model_id(&self) -> &str {
+                "fixture-model"
+            }
+        }
+
+        let (mut normalized, mut chunked) = contract_documents();
+        let template = normalized.pages[0].content[0].clone();
+        normalized.pages[0].content = (1..=7).map(|n| NormalizedBlock {
+            block_id: format!("dense-source-{n}"),
+            text: format!("Record {n} confirms that the parties reviewed the service schedule and accepted the complete written delivery instructions for the next reporting period."),
+            ..template.clone()
+        }).collect();
+        let blocks = normalized
+            .pages
+            .iter()
+            .flat_map(|page| &page.content)
+            .collect::<Vec<_>>();
+        chunked.chunks[0].block_ids = blocks.iter().map(|b| b.block_id.clone()).collect();
+        chunked.chunks[0].source_spans = blocks.iter().map(|b| b.source.clone()).collect();
+        chunked.chunks[0].text = blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let full = source_catalog(&chunked, &normalized, None).unwrap();
+        // This is the production seam under test. Do not construct the balanced
+        // subset in the test: the prompt balances independently of this return.
+        let production = source_catalog_for_profile(
+            SummaryProfile::General,
+            VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
+        let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &production).unwrap();
+        let offered: Value = serde_json::from_str(&prompt).unwrap();
+        let shown_ids = offered["source_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["source_id"].as_str().unwrap())
+            .collect::<HashSet<_>>();
+        let shown = full
+            .candidates
+            .iter()
+            .find(|s| shown_ids.contains(s.request_id.as_str()))
+            .unwrap();
+        let hidden = full
+            .candidates
+            .iter()
+            .find(|s| !shown_ids.contains(s.request_id.as_str()))
+            .unwrap();
+        let generate = |source, should_be_offered| {
+            generate_summary_with_validation_repair(
+                SummaryProfile::General,
+                &CitingRuntime {
+                    source,
+                    should_be_offered,
+                },
+                &normalized.document_id,
+                &production,
+                prompt.clone(),
+                schema.clone(),
+                usize::MAX,
+                0,
+                0,
+                &UNCONTROLLED_EXECUTION,
+            )
+        };
+        let accepted = generate(shown, true).unwrap();
+        assert_eq!(
+            accepted.claims[0].evidence_ids,
+            vec![shown.evidence.evidence_id.clone()]
+        );
+        match generate(hidden, false) {
+            Err(failure) => assert_eq!(failure.code, "MODEL_SUMMARY_RESPONSE_INVALID"),
+            Ok(_) => panic!("production accepted an unoffered real source citation"),
+        }
+
+        let text_pages = native_text_pages(&normalized);
+        let catalog_pages = production
+            .candidates
+            .iter()
+            .map(|s| s.evidence.source_span.page_start)
+            .collect::<HashSet<_>>();
+        assert_eq!(catalog_pages, text_pages);
+        assert_eq!(text_pages.len(), 6);
+        assert!(!delivery_page_coverage_satisfied(
+            &HashSet::from([1, 2]),
+            &[],
+            &normalized
+        ));
+        assert!(delivery_page_coverage_satisfied(
+            &text_pages,
+            &[],
+            &normalized
+        ));
+    }
+
+    #[test]
+    fn page_balance_is_exact_deterministic_and_versioned() {
+        for count in 0..=8 {
+            let catalog = SourceCatalog {
+                candidates: (1..=count)
+                    .map(|n| candidate(&format!("s{n}"), &format!("e{n}"), 1))
+                    .collect(),
+                omitted_source_units: 2,
+            };
+            let balanced = page_balanced_catalog(SummaryProfile::General, VERSION, &catalog);
+            assert_eq!(balanced.omitted_source_units, 2);
+            assert_eq!(balanced.candidates.len(), (count as usize).min(3));
+            assert_eq!(
+                balanced,
+                page_balanced_catalog(SummaryProfile::General, VERSION, &catalog)
+            );
+            assert_eq!(
+                balanced,
+                page_balanced_catalog(SummaryProfile::General, VERSION, &balanced)
+            );
+            for source in &balanced.candidates {
+                assert!(catalog.candidates.contains(source));
+            }
+            for version in [
+                PRE_BALANCED_SYNTHESIS_VERSION,
+                PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION,
+                PRE_CONTEXT_SYNTHESIS_VERSION,
+            ] {
+                assert_eq!(
+                    page_balanced_catalog(SummaryProfile::General, version, &catalog),
+                    catalog
+                );
+                if count > 0 {
+                    let (prompt, _) =
+                        prompt_and_schema_for_version(SummaryProfile::General, version, &catalog)
+                            .unwrap();
+                    let prompt: Value = serde_json::from_str(&prompt).unwrap();
+                    assert_eq!(
+                        prompt["source_segments"].as_array().unwrap().len(),
+                        count as usize
+                    );
+                }
+            }
+            for profile in [SummaryProfile::Story, SummaryProfile::Contract] {
+                assert_eq!(page_balanced_catalog(profile, VERSION, &catalog), catalog);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "private historical artifacts; explicit replay input required"]
+    fn offline_saved_catalog_policy_replay() {
+        let path = std::env::var("DOCSUM_CATALOG_REPLAY_INPUT").unwrap();
+        let cases: Vec<Value> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for case in &cases {
+            let artifacts = &case["artifacts"];
+            let normalized: NormalizedDocument =
+                serde_json::from_value(artifacts["normalized"].clone()).unwrap();
+            let chunked: ChunkedDocument =
+                serde_json::from_value(artifacts["chunked"].clone()).unwrap();
+            let analyzed: AnalyzedDocument =
+                serde_json::from_value(artifacts["analyzed"].clone()).unwrap();
+            let synthesized: SynthesizedDocument =
+                serde_json::from_value(artifacts["synthesized"].clone()).unwrap();
+            let verified: VerifiedDocument =
+                serde_json::from_value(artifacts["verified"].clone()).unwrap();
+            assert_eq!(
+                synthesized.synthesis_version,
+                PRE_BALANCED_SYNTHESIS_VERSION
+            );
+            validate_content(&synthesized, &analyzed, &chunked, &normalized).unwrap();
+            validate_verified_document(&verified, &synthesized, &analyzed, &chunked, &normalized)
+                .unwrap();
+            let old = source_catalog_for_profile(
+                SummaryProfile::General,
+                PRE_BALANCED_SYNTHESIS_VERSION,
+                &chunked,
+                &normalized,
+                Some(&analyzed),
+            )
+            .unwrap();
+            let (old_prompt, _) = prompt_and_schema_for_version(
+                SummaryProfile::General,
+                PRE_BALANCED_SYNTHESIS_VERSION,
+                &old,
+            )
+            .unwrap();
+            let old_prompt: Value = serde_json::from_str(&old_prompt).unwrap();
+            assert_eq!(
+                old_prompt["source_segments"].as_array().unwrap().len(),
+                old.candidates.len()
+            );
+        }
+        println!(
+            "Historical synthesis and verification artifacts replayed: {}",
+            cases.len()
+        );
+    }
 
     struct TrimReplayRuntime {
         text: String,
