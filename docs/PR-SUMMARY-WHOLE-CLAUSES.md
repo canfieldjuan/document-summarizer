@@ -63,24 +63,27 @@ review of #111; #100 remains frozen.
 General synthesis 12 builds numbered clauses from F1's retained source ranges,
 then applies the existing page-balanced selection. Exact quotes stay page/block
 local; parent lead-ins and cross-page continuations are supplied as `full_clause`
-source data. Both prompt serialization paths carry that context, and request
-budget accounting includes it. Version 11 reconstruction and disclosures remain
+source data in a request-local context table. Both prompt serialization paths
+share the table owner, and request budget accounting includes it. Version 11 reconstruction and disclosures remain
 accepted. No verifier, output schema, runtime or extraction behavior was changed.
 
 The fail-first request test failed with `whole clause missing from drafting
-request`, then passed. Six focused tests cover the whole long clause, cross-page
+request`, then passed. The context-sharing regression also failed before its
+fix. Eight focused tests cover the whole long clause, cross-page
 parent context with lettered conditions, exclusion of the next clause/footer,
 ordinary forms and historical catalogs, complete serialized context budgeting,
 same-page block order, and version-11 disclosure reload/tampering.
 
 Verification performed before publication:
-- Adjacent summary suite: 272 passed, 13 opt-in tests ignored.
-- Six focused whole-clause regressions passed.
+- Adjacent summary suite: 274 passed, 13 opt-in tests ignored.
+- Eight focused whole-clause regressions passed.
 - Saved private A/B replay passed; historical artifacts remain valid. A offers
   26 excerpts across 10 text pages; B offers 42 across 14. No detected footer
   excerpts remain. The B payment-stage context check passes.
-- Rebuilt A/B requests contain 47,579 / 47,713 characters including framing and
-  schema, within the existing 32k profile character budget. This is not a live
+- A emits 14 distinct contexts for 20 fragment references; B emits 25 for 28.
+  Every reference resolves to its original complete context.
+- Rebuilt A/B requests contain 38,123 / 46,570 characters including framing and
+  schema, down from 47,579 / 47,713 at c913fd2, within the existing 32k profile character budget. This is not a live
   tokenizer admission or inference result.
 - Formatting, strict all-target/all-feature Clippy and diff checks passed.
 
@@ -147,3 +150,13 @@ existing response parser. Exercise drafting and selection builders, no-context
 requests, and the existing over-budget test. Replay A/B with total references,
 distinct emitted contexts, request size and 32k budget fit. Run adjacent summary
 tests, formatting, strict Clippy, and a cold diff audit. No inference.
+
+Correction verification: the three-fragment production-prompt regression failed
+on c913fd2's serializer (no shared context table) and passes with one emitted
+context. The real source-ID control passes while a context ID is rejected by the
+response parser. Both serializers preserve distinct conditions, exclude unused
+contexts, omit empty tables, and isolate successive requests. The A/B replay
+checks emitted distinct counts and resolves every fragment reference back to its
+exact original context. Formatting, strict Clippy and 274 adjacent summary tests
+pass. No clause-reconstruction, verifier, response-schema or runtime code changed
+in this correction. Current-head CI and independent review remain pending.
