@@ -117,3 +117,33 @@ implementation and planned offline verification are complete. F3 must still add
 full-clause verification and fidelity rejection tests; fresh A/B accuracy remains
 unmeasured. Unnumbered/ambiguous prose retains its prior segmentation. #111 stays
 held and #100 stays frozen.
+
+## Contract revision: one context per governing clause
+
+New evidence: #71 comment 5921835832 and #114 thread 4150488007 require one
+serialized context per distinct governing clause. At c913fd2, both source prompt
+builders clone `full_clause` into every offered fragment. Several fragments of
+one clause therefore pay the whole-context request cost repeatedly.
+
+Revised root cause: context belongs to a request-level clause table, while the
+current serializer treats it as independent per-segment text.
+
+Required surface: the two prompt builders in `summary/coherent.rs` must share
+one deterministic context-interning helper. Serialize distinct full contexts once
+in `clause_contexts`; each applicable offered segment references its
+`clause_context_id`. Context IDs are not citable source IDs. Request budgeting
+uses the resulting full serialization as before. Empty context tables are omitted.
+Update the General instruction and canonical source contract for this input shape.
+
+Non-scope: clause reconstruction/selection, citation provenance, response schemas,
+verifier behavior, model settings, persisted artifacts, and F3 remain unchanged.
+Identical context strings may share a table row; differing conditions must not.
+Tables are local to each request, including source-selection windows.
+
+Verification: fail first with three actual clause fragments and one expected
+serialized context. Prove all fragments resolve to the complete context, distinct
+contexts stay distinct, unused contexts are not emitted, and context IDs fail the
+existing response parser. Exercise drafting and selection builders, no-context
+requests, and the existing over-budget test. Replay A/B with total references,
+distinct emitted contexts, request size and 32k budget fit. Run adjacent summary
+tests, formatting, strict Clippy, and a cold diff audit. No inference.

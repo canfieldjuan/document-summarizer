@@ -493,6 +493,10 @@ General synthesis 12 reconstructs numbered contract clauses before page balancin
 Each offered quote retains the complete clause fragment from its original block;
 cross-block/page clauses and numbered child clauses also carry source-derived
 `full_clause` context with their governing opening text and parent lead-ins.
+Each distinct context appears once in the request's `clause_contexts` table;
+segments use `clause_context_id` references. These context IDs are not citable.
+The table contains only contexts used by offered segments and is local to the
+request. Identical text can share a row; differing conditions cannot.
 Lettered lists within a numbered clause remain together. An uppercase governing
 title immediately before the clause stays with it. This uses the same retained
 source ranges as furniture exclusion. Ordinary prose/forms keep their existing
