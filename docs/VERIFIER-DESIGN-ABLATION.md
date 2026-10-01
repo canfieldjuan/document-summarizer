@@ -77,3 +77,13 @@ The two added files define the evidence protocol and public source/claim/label d
 NOT DONE
 
 Independent label review, condition implementation/preflight, inference and reporting remain. The preliminary fourteen-claim run is retained separately and cannot satisfy these requirements.
+
+## Execution clarification after independent review
+
+All thirty labels were approved without changes in PR116 comment 5936227862, and the operator authorized execution on the same case SHA256 b290394ba9a94d3cf707e9053ba64d9105face98ec73cb0da646ddb9eed99a1b. The file's original pending-review metadata is retained to preserve the approved bytes. Any case or answer change requires renewed approval before inference.
+
+Report source-reading classes separately (twelve faulty/twelve faithful) from equipment-scope narrowing-policy compliance (three faulty/three faithful). Also report the original aggregate candidate rule without presenting policy misses as reading failures. Explicitly identify invoice-period-1-faithful as a billing-period/invoice-period synonym control; a rejection is a false withholding, never a caught error.
+
+Production coherent summaries admit at most eight claims. Assign the frozen seed-7 shuffled order to synthetic document groups of at most eight, then use the production batch planner inside each group. C0 grouping is the reference for C1/C2/C4/C5; C3/C2+C3 split it. This avoids pretending one thirty-claim summary is admitted by production. Individual clauses and their claims still come through the production fixture, source-context builder, compact identifiers, parser and guards.
+
+The thinking-on condition may add lazy grammar activation at the explicit closing think token in the existing completion transport. Only C1 opens the packaged thinking prefix; all other conditions retain the packaged thinking-off prefix. Record full wire requests/responses, token IDs and usage. This isolated diagnostic adapter is not a production capability claim. A missing, duplicate or unclosed reasoning boundary cannot become a valid answer.
