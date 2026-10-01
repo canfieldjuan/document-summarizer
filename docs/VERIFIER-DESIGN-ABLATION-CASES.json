@@ -1,0 +1,544 @@
+{
+  "status": "frozen_for_independent_label_review; no inference authorized until reviewed",
+  "source_head": "a25b22f6c5242c311474681d289d724db0de33a9",
+  "source_case_sha256": "70c9ebf4a96021dbd7ae2e739e54f67e44842db2af6a8e01e71379579aa8e828",
+  "pairs": [
+    {
+      "id": "payment-stage-1",
+      "error_class": "payment-stage",
+      "origin": "original F3 case, unchanged; previously measured",
+      "opening": "10.2 Substantial Completion\nThe owner approves payment when the work reaches substantial completion.",
+      "exact_quote": "Such payment releases retained funds except for incomplete work.",
+      "faulty": "Final payment releases retained funds except for incomplete work.",
+      "faithful": "At substantial completion, payment releases retained funds except for incomplete work.",
+      "changed_element": "Original retained pair; not newly constrained to a single edit",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "Source establishes release at substantial completion, not final payment. The latter is unestablished, not explicitly contradicted."
+    },
+    {
+      "id": "payment-stage-2",
+      "error_class": "payment-stage",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "5.1 Retainage release\nInterim acceptance and final settlement are separate stages.",
+      "exact_quote": "The owner releases retainage at interim acceptance, except amounts reserved for unfinished tasks.",
+      "faithful": "Except for amounts reserved for unfinished tasks, the owner releases retainage at interim acceptance.",
+      "faulty": "Except for amounts reserved for unfinished tasks, the owner releases retainage at final settlement.",
+      "changed_element": "interim acceptance -> final settlement",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "The source establishes the release at interim acceptance. It does not establish the same release at final settlement.",
+      "minimal_edit": {
+        "faithful_span": "interim acceptance",
+        "faulty_span": "final settlement"
+      }
+    },
+    {
+      "id": "payment-stage-3",
+      "error_class": "payment-stage",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "5.2 Release sequence\nThe project uses two distinct milestones named Amber and Birch.",
+      "exact_quote": "Retained funds are released only at milestone Amber.",
+      "faithful": "The release of retained funds occurs only at milestone Amber.",
+      "faulty": "The release of retained funds occurs only at milestone Birch.",
+      "changed_element": "Amber -> Birch",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "The source restricts release to Amber. Changing that milestone to Birch changes the exclusive release stage.",
+      "minimal_edit": {
+        "faithful_span": "Amber",
+        "faulty_span": "Birch"
+      }
+    },
+    {
+      "id": "invoice-period-1",
+      "error_class": "invoice-period",
+      "origin": "original F3 case, unchanged; previously measured",
+      "opening": "2.1 Agreement total\nThe monthly agreement total covers routine services.",
+      "exact_quote": "Extra visits outside the current invoice period are excluded from the agreement total.",
+      "faulty": "Extra visits are excluded from the agreement total.",
+      "faithful": "Extra visits are excluded from the agreement total when they fall outside the current billing period.",
+      "changed_element": "Original retained pair; not newly constrained to a single edit",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "Removing the outside-period condition excludes visits that the clause does not exclude."
+    },
+    {
+      "id": "invoice-period-2",
+      "error_class": "invoice-period",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "3.2 Visit charges\nThe March invoice covers the monthly service period.",
+      "exact_quote": "Extra visits during March are included in the March agreement total. Extra visits outside March are excluded from that total.",
+      "faithful": "Extra visits outside March do not form part of the March agreement total.",
+      "faulty": "Extra visits during March do not form part of the March agreement total.",
+      "changed_element": "outside March -> during March",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "The source expressly includes visits during March and excludes those outside March. The claim describes the exclusion rule only.",
+      "minimal_edit": {
+        "faithful_span": "outside March",
+        "faulty_span": "during March"
+      }
+    },
+    {
+      "id": "invoice-period-3",
+      "error_class": "invoice-period",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "3.3 Service period\nEach invoice identifies the service period it covers.",
+      "exact_quote": "The agreement total excludes callouts before the start of the invoiced service period; callouts within that period are included.",
+      "faithful": "The agreement total does not include callouts made before the invoiced service period starts.",
+      "faulty": "The agreement total does not include callouts.",
+      "changed_element": "delete before-the-period condition",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "The unrestricted exclusion includes in-period callouts that the source expressly includes.",
+      "minimal_edit": {
+        "faithful_span": " made before the invoiced service period starts",
+        "faulty_span": ""
+      }
+    },
+    {
+      "id": "working-day-cure-1",
+      "error_class": "working-day-cure",
+      "origin": "original F3 case, unchanged; previously measured",
+      "opening": "4.1 Failure to correct\nWritten notice begins the opportunity to cure a service failure.",
+      "exact_quote": "If the contractor does not begin correction within seven working days after written notice and continue correction diligently, the owner may perform the correction and charge its cost to the contractor.",
+      "faulty": "The owner may perform correction and charge the contractor after seven days of written notice.",
+      "faithful": "If the contractor fails to start correction within seven working days after written notice and continue diligently, the owner may correct the failure and charge the contractor.",
+      "changed_element": "Original retained pair; not newly constrained to a single edit",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "The claim drops the working-day qualifier and the failure-to-correct trigger."
+    },
+    {
+      "id": "working-day-cure-2",
+      "error_class": "working-day-cure",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "4.2 Correction notice\nWritten notice starts the correction clock.",
+      "exact_quote": "If the contractor has not begun correction within eight working days after written notice, the owner may arrange correction and charge the contractor.",
+      "faithful": "After written notice, the owner may arrange and charge for correction if the contractor has not started it within eight working days.",
+      "faulty": "After written notice, the owner may arrange and charge for correction if the contractor has not started it within eight calendar days.",
+      "changed_element": "working -> calendar",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "Changing the clock changes the trigger. The source does not establish a calendar-day deadline.",
+      "minimal_edit": {
+        "faithful_span": "working",
+        "faulty_span": "calendar"
+      }
+    },
+    {
+      "id": "working-day-cure-3",
+      "error_class": "working-day-cure",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "4.3 Interrupted correction\nThis clause governs work that starts within the cure period.",
+      "exact_quote": "If correction starts within five working days after written notice but then stops for two working days, the owner may arrange substitute correction.",
+      "faithful": "If correction begins within five working days of written notice and subsequently stops for two working days, the owner may obtain substitute correction.",
+      "faulty": "If correction begins within five working days of written notice, the owner may obtain substitute correction.",
+      "changed_element": "delete subsequent two-working-day stop condition",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "Starting correction alone does not establish the permission; the subsequent stop is also required.",
+      "minimal_edit": {
+        "faithful_span": " and subsequently stops for two working days",
+        "faulty_span": ""
+      }
+    },
+    {
+      "id": "coverage-condition-1",
+      "error_class": "coverage-condition",
+      "origin": "original F3 case, unchanged; previously measured",
+      "opening": "6.1 Property insurance\nThe owner maintains property insurance for the work.",
+      "exact_quote": "The insurer's payment is due to the owner only to the extent the loss is covered by the property insurance policy.",
+      "faulty": "The insurer's payment is due to the owner for the loss.",
+      "faithful": "The insurer pays the owner only for the portion of the loss covered by the property insurance policy.",
+      "changed_element": "Original retained pair; not newly constrained to a single edit",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "The claim drops the covered-loss limitation."
+    },
+    {
+      "id": "coverage-condition-2",
+      "error_class": "coverage-condition",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "6.2 Covered causes\nThe policy lists the causes of loss that it covers.",
+      "exact_quote": "The insurer reimburses the owner for fire losses only; flood losses are excluded.",
+      "faithful": "The owner receives insurer reimbursement only for losses caused by fire.",
+      "faulty": "The owner receives insurer reimbursement only for losses caused by flood.",
+      "changed_element": "fire -> flood",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "The faithful summary preserves fire-only coverage, including exclusion of flood. The contrast changes the covered cause.",
+      "minimal_edit": {
+        "faithful_span": "fire",
+        "faulty_span": "flood"
+      }
+    },
+    {
+      "id": "coverage-condition-3",
+      "error_class": "coverage-condition",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "6.3 Water-damage coverage\nAn annual inspection is a prerequisite for this coverage.",
+      "exact_quote": "Accidental water damage is covered only if the annual inspection is current.",
+      "faithful": "A current annual inspection is required for accidental water damage to be covered.",
+      "faulty": "A current annual inspection is not required for accidental water damage to be covered.",
+      "changed_element": "current-inspection prerequisite -> inspection not required",
+      "faulty_factual_support": false,
+      "faulty_condition_preservation": false,
+      "rationale": "The source requires a current inspection; the contrast negates that prerequisite.",
+      "minimal_edit": {
+        "faithful_span": "is required",
+        "faulty_span": "is not required"
+      }
+    },
+    {
+      "id": "equipment-scope-1",
+      "error_class": "equipment-scope",
+      "origin": "original F3 case, unchanged; previously measured",
+      "opening": "8.1 Equipment use\nThe contractor may use the owner's equipment with permission.",
+      "exact_quote": "The contractor indemnifies the owner for losses arising from equipment use, whether or not that use was negligent.",
+      "faulty": "The contractor indemnifies the owner for losses from negligent equipment use.",
+      "faithful": "The contractor indemnifies the owner for equipment-use losses regardless of whether the use was negligent.",
+      "changed_element": "Original retained pair; not newly constrained to a single edit",
+      "faulty_factual_support": true,
+      "faulty_condition_preservation": false,
+      "rationale": "Negligent-use losses are within scope, but a standalone summary omits the explicitly included non-negligent losses."
+    },
+    {
+      "id": "equipment-scope-2",
+      "error_class": "equipment-scope",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "8.2 Equipment losses\nThe following indemnity concerns temporary equipment.",
+      "exact_quote": "The contractor indemnifies the owner for losses from both borrowed and rented equipment.",
+      "faithful": "Indemnity from the contractor protects the owner against losses arising from borrowed or rented equipment.",
+      "faulty": "Indemnity from the contractor protects the owner against losses arising from rented equipment.",
+      "changed_element": "delete borrowed equipment from included scope",
+      "faulty_factual_support": true,
+      "faulty_condition_preservation": false,
+      "rationale": "Rented-equipment losses are included, so the subset is true. It omits borrowed equipment from the standalone scope summary.",
+      "minimal_edit": {
+        "faithful_span": "borrowed or rented",
+        "faulty_span": "rented"
+      }
+    },
+    {
+      "id": "equipment-scope-3",
+      "error_class": "equipment-scope",
+      "origin": "new public synthetic pair; no inference",
+      "opening": "8.3 Operators\nThe indemnity applies regardless of which permitted operator caused the equipment loss.",
+      "exact_quote": "The contractor indemnifies the owner for equipment losses caused by either employees or permitted visitors.",
+      "faithful": "The owner is indemnified by the contractor for equipment losses caused by employees or permitted visitors.",
+      "faulty": "The owner is indemnified by the contractor for equipment losses caused by employees.",
+      "changed_element": "delete permitted visitors from included scope",
+      "faulty_factual_support": true,
+      "faulty_condition_preservation": false,
+      "rationale": "Employee-caused losses are covered, but the scope summary omits permitted visitors.",
+      "minimal_edit": {
+        "faithful_span": "employees or permitted visitors",
+        "faulty_span": "employees"
+      }
+    }
+  ],
+  "claims": [
+    {
+      "id": "payment-stage-1-faulty",
+      "pair_id": "payment-stage-1",
+      "error_class": "payment-stage",
+      "variant": "faulty",
+      "claim": "Final payment releases retained funds except for incomplete work.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "payment-stage-1-faithful",
+      "pair_id": "payment-stage-1",
+      "error_class": "payment-stage",
+      "variant": "faithful",
+      "claim": "At substantial completion, payment releases retained funds except for incomplete work.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "payment-stage-2-faulty",
+      "pair_id": "payment-stage-2",
+      "error_class": "payment-stage",
+      "variant": "faulty",
+      "claim": "Except for amounts reserved for unfinished tasks, the owner releases retainage at final settlement.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "payment-stage-2-faithful",
+      "pair_id": "payment-stage-2",
+      "error_class": "payment-stage",
+      "variant": "faithful",
+      "claim": "Except for amounts reserved for unfinished tasks, the owner releases retainage at interim acceptance.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "payment-stage-3-faulty",
+      "pair_id": "payment-stage-3",
+      "error_class": "payment-stage",
+      "variant": "faulty",
+      "claim": "The release of retained funds occurs only at milestone Birch.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "payment-stage-3-faithful",
+      "pair_id": "payment-stage-3",
+      "error_class": "payment-stage",
+      "variant": "faithful",
+      "claim": "The release of retained funds occurs only at milestone Amber.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "invoice-period-1-faulty",
+      "pair_id": "invoice-period-1",
+      "error_class": "invoice-period",
+      "variant": "faulty",
+      "claim": "Extra visits are excluded from the agreement total.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "invoice-period-1-faithful",
+      "pair_id": "invoice-period-1",
+      "error_class": "invoice-period",
+      "variant": "faithful",
+      "claim": "Extra visits are excluded from the agreement total when they fall outside the current billing period.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "invoice-period-2-faulty",
+      "pair_id": "invoice-period-2",
+      "error_class": "invoice-period",
+      "variant": "faulty",
+      "claim": "Extra visits during March do not form part of the March agreement total.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "invoice-period-2-faithful",
+      "pair_id": "invoice-period-2",
+      "error_class": "invoice-period",
+      "variant": "faithful",
+      "claim": "Extra visits outside March do not form part of the March agreement total.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "invoice-period-3-faulty",
+      "pair_id": "invoice-period-3",
+      "error_class": "invoice-period",
+      "variant": "faulty",
+      "claim": "The agreement total does not include callouts.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "invoice-period-3-faithful",
+      "pair_id": "invoice-period-3",
+      "error_class": "invoice-period",
+      "variant": "faithful",
+      "claim": "The agreement total does not include callouts made before the invoiced service period starts.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "working-day-cure-1-faulty",
+      "pair_id": "working-day-cure-1",
+      "error_class": "working-day-cure",
+      "variant": "faulty",
+      "claim": "The owner may perform correction and charge the contractor after seven days of written notice.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "working-day-cure-1-faithful",
+      "pair_id": "working-day-cure-1",
+      "error_class": "working-day-cure",
+      "variant": "faithful",
+      "claim": "If the contractor fails to start correction within seven working days after written notice and continue diligently, the owner may correct the failure and charge the contractor.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "working-day-cure-2-faulty",
+      "pair_id": "working-day-cure-2",
+      "error_class": "working-day-cure",
+      "variant": "faulty",
+      "claim": "After written notice, the owner may arrange and charge for correction if the contractor has not started it within eight calendar days.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "working-day-cure-2-faithful",
+      "pair_id": "working-day-cure-2",
+      "error_class": "working-day-cure",
+      "variant": "faithful",
+      "claim": "After written notice, the owner may arrange and charge for correction if the contractor has not started it within eight working days.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "working-day-cure-3-faulty",
+      "pair_id": "working-day-cure-3",
+      "error_class": "working-day-cure",
+      "variant": "faulty",
+      "claim": "If correction begins within five working days of written notice, the owner may obtain substitute correction.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "working-day-cure-3-faithful",
+      "pair_id": "working-day-cure-3",
+      "error_class": "working-day-cure",
+      "variant": "faithful",
+      "claim": "If correction begins within five working days of written notice and subsequently stops for two working days, the owner may obtain substitute correction.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "coverage-condition-1-faulty",
+      "pair_id": "coverage-condition-1",
+      "error_class": "coverage-condition",
+      "variant": "faulty",
+      "claim": "The insurer's payment is due to the owner for the loss.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "coverage-condition-1-faithful",
+      "pair_id": "coverage-condition-1",
+      "error_class": "coverage-condition",
+      "variant": "faithful",
+      "claim": "The insurer pays the owner only for the portion of the loss covered by the property insurance policy.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "coverage-condition-2-faulty",
+      "pair_id": "coverage-condition-2",
+      "error_class": "coverage-condition",
+      "variant": "faulty",
+      "claim": "The owner receives insurer reimbursement only for losses caused by flood.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "coverage-condition-2-faithful",
+      "pair_id": "coverage-condition-2",
+      "error_class": "coverage-condition",
+      "variant": "faithful",
+      "claim": "The owner receives insurer reimbursement only for losses caused by fire.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "coverage-condition-3-faulty",
+      "pair_id": "coverage-condition-3",
+      "error_class": "coverage-condition",
+      "variant": "faulty",
+      "claim": "A current annual inspection is not required for accidental water damage to be covered.",
+      "expected_factual_support": false,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "coverage-condition-3-faithful",
+      "pair_id": "coverage-condition-3",
+      "error_class": "coverage-condition",
+      "variant": "faithful",
+      "claim": "A current annual inspection is required for accidental water damage to be covered.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "equipment-scope-1-faulty",
+      "pair_id": "equipment-scope-1",
+      "error_class": "equipment-scope",
+      "variant": "faulty",
+      "claim": "The contractor indemnifies the owner for losses from negligent equipment use.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "equipment-scope-1-faithful",
+      "pair_id": "equipment-scope-1",
+      "error_class": "equipment-scope",
+      "variant": "faithful",
+      "claim": "The contractor indemnifies the owner for equipment-use losses regardless of whether the use was negligent.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "equipment-scope-2-faulty",
+      "pair_id": "equipment-scope-2",
+      "error_class": "equipment-scope",
+      "variant": "faulty",
+      "claim": "Indemnity from the contractor protects the owner against losses arising from rented equipment.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "equipment-scope-2-faithful",
+      "pair_id": "equipment-scope-2",
+      "error_class": "equipment-scope",
+      "variant": "faithful",
+      "claim": "Indemnity from the contractor protects the owner against losses arising from borrowed or rented equipment.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    },
+    {
+      "id": "equipment-scope-3-faulty",
+      "pair_id": "equipment-scope-3",
+      "error_class": "equipment-scope",
+      "variant": "faulty",
+      "claim": "The owner is indemnified by the contractor for equipment losses caused by employees.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": false,
+      "expected_admit": false
+    },
+    {
+      "id": "equipment-scope-3-faithful",
+      "pair_id": "equipment-scope-3",
+      "error_class": "equipment-scope",
+      "variant": "faithful",
+      "claim": "The owner is indemnified by the contractor for equipment losses caused by employees or permitted visitors.",
+      "expected_factual_support": true,
+      "expected_condition_preservation": true,
+      "expected_admit": true
+    }
+  ]
+}
