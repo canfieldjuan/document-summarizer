@@ -20,8 +20,14 @@ The branch also owns source splitting and furniture removal in
 `e0cb818d57a1c9e51125540b9a2c4c5e1f377516`, F1 and F2 already own those decisions
 in `summary/coherent/page_furniture.rs` and `summary/coherent/whole_clauses.rs`.
 The latter exposes `Clauses::new`, `segment` and `context`; it is not yet a typed
-extraction-record enumerator. Reuse and, where needed, expose its authoritative
-ordered source ranges rather than retaining a second parser in PR111.
+extraction-record enumerator and has no heading field. Its `number` function
+recognizes decimal clause markers; its `leading_title` rule only admits an
+all-caps prefix immediately before one. It does not recognize ARTICLE starts,
+separate an inline title from its body, or attach a title-case leading title to
+the following section. Therefore the heading/section rules below require a
+versioned extension of this shared owner, not just a new matching table.
+Reuse its authoritative source order and expose source ranges rather than
+retaining a second parser in PR111.
 
 The prior contract's statement that no fixed term taxonomy was wanted is
 superseded by the operator's six categories below. Earlier local tests and A/B
@@ -57,60 +63,175 @@ liability/indemnity**. Every category is present exactly once. A category with
 no selected clause displays exactly **not identified**. This means the declared
 selector found no match; it does not assert that the document lacks that term.
 
-For this slice, each selected entry quotes a **whole extracted clause**. The
-operator also permits exact spans, but span selection is not needed here and
-will not be introduced implicitly. No paraphrases, synthesized names, inferred
-dates, amounts, obligations or legal conclusions are added. Section/category
-labels and the fixed missing-match message are application text.
+Each selected entry quotes a **whole source section**, represented by its ordered
+whole-clause references, including the heading, governing opening and all
+subclauses. A leaf section can contain just one clause. The opening-parties
+fallback below similarly retains its entire source prefix. No sentence picking,
+paraphrases, synthesized names, inferred dates, amounts, obligations or legal
+conclusions are added. Section/category labels and the fixed missing-match
+message are application text.
 
-Store a typed, versioned selection of clause references alongside the existing
-clause inventory. Its authoritative selection data is category plus clause ID;
-text and page citations resolve from the validated clause/evidence records.
-Do not create an independently editable key-term text copy. The validated view
-and canonical text renderer copy the resolved source wording exactly.
+Store a typed, versioned selection alongside the existing clause inventory:
+category, selection rule, source-section/root reference and the complete ordered
+clause-ID list. Opening-party selections identify the opening source unit(s).
+These references, not copied free text, are authoritative; text and page
+citations resolve from validated clause/evidence records. Do not create an
+independently editable key-term text copy. Validation rebuilds the selection
+including its section extent, and the renderer copies source wording exactly.
 
-Every displayed entry includes its **clause ID and source page citation(s)**.
-Cross-page clauses cite all their authoritative source spans. The key-term entry
-and its copy in the full list resolve to the same record. Adding key terms must
-not remove, reorder, shorten or mutate that full inventory. "Unchanged" here
-means unchanged by the key-term layer over the shared source owner; the old
-PR111 parser's output is not a second authority.
+Every displayed clause includes its **clause ID and source page citation(s)**.
+Cross-page clauses cite all their authoritative source spans. Each key-term
+reference and its copy in the full list resolve to the same record. Adding key
+terms must not remove, reorder, shorten or mutate that full inventory.
+"Unchanged" here means unchanged by the key-term layer over the shared source
+owner; the old PR111 parser's output is not a second authority.
 
 ### Deterministic selection policy for review
 
-The initial selector matches **printed headings only**. It uses the heading
-identified by the shared source owner; it does not search body text, filenames,
-model summaries or arbitrary substrings. For matching only, remove a recognized
-printed clause-number prefix, trim whitespace and terminal colon/period, fold
-ASCII case, collapse whitespace, and normalize `&` to `and`. These operations
-never modify displayed source text. Match the entire normalized heading against
-this versioned, closed table:
+These are **proposed Contract extraction rules**, not capabilities already
+present in F2. Extend the shared source owner to expose heading ranges, section
+ancestry and ordered source fragments under a new extraction policy version.
+Do not change General's current segmentation or historical artifact dispatch.
+Category matching consumes this view; it must not become another parser.
+
+#### What counts as a heading
+
+Use canonical retained source lines after F1 furniture filtering, across block
+and page boundaries. A line boundary means a newline or the end of a normalized
+source block, not a visual line inferred from a model. Ignore blank lines for
+adjacency, but do not skip intervening nonblank text. Retain original bytes and
+provenance for display; normalization below is for recognition only.
+
+The initial policy recognizes these three layouts. Resolve an ARTICLE start
+first, then a numeric start, then a standalone leading title, so the same line
+cannot acquire two owners:
+
+1. **Numbered title, standalone or inline.** At the start of a retained line,
+   accept a decimal marker such as `5`, `5.`, `5)`, `5.1` or `5.1.`, optionally
+   preceded by the section sign. Each decimal component has one to three ASCII
+   digits with literal periods between components and at most one trailing
+   period or closing parenthesis. The marker must be followed by whitespace;
+   its remainder must be nonempty. After the marker, the candidate ends at
+   the first period or colon followed by whitespace/end of line; with no such
+   delimiter, use the entire remaining line. Text following the delimiter is clause
+   body and must stay in the same source clause. Thus `5. Payment. Client shall
+   pay...` has heading `Payment`, but quotes the whole clause including `Client`.
+   A numeric start remains a clause/section boundary even when its candidate
+   does not match any category. Do not search later sentences for a heading.
+2. **Standalone title before a numbered clause.** A complete retained line is
+   a title when, after removing one optional terminal period/colon, it consists
+   of alphabetic words and spaces, with `&`, `/`, hyphen and apostrophe allowed
+   inside/between words, and is either all caps or title case. For title case,
+   alphabetic words are uppercase or have an uppercase first letter and
+   lowercase remaining letters, except the lowercase connectors `and`, `or`,
+   `of`, `the`, `to`, `for`, `in`, `with`, `a`, `an`; at least one word starts
+   uppercase. The next nonblank retained line must begin with a numeric marker
+   from rule 1. The title belongs
+   to the following section, never the preceding clause. For a dotted marker
+   such as `5.1`, give the title the implicit parent `5` when that parent is not
+   already open in the current article/document; otherwise attach it to the
+   incoming clause `5.1` without renaming the existing parent. For a plain `5`,
+   attach the title to section `5`. This supports `Payment Terms` followed by
+   `5.1 ...` even across blocks/pages. If the numbered line also has a title,
+   retain and match both separately at their assigned level(s); never
+   concatenate them into a made-up heading or duplicate the source section.
+3. **Standalone ARTICLE title.** A complete retained line of the form
+   `ARTICLE <ordinal> <separator> <title>` opens an article. Match ARTICLE
+   case-insensitively; the ordinal is a positive decimal integer of up to three
+   digits or a canonical uppercase Roman numeral I through MMMCMXCIX. The
+   separator is a hyphen, U+2013, U+2014 or colon, with optional surrounding
+   whitespace; require whitespace between ARTICLE and its ordinal. The title
+   is the entire remaining line, with only an optional terminal period/colon
+   removed. Thus `ARTICLE V - PAYMENT` yields `PAYMENT`. Inline body on an
+   ARTICLE heading line is not supported. An unmatched ARTICLE title still
+   establishes the next article boundary.
+
+These grammar rules establish candidates and boundaries **independently of the
+category table**. For example, an unlisted `6. Notices` must end section 5.
+No font-size inference, all-body keyword search or filename matching is allowed.
+
+#### Section extent and ordering
+
+A match selects the **complete section** rooted at its heading. A numeric
+section `5` contains its opening and every contiguous descendant (`5.1`,
+`5.1.1`, `5.2`, etc.), including unnumbered continuations and cross-page text.
+It ends before the next numeric marker that is not a strict component-prefix
+descendant, the next ARTICLE, or a standalone title introducing such a new
+section, whichever comes first. Components, not string prefixes, determine
+ancestry: `50.1` is not a child of `5`. A `5.1` match similarly includes `5.1.1`
+but stops before `5.2`. With no following boundary, end at document end.
+An implicit parent from rule 2 follows the same rule. Section identity includes
+its source occurrence and article scope, not just its printed number; a new
+ARTICLE resets numeric ancestry.
+
+An ARTICLE section includes all subsequent clauses until the next ARTICLE or
+end of document; numeric sections nested within it do not end the article.
+Do not infer an article's end from numbering style changes or an unsupported
+appendix heading. This limitation is reported with the known misses below.
+
+For `5. PAYMENT / 5.1 ... / 5.2 ... / 6. NOTICES`, the payment entry must quote
+5, 5.1 and 5.2, including the opening words and citations, and exclude 6. It must
+never present `5. PAYMENT` alone when child text exists. Unknown child headings
+do not drop their text from the selected parent. A matched section whose entire
+retained text is just its own heading is not evidence of terms: select no
+key-term entry for it and report that heading-only miss; keep the heading in
+the full list. Do not require each child to have its own recognized heading.
+
+Keep all matching sections in canonical document order within a category.
+When a matching ancestor already includes a matching descendant in the same
+category, keep the ancestor selection once; do not repeat its child references.
+Otherwise deduplicate only repeated references to the same source occurrence,
+not distinct occurrences with equal wording. Matches in different categories
+may refer to the same source clause without creating extra inventory records.
+Do not choose by HashMap iteration, model ranking, amount or apparent importance.
+
+#### Frozen heading table and opening-parties fallback
+
+For matching only, trim the recognized heading, fold ASCII case, replace `&`
+with the word `and` surrounded by spaces, then collapse whitespace. Markers and
+heading delimiters have already been separated by the rules above. Never change displayed source text.
+Match the **entire** normalized heading against this closed table:
 
 | Category | Accepted normalized headings |
 | --- | --- |
 | parties | parties; parties to the agreement; contracting parties |
-| payment | payment; payments; payment terms; fees; compensation; fees and payment; contract price |
-| term/renewal | term; duration; renewal; term and renewal; term/renewal; commencement and duration |
+| payment | payment; payments; payment terms; fees; compensation; fees and payment; contract price; pricing |
+| term/renewal | term; duration; renewal; term and renewal; term/renewal; commencement and duration; initial term |
 | termination | termination; termination of agreement; termination of the agreement; cancellation |
 | insurance | insurance; insurance requirements; property insurance |
-| liability/indemnity | liability; limitation of liability; indemnity; indemnification; liability and indemnity; liability and indemnification |
+| liability/indemnity | liability; limitation of liability; indemnity; indemnification; liability and indemnity; liability and indemnification; hold harmless |
 
-Keep **all** matching clauses in canonical document order within a category;
-remove duplicate references to the same clause ID, not distinct occurrences
-with equal wording. Do not choose by HashMap iteration, model ranking, amount,
-recency or apparent importance. A matching parent heading does not automatically
-classify separately extracted child clauses; retain the complete governing
-context supplied by the shared owner. A combined heading not in the table is
-unmatched. The table and ordering are policy-versioned and frozen before A/B
-replay; do not tune aliases silently after observing that replay.
+If no headed parties section was selected, apply just this fallback: take all
+retained opening source text before the first section, **only if** that section
+is root numeric `1` (including an implicit `1` before `1.1`) or ARTICLE I/1,
+and the opening contains the standalone word `between`, case-insensitively.
+Word boundaries exclude adjacent letters, digits and underscores. Quote the
+entire prefix using its source-unit IDs and pages; do not extract or infer party
+names. A leading title assigned to clause 1 belongs to that section, not the
+opening prefix. No fallback applies when the prefix is empty, the first section
+starts elsewhere, or `between` occurs only inside a numbered/article body. This
+is a positional selector, not a semantic guarantee that every use of `between`
+names parties. Record `opening-between` as the rule in replay evidence.
 
-Known misses: unheaded party introductions and inline defined terms, synonyms
-outside the table, unsupported combined headings, non-English headings,
-OCR-corrupted headings, and layouts whose heading boundaries the shared owner
-cannot establish. Their text stays available in the full clause list and
-existing source warnings remain visible. A defined-term recognizer is not part
-of this initial rule. These misses must appear in the replay report. Any later
-model ranking may select only extracted clause IDs and needs a separate contract.
+The grammar, section extents, table, fallback and ordering are policy-versioned
+and frozen **before** A/B replay. The additions `pricing`, `initial term` and
+`hold harmless` come from this review, not from inspecting A/B selections. Do
+not silently tune any rule after observing the replay; seek contract review
+for a rule change first.
+
+Known misses and limits: headings outside the table, unsupported combined or
+non-English headings, OCR-corrupted headings, inline titles without a period or
+colon plus whitespace separating their body, lowercase unnumbered titles,
+standalone titles not followed by a recognized numeric marker, `Section 5`
+markers, letter-only `(a)` numbering, split-line
+ARTICLE titles and unsupported article endings (e.g. an unmarked appendix).
+Unheaded parties without the narrow opening rule remain `not identified`.
+The rules cannot distinguish a similarly formatted table of contents from
+operative sections or establish that a matching heading covers every relevant
+obligation elsewhere. Ambiguous/misordered normalized layouts are not repaired
+by inference. Keep their source in the full list and existing warnings visible;
+report these limits in the replay. No defined-term recognizer is added. Any later
+model ranking may select only extracted source IDs under a separate contract.
 
 ### Validation, persistence and downstream presentation
 
@@ -118,7 +239,9 @@ model ranking may select only extracted clause IDs and needs a separate contract
   from authoritative normalized sources at the existing validation boundaries.
   Reject unknown/duplicate category entries, unknown or cross-document clause
   IDs, mismatched pages, reordered/missing expected selections and altered text.
-  A recomputed artifact hash alone is not proof of source fidelity.
+  Also reject a selected parent with missing children, a section extended into
+  its peer, and a fallback that does not satisfy the opening rule. A recomputed
+  artifact hash alone is not proof of source fidelity.
 - Validate the typed selection and the canonical rendered text together before
   persistence/delivery and again on existing persisted-artifact read paths.
   Unknown free-text fields in reference records are rejected. Mutation of a
@@ -141,11 +264,14 @@ model ranking may select only extracted clause IDs and needs a separate contract
   the authoritative ledger or count a label as cited page coverage.
 - Preserve the **1 MiB UTF-8 text cap**, existing artifact-size cap, and
   `SUMMARY_TRUNCATED_FOR_DELIVERY` disclosure. Apply the existing whole-unit
-  prefix mechanism to the key-terms-first rendering; never cut a quoted clause
-  or its citation mid-unit. Keep the persisted/full desktop inventory intact.
+  prefix mechanism to the key-terms-first rendering. A selected key-term section
+  (all its clauses and citations) is one indivisible delivery group; a prefix
+  cannot leave a heading stub or omit its qualifying subclauses. Full-list
+  clauses remain individually indivisible. Keep the persisted/full desktop
+  inventory intact. Do not skip an oversized section and deliver later units.
   Any absent category/list portion caused by the cap is truncation, not
-  `not identified`. Preserve the source/page coverage checks on the actual
-  delivered references. If no acceptable nonempty prefix fits or coverage
+  `not identified`; a labels-only prefix is not an acceptable result. Preserve
+  the source/page coverage checks on actual delivered references. If no acceptable nonempty prefix fits or coverage
   fails, use the existing explicit delivery failure, never silent clipping.
   The current extraction route's final delivery-size check and provider prefix
   path must be exercised together, not assumed to compose from helper tests.
@@ -176,9 +302,10 @@ frozen and PR116's hold is independent of this contract.
 
 The operator approved the product direction: key terms first, then the full
 clause list. The detailed matcher and data/delivery rules above are **proposed
-for contract review**, not already implemented or accepted. In particular,
-heading-only selection deliberately leaves unheaded party definitions unmatched.
-A/B replay must report that honestly rather than infer a result.
+for contract review**, not already implemented or accepted. Heading boundaries
+and whole-section enumeration require extending the shared owner, and the narrow
+opening rule does not promise complete party identification. A/B replay must
+report actual selections and known misses rather than infer a result.
 
 PR111 still has the summary-first hold, duplicate-owner review thread and merge
 conflicts. A contract-only commit does not resolve them. After contract review,
@@ -193,10 +320,35 @@ key-term-first typed output through persistence, desktop projection and Connect
 rendering. Keep that expected failing test specific to this missing behavior.
 After implementation, prove:
 
-- A recognized heading selects the exact whole clause; a non-matching heading
-  such as `Payment history example` is not selected. Case, number-prefix and
-  permitted punctuation variants match without changing source bytes. A body
-  mention of an accepted term beneath another heading does not select it.
+- Public fixtures cover each declared layout before real replay: `5. Payment.
+  Client shall pay...`; title-case `Payment Terms` before `5.1`; and ARTICLE V
+  with each supported separator before PAYMENT. Prove the correct heading and
+  exact whole-source selection, including opening words, through the shared
+  owner and production extractor. An unlisted heading such as `Payment history
+  example` and an accepted word appearing only in body text select nothing.
+- `5. PAYMENT`, `5.1`, nested `5.1.1`, `5.2`, `6. NOTICES` prove complete parent
+  selection and exclusion of the next peer, including a cross-page child and
+  an unknown child heading. `50.1` is not a descendant of `5`. A leaf match stops
+  at its peer; an ARTICLE stops at the next ARTICLE even if its title is
+  unmatched. A title-case leading heading is absent from the preceding clause
+  and present exactly once in its own section. Cover both implicit and already
+  open parents, and repeated numbers in different articles. A real heading-only
+  section is not presented as a populated key term. Matching parent plus matching child
+  produces one complete selection, while distinct same-text sections survive.
+- The opening fallback accepts a whole prefix containing `between` before
+  section 1, including ARTICLE I and implicit root 1, and preserves every source
+  reference. Reject body-only `between`, `inbetween`, empty opening, a first
+  section other than 1/I, and a prefix without the word. An existing headed
+  parties selection suppresses the fallback. Report the positional rule's
+  semantic limit rather than calling it party-name extraction.
+- The added aliases `pricing`, `initial term` and `hold harmless` have positive
+  public fixtures. Mixed matched/unmatched sections and unsupported layouts
+  retain the complete source inventory. Negative fixtures cover `Section 5.
+  Payment`, `(a) Payment`, a lowercase unnumbered title, an undelimited inline
+  heading and a split-line ARTICLE title; none gains a heading match by body
+  keyword search. For each accepted marker/title form, also use an unlisted
+  title to prove that a structural boundary is not itself a category match.
+  Grammar and table fixtures are frozen before looking at real A/B selections.
 - All six categories have stable order; empty categories show `not identified`.
   Multiple matches preserve source order, equal-text distinct occurrences stay
   distinct, and repeated references to one occurrence are not duplicated.
@@ -204,22 +356,26 @@ After implementation, prove:
   governing openings retain the full source list and correct page references.
 - Altered key-term text fails validation; also reject a valid clause ID paired
   with another clause's text/page, a cross-document ID, unknown category or
-  silently omitted expected match. Recompute hashes in mutation tests so hash
-  mismatch is not the only reason for rejection.
+  silently omitted expected match. Omit a parent's child or append the next
+  section and require rejection even when every individual ID is valid.
+  Recompute hashes in mutation tests so hash mismatch is not the only reason
+  for rejection.
 - Desktop and the actual provider text path both deliver key terms first and
   the full clause list below. Category/list duplication cannot inflate coverage
   counts. At the byte cap, cap-minus-one/cap/cap-plus-one and multibyte source
   text prove whole-unit delivery, explicit truncation and failure when nothing
-  acceptable fits. Ordinary non-Contract output remains unchanged.
+  acceptable fits. Include a parent whose heading fits but complete section
+  does not: no partial section or labels-only success may be delivered, and no
+  later unit may leapfrog it. Ordinary non-Contract output remains unchanged.
 - The production Contract pipeline completes with a runtime that fails if
   invoked, persists/reopens validated records, and rejects modified persisted
   output. Historical artifacts stay readable. Interleaved independent runs
   cannot mix clause IDs, source text or pages through selection state.
 - Replay the saved real contracts **A and B** through the reconciled production
   extraction/validation/rendering path without model calls. For each category,
-  record selected clause ID(s) and page(s), or `not identified`, plus the exact
-  matching heading/rule locally. Record document/source hashes, app commit and
-  policy version; verify every selected quote and citation against source and
+  record section boundaries, every selected clause ID and page, or
+  `not identified`, plus the exact matching heading/fallback rule locally.
+  Record document/source hashes, app commit and policy version; verify every selected quote and citation against source and
   compare the complete inventory before/after adding key terms. Report known
   misses and any source-owner changes separately. Publish no private wording.
 
@@ -232,7 +388,8 @@ regressions before the implementation can be called complete.
 ## Implementation summary
 
 This revision changes **only this contract**. It specifies the approved view
-order, fixed categories, exact-source references, proposed heading matcher,
+order, fixed categories, exact-source references, explicit heading grammar,
+complete-section selection, opening-parties fallback, frozen aliases,
 validation/delivery behavior, shared ownership and settling evidence. The
 existing implementation at `847ca3e` has no key-terms feature. No branch
 reconciliation, source deletion, tests, inference or product changes were made
@@ -240,10 +397,11 @@ for this contract revision.
 
 ## Cold diff audit
 
-`docs/PR-CLAUSE-EXTRACTION.md` replaces the stale combined F1/F2/F3 implementation
-claims with the current extraction scope and review gate. Source citations name
-the inspected PR head and current-main owner APIs. The proposed feature and its
-verification obligations are distinguished from behavior present in code.
+`docs/PR-CLAUSE-EXTRACTION.md` addresses the undefined-heading and parent-stub
+review blockers plus the recommended opening-party rule and heading aliases.
+It keeps the accepted presentation/source-validation boundaries and review gate.
+Source citations name the inspected PR head and current-main owner APIs. New
+heading/section behavior is distinguished from capabilities present in code.
 The contract-only diff must leave all source, fixtures and approved model case
 files unchanged; check that plus Markdown whitespace before committing.
 
