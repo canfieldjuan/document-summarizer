@@ -503,7 +503,19 @@ source ranges as furniture exclusion. Ordinary prose/forms keep their existing
 segmentation. The complete serialized context counts against the existing
 request budget; clauses are not shortened to fit. Version 11 reloads its original
 sentence-packed catalog. Analysis and verifier behavior are unchanged by F2;
-full-clause verification is a separate change.
+full-clause verification is specified below.
+
+F3 General coherent verification uses the same numbered-clause reconstruction
+as drafting. Each cited exact block/quote can reference its complete governing
+clause and parent lead-ins in a request-local context table. Distinct contexts
+appear once per request; context IDs are neither citation nor verdict IDs.
+Preflight and execution use one builder and budget the complete serialization.
+Clauses are never truncated to fit. Verification must consider payment stages,
+governing conditions, qualifications and scope; partial support cannot pass.
+Existing verdict parsing, withholding, semantic guards and contribution checks
+remain mandatory. No rewriting pass is added. Verification version 11 records
+this policy; completed version-10 artifacts retain their original validation.
+See `PR-SUMMARY-CLAUSE-VERIFICATION.md` for scope and evidence requirements.
 
 Synthesis constructs a catalog of exact source segments from the normalized
 chunks, independent of the analyzed claim ledger. Segments retain canonical
@@ -609,7 +621,7 @@ mode, supported prose claims, ledger claims, their exact evidence and the canoni
 rendered text. The desktop shows coherent paragraphs first and keeps any supported
 ledger claims available as supporting detail.
 
-Current artifacts use synthesis 12.0.0, verification 10.0.0, summary 8.0.0 and
+Current artifacts use synthesis 12.0.0, verification 11.0.0, summary 8.0.0 and
 citation 4.0.0. Completed coherent artifacts from before Contract source
 segmentation retain synthesis 8.0.0 with verification 10.0.0 and summary 8.0.0
 compatibility, while an active coherent synthesis-8 checkpoint must regenerate
