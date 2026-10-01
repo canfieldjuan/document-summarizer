@@ -8,8 +8,10 @@ mod budget;
 mod page_furniture;
 mod semantic_support;
 mod trim;
+mod verification;
 mod whole_clauses;
 pub(super) use trim::verify_source_contributions;
+pub(super) use verification::summary_verification_prompt;
 
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
 pub(super) const MAX_SUMMARY_CLAIMS: usize = 8;
@@ -169,14 +171,14 @@ struct PromptSourceSegment {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PromptClauseContext {
+pub(super) struct PromptClauseContext {
     context_id: String,
     full_clause: String,
 }
 
 // Both prompt builders use this request-local owner after choosing their sources.
 // First appearance gives stable IDs; text equality preserves differing conditions.
-fn intern_clause_context(
+pub(super) fn intern_clause_context(
     context: Option<&str>,
     contexts: &mut Vec<PromptClauseContext>,
 ) -> Option<String> {
@@ -7732,8 +7734,7 @@ fn source_catalog_with_furniture_policy(
                 .filter(|_| source_framing.is_none());
             let full_clause = clauses
                 .as_ref()
-                .and_then(|clauses| clauses.context(&source.block_id, &source.exact_quote))
-                .filter(|context| context != &source.exact_quote);
+                .and_then(|clauses| clauses.context(&source.block_id, &source.exact_quote));
             candidates.push(SourceCandidate {
                 request_id: format!("s{ordinal}"),
                 evidence: EvidenceItem {
@@ -8093,6 +8094,117 @@ mod tests {
     };
     use crate::pipeline::model::OllamaRuntime;
     use std::sync::Mutex;
+
+    #[test]
+    fn whole_clause_verification_admission_keeps_governing_context() {
+        struct Capture(Mutex<Vec<ModelRequest>>);
+        impl ModelRuntime for Capture {
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+            fn runtime_id(&self) -> &str {
+                "capture"
+            }
+            fn model_id(&self) -> &str {
+                "capture"
+            }
+            fn context_tokens(&self, _: PipelineStage) -> u32 {
+                32_768
+            }
+            fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                panic!("admission must not generate")
+            }
+            fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+                self.0.lock().unwrap().push(request.clone());
+                Ok(())
+            }
+        }
+        let (mut normalized, mut chunked) = contract_documents();
+        set_furniture_fixture(&mut normalized, &mut chunked, |n| match n {
+            1 => "10.2 Substantial Completion\nPayment requires acceptance.".into(),
+            2 => "Such payment releases retained funds except for incomplete work.".into(),
+            3 => "The owner must approve the release in writing.".into(),
+            _ => format!("11. Insurance\nCoverage applies to phase {n}."),
+        });
+        let catalog = source_catalog_for_profile(
+            SummaryProfile::General,
+            VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
+        let evidence = catalog
+            .candidates
+            .iter()
+            .take(3)
+            .map(|c| c.evidence.clone())
+            .collect::<Vec<_>>();
+        let ledger = CitedClaim {
+            claim_id: "ledger".into(),
+            text: "Payment requires acceptance.".into(),
+            evidence_ids: vec![evidence[0].evidence_id.clone()],
+        };
+        let analyzed = AnalyzedDocument {
+            document_id: normalized.document_id.clone(),
+            analysis_version: ANALYSIS_VERSION.into(),
+            runtime_id: "capture".into(),
+            model_id: "capture".into(),
+            chunks: vec![ChunkAnalysis {
+                chunk_id: chunked.chunks[0].chunk_id.clone(),
+                summary_text: String::new(),
+                source_spans: evidence.iter().map(|e| e.source_span.clone()).collect(),
+                evidence: evidence.clone(),
+            }],
+            omissions: vec![],
+            inspected_pages: vec![],
+            warnings: vec![],
+        };
+        let synthesized = SynthesizedDocument {
+            document_id: normalized.document_id.clone(), synthesis_version: VERSION.into(),
+            runtime_id: "capture".into(), model_id: "capture".into(),
+            presentation_mode: SummaryPresentationMode::Coherent, summary_text: String::new(),
+            source_chunk_ids: vec![chunked.chunks[0].chunk_id.clone()],
+            summary_claims: vec![CitedClaim { claim_id: "prose".into(),
+                text: "At substantial completion, payment releases retained funds except for incomplete work, with the owner's written approval.".into(),
+                evidence_ids: evidence[1..].iter().map(|e| e.evidence_id.clone()).collect() }],
+            synthesis_evidence: evidence, claims: vec![ledger], warnings: vec![],
+        };
+        let runtime = Capture(Mutex::new(vec![]));
+        assert!(!coherent_verification_exceeds_runtime_context(
+            SummaryProfile::General,
+            &runtime,
+            &synthesized,
+            &analyzed,
+            &normalized,
+            7
+        )
+        .unwrap());
+        let requests = runtime.0.lock().unwrap();
+        let request = requests.last().unwrap();
+        let wire: Value = serde_json::from_str(&request.user_prompt).unwrap();
+        assert_eq!(
+            wire["clause_contexts"].as_array().map_or(0, Vec::len),
+            1,
+            "clause context missing from verification request"
+        );
+        let context = &wire["clause_contexts"][0];
+        assert!(context["full_clause"]
+            .as_str()
+            .unwrap()
+            .starts_with("10.2 Substantial Completion"));
+        assert!(!context["full_clause"]
+            .as_str()
+            .unwrap()
+            .contains("11. Insurance"));
+        for item in wire["claims"][0]["evidence"].as_array().unwrap() {
+            assert_eq!(item["clause_context_id"], context["context_id"]);
+            assert!(!item["exact_quote"]
+                .as_str()
+                .unwrap()
+                .contains("Substantial Completion"));
+        }
+    }
 
     #[test]
     fn whole_clause_three_fragments_serialize_one_context() {
@@ -8575,7 +8687,7 @@ mod tests {
         }
     }
 
-    fn set_furniture_fixture(
+    pub(super) fn set_furniture_fixture(
         normalized: &mut NormalizedDocument,
         chunked: &mut ChunkedDocument,
         source: impl Fn(u32) -> String,
@@ -13666,7 +13778,7 @@ mod tests {
         catalog
     }
 
-    fn contract_documents() -> (NormalizedDocument, ChunkedDocument) {
+    pub(super) fn contract_documents() -> (NormalizedDocument, ChunkedDocument) {
         let pages = CONTRACT_SOURCE_LINES
             .iter()
             .enumerate()
