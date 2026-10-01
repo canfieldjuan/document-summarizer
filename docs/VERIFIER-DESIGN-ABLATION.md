@@ -66,17 +66,17 @@ If a 9B condition passes, it supports sensitivity to that verification design on
 
 ## Implementation summary
 
-Prepared the contract and thirty-claim case list only. No ablation harness implementation or expanded inference yet. No production behavior changed.
+Implemented and froze all seven diagnostic setups at `36c4acd0e3d5962c62ea3ba41327ce12c961158d`, then completed eighty requests and 210 claim judgments on each approved model. The case file and expected answers remain unchanged. The ignored local snapshot records native requests/responses, reasoning tokens, strict parsing and final admission. [Results and evidence receipts](VERIFIER-DESIGN-ABLATION-RESULTS.md) separate reading from narrowing policy. No production behavior changed.
 
 ## Cold diff audit
 
-The two added files define the evidence protocol and public source/claim/label data. They do not change production code or the F3 PR branch. Count, preservation and JSON checks must pass before the freeze commit is published for independent review.
+The evidence branch contains this protocol, the unchanged approved public case file, frozen request setups and measured results. The completion update touches this protocol and the result report only. The native-response audit checks all 420 claim mappings, approved source/claim bytes, wire schemas and frozen requests. Production source and the F3 PR branch do not change.
 
 ## Gap audit
 
-NOT DONE
+DONE
 
-Independent label review, condition implementation/preflight, inference and reporting remain. The preliminary fourteen-claim run is retained separately and cannot satisfy these requirements.
+The approved experiment, preflight, inference and reporting are complete. Scorer controls and the independent raw-artifact audit pass. Independent review of these results is next; production qualification and PR116 merge readiness remain NOT DONE. The preliminary fourteen-claim diagnostic remains separate. No additional inference or production change follows automatically from a candidate pass.
 
 ## Execution clarification after independent review
 
