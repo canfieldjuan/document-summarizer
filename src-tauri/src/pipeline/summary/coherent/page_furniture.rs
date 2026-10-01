@@ -112,6 +112,10 @@ fn running_label(text: &str, page: u32) -> bool {
 }
 
 impl Furniture {
+    pub(super) fn retained_ranges(&self, block_id: &str) -> &[(usize, usize)] {
+        &self.retained[block_id]
+    }
+
     pub(super) fn new(document: &NormalizedDocument) -> Self {
         let mut candidates = Vec::new();
         for page in &document.pages {

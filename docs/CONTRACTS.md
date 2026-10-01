@@ -473,7 +473,7 @@ path. This changes synthesis, verification, citation persistence, reopen
 validation and the desktop projection together; document profiles and automatic
 routing are not part of this contract.
 
-General synthesis 11 excludes recognized page furniture before quote packing
+General synthesis 11 and later exclude recognized page furniture before quote packing
 and page-balanced first/middle/last selection. Exclusions are source byte ranges:
 repeated marginal publisher notices and running labels require cross-page
 corroboration; page-number-only edge lines must match the page. Numbered clause
@@ -488,6 +488,18 @@ relax coverage thresholds or allow an empty substantive document to complete.
 The prompt, schema and parser share the filtered offered catalog. Saved synthesis
 10 reconstructs its prior unfiltered catalog. Analysis, Story, Contract, semantic
 verification and fallback-ledger behavior are unchanged by this policy.
+
+General synthesis 12 reconstructs numbered contract clauses before page balancing.
+Each offered quote retains the complete clause fragment from its original block;
+cross-block/page clauses and numbered child clauses also carry source-derived
+`full_clause` context with their governing opening text and parent lead-ins.
+Lettered lists within a numbered clause remain together. An uppercase governing
+title immediately before the clause stays with it. This uses the same retained
+source ranges as furniture exclusion. Ordinary prose/forms keep their existing
+segmentation. The complete serialized context counts against the existing
+request budget; clauses are not shortened to fit. Version 11 reloads its original
+sentence-packed catalog. Analysis and verifier behavior are unchanged by F2;
+full-clause verification is a separate change.
 
 Synthesis constructs a catalog of exact source segments from the normalized
 chunks, independent of the analyzed claim ledger. Segments retain canonical
@@ -593,7 +605,7 @@ mode, supported prose claims, ledger claims, their exact evidence and the canoni
 rendered text. The desktop shows coherent paragraphs first and keeps any supported
 ledger claims available as supporting detail.
 
-Current artifacts use synthesis 11.0.0, verification 10.0.0, summary 8.0.0 and
+Current artifacts use synthesis 12.0.0, verification 10.0.0, summary 8.0.0 and
 citation 4.0.0. Completed coherent artifacts from before Contract source
 segmentation retain synthesis 8.0.0 with verification 10.0.0 and summary 8.0.0
 compatibility, while an active coherent synthesis-8 checkpoint must regenerate
