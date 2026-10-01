@@ -621,7 +621,7 @@ mode, supported prose claims, ledger claims, their exact evidence and the canoni
 rendered text. The desktop shows coherent paragraphs first and keeps any supported
 ledger claims available as supporting detail.
 
-Current artifacts use synthesis 12.0.0, verification 10.0.0, summary 8.0.0 and
+Current artifacts use synthesis 12.0.0, verification 11.0.0, summary 8.0.0 and
 citation 4.0.0. Completed coherent artifacts from before Contract source
 segmentation retain synthesis 8.0.0 with verification 10.0.0 and summary 8.0.0
 compatibility, while an active coherent synthesis-8 checkpoint must regenerate

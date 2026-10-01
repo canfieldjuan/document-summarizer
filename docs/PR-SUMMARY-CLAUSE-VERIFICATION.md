@@ -56,8 +56,13 @@ a remaining blocker, not a reason to weaken validation or add keyword patches.
    verdicts, not fixture labels, determine semantic success.
 4. Replay saved private A/B artifacts before inference. Confirm historical
    readability, context ownership and request fit; keep private text local.
-5. Run a bounded public-case 9B verification probe with the existing qualified
-   runtime/settings and inference lock. Keep failed attempts in the evidence.
+   Report the existing planner limits at both 8,192 and 32,768 tokens: each
+   currently offered source and the saved generated claim groups. Report
+   overflow/fallback counts, without treating a character estimate as a runtime
+   tokenization measurement or those saved claims as fresh F3 output.
+5. Run a bounded public-case 9B verification probe with the previously used
+   isolated candidate runtime/settings and inference lock. Main has no 9B preset;
+   export the F3 commit and record the two runtime-overlay files separately. Keep failed attempts in the evidence.
    Fresh whole-document A/B accuracy review follows F3 and reports the five
    classes separately from coherent rate and page coverage.
 6. Run focused and adjacent summary tests, formatting, strict Clippy and a cold
@@ -65,13 +70,89 @@ a remaining blocker, not a reason to weaken validation or add keyword patches.
 
 ## Implementation summary
 
-Pending.
+Contract commit `19bfd34` precedes implementation `af23868`. One General coherent
+verification builder derives governing context from F2's retained source ranges
+and clause owner. Both preflight and execution call it. The existing request-ID
+serializer uses F2's context interning helper after batching. Context identical
+to the exact quote needs no table entry; that rule now belongs to the shared
+clause owner. Non-context requests retain their previous serialized bytes.
+Verification 11 records the new policy; historical verification 10 remains valid.
+No verdict schema, storage, model/runtime setting or rewrite path changed.
+
+The admission regression failed before the fix because its captured request
+lacked the governing clause, and passed afterward. Four focused tests pass:
+execution/admission equality and withholding for all five fixture verdict pairs;
+full cross-page context with the adjacent clause excluded; request-local context
+deduplication/isolation; and exact budget and verdict-ID boundaries. These
+fixture verdicts prove application enforcement, not model accuracy.
+
+Adjacent summary suite: 278 passed, 15 opt-in ignored. Saved A/B historical
+citation artifacts validate. Their 26/42 currently offered sources map exactly
+to drafting's context ownership; 20/28 have additional context. Replayed
+per-source verification requests peak at 8,437/6,284 characters with no oversized
+source. These are per-source admission measurements, not a claim that arbitrary
+multi-source paragraphs or fresh summaries fit. Formatting, strict all-target/
+all-feature Clippy and diff checks pass. The public live fidelity probe failed; details below.
+
+## Live setup provenance
+
+The initial probe stopped before inference: main selected an 8,192-token profile,
+not the required 32,768-token 9B profile. Registering a GGUF alone does not select
+that model. No server started, no model verdict was produced, and this failed
+setup remains in the local evidence.
+
+The corrected probe exports implementation `af23868` with the harness's existing
+`snapshot_source` helper. Only `model_settings.rs` and `llama_cpp.rs` are overlaid
+from the checksum-verified prior `reliability-20260930/matrix` snapshot. These
+supply its existing 9B Q4_K_M, 32k, closed-think-block candidate configuration;
+they are not changes in this PR or evidence of an installed production preset.
+The production verifier and its requests come from F3. The isolated build and
+four focused regressions pass; the candidate framing regression also passes.
+Model/server hashes must match prior qualification. The driver holds the shared
+inference lock, checks an idle GPU, records owned server arguments, preserves all
+attempts, and compares source hashes before and after execution.
+
+The F3 live probe completed all ten public cases: 7/10 expectations met. Both raw
+verdicts and post-guard results accepted the faulty payment-stage, invoice-period,
+and working-day/cure claims. It rejected the faulty coverage-condition and
+equipment-scope claims and accepted all five faithful controls. Every captured
+request contains the governing clause and its lost condition; there was no
+truncation. Actual server context was 32,768, GPU ownership stayed exclusive,
+and frozen source hashes remained unchanged. The failed assertion is retained.
+A bounded evidence-only inline-context comparison is pending to isolate whether
+request-table indirection contributes. No production change follows from this
+hypothesis alone.
 
 ## Cold diff audit
 
-Pending.
+- `summary.rs`: shared prompt builder at preflight and execution, context-aware
+  verifier instruction, version selection/replay compatibility, and optional
+  internal context field. Existing strict response parsing and guards remain.
+- `summary/coherent/verification.rs`: context from the cited block/quote through
+  the existing source owner; only current General coherent input is extended.
+- `summary/identifiers.rs`: existing local claim/evidence vocabularies preserved;
+  distinct context table emitted per batch. Context IDs cannot restore as verdicts.
+- `summary/coherent.rs` and `whole_clauses.rs`: expose the shared context interner
+  and own the existing no-redundant-context rule in one place. Drafting semantics
+  are preserved; a production-admission regression and test fixture access added.
+- `summary/coherent/verification/tests.rs`: synthetic execution and boundary
+  tests, owner-only offline replay, and opt-in live verifier probe using the
+  isolated 9B candidate runtime.
+  Every probe attempt is retained; semantic expectations are separate from output.
+- `summary/legacy_generation.rs`: test-only constructor initializes no context.
+- `docs/CONTRACTS.md` and this file: versioned input contract and honest evidence.
+
+boundary-probe: original verdict IDs accepted and context IDs rejected; correct
+and rejected fixture verdicts preserved; repeated context shared and different
+conditions separate; no-context and historical requests isolated; complete input
+passes at its character limit and fails one character below it.
+
+effect-trace: governing clause reaches verification | shared source owner and
+request builder | fail-first captured-request regression and identical admission/
+execution requests pass; the live probe still passes three incorrect claims.
 
 ## Gap audit
 
-NOT DONE: implementation, deterministic proof, saved replay, public fidelity
-probe and current-head CI/review remain.
+NOT DONE: the public fidelity gate fails for three faulty claims. Publication
+and current-head CI/review remain. No merge is justified by context transport alone.
+Fresh full-document A/B accuracy review follows F3; #111 remains held.
