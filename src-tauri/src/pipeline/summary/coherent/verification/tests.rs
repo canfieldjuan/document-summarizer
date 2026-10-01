@@ -335,48 +335,74 @@ fn clause_verification_saved_source_replay() {
             Some(&analyzed),
         )
         .unwrap();
-        let mut requests = 0;
-        let mut with_context = 0;
-        let mut max_characters = 0;
-        let mut overflow = 0;
-        // Replay each currently offered source through the shared verifier builder.
-        // Exact source text is a transport control, not new generated prose.
-        for candidate in &catalog.candidates {
-            let mut source = historical.clone();
-            source.synthesis_version = VERSION.into();
-            source.presentation_mode = SummaryPresentationMode::Coherent;
-            source.synthesis_evidence = vec![candidate.evidence.clone()];
-            source.summary_claims = vec![CitedClaim {
-                claim_id: "replay".into(),
-                text: candidate.evidence.exact_quote.clone(),
-                evidence_ids: vec![candidate.evidence.evidence_id.clone()],
-            }];
+        for context_tokens in [8_192, 32_768] {
+            let request_limit =
+                verification_request_character_limit(context_tokens, VERIFICATION_OUTPUT_TOKENS)
+                    .unwrap();
+            let mut requests = 0;
+            let mut with_context = 0;
+            let mut max_characters = 0;
+            let mut overflow = 0;
+            // Replay each currently offered source through the shared verifier builder.
+            // Exact source text is a transport control, not new generated prose.
+            for candidate in &catalog.candidates {
+                let mut source = historical.clone();
+                source.synthesis_version = VERSION.into();
+                source.presentation_mode = SummaryPresentationMode::Coherent;
+                source.synthesis_evidence = vec![candidate.evidence.clone()];
+                source.summary_claims = vec![CitedClaim {
+                    claim_id: "replay".into(),
+                    text: candidate.evidence.exact_quote.clone(),
+                    evidence_ids: vec![candidate.evidence.evidence_id.clone()],
+                }];
+                let prompt =
+                    summary_verification_prompt(SummaryProfile::General, &source, &normalized)
+                        .unwrap();
+                assert!(
+                    prompt.claims[0].evidence[0].full_clause == candidate.full_clause,
+                    "context ownership differs; private text omitted"
+                );
+                with_context += usize::from(candidate.full_clause.is_some());
+                match plan_verification_batches(
+                    &prompt,
+                    &source.summary_claims,
+                    MAX_SUMMARY_CLAIMS,
+                    request_limit,
+                ) {
+                    Ok(batches) => {
+                        for batch in batches {
+                            requests += 1;
+                            max_characters = max_characters.max(
+                                batch.system_prompt.chars().count()
+                                    + batch.user_prompt.chars().count(),
+                            );
+                        }
+                    }
+                    Err(error) if error.code == "VERIFICATION_INPUT_TOO_LARGE" => overflow += 1,
+                    Err(error) => panic!("unexpected replay failure: {}", error.code),
+                }
+            }
+            let mut saved = historical.clone();
+            saved.synthesis_version = VERSION.into();
+            saved.presentation_mode = SummaryPresentationMode::Coherent;
             let prompt =
-                summary_verification_prompt(SummaryProfile::General, &source, &normalized).unwrap();
-            assert!(
-                prompt.claims[0].evidence[0].full_clause == candidate.full_clause,
-                "context ownership differs; private text omitted"
-            );
-            with_context += usize::from(candidate.full_clause.is_some());
-            match verification_batches_for_runtime(
-                &FixtureRuntime::default(),
+                summary_verification_prompt(SummaryProfile::General, &saved, &normalized).unwrap();
+            let saved_fit = match plan_verification_batches(
                 &prompt,
-                &source.summary_claims,
+                &saved.summary_claims,
                 MAX_SUMMARY_CLAIMS,
+                request_limit,
             ) {
                 Ok(batches) => {
-                    for batch in batches {
-                        requests += 1;
-                        max_characters = max_characters.max(
-                            batch.system_prompt.chars().count() + batch.user_prompt.chars().count(),
-                        );
-                    }
+                    json!({"fallback":false,"batches":batches.len(),"max_request_characters":batches.iter().map(|b| b.system_prompt.chars().count()+b.user_prompt.chars().count()).max()})
                 }
-                Err(error) if error.code == "VERIFICATION_INPUT_TOO_LARGE" => overflow += 1,
-                Err(error) => panic!("unexpected replay failure: {}", error.code),
-            }
+                Err(error) if error.code == "VERIFICATION_INPUT_TOO_LARGE" => {
+                    json!({"fallback":true,"reason":error.code})
+                }
+                Err(error) => panic!("unexpected saved-claim fit failure: {}", error.code),
+            };
+            receipts.push(json!({"case":index,"context_tokens":context_tokens,"planner_character_limit":request_limit,"historical_artifacts_valid":true,"sources":catalog.candidates.len(),"with_context":with_context,"requests":requests,"max_request_characters":max_characters,"oversized_sources":overflow,"saved_claim_fit":saved_fit}));
         }
-        receipts.push(json!({"case":index,"historical_artifacts_valid":true,"sources":catalog.candidates.len(),"with_context":with_context,"requests":requests,"max_request_characters":max_characters,"oversized_sources":overflow}));
     }
     std::fs::write(
         std::env::var("DOC_SUM_F3_REPLAY_OUTPUT").unwrap(),

@@ -94,6 +94,24 @@ source. These are per-source admission measurements, not a claim that arbitrary
 multi-source paragraphs or fresh summaries fit. Formatting, strict all-target/
 all-feature Clippy and diff checks pass. The public live fidelity probe failed; details below.
 
+## Offline fit at both supported context sizes
+
+The extended replay uses the production character-budget planner, without a
+model call. It projects the saved prose claims through the new source-context
+builder; these are not freshly generated F3 summaries.
+
+| Saved case | Context | Planner character cap | Saved-claim batches | Largest request | Oversized offered sources | Planner fallback |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| A | 8,192 | 10,752 | 2 | 9,715 | 0/26 | No |
+| A | 32,768 | 16,000 | 2 | 14,150 | 0/26 | No |
+| B | 8,192 | 10,752 | 5 | 8,305 | 0/42 | No |
+| B | 32,768 | 16,000 | 3 | 13,152 | 0/42 | No |
+
+Both historical artifacts still validate. The 8k and 32k planner checks pass;
+actual runtime tokenization can still reject a request, and these results do
+not imply every possible future paragraph fits. The new measurement changes
+only the opt-in replay test. Strict Clippy and formatting pass after that change.
+
 ## Live setup provenance
 
 The initial probe stopped before inference: main selected an 8,192-token profile,
@@ -119,9 +137,14 @@ equipment-scope claims and accepted all five faithful controls. Every captured
 request contains the governing clause and its lost condition; there was no
 truncation. Actual server context was 32,768, GPU ownership stayed exclusive,
 and frozen source hashes remained unchanged. The failed assertion is retained.
-A bounded evidence-only inline-context comparison is pending to isolate whether
-request-table indirection contributes. No production change follows from this
-hypothesis alone.
+A second bounded, evidence-only run placed the full clause directly in each
+`exact_quote` and removed context-table lookup. The system prompt, seed, output
+schema/limit, model and runtime settings stayed the same. All ten raw and final
+verdicts were identical: 2/5 faulty claims rejected and 0/5 faithful paraphrases
+wrongly withheld. Removing lookup therefore did not correct these failures in
+this probe. The diagnostic modification is not in the production diff. These
+small synthetic probes establish a remaining verifier-accuracy failure; they
+do not establish general model accuracy or a fresh whole-document result.
 
 ## Cold diff audit
 
@@ -153,6 +176,8 @@ execution requests pass; the live probe still passes three incorrect claims.
 
 ## Gap audit
 
-NOT DONE: the public fidelity gate fails for three faulty claims. Publication
-and current-head CI/review remain. No merge is justified by context transport alone.
+NOT DONE for merge: the public fidelity gate fails for three faulty claims.
+Current-head CI/review remain. Context transport and deterministic enforcement
+are proven, but do not resolve this model-judgment failure. No merge is justified
+by green deterministic tests alone.
 Fresh full-document A/B accuracy review follows F3; #111 remains held.
