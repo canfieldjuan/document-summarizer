@@ -1,9 +1,10 @@
 # Contract view: key terms first, then the full source-clause list
 
 Status: policy revision 3 accepted in comment 5945128686 and confirmed by the
-operator in this session. The `edb29fd` freeze is superseded by the required
-combined-heading narrowing below. Refreeze after implementation; independent
-review and qualification remain open. No unseen source has been opened.
+operator in this session. The `edb29fd` freeze is superseded by the implemented
+combined-heading narrowing, frozen at `f2f26ae`. Independent confirmation of
+that replacement freeze and qualification remain open. No unseen source has
+been opened.
 Operator direction: [PR111 comment 5938758874](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5938758874).
 This document supersedes the earlier combined source-repair/extraction plan.
 Acceptance: [PR111 comment 5943290721](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5943290721).
@@ -496,7 +497,54 @@ Do not substitute prior branch test results or a helper-only replay for the new
 production path. Independent review checks the A/B selections and both negative
 regressions before the implementation can be called complete.
 
-## Policy-3 implementation and regression receipt
+## Current policy-3.0.1 narrowing and regression receipt
+
+Design-only commit: `c31f54d5d002509a58d2f5763f14167823083ee5`.
+Implementation/freeze: `f2f26ae8a0d3ab910408f4f9bf91006c7d68467a`.
+The rule/fixture fingerprint is the SHA256 of the sorted, compact JSON map of
+file names to SHA256 values in the local composition-freeze manifest:
+`76ea37062537f7736feaaf326898423208677f10f87dde1c8e37eb6781aa0862`.
+The frozen files include the shared clause source, extraction implementation
+and tests, provider fixtures, canonical contract and this design document at
+the frozen commit. This later receipt edit does not change the frozen rules.
+
+Five public tests failed first for the exact overmatching class, then passed.
+They cover bonds, service frequency, mixed-topic lists, the explained termination
+miss, positive category sets, an earlier match suppressed before a multi-word
+final alias, empty final conjuncts and unchanged full source text. Adjacent
+Contract tests: 40 passed, 0 failed, 7 ignored. Rust fmt and strict all-target,
+all-feature Clippy passed. The alias table, shared source-boundary parser and
+frontend are unchanged from `25f081f`. No frontend test/build was repeated for
+this matcher-only revision; required CI remains independent.
+
+Frozen A/B regression on identical saved inputs passed source reconstruction
+and delivery coverage: A retains 64 clauses and 69/69 render units; B retains
+191 clauses and delivers 195/195 units. All inventory text and headings are
+unchanged. A's selections are unchanged. B's payment selections decrease from
+2 to 1, removing the wrong mixed-topic fees label; termination decreases from
+1 to 0, the required explained miss. Every other category is unchanged.
+No new category selection is introduced; no source clause is lost. Model calls
+remain zero. The local comparison script's initial field-name error was fixed
+to read the existing serialized `clauseId`; production code was not changed.
+
+Cold diff audit: `contract_extraction.rs::{VERSION,heading_matches,tests}` adds
+only the approved eligibility gate and production-extraction fixtures;
+`CONTRACTS.md` records the matching rule and new deterministic policy identity.
+The design-only commit precedes both. No aliases, clause boundaries, renderer,
+API/schema/storage shapes, runtime settings or dependencies change.
+
+boundary-probe: shared-head and mixed-list negatives fail before/pass after;
+final-alias and single-word-final controls still select exact expected categories,
+dual-category terms appear once each, and excluded text stays in the inventory.
+effect-trace: remove wrong topic labels | eligibility of earlier conjuncts in
+the existing matcher | public fail-first tests and frozen A/B selection comparison.
+
+NOT DONE for merge. Stop before C-G: replacement-freeze confirmation, unseen
+qualification, independent review, exact-head CI and the fidelity prerequisite
+remain. No private manifest or unseen source was opened. A/B are regressions
+only; neither passing reconstruction nor this correction qualifies the rules.
+
+## Historical policy-3.0.0 implementation and regression receipt
 
 Contract-only revision: `642345937154293808159110ec10a027fe1e8b82`.
 Implementation and freeze: `edb29fdbdd41ad564158f6fb8fe7cc9ab49eda6b`.
@@ -684,7 +732,7 @@ identical text cannot reuse another document's IDs; this is not an endurance tes
 
 ## Gap audit
 
-NOT DONE for merge. Policy 3 implementation and local regressions are complete.
+NOT DONE for merge. Policy 3.0.1 implementation and local regressions are complete.
 The unseen-contract gate, required exact-head CI, independent review of the
 selections/negative regressions and summary-fidelity review prerequisite remain.
 Stop before the held-out run; the screened private manifest must be supplied
