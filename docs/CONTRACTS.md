@@ -7,38 +7,45 @@ SQLite, or mutate pipeline state.
 
 ## Complete clause sources and Contract extraction
 
-Current analysis 15 uses the shared source owner in `summary/clauses.rs`.
-Repeated publisher notices are excluded before quote selection whether PDF text
-order places them before or after the page body. The detector requires a repeated
-copyright/rights notice plus publisher reproduction or trademark wording; it is
-not a general deletion of repeated prose. Numbered clauses keep their lead-in,
-conditions and cross-page continuation. Unnumbered prose/forms retain version
-14 quotation behavior and gain complete enclosing context. Ambiguous repeated
-quotes and model contexts above 8,192 characters are omitted with the existing
-source-omission warning rather than assigned an invented context.
+The accepted Contract extraction policy is frozen in
+[PR-CLAUSE-EXTRACTION.md](PR-CLAUSE-EXTRACTION.md), including its heading grammar,
+section extents, fixed category table, opening-parties fallback and known limits.
+`summary/coherent/page_furniture.rs` remains the furniture owner;
+`summary/coherent/whole_clauses.rs` owns the versioned Contract source view.
+General keeps main's analysis 14 and synthesis 12 source and verification behavior.
+No independent Contract parser or furniture detector is retained.
 
-Synthesis 11 offers original quote identities plus `full_clause`. Verification
-and its admission preflight rebuild that context from the same normalized source.
-An unoffered source ID remains invalid. Historical analysis 14 and synthesis 10
-artifacts replay their former catalogs and hashes. This source fix is not a claim
-that model entailment verdicts or material coverage are now accurate.
+Contract profile (also Automatic resolving to Contract) uses
+`contract-extraction-2.0.0` for deterministic analysis, synthesis and verification.
+It stores ordered source clauses and typed selections for parties, payment,
+term/renewal, termination, insurance and liability/indemnity. Each selection
+contains a rule, root source-clause ID and all clause IDs in the selected section.
+Both term/renewal and termination may reference the same section; this adds no
+inventory records. Missing matches render `not identified`, not an inferred term.
 
-Contract profile now extracts ordered typed clause records: `clauseId`, optional
-printed `heading`, exact source `text`, and `evidenceIds`. Analysis, synthesis and
-verification use `contract-extraction-1.0.0`; final summary 9.0.0 and citation 5.0.0
-include `contract_extraction` in their integrity binding. Verification means exact
-source reconstruction, not model-generated legal interpretation. Normalized text
-and page/block citations remain authoritative. No new model calls are made by
-these stages. Automatic uses this route when its existing profile decision is
-Contract. Model selection and desktop runtime setup are unchanged.
+Desktop and Connect show key terms first, then every source clause. Source text,
+IDs and page citations are reconstructed and validated before persistence and
+on reload; recomputing hashes cannot authorize altered wording or section extent.
+Summary 9.0.0 and citation 5.0.0 bind the complete typed extraction and rendering.
+Released historical prose artifacts retain their original validation and hashes;
+incompatible extraction checkpoints require explicit retry, never reinterpretation.
+No model generation, ranking or semantic verification is used by this route.
 
-The desktop renders clause records and citations with text-safe DOM APIs. Connect
-keeps its existing closed text envelope, carrying the same ordered source clauses
-and page labels. Machine-readable records are retained in local artifacts; a new
-external structured capability is outside this change. Existing transaction,
-retry, cancellation, delivery-size and source-integrity boundaries remain active.
-OCR provenance/warnings are retained; copying OCR text does not independently
-validate its transcription. Historical Contract prose stays readable.
+Connect retains its closed text envelope and existing byte limits. A selected
+key-term section and all its citations form one atomic delivery unit; a prefix
+cannot deliver a heading stub or omit children. Full-list clauses are atomic
+individually. Labels and repeated references do not inflate source coverage.
+The existing truncation warning identifies omitted output; invalid extraction or
+an unacceptable prefix is a failure, not `not identified`. The full persisted
+inventory remains available to desktop. Existing run transactions, cancellation,
+state-version checks and retry ownership remain in force.
+
+The selector is positional, not a legal interpretation: numbered TOCs and
+trailing unnumbered material can be included under the wrong category. A/B replay
+must report these consequences locally. OCR wording retains its provenance and
+warnings; exact copying does not establish transcription accuracy. Model setup,
+General summaries, external capability/schema and storage migrations are outside
+this change.
 
 ## `PipelineRun`
 Represents an instance of processing a document.
