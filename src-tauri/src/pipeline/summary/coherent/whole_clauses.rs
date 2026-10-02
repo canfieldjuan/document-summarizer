@@ -479,7 +479,7 @@ pub(in crate::pipeline::summary) fn contract_sources(
         if let Some((article, title)) = article_title(text).or_else(|| {
             let recognized = bare_roman_title(
                 text,
-                lines.get(i + 1).map(&line_text).unwrap_or(""),
+                lines.get(i + 1).map(line_text).unwrap_or(""),
                 last_roman,
             );
             if let Some((number, _)) = recognized {
