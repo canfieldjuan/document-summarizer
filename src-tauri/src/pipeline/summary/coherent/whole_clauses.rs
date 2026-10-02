@@ -703,10 +703,7 @@ pub(in crate::pipeline::summary) fn contract_sources(
                 article: None,
                 opening: false,
                 heading_only: !has_body && leading.is_none(),
-                boundary_uncertain: uncertain
-                    || read
-                        .get(i.wrapping_sub(1))
-                        .is_some_and(|line| line.kind == LineKind::HeadingLike),
+                boundary_uncertain: uncertain,
             };
             if let Some((fragment, title)) = leading {
                 clause.headings.push(title);

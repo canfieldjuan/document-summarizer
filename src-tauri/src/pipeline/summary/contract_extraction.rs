@@ -900,6 +900,20 @@ mod tests {
     }
 
     #[test]
+    fn recognized_section_starts_after_unknown_boundary() {
+        let text = "1. Other. Ordinary obligations.\nIII.\tOTHER\n3.1 Payment. Pay after acceptance.\n4. Other. Other obligations.";
+        let extraction = output("incoming-unknown-boundary", &[text]).0;
+        assert!(
+            !selected(&extraction, ContractTermCategory::Payment).is_empty(),
+            "unknown line outside selected extent contaminated its recognized start"
+        );
+        let (normalized, _) = fixture("incoming-unknown-boundary", &[text]);
+        let sources = whole_clauses::contract_sources(&normalized);
+        assert!(sources[0].boundary_uncertain);
+        assert!(!sources[1].boundary_uncertain);
+    }
+
+    #[test]
     fn classifier_bounds_and_unknown_markers() {
         for boundary in [
             "III OTHER",
