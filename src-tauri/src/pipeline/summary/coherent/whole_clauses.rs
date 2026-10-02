@@ -356,11 +356,7 @@ fn article_title(text: &str) -> Option<(u32, &str)> {
     ))
 }
 
-fn bare_roman_title<'a>(
-    text: &'a str,
-    next: Option<&[String]>,
-    last: Option<u32>,
-) -> Option<(u32, &'a str)> {
+fn bare_roman_title(text: &str) -> Option<(u32, &str)> {
     let (ordinal, title) = text.split_once(". ")?;
     let title = title.trim();
     if !ordinal
@@ -376,15 +372,6 @@ fn bare_roman_title<'a>(
     }
     let article = format!("ARTICLE {ordinal} - {title}");
     let (number, _) = article_title(&article)?;
-    if last.is_some_and(|previous| previous + 1 == number) {
-        return Some((
-            number,
-            title.strip_suffix(['.', ':']).unwrap_or(title).trim_end(),
-        ));
-    }
-    if next?.first()?.parse::<u32>().ok()? != number {
-        return None;
-    }
     Some((
         number,
         title.strip_suffix(['.', ':']).unwrap_or(title).trim_end(),
@@ -459,7 +446,7 @@ impl<'a> ReadLine<'a> {
             numbered,
             roman_decimal: !text.trim_start().starts_with('§'),
             article,
-            roman: None,
+            roman: bare_roman_title(text),
             title,
             ends_unit,
             kind,
@@ -533,14 +520,16 @@ pub(in crate::pipeline::summary) fn contract_sources(
     let mut last_roman = None;
     for index in 0..read.len() {
         if read[index].article.is_none() {
-            let roman = bare_roman_title(
-                line_text(&lines[index]),
-                read.get(index + 1)
-                    .filter(|line| line.roman_decimal)
-                    .and_then(|line| line.decimal.as_ref())
-                    .map(|(parts, _)| parts.as_slice()),
-                last_roman,
-            );
+            let roman = read[index].roman.filter(|(number, _)| {
+                last_roman.is_some_and(|previous| *number == previous + 1)
+                    || read.get(index + 1).is_some_and(|next| {
+                        next.roman_decimal
+                            && next.decimal.as_ref().is_some_and(|(parts, _)| {
+                                parts.first().and_then(|part| part.parse::<u32>().ok())
+                                    == Some(*number)
+                            })
+                    })
+            });
             if let Some((number, _)) = roman {
                 last_roman = Some(number);
             }
