@@ -14,6 +14,14 @@ A capitalized continuation followed by a numbered heading becomes that heading's
 leading title. The preceding section is truncated without an uncertainty signal.
 S section 15 and its public two-page fixture reproduce the omitted exception.
 
+Code-grounded correction to the initial trace: the saved S normalized block
+contains both the unfinished all-caps line and its exception. Its preceding
+line passes `leading_title`, and the unconditional `|| title` in `ends_unit`
+marks that unfinished sentence complete. Block/page separation is another
+reproduced trigger, not the sole trigger in S. Remove the candidate-title
+completion shortcut; only an actually admitted structural title may establish
+completion without punctuation. Cover the same-block uppercase predecessor.
+
 Required surface: `whole_clauses.rs` retained-line reader and source assembly;
 public Contract fixtures in `contract_extraction.rs`; policy metadata and these
 contract docs. A unit start depends on the preceding retained line's cached
@@ -29,7 +37,7 @@ text is neither rewritten nor removed; ranges/provenance remain exact. The
 their IDs; changed text, ranges or ordinals obtain their derived IDs. Policy
 analysis/synthesis/verification becomes 3.1.2.
 
-Cleanup: remove both block-start bypasses (classification and leading-title
+Cleanup: remove the candidate-title completion shortcut and both block-start bypasses (classification and leading-title
 assembly). Reuse cached line metadata for the truncation signal; add no number
 parser, selected-text heuristic, category-specific exception or boundary rescan.
 Earlier paragraph/title-shape and Roman guards remain unless this change proves
