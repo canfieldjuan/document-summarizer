@@ -59,7 +59,8 @@ Special-case inventory across prior revisions, with disposition:
   numeric ordinal limits and terminal punctuation: retained inventory grammar;
   unsupported/split forms mark uncertainty rather than silently certifying terms.
 - Bare Roman uppercase/canonical/matching-decimal/consecutive-ordinal routes:
-  retain existing inventory shape, remove the duplicate decimal parser and
+  retain existing inventory shape (including the prior lookahead exclusion of
+  section-symbol-prefixed markers), remove the duplicate decimal parser and
   literal-whitespace confidence assumption; these roots/crossings are uncertain
   for key terms pending a later inventory revision.
 - Opening-between fallback, first decimal 1/ARTICLE I/Roman I: retain eligibility,
