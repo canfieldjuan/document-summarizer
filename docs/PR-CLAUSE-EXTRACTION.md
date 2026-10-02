@@ -1,5 +1,11 @@
 # Contract view: key terms first, then the full source-clause list
 
+Current status (2026-10-02): C-G ran under policy 3.0.1 and failed the
+observed zero-wrong-label gate. Its replacement private evidence packet awaits
+independent review. The bare-Roman revision below is a proposal only; no
+production rule changed. The next status paragraph is the earlier freeze
+receipt, before C-G access.
+
 Status: policy revision 3 accepted in comment 5945128686 and confirmed by the
 operator in this session. The `edb29fd` freeze is superseded by the implemented
 combined-heading narrowing, frozen at `f2f26ae`. Independent confirmation of
@@ -12,6 +18,44 @@ The two required amendments were committed separately in `281301f`, before
 implementation. PR111 remains a draft; acceptance authorized implementation,
 not completion of the summary-fidelity review prerequisite. The acceptance
 thread itself is cleared by review reply 4161807793.
+
+## Proposed bare-Roman boundary revision (pending review)
+
+The C-G run exposed a source-boundary failure under policy 3.0.1: a bare Roman
+section heading can be appended to the preceding numbered clause. Exact source
+reconstruction then preserves that wrong extent in a selected key term. This
+proposal changes the shared Contract source view, not the category aliases or
+rendering. It requires review before implementation and a new policy identity.
+
+Recognize a complete retained line of the form `<Roman>. <TITLE>` as a
+top-level section boundary only when all of these hold: the Roman ordinal is
+canonical uppercase I through MMMCMXCIX; the title has at least one alphabetic
+character and every alphabetic character is uppercase; and the next nonblank
+retained line starts with a decimal clause marker whose first component equals
+the Roman ordinal. The ordinal and title are used only for recognition. Keep
+the exact source line, its page and its original bytes in the new section.
+The new section resets numeric ancestry, contains its following numbered
+descendants, and ends before the next recognized top-level section. An
+unmatched Roman title still closes the preceding section. A recognized Roman I
+also satisfies the existing opening-parties fallback's first-section rule.
+
+Do not recognize noncanonical numerals, title-case or inline-body forms,
+Roman-looking initials or sentences, or a heading whose following decimal
+section number disagrees. Retain rejected lines in the full source inventory
+under the existing continuation rule. General summary segmentation, furniture
+filtering, alias matching, typed output, rendering, storage and Connect wire
+shape stay unchanged. If accepted, bump the Contract extraction policy identity
+from `contract-extraction-3.0.1` to `contract-extraction-3.0.2` for the
+changed boundary grammar; old checkpoints retain their explicit retry path.
+
+Verification: declare a fail-first public production-extraction test showing a
+payment clause ending before `III. TERM AND TERMINATION`, a termination clause
+ending before `IV. GENERAL PROVISIONS`, and all intervening source lines in the
+full list. Probe matching and mismatching ordinals, canonical and invalid Roman
+spellings, uppercase and sentence-case titles, page/block boundaries, and an
+opening Roman I. Run the focused Contract tests, formatter and strict Clippy.
+A/B/C-G are regression evidence only; qualification of the revised rule needs
+a newly screened unseen set and independent review before merge.
 
 ## Accepted boundary revision (policy 3)
 
