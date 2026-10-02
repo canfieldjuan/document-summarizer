@@ -874,9 +874,36 @@ mod tests {
     }
 
     #[test]
+    fn classifier_body_context_and_amount_fields() {
+        let cases = [
+            ("amount-field", "1. Termination\n1.1 Give written notice.\nPayment Terms Net 30\n2. Other. Other obligations.", ContractTermCategory::Termination),
+            ("footer-page-number", "1. Termination\n1.1 Give written notice.\n2026 Public Service Agreement 6\n2. Other. Other obligations.", ContractTermCategory::Termination),
+            ("footer-identifier", "1. Termination\n1.1 Give written notice.\nSubcontract 022500\n2. Other. Other obligations.", ContractTermCategory::Termination),
+            ("wrapped-exhibit-reference", "1. Payment\n1.1 Pay at the rates in\nExhibit A. Submit an invoice for services.\n2. Other. Other obligations.", ContractTermCategory::Payment),
+            ("wrapped-article-reference", "1. Insurance\n1.1 Coverage is pursuant to\nArticle 11. Certificates protect the client.\n2. Other. Other obligations.", ContractTermCategory::Insurance),
+            ("wrapped-section-reference", "1. Termination\n1.1 Apply the terms of\nSection 6. The parties shall give written notice.\n2. Other. Other obligations.", ContractTermCategory::Termination),
+            ("letter-list-body", "1. Payment\n1.1 Pay the invoice.\na. Contractor shall pay for all of the services upon receipt of an invoice.\nb. The parties shall reconcile any disputed items before making final payment.\n2. Other. Other obligations.", ContractTermCategory::Payment),
+            ("roman-list-body", "1. Payment\n1.1 Pay the invoice.\ni. all required documentation is submitted;\nii. all work has been completed and delivered to the client;\n2. Other. Other obligations.", ContractTermCategory::Payment),
+        ];
+        let failures = cases
+            .into_iter()
+            .filter_map(|(name, text, category)| {
+                selected(&output(name, &[text]).0, category)
+                    .is_empty()
+                    .then_some(name)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            failures.is_empty(),
+            "body context falsely marked uncertain: {failures:?}"
+        );
+    }
+
+    #[test]
     fn classifier_bounds_and_unknown_markers() {
         for boundary in [
             "III OTHER",
+            "III.",
             "iii. Other",
             "iii\tOther",
             "A. Other",
@@ -904,6 +931,7 @@ mod tests {
             "OTHER TERMS APPLY.",
             "Name/Title:",
             "Representative:",
+            "Civil liability continues.",
         ] {
             let text = format!("1. Payment\n1.1 Pay after acceptance.\n{continuation}\nOrdinary prose.\n3. Other. Other obligations.");
             assert!(

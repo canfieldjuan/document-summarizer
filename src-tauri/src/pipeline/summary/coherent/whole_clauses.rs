@@ -356,7 +356,7 @@ fn article_title(text: &str) -> Option<(u32, &str)> {
     ))
 }
 
-fn bare_roman_title(text: &str) -> Option<(u32, &str)> {
+fn bare_roman_title(text: &str, number: Option<u32>) -> Option<(u32, &str)> {
     let (ordinal, title) = text.split_once(". ")?;
     let title = title.trim();
     if !ordinal
@@ -370,8 +370,7 @@ fn bare_roman_title(text: &str) -> Option<(u32, &str)> {
     {
         return None;
     }
-    let article = format!("ARTICLE {ordinal} - {title}");
-    let (number, _) = article_title(&article)?;
+    let number = number?;
     Some((
         number,
         title.strip_suffix(['.', ':']).unwrap_or(title).trim_end(),
@@ -413,30 +412,38 @@ impl<'a> ReadLine<'a> {
         let upper = recognition.to_ascii_uppercase();
         let toc = upper == "TABLE OF CONTENTS";
         let (marker, remainder) = recognition.split_once(' ').unwrap_or((&recognition, ""));
+        let words = recognition.split_whitespace().collect::<Vec<_>>();
+        let plausible_heading = remainder.is_empty()
+            || leading_title(remainder)
+            || (!recognition.ends_with(['.', ';', '?', '!'])
+                && (words.len().saturating_sub(1) <= 8
+                    || remainder
+                        .chars()
+                        .filter(|c| c.is_alphabetic())
+                        .all(char::is_uppercase)));
         let ordinal = marker.trim_end_matches(['.', ')']);
-        let roman = !ordinal.is_empty()
-            && ordinal.chars().all(|c| {
-                matches!(
-                    c.to_ascii_uppercase(),
-                    'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'
-                )
-            })
-            && !remainder.is_empty();
+        let roman_number =
+            article_title(&format!("ARTICLE {} - TITLE", ordinal.to_ascii_uppercase()))
+                .map(|(number, _)| number);
+        let roman = roman_number.is_some()
+            && (marker.ends_with(['.', ')']) || !remainder.is_empty())
+            && plausible_heading;
         let letter = marker.ends_with(['.', ')'])
             && ordinal.len() == 1
             && ordinal.chars().all(char::is_alphabetic)
-            && !remainder.is_empty();
+            && !remainder.is_empty()
+            && plausible_heading;
         let structural_marker = matches!(
             marker.to_ascii_uppercase().as_str(),
             "ARTICLE" | "SECTION" | "EXHIBIT" | "APPENDIX" | "SCHEDULE" | "ATTACHMENT" | "ANNEX"
-        );
-        let words = recognition.split_whitespace().collect::<Vec<_>>();
+        ) && plausible_heading;
         let toc_words = decimal.as_ref().map_or_else(
             || words.clone(),
             |(_, rest)| rest.split_whitespace().collect::<Vec<_>>(),
         );
         let toc_entry = recognition.contains("...")
-            || (toc_words.len() > 1
+            || (numbered
+                && toc_words.len() > 1
                 && toc_words
                     .last()
                     .is_some_and(|word| word.chars().all(|c| c.is_ascii_digit()))
@@ -476,7 +483,7 @@ impl<'a> ReadLine<'a> {
             numbered,
             roman_decimal: !text.trim_start().starts_with('§'),
             article,
-            roman: bare_roman_title(text),
+            roman: bare_roman_title(text, roman_number),
             title,
             generic_heading_like,
             opening_cover,
@@ -587,6 +594,12 @@ pub(in crate::pipeline::summary) fn contract_sources(
             in_opening = false;
         } else if read[index].numbered {
             in_opening = false;
+        } else if read[index].kind == LineKind::HeadingLike
+            && !read[index].toc
+            && !read[index].toc_entry
+            && !starts_unit
+        {
+            read[index].kind = LineKind::Text;
         } else if in_opening && read[index].opening_cover {
             read[index].kind = LineKind::Text;
         } else if read[index].kind == LineKind::Text
