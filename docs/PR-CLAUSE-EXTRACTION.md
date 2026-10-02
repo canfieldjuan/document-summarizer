@@ -18,7 +18,7 @@ The published 6e6b2b6 lock is invalidated for unseen qualification.
 Contract revision from reproduced body-context failures: marker words inside a
 wrapped sentence and long mixed-case list-item bodies are continuations, not
 new section openers. Unknown structural/ordinal lines must start a source unit
-and have a plausible heading remainder (title shape or short unpunctuated
+and have a plausible heading remainder (title shape or unpunctuated all-caps
 heading). TOC trailing-number recognition requires a numbered heading; bare
 trailing numbers require actual TOC context or dot leaders. This avoids amount
 fields, dated footers and document identifiers. The public body-context probe
@@ -30,6 +30,14 @@ numbered clause marks uncertainty even when the unknown line is outside its
 selected extent. Public recognized_section_starts_after_unknown_boundary fails
 on that exact defect. Remove this special case. Keep the signal on the preceding
 section that retained the unknown line; a recognized new start is reliable.
+
+Final reproduced classifier refinement: a short mixed-case remainder does not
+make a Roman/letter or structural marker a section heading. The public short
+list-body probe failed for insurance, liability and Roman-body cases. Remove
+that shortcut; require a title-shaped remainder or an unpunctuated all-caps
+heading. Canonical ordinals are case-neutral; long mixed-case enumerated body
+and wrapped references stay Text. Short generic caps remain limited to eight
+words and source-unit starts outside the opening.
 
 Required change surface: ReadLine and cached classification finalization in
 whole_clauses.rs; public regression fixtures and policy identity in
