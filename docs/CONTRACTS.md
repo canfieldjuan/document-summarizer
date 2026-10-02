@@ -16,9 +16,11 @@ General keeps main's analysis 14 and synthesis 12 source and verification behavi
 No independent Contract parser or furniture detector is retained.
 
 Contract profile (also Automatic resolving to Contract) uses
-`contract-extraction-3.1.1` for deterministic analysis, synthesis and verification.
-Source clause/evidence identities and inventory retain policy 3.0.2. The source
-reader records unsupported heading/TOC boundaries; any affected key-term
+`contract-extraction-3.1.2` for deterministic analysis, synthesis and verification.
+Source clause/evidence identities retain the 3.0.2 content-addressed recipe.
+The source reader carries sentence continuity across blocks and pages, repairs
+false leading-title splits, and records unfinished or unsupported heading/TOC
+boundaries; any affected key-term
 category renders `not identified`. Selection consumes origin uncertainty rather
 than re-parsing selected text.
 It stores ordered source clauses and typed selections for parties, payment,

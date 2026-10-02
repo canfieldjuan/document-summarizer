@@ -47,6 +47,13 @@ Explicit non-scope: General, page-furniture filtering, heading aliases, recall,
 UI/rendering, wire/schema/storage, dependencies and v4 sources. No new input
 access before operator confirmation of the final fingerprint.
 
+Regression contract reconciliation: old fixtures explicitly treated a page/block
+break as completion, allowed an unadmitted bare caps title as completion, or
+selected a source ending in an unterminated field/numeric continuation before
+a new heading. Retain those inputs as negative tests under the new invariant,
+with completed-sentence counterparts as positive controls. Fields remain in
+their source and never become headings; the outgoing boundary is uncertain.
+
 Assumptions/blockers: the previous retained line already excludes page furniture.
 Existing standalone titles and marker-only lines count as completed structural
 units. A capitalized body tail must not gain a boundary solely from page/block
