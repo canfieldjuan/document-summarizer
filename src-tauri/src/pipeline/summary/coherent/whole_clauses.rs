@@ -376,6 +376,45 @@ fn article_title(text: &str) -> Option<(u32, &str)> {
     ))
 }
 
+fn bare_roman_title<'a>(text: &'a str, next: &str, last: Option<u32>) -> Option<(u32, &'a str)> {
+    let (ordinal, title) = text.split_once(". ")?;
+    let title = title.trim();
+    if !ordinal
+        .chars()
+        .all(|c| matches!(c, 'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'))
+        || !title.chars().any(char::is_alphabetic)
+        || !title
+            .chars()
+            .filter(|c| c.is_alphabetic())
+            .all(char::is_uppercase)
+    {
+        return None;
+    }
+    let article = format!("ARTICLE {ordinal} - {title}");
+    let (number, _) = article_title(&article)?;
+    if last.is_some_and(|previous| previous + 1 == number) {
+        return Some((
+            number,
+            title.strip_suffix(['.', ':']).unwrap_or(title).trim_end(),
+        ));
+    }
+    let (marker, _) = next.split_once(char::is_whitespace)?;
+    let marker = marker.strip_suffix(['.', ')']).unwrap_or(marker);
+    let mut components = marker.split('.');
+    let first = components.next()?;
+    if first.is_empty()
+        || !first.bytes().all(|b| b.is_ascii_digit())
+        || components.any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+        || first.parse::<u32>().ok()? != number
+    {
+        return None;
+    }
+    Some((
+        number,
+        title.strip_suffix(['.', ':']).unwrap_or(title).trim_end(),
+    ))
+}
+
 fn append_source(
     clause: &mut SourceClause,
     fragment: SourceFragment,
@@ -433,10 +472,21 @@ pub(in crate::pipeline::summary) fn contract_sources(
     let mut clauses: Vec<SourceClause> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     let mut i = 0;
+    let mut last_roman = None;
     while i < lines.len() {
         let fragment = lines[i].clone();
         let text = line_text(&fragment);
-        if let Some((article, title)) = article_title(text) {
+        if let Some((article, title)) = article_title(text).or_else(|| {
+            let recognized = bare_roman_title(
+                text,
+                lines.get(i + 1).map(&line_text).unwrap_or(""),
+                last_roman,
+            );
+            if let Some((number, _)) = recognized {
+                last_roman = Some(number);
+            }
+            recognized
+        }) {
             stack.clear();
             let index = clauses.len();
             clauses.push(SourceClause {

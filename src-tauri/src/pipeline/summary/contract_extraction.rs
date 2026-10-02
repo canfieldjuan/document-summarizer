@@ -6,7 +6,7 @@ use crate::pipeline::contracts::{
     ContractTermCategory, ExtractedContractClause,
 };
 
-pub(super) const VERSION: &str = "contract-extraction-3.0.1";
+pub(super) const VERSION: &str = "contract-extraction-3.0.2";
 const RUNTIME: &str = "deterministic-source-extraction";
 
 fn invalid() -> PipelineFailure {
@@ -830,6 +830,77 @@ mod tests {
         }
         for title in ["Payment,", "Payment;", "Payment &", "Payment, ;"] {
             assert!(!heading_matches(Payment, title), "{title}");
+        }
+    }
+
+    #[test]
+    fn bare_roman_sections_stop_selected_extent() {
+        let text = "2. Payment\n2.1 Client shall pay.\nIII. TERM AND TERMINATION\n3.1 Either party may terminate.\nIV. GENERAL PROVISIONS\n4.1 Notices shall be written.";
+        let extraction = output("roman-boundaries", &[text]).0;
+        let payment = selected(&extraction, ContractTermCategory::Payment);
+        assert!(
+            !payment.iter().any(|c| c.text.contains("III. TERM")),
+            "payment includes next Roman heading"
+        );
+        assert_eq!(payment.len(), 2);
+        let termination = selected(&extraction, ContractTermCategory::Termination);
+        assert_eq!(termination.len(), 2);
+        assert!(!termination.iter().any(|c| c.text.contains("IV. GENERAL")));
+    }
+
+    #[test]
+    fn bare_roman_first_section_preserves_opening_parties() {
+        let extraction = output("roman-opening", &["Agreement between Alpha and Beta.\nI. SERVICES\n1.1 Services shall be delivered.\nII. OTHER\n2.1 Other terms apply."]).0;
+        let parties = selected(&extraction, ContractTermCategory::Parties);
+        assert_eq!(parties.len(), 1);
+        assert_eq!(parties[0].text, "Agreement between Alpha and Beta.");
+    }
+
+    #[test]
+    fn bare_roman_sequence_closes_before_unnumbered_prose() {
+        for (heading, accepted) in [
+            ("III. GENERAL", true),
+            ("IV. GENERAL", false),
+            ("II. GENERAL", false),
+            ("III. General", false),
+        ] {
+            let text =
+                format!("II. PAYMENT\n2.1 Client shall pay.\n{heading}\nWritten notices apply.");
+            let (normalized, _) = fixture("roman-sequence", &[&text]);
+            let clauses = whole_clauses::contract_sources(&normalized);
+            assert_eq!(
+                clauses.iter().filter(|c| c.article.is_some()).count(),
+                if accepted { 2 } else { 1 },
+                "sequence boundary: {heading}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_roman_admission_boundaries() {
+        for (heading, next, accepted) in [
+            ("I. PARTIES", "1.1 Named parties sign.", true),
+            ("MMMCMXCIX. PAYMENT", "3999.1 Pay.", true),
+            ("IIII. PAYMENT", "4.1 Pay.", false),
+            ("MMMM. PAYMENT", "4000.1 Pay.", false),
+            ("III. Payment", "3.1 Pay.", false),
+            ("III. PAYMENT", "4.1 Pay.", false),
+            ("III. 123", "3.1 Pay.", false),
+            ("III. PAYMENT", "", false),
+            ("I. shall apply", "1.1 Pay.", false),
+        ] {
+            let (normalized, _) = fixture("roman-admission", &[heading, next]);
+            let clauses = whole_clauses::contract_sources(&normalized);
+            assert_eq!(
+                clauses.iter().any(|c| c.article.is_some()),
+                accepted,
+                "{heading}: {next}"
+            );
+            assert!(clauses.iter().flat_map(|c| &c.fragments).any(|f| normalized
+                .pages
+                .iter()
+                .flat_map(|p| &p.content)
+                .any(|b| b.block_id == f.block_id && b.text[f.start..f.end].contains(heading))));
         }
     }
 
