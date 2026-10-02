@@ -6,7 +6,7 @@ use crate::pipeline::contracts::{
     ContractTermCategory, ExtractedContractClause,
 };
 
-pub(super) const VERSION: &str = "contract-extraction-3.0.0";
+pub(super) const VERSION: &str = "contract-extraction-3.0.1";
 const RUNTIME: &str = "deterministic-source-extraction";
 
 fn invalid() -> PipelineFailure {
@@ -316,12 +316,21 @@ fn heading_matches(category: ContractTermCategory, heading: &str) -> bool {
             "limitations of liability",
         ],
     };
-    headings.contains(&normalized.as_str())
-        || normalized
-            .split([',', ';'])
-            .flat_map(|part| part.split(" and "))
-            .flat_map(|part| part.split(" or "))
-            .any(|part| headings.contains(&part.trim()))
+    if headings.contains(&normalized.as_str()) {
+        return true;
+    }
+    let conjuncts = normalized
+        .split([',', ';'])
+        .flat_map(|part| part.split(" and "))
+        .flat_map(|part| part.split(" or "))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    conjuncts.split_last().is_some_and(|(last, earlier)| {
+        // Earlier words can share the final head: "Payment and Performance Bonds".
+        headings.contains(last)
+            || (last.split_whitespace().count() == 1
+                && earlier.iter().any(|part| headings.contains(part)))
+    })
 }
 
 fn select_key_terms(
@@ -754,6 +763,74 @@ mod tests {
         )
         .0;
         assert_eq!(extraction.key_terms[1].selections.len(), 1);
+    }
+
+    #[test]
+    fn combined_heading_rejects_shared_bond_head() {
+        assert_unselected_combined_heading("Payment and Performance Bonds");
+    }
+
+    #[test]
+    fn combined_heading_rejects_shared_service_head() {
+        assert_unselected_combined_heading("Duration and Frequency of Services");
+    }
+
+    #[test]
+    fn combined_heading_rejects_multiword_list_tail() {
+        assert_unselected_combined_heading("Permits, Fees, Licenses, and Other Obligations");
+    }
+
+    #[test]
+    fn combined_heading_shared_tail_is_an_explained_miss() {
+        assert_unselected_combined_heading(
+            "Termination, Suspension or Assignment of the Subcontract",
+        );
+    }
+
+    fn assert_unselected_combined_heading(title: &str) {
+        let text = format!("5. {title}. Printed terms remain in the source inventory.");
+        let (extraction, _, _) = output("shared-head", &[&text]);
+        assert!(
+            extraction.key_terms.iter().all(|t| t.selections.is_empty()),
+            "shared multi-word head must not select a topic: {title}"
+        );
+        assert_eq!(extraction.clauses.len(), 1);
+        assert_eq!(extraction.clauses[0].text, text);
+    }
+
+    #[test]
+    fn combined_heading_retains_supported_controls() {
+        use ContractTermCategory::*;
+        for (title, expected) in [
+            ("Invoicing and Payment", vec![Payment]),
+            ("Survival and Termination", vec![Termination]),
+            ("Insurance and Bonds", vec![Insurance]),
+            ("Term and Termination", vec![TermRenewal, Termination]),
+            ("Fees and Payment Terms", vec![Payment]),
+            ("Insurance and Payment Terms", vec![Payment]),
+        ] {
+            let text = format!("5. {title}. Printed terms apply.");
+            let (extraction, _, _) = output("combined-control", &[&text]);
+            let actual = extraction
+                .key_terms
+                .iter()
+                .filter(|t| !t.selections.is_empty())
+                .map(|t| t.category)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{title}");
+            for term in &extraction.key_terms {
+                if !term.selections.is_empty() {
+                    assert_eq!(term.selections.len(), 1);
+                    assert_eq!(
+                        selected(&extraction, term.category),
+                        vec![&extraction.clauses[0]]
+                    );
+                }
+            }
+        }
+        for title in ["Payment,", "Payment;", "Payment &", "Payment, ;"] {
+            assert!(!heading_matches(Payment, title), "{title}");
+        }
     }
 
     #[test]

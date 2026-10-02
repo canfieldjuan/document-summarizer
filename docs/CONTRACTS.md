@@ -16,7 +16,7 @@ General keeps main's analysis 14 and synthesis 12 source and verification behavi
 No independent Contract parser or furniture detector is retained.
 
 Contract profile (also Automatic resolving to Contract) uses
-`contract-extraction-3.0.0` for deterministic analysis, synthesis and verification.
+`contract-extraction-3.0.1` for deterministic analysis, synthesis and verification.
 It stores ordered source clauses and typed selections for parties, payment,
 term/renewal, termination, insurance and liability/indemnity. Each selection
 contains a rule, root source-clause ID and all clause IDs in the selected section.
@@ -34,7 +34,10 @@ No model generation, ranking or semantic verification is used by this route.
 Policy 3 requires an uppercase-first numeric remainder and a preceding-unit
 boundary before a standalone title can move to the next clause. It accepts an
 uppercase ARTICLE/title with a whitespace-only separator and matches complete
-heading conjuncts against the existing alias table. These rules apply only to
+heading conjuncts against the existing alias table. The final conjunct is always
+matched; earlier conjuncts qualify only when the final conjunct is one word.
+Exact whole-heading aliases remain accepted; an empty final conjunct cannot
+enable earlier matches. These rules apply only to
 Contract extraction. A/B now serve as regressions, not qualification: freeze the
 rules/fixtures before opening the operator-screened C-onward set, then require
 zero wrong labels and independent review from fresh PDF ingestion. Stop before
