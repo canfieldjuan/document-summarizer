@@ -196,10 +196,15 @@ Match the **entire** normalized heading against this closed table:
 | --- | --- |
 | parties | parties; parties to the agreement; contracting parties |
 | payment | payment; payments; payment terms; fees; compensation; fees and payment; contract price; pricing |
-| term/renewal | term; duration; renewal; term and renewal; term/renewal; commencement and duration; initial term |
-| termination | termination; termination of agreement; termination of the agreement; cancellation |
+| term/renewal | term; duration; renewal; term and renewal; term/renewal; commencement and duration; initial term; renewal term; term and termination |
+| termination | termination; termination of agreement; termination of the agreement; cancellation; term and termination |
 | insurance | insurance; insurance requirements; property insurance |
-| liability/indemnity | liability; limitation of liability; indemnity; indemnification; liability and indemnity; liability and indemnification; hold harmless |
+| liability/indemnity | liability; limitation of liability; indemnity; indemnification; liability and indemnity; liability and indemnification; hold harmless; limitations of liability |
+
+`term and termination` selects the same complete section under both term/renewal
+and termination, without adding inventory records. These additions, plus
+`limitations of liability` and `renewal term`, come from general drafting
+conventions in the accepted review, before the A/B freeze.
 
 If no headed parties section was selected, apply just this fallback: take all
 retained opening source text before the first section, **only if** that section
@@ -228,7 +233,11 @@ ARTICLE titles and unsupported article endings (e.g. an unmarked appendix).
 Unheaded parties without the narrow opening rule remain `not identified`.
 The rules cannot distinguish a similarly formatted table of contents from
 operative sections or establish that a matching heading covers every relevant
-obligation elsewhere. Ambiguous/misordered normalized layouts are not repaired
+obligation elsewhere. This can produce a wrong label, not just a missing match:
+a numbered TOC's last entry runs until the body's `1.` and absorbs the preamble;
+if that entry matches a category, its key term quotes non-matching text. The
+last body section similarly absorbs trailing unnumbered material such as a
+signature block or exhibit. Ambiguous/misordered normalized layouts are not repaired
 by inference. Keep their source in the full list and existing warnings visible;
 report these limits in the replay. No defined-term recognizer is added. Any later
 model ranking may select only extracted source IDs under a separate contract.
@@ -349,6 +358,9 @@ After implementation, prove:
   keyword search. For each accepted marker/title form, also use an unlisted
   title to prove that a structural boundary is not itself a category match.
   Grammar and table fixtures are frozen before looking at real A/B selections.
+- Positive public fixtures cover `term and termination`, `limitations of
+  liability` and `renewal term`. The combined heading selects one whole section
+  under both term/renewal and termination, with no extra inventory records.
 - All six categories have stable order; empty categories show `not identified`.
   Multiple matches preserve source order, equal-text distinct occurrences stay
   distinct, and repeated references to one occurrence are not duplicated.
@@ -377,7 +389,10 @@ After implementation, prove:
   `not identified`, plus the exact matching heading/fallback rule locally.
   Record document/source hashes, app commit and policy version; verify every selected quote and citation against source and
   compare the complete inventory before/after adding key terms. Report known
-  misses and any source-owner changes separately. Publish no private wording.
+  misses and any source-owner changes separately. Locally report whether A or B
+  has a numbered TOC or trailing unnumbered material and which key terms that
+  affects, including any non-matching text absorbed into a selected section.
+  Publish no private wording.
 
 Run focused source/extraction/validation/workspace/Connect tests and the frontend
 build, Rust fmt and strict Clippy. Required CI owns duplicated broad suites.
