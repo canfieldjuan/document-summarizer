@@ -1,13 +1,14 @@
 # Contract view: key terms first, then the full source-clause list
 
 Status: accepted contract implemented at `6e3c375`; independent review and the
-existing summary-first merge hold remain open.
+existing summary-fidelity review prerequisite remain open.
 Operator direction: [PR111 comment 5938758874](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5938758874).
 This document supersedes the earlier combined source-repair/extraction plan.
 Acceptance: [PR111 comment 5943290721](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5943290721).
 The two required amendments were committed separately in `281301f`, before
 implementation. PR111 remains a draft; acceptance authorized implementation,
-not release of the summary-first merge hold.
+not completion of the summary-fidelity review prerequisite. The acceptance
+thread itself is cleared by review reply 4161807793.
 
 ## Root cause
 
@@ -317,8 +318,8 @@ and canonical contract were committed before implementation. The shared-source
 view and all public grammar/table fixtures were frozen at `6e3c375` before A/B
 replay. No rule was changed after observing real selections.
 
-The summary-first hold and independent review of this implementation remain
-merge gates. General/F3 verification is outside this PR. No fresh model inference
+The summary-fidelity prerequisite and independent review of this implementation
+remain merge gates; the original acceptance thread has been cleared. General/F3 verification is outside this PR. No fresh model inference
 is required for this deterministic extraction replay.
 
 ## Verification plan
@@ -510,6 +511,6 @@ identical text cannot reuse another document's IDs; this is not an endurance tes
 
 NOT DONE for merge. Implementation and local verification are complete. Required
 exact-head CI, independent review of the selections/negative regressions, and
-release of the existing summary-first hold remain. The selector's reported
+completion of the summary-fidelity review prerequisite remain. The selector's reported
 layout/topic limits are unchanged. No fresh PDF ingestion, installed GUI proof,
 new model qualification or broad duplicate CI suite is claimed.
