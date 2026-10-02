@@ -25,6 +25,12 @@ fields, dated footers and document identifiers. The public body-context probe
 failed on all eight classes before this correction. The canonical Roman ordinal
 is cached once and reused by inventory admission rather than reparsed.
 
+Further origin correction: my previous-line inheritance on a newly recognized
+numbered clause marks uncertainty even when the unknown line is outside its
+selected extent. Public recognized_section_starts_after_unknown_boundary fails
+on that exact defect. Remove this special case. Keep the signal on the preceding
+section that retained the unknown line; a recognized new start is reliable.
+
 Required change surface: ReadLine and cached classification finalization in
 whole_clauses.rs; public regression fixtures and policy identity in
 contract_extraction.rs. Admitted Roman roots are reliable Heading boundaries.
