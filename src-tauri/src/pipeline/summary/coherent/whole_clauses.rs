@@ -594,13 +594,12 @@ pub(in crate::pipeline::summary) fn contract_sources(
             in_opening = false;
         } else if read[index].numbered {
             in_opening = false;
-        } else if read[index].kind == LineKind::HeadingLike
+        } else if (read[index].kind == LineKind::HeadingLike
             && !read[index].toc
             && !read[index].toc_entry
-            && !starts_unit
+            && !starts_unit)
+            || (in_opening && read[index].opening_cover)
         {
-            read[index].kind = LineKind::Text;
-        } else if in_opening && read[index].opening_cover {
             read[index].kind = LineKind::Text;
         } else if read[index].kind == LineKind::Text
             && read[index].generic_heading_like
