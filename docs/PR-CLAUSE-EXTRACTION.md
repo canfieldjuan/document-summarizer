@@ -1,7 +1,8 @@
 # Contract view: key terms first, then the full source-clause list
 
-Status: accepted contract implemented at `6e3c375`; independent review and the
-existing summary-fidelity review prerequisite remain open.
+Status: policy revision 3 accepted in comment 5945128686 and confirmed by the
+operator in this session. Implement after this contract-only commit; freeze before
+any unseen-contract access. Independent review and qualification remain open.
 Operator direction: [PR111 comment 5938758874](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5938758874).
 This document supersedes the earlier combined source-repair/extraction plan.
 Acceptance: [PR111 comment 5943290721](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5943290721).
@@ -9,6 +10,46 @@ The two required amendments were committed separately in `281301f`, before
 implementation. PR111 remains a draft; acceptance authorized implementation,
 not completion of the summary-fidelity review prerequisite. The acceptance
 thread itself is cleared by review reply 4161807793.
+
+## Accepted boundary revision (policy 3)
+
+Acceptance: [comment 5945128686](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5945128686),
+with execution order clarified in [comment 5945149973](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5945149973).
+
+Root cause: policy 2 treated a wrapped title-case sentence tail as a heading and
+a wrapped numeric phrase as a new clause. Public production-path probes at
+`f8fa549` reproduce both: `between the` / `Parties.` moves into the next clause;
+`within` / `30 days of invoice.` breaks the payment parent. Source reconstruction
+repeats these decisions, so it proves consistency, not correct clause boundaries.
+
+Required change surface: the shared Contract source view in `whole_clauses.rs`,
+the existing `heading_matches` owner, their public regression fixtures, and
+policy identity `contract-extraction-3.0.0`. General's versioned behavior, the
+alias table, output shapes, model/runtime settings and all other scope stay fixed.
+
+The only policy amendments are the preceding-unit guard, uppercase numeric
+remainder, combined-heading matching, uppercase whitespace-only ARTICLE form,
+and the unseen-contract gate specified below. Do not tune these from A/B.
+
+Execution: contract-only commit first; fail-first public regressions and
+implementation next; focused tests/format/Clippy, then commit and hash the rules
+and fixtures. A/B may be replayed only as regression evidence. **Stop before the
+held-out run.** The operator-screened private manifest is not yet authorized for
+access here; do not search the corpus or open candidate contracts.
+
+Qualification replaces A/B with **3-5 operator-screened real contracts**, aliases
+C onward, listed in a private local manifest supplied after operator confirmation.
+Freeze before opening any of them. Run from fresh PDF ingestion and report each
+category as correct, wrong label or missed, with cause. Pass requires **zero
+wrong labels**; explained misses are allowed. Independent review must compare
+every category against each source document. No qualification claim before this.
+
+The new public negatives are the wrapped `between the` / `Parties.` and `within`
+/ `30 days` cases, mixed-case `Article 5 shall apply`, and `payment history
+example`. Positive controls retain real titles, numeric children, existing
+aliases, each approved conjunction, and uppercase ARTICLE headings. Probe every
+preceding-unit route (terminal punctuation, marker, heading, block/page start)
+without changing General or adding a second parser.
 
 ## Root cause
 
@@ -115,7 +156,9 @@ cannot acquire two owners:
    preceded by the section sign. Each decimal component has one to three ASCII
    digits with literal periods between components and at most one trailing
    period or closing parenthesis. The marker must be followed by whitespace;
-   its remainder must be nonempty. After the marker, the candidate ends at
+   its remainder must begin with an uppercase character, preserving F2's
+   uppercase-first guard. Thus wrapped `30 days of invoice.` is continuation
+   text, not a boundary. After the marker, the candidate ends at
    the first period or colon followed by whitespace/end of line; with no such
    delimiter, use the entire remaining line. Text following the delimiter is clause
    body and must stay in the same source clause. Thus `5. Payment. Client shall
@@ -130,8 +173,12 @@ cannot acquire two owners:
    lowercase remaining letters, except the lowercase connectors `and`, `or`,
    `of`, `the`, `to`, `for`, `in`, `with`, `a`, `an`; at least one word starts
    uppercase. The next nonblank retained line must begin with a numeric marker
-   from rule 1. The title belongs
-   to the following section, never the preceding clause. For a dotted marker
+   from rule 1. The previous retained nonblank line must also end a unit:
+   terminal `.`, `:`, `;`, `?`, `!` or `)`, a standalone marker or heading line,
+   or the candidate starts a source block/page. A marker/heading line here has
+   no trailing clause body; a numbered sentence ending `between the` is not
+   such a standalone line. Otherwise the candidate continues the prior clause.
+   The title belongs to the following section, never the preceding clause. For a dotted marker
    such as `5.1`, give the title the implicit parent `5` when that parent is not
    already open in the current article/document; otherwise attach it to the
    incoming clause `5.1` without renaming the existing parent. For a plain `5`,
@@ -148,7 +195,11 @@ cannot acquire two owners:
    is the entire remaining line, with only an optional terminal period/colon
    removed. Thus `ARTICLE V - PAYMENT` yields `PAYMENT`. Inline body on an
    ARTICLE heading line is not supported. An unmatched ARTICLE title still
-   establishes the next article boundary.
+   establishes the next article boundary. A whitespace-only separator is also
+   accepted when the keyword is exactly `ARTICLE` and every alphabetic character
+   of the title is uppercase (with at least one such character). Thus
+   `ARTICLE 10    PAYMENTS` is accepted, but `Article 5 shall apply` is not.
+   Existing ordinal and explicit-separator rules are unchanged.
 
 These grammar rules establish candidates and boundaries **independently of the
 category table**. For example, an unlisted `6. Notices` must end section 5.
@@ -194,7 +245,12 @@ Do not choose by HashMap iteration, model ranking, amount or apparent importance
 For matching only, trim the recognized heading, fold ASCII case, replace `&`
 with the word `and` surrounded by spaces, then collapse whitespace. Markers and
 heading delimiters have already been separated by the rules above. Never change displayed source text.
-Match the **entire** normalized heading against this closed table:
+Keep the exact whole-heading match and also split normalized headings on
+` and `, `,`, ` or `, `;` and `&` (already normalized to `and`). Trim each
+conjunct and match the **entire conjunct** against the same closed table. Any
+matching conjunct selects that category once; one section can serve several
+categories without adding inventory records. `payment history example` remains
+unmatched. This changes composition, not the alias table:
 
 | Category | Accepted normalized headings |
 | --- | --- |
@@ -223,7 +279,7 @@ is a positional selector, not a semantic guarantee that every use of `between`
 names parties. Record `opening-between` as the rule in replay evidence.
 
 The grammar, section extents, table, fallback and ordering are policy-versioned
-and frozen **before** A/B replay. The additions `pricing`, `initial term` and
+and frozen **before** any unseen-contract access. A/B are regression cases only. The additions `pricing`, `initial term` and
 `hold harmless` come from this review, not from inspecting A/B selections. Do
 not silently tune any rule after observing the replay; seek contract review
 for a rule change first.
@@ -314,9 +370,9 @@ frozen and PR116's hold is independent of this contract.
 ## Assumptions/blockers
 
 The accepted view is key terms first, then the full clause list. The amendments
-and canonical contract were committed before implementation. The shared-source
-view and all public grammar/table fixtures were frozen at `6e3c375` before A/B
-replay. No rule was changed after observing real selections.
+and canonical contract were committed before implementation. Policy 2 was frozen at `6e3c375` before A/B replay. Independent review then
+found incorrect boundaries and a wrong parties label. The accepted policy 3
+revision above must be frozen again before unseen-contract access.
 
 The summary-fidelity prerequisite and independent review of this implementation
 remain merge gates; the original acceptance thread has been cleared. General/F3 verification is outside this PR. No fresh model inference
@@ -431,7 +487,7 @@ furniture-only-page disclosure is propagated to coverage checks.
 - Private saved-source replay (ignored test explicitly enabled): 1 passed.
   No LLM, model server or inference configuration was used or changed.
 
-### A/B replay after freeze
+### Historical policy-2 A/B regression receipt (not qualification)
 
 | Alias | Source clauses | Delivered render units | Text bytes | Model calls |
 | --- | ---: | ---: | ---: | ---: |
@@ -452,6 +508,10 @@ that is not a per-record equivalence claim across the changed source policies.
 | termination | not identified | not identified |
 | insurance | 1 / 4 | 1 / 4 |
 | liability/indemnity | 2 / 8 | 1 / 3 |
+
+Correction from independent review: A's parties selection is a wrong label,
+caused by a wrapped sentence tail. The table above records policy-2 output, not
+semantic accuracy. Source validation did not detect this boundary error.
 
 These misses are reported, not tuned away. The corresponding document text
 remains in the full inventory; this is not complete key-term identification or
@@ -509,7 +569,9 @@ identical text cannot reuse another document's IDs; this is not an endurance tes
 
 ## Gap audit
 
-NOT DONE for merge. Implementation and local verification are complete. Required
+NOT DONE for merge. Policy 2 local checks did not establish correct boundaries.
+Policy 3 implementation/public regressions and the separate unseen-contract gate
+are pending under the accepted revision above. Required
 exact-head CI, independent review of the selections/negative regressions, and
 completion of the summary-fidelity review prerequisite remain. The selector's reported
 layout/topic limits are unchanged. No fresh PDF ingestion, installed GUI proof,
