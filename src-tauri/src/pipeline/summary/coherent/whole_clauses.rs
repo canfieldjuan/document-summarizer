@@ -416,11 +416,10 @@ impl<'a> ReadLine<'a> {
         let plausible_heading = remainder.is_empty()
             || leading_title(remainder)
             || (!recognition.ends_with(['.', ';', '?', '!'])
-                && (words.len().saturating_sub(1) <= 8
-                    || remainder
-                        .chars()
-                        .filter(|c| c.is_alphabetic())
-                        .all(char::is_uppercase)));
+                && remainder
+                    .chars()
+                    .filter(|c| c.is_alphabetic())
+                    .all(char::is_uppercase));
         let ordinal = marker.trim_end_matches(['.', ')']);
         let roman_number =
             article_title(&format!("ARTICLE {} - TITLE", ordinal.to_ascii_uppercase()))

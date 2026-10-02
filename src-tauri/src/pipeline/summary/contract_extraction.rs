@@ -914,6 +914,28 @@ mod tests {
     }
 
     #[test]
+    fn short_list_bodies_are_continuations() {
+        let cases=[
+            ("1. Insurance\n1.1 Maintain coverage.\nc. General coverage applies only to workers\nwhile on site.\n2. Other. Other obligations.",ContractTermCategory::Insurance),
+            ("1. Liability\n1.1 Cover losses.\ng. Contractor shall maintain coverage for all workers\nwhile on site.\n2. Other. Other obligations.",ContractTermCategory::LiabilityIndemnity),
+            ("1. Payment\n1.1 Pay for services.\ni. all workers must maintain current insurance\nwhile on site.\n2. Other. Other obligations.",ContractTermCategory::Payment),
+        ];
+        let failures = cases
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, (text, category))| {
+                selected(&output("short-list-body", &[text]).0, category)
+                    .is_empty()
+                    .then_some(i)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            failures.is_empty(),
+            "short list bodies falsely marked uncertain: {failures:?}"
+        );
+    }
+
+    #[test]
     fn classifier_bounds_and_unknown_markers() {
         for boundary in [
             "III OTHER",
