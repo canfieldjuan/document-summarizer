@@ -1,11 +1,49 @@
 # Contract view: key terms first, then the full source-clause list
 
-Current status (2026-10-02): operator-directed origin uncertainty revision is
-previously published at selection policy 3.1.0, source identity 3.0.2. That lock
-is invalidated by confirmed classifier defects below. A-O are
-regression inputs now. All nine historical wrong slots abstain. Full inventory
-and provenance are unchanged. New unseen EDGAR qualification and independent
-review remain pending; PR111 remains draft. Stop before the fresh unseen batch.
+Current status (2026-10-02): the overbroad 3.1.0 lock is superseded by the
+origin correction, policy 3.1.1 and source identity 3.0.2. All seven wrong H/I/N
+slots at 3.0.2 abstain; F's already-correct admitted-Roman results are retained.
+Of the 25 extra withdrawals, 23 are restored exactly. L/payment still abstains
+at a retained EXHIBIT-number marker, whose role needs independent adjudication;
+O/parties abstains at TOC material in the opening. All other selections and the
+full inventory are unchanged. Independent review and fresh unseen qualification
+remain pending. PR111 is draft. Stop before the operator's new EDGAR batch.
+
+## Corrected 3.1.1 regression receipt
+
+A-O fresh ingest plus same-identity replay at runtime commit
+`5e18a38274c97682fdac63448b8faa34914e1f03`: 2 passed, 0 failed. Full clause IDs,
+text, headings, evidence IDs, quote ranges and provenance match the frozen 3.0.2
+baseline. Calls are zero; reload and delivery coverage pass every case. Contract
+suite: 30 passed, 0 failed, 1 ignored. Added paired public probe: 1 passed,
+0 failed; all seven uncertain fixtures abstain and all seven clean controls
+select. The identical probe fails on 789e3e7 for all seven, with clean controls
+still selecting. Format and strict Clippy passed. Later changes are guarded
+test-only and documentation; runtime-source equality to the replay head is
+checked before lock. No new unseen inputs were accessed.
+
+Cleanup: remove the failed-title-to-HeadingLike default and prior-line
+uncertainty inheritance; upgrade admitted Roman state to Heading; cache the
+canonical ordinal once for confidence and legacy inventory. Retain source-unit,
+three-digit, uppercase, Roman admission/sequence and inventory ancestry guards.
+The literal legacy Roman spacing rule remains only for frozen inventory;
+confidence recognition uses whitespace-neutral tokens. No selected-text rescan,
+new topic aliases, furniture changes, General, schema or storage edits.
+
+Per-slot six-step records and public class fixtures are in the durable receipt.
+The two retained abstentions are disclosed, not called restored or independently
+approved. No claim of unseen qualification or merge readiness is made.
+
+Durable evidence aliases (sha256):
+
+- `new-raw311`: `cae198942779a8181ec697c836a64a32fd411ca408618768ac5ddedfba7d26ae`
+- `inventory-replay311`: `693d297801126a5d4c91f0e989617b1ab7f78b020b2543147ff7805bec636c57`
+- `comparison311`: `ad3fc2ac62b961c928dc99241ff83d3090ca8f85f601d28a13722e5843f137b9`
+- `slot-proof25`: `0c7d09200f469e68929bc3fc8eff10636aec8b4f5ca3814ae83d231f78b43093`
+- `historical-slot-proof9`: `9c19655fb9450684100045265205356ca93b2dc726f3f1cb8cb742623493ac37`
+- `execution-receipt311`: `bc28fcec2d9bd7073fa99b29ebd65bc27c606507b771c2848209e056b12fb938`
+- `public-before302`: `69287c2967005d84011ee607b7db7278698a1c305e948dff6d36053a6956b5dc`
+- `public-after311`: `135ca1a83f057c5992b9d88faa6041b596efc0d8ff77aaf1562a98a21228bbe0`
 
 ## Required classifier correction (review findings, operator approved)
 
@@ -66,7 +104,7 @@ and TOC tests and clean controls. Replay the frozen A-O inputs, account for all
 normalized IDs, then lock and stop. Record reproduce/isolate/explain/fix/prove/
 prevent-regression per affected slot using public fixtures per source class.
 
-## Origin regression lock receipt
+## Historical invalidated 3.1.0 receipt
 
 Tested code commit: `ddcc0fddc31f4a987a10bb7d1411a0fd4a67882b`.
 Public Contract tests: 25 passed, 0 failed, 1 ignored; format and strict Clippy
@@ -142,13 +180,13 @@ text. Record uncertainty on affected source clauses at this origin; selection
 consumes this signal and never re-parses selected text. If any candidate section
 for a category crosses uncertainty, the entire category is not identified,
 including opening parties. TOC runs, split ARTICLE lines, unsupported Roman or
-letter headings, and appendix transitions produce uncertainty. Existing Roman
-inventory roots are conservative heading-like boundaries for key terms.
+letter headings, and appendix transitions produce uncertainty. Admitted Roman
+inventory roots are reliable boundaries; unrecognized forms remain uncertain.
 
 Full inventory is frozen: clause order, text, headings, source ranges, provenance
 and IDs retain policy 3.0.2 behavior. This requires retaining inventory admission
-rules inside the single reader, not a second parser. Selection policy changes to
-3.1.0; source identity remains 3.0.2. No General, furniture, alias, rendering,
+rules inside the single reader, not a second parser. Selection policy is
+3.1.1; source identity remains 3.0.2. No General, furniture, alias, rendering,
 wire/schema, dependency or storage changes. No recall improvements.
 
 Special-case inventory across prior revisions, with disposition:
@@ -169,8 +207,8 @@ Special-case inventory across prior revisions, with disposition:
 - Bare Roman uppercase/canonical/matching-decimal/consecutive-ordinal routes:
   retain existing inventory shape (including the prior lookahead exclusion of
   section-symbol-prefixed markers), remove the duplicate decimal parser and
-  literal-whitespace confidence assumption; these roots/crossings are uncertain
-  for key terms pending a later inventory revision.
+  literal-whitespace confidence assumption; admitted roots are reliable; unrecognized crossings remain uncertain
+  for key terms.
 - Opening-between fallback, first decimal 1/ARTICLE I/Roman I: retain eligibility,
   but require an uncertainty-free opening range.
 - Exact heading aliases including pricing/initial term/hold harmless/plural
@@ -185,7 +223,8 @@ ARTICLE, TOC entries and appendix transitions must become not identified. Clean
 numeric/ARTICLE controls must retain selections. Full inventory equality before
 and after is required, including IDs on the same normalized document. Run A-O
 fresh as regression only, identify the A/B copies against the old policy, show
-all nine historical wrong slots abstain, explain every other category change,
+the seven unresolved H/I/N slots abstain and preserve the two F corrections,
+explain every other category change,
 then commit/hash the rules and stop before the operator's new unseen batch.
 
 ## Accepted bare-Roman boundary revision
