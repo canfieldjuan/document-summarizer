@@ -6,7 +6,8 @@ use crate::pipeline::contracts::{
     ContractTermCategory, ExtractedContractClause,
 };
 
-pub(super) const VERSION: &str = "contract-extraction-3.0.2";
+pub(super) const VERSION: &str = "contract-extraction-3.1.0";
+const SOURCE_VERSION: &str = "contract-extraction-3.0.2";
 const RUNTIME: &str = "deterministic-source-extraction";
 
 fn invalid() -> PipelineFailure {
@@ -42,7 +43,7 @@ fn records(
             let evidence_id = deterministic_id(
                 "contract-source",
                 &[
-                    VERSION,
+                    SOURCE_VERSION,
                     &normalized.document_id,
                     &chunk.chunk_id,
                     &fragment.block_id,
@@ -65,7 +66,7 @@ fn records(
         let clause_id = deterministic_id(
             "contract-clause",
             &[
-                VERSION,
+                SOURCE_VERSION,
                 &normalized.document_id,
                 &ordinal.to_string(),
                 &text,
@@ -343,6 +344,7 @@ fn select_key_terms(
         .map(|category| {
             let mut selected = HashSet::new();
             let mut selections = Vec::new();
+            let mut uncertain_category = false;
             for (index, source) in sources.iter().enumerate() {
                 if selected.contains(&index)
                     || !source.headings.iter().any(|h| heading_matches(category, h))
@@ -350,6 +352,13 @@ fn select_key_terms(
                     continue;
                 }
                 let members = whole_clauses::section_members(sources, index);
+                if members
+                    .iter()
+                    .any(|&index| sources[index].boundary_uncertain)
+                {
+                    uncertain_category = true;
+                    continue;
+                }
                 if members.len() == 1 && source.heading_only {
                     continue;
                 }
@@ -370,7 +379,9 @@ fn select_key_terms(
                         || sources[i].number.as_deref().is_some_and(|n| n == ["1"])
                 }) {
                     let prefix = &sources[..first.unwrap()];
-                    if prefix.iter().any(|s| {
+                    if prefix.iter().any(|source| source.boundary_uncertain) {
+                        uncertain_category = true;
+                    } else if prefix.iter().any(|s| {
                         s.text(blocks)
                             .split(|c: char| !c.is_alphanumeric() && c != '_')
                             .any(|w| w.eq_ignore_ascii_case("between"))
@@ -388,6 +399,9 @@ fn select_key_terms(
                         }
                     }
                 }
+            }
+            if uncertain_category {
+                selections.clear();
             }
             ContractKeyTerm {
                 category,
@@ -834,26 +848,59 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_layouts_abstain_at_source() {
+        for (layout, text) in [
+            ("tab-roman", "2. Payment\n2.1 Pay after acceptance.\nIII.\tOTHER\n3.1 Other obligations."),
+            ("space-roman", "2. Payment\n2.1 Pay after acceptance.\nIII. OTHER\n3.1 Other obligations."),
+            ("split-article", "2. Payment\n2.1 Pay after acceptance.\nARTICLE III\nOTHER\n3.1 Other obligations."),
+            ("toc", "TABLE OF CONTENTS\n2. Payment\n2.1 Terms 3\n3. Other 4"),
+            ("appendix", "2. Payment. Pay after acceptance.\nAPPENDIX A\nI. Services\nOther obligations.\n3. Other. Excluded."),
+        ] {
+            let extraction = output(layout, &[text]).0;
+            assert!(selected(&extraction, ContractTermCategory::Payment).is_empty(), "uncertain boundary must abstain: {layout}");
+            assert!(!extraction.clauses.is_empty());
+        }
+        for text in ["2. Payment\n2.1 Pay after acceptance.\n3. Other. Excluded.", "ARTICLE II - PAYMENT\n2.1 Pay after acceptance.\nARTICLE III - OTHER\n3.1 Other obligations."] {
+            assert!(!selected(&output("clean", &[text]).0, ContractTermCategory::Payment).is_empty());
+        }
+    }
+
+    #[test]
+    fn uncertainty_abstains_the_whole_category_and_preserves_clean_siblings() {
+        let text = "1. Payment. Clean obligation.\n2. Other. Other obligation.\n3. Payment. Uncertain obligation.\nAPPENDIX A\nI. Services\nUnnumbered prose.\n4. Insurance. Maintain coverage.";
+        let (normalized, _) = fixture("mixed-boundary", &[text]);
+        let sources = whole_clauses::contract_sources(&normalized);
+        assert!(sources.iter().any(|source| source.boundary_uncertain));
+        let extraction = output("mixed-boundary", &[text]).0;
+        assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
+        assert_eq!(
+            selected(&extraction, ContractTermCategory::Insurance).len(),
+            1
+        );
+    }
+
+    #[test]
     fn bare_roman_sections_stop_selected_extent() {
         let text = "2. Payment\n2.1 Client shall pay.\nIII. TERM AND TERMINATION\n3.1 Either party may terminate.\nIV. GENERAL PROVISIONS\n4.1 Notices shall be written.";
         let extraction = output("roman-boundaries", &[text]).0;
-        let payment = selected(&extraction, ContractTermCategory::Payment);
-        assert!(
-            !payment.iter().any(|c| c.text.contains("III. TERM")),
-            "payment includes next Roman heading"
-        );
-        assert_eq!(payment.len(), 2);
-        let termination = selected(&extraction, ContractTermCategory::Termination);
-        assert_eq!(termination.len(), 2);
-        assert!(!termination.iter().any(|c| c.text.contains("IV. GENERAL")));
+        assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
+        assert!(selected(&extraction, ContractTermCategory::Termination).is_empty());
+        assert_eq!(extraction.clauses.len(), 6);
+        assert!(extraction
+            .clauses
+            .iter()
+            .any(|c| c.text == "III. TERM AND TERMINATION"));
     }
 
     #[test]
     fn bare_roman_first_section_preserves_opening_parties() {
-        let extraction = output("roman-opening", &["Agreement between Alpha and Beta.\nI. SERVICES\n1.1 Services shall be delivered.\nII. OTHER\n2.1 Other terms apply."]).0;
-        let parties = selected(&extraction, ContractTermCategory::Parties);
-        assert_eq!(parties.len(), 1);
-        assert_eq!(parties[0].text, "Agreement between Alpha and Beta.");
+        let text = "Agreement between Alpha and Beta.\nI. SERVICES\n1.1 Services shall be delivered.\nII. OTHER\n2.1 Other terms apply.";
+        let extraction = output("roman-opening", &[text]).0;
+        assert!(selected(&extraction, ContractTermCategory::Parties).is_empty());
+        assert_eq!(
+            extraction.clauses[0].text,
+            "Agreement between Alpha and Beta."
+        );
     }
 
     #[test]

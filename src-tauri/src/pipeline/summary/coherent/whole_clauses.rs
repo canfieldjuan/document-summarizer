@@ -195,6 +195,7 @@ pub(in crate::pipeline::summary) struct SourceClause {
     pub article: Option<u32>,
     pub opening: bool,
     pub heading_only: bool,
+    pub boundary_uncertain: bool,
 }
 
 impl SourceClause {
@@ -210,36 +211,31 @@ impl SourceClause {
     }
 }
 
-fn contract_marker(marker: &str) -> Option<Vec<String>> {
+fn decimal_marker(marker: &str) -> Option<Vec<String>> {
     let marker = marker.trim();
     let marker = marker.strip_suffix(['.', ')']).unwrap_or(marker);
     let parts = marker.split('.').collect::<Vec<_>>();
     if parts
         .iter()
-        .any(|p| p.is_empty() || p.len() > 3 || !p.bytes().all(|b| b.is_ascii_digit()))
+        .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
     {
         return None;
     }
     Some(parts.into_iter().map(str::to_string).collect())
 }
 
-fn contract_number(line: &str) -> Option<(Vec<String>, &str)> {
+fn contract_marker(marker: &str) -> Option<Vec<String>> {
+    decimal_marker(marker).filter(|parts| parts.iter().all(|part| part.len() <= 3))
+}
+
+fn decimal_line(line: &str) -> Option<(Vec<String>, &str)> {
     let line = line
         .trim()
         .strip_prefix('§')
         .unwrap_or(line.trim())
         .trim_start();
     let (marker, rest) = line.split_once(char::is_whitespace)?;
-    // Preserve F2's uppercase-first guard: a wrapped "30 days" is not a clause.
-    if !rest
-        .trim_start()
-        .chars()
-        .next()
-        .is_some_and(char::is_uppercase)
-    {
-        return None;
-    }
-    Some((contract_marker(marker)?, rest.trim()))
+    Some((decimal_marker(marker)?, rest.trim()))
 }
 
 fn contract_title(text: &str) -> (&str, bool) {
@@ -277,22 +273,6 @@ fn leading_title(text: &str) -> bool {
                 chars.next().is_some_and(char::is_uppercase) && chars.all(char::is_lowercase)
             }
         })
-}
-
-// Only structural lines without trailing body qualify as a preceding heading.
-// A numbered sentence ending "between the" must still fail this boundary check.
-fn ends_source_unit(text: &str) -> bool {
-    if text.trim_end().ends_with(['.', ':', ';', '?', '!', ')'])
-        || contract_marker(text.trim().strip_prefix('§').unwrap_or(text.trim())).is_some()
-        || article_title(text).is_some()
-        || leading_title(text)
-    {
-        return true;
-    }
-    contract_number(text).is_some_and(|(_, rest)| {
-        let (title, has_body) = contract_title(rest);
-        !has_body && leading_title(title)
-    })
 }
 
 fn article_title(text: &str) -> Option<(u32, &str)> {
@@ -376,7 +356,11 @@ fn article_title(text: &str) -> Option<(u32, &str)> {
     ))
 }
 
-fn bare_roman_title<'a>(text: &'a str, next: &str, last: Option<u32>) -> Option<(u32, &'a str)> {
+fn bare_roman_title<'a>(
+    text: &'a str,
+    next: Option<&[String]>,
+    last: Option<u32>,
+) -> Option<(u32, &'a str)> {
     let (ordinal, title) = text.split_once(". ")?;
     let title = title.trim();
     if !ordinal
@@ -398,21 +382,92 @@ fn bare_roman_title<'a>(text: &'a str, next: &str, last: Option<u32>) -> Option<
             title.strip_suffix(['.', ':']).unwrap_or(title).trim_end(),
         ));
     }
-    let (marker, _) = next.split_once(char::is_whitespace)?;
-    let marker = marker.strip_suffix(['.', ')']).unwrap_or(marker);
-    let mut components = marker.split('.');
-    let first = components.next()?;
-    if first.is_empty()
-        || !first.bytes().all(|b| b.is_ascii_digit())
-        || components.any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
-        || first.parse::<u32>().ok()? != number
-    {
+    if next?.first()?.parse::<u32>().ok()? != number {
         return None;
     }
     Some((
         number,
         title.strip_suffix(['.', ':']).unwrap_or(title).trim_end(),
     ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineKind {
+    Heading,
+    HeadingLike,
+    Text,
+}
+
+struct ReadLine<'a> {
+    decimal: Option<(Vec<String>, &'a str)>,
+    numbered: bool,
+    article: Option<(u32, &'a str)>,
+    roman: Option<(u32, &'a str)>,
+    title: bool,
+    ends_unit: bool,
+    kind: LineKind,
+    toc: bool,
+}
+
+impl<'a> ReadLine<'a> {
+    fn read(text: &'a str) -> Self {
+        let decimal = decimal_line(text);
+        let numbered = decimal.as_ref().is_some_and(|(parts, rest)| {
+            parts.iter().all(|part| part.len() <= 3)
+                && rest.chars().next().is_some_and(char::is_uppercase)
+        });
+        let article = article_title(text);
+        let title = leading_title(text);
+        let recognition = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let upper = recognition.to_ascii_uppercase();
+        let toc = upper == "TABLE OF CONTENTS";
+        let (marker, remainder) = recognition.split_once(' ').unwrap_or((&recognition, ""));
+        let roman_or_letter = marker.strip_suffix('.').is_some_and(|ordinal| {
+            !ordinal.is_empty()
+                && (ordinal.len() == 1 && ordinal.chars().all(char::is_uppercase)
+                    || ordinal
+                        .chars()
+                        .all(|c| matches!(c, 'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M')))
+                && leading_title(remainder)
+        });
+        let structural = toc
+            || roman_or_letter
+            || matches!(
+                marker.to_ascii_uppercase().as_str(),
+                "ARTICLE" | "APPENDIX" | "EXHIBIT"
+            )
+            || (title && upper.split_whitespace().any(|word| word == "APPENDIX"));
+        let kind = if article.is_some() || numbered {
+            LineKind::Heading
+        } else if structural {
+            LineKind::HeadingLike
+        } else {
+            LineKind::Text
+        };
+        let ends_unit = text.trim_end().ends_with(['.', ':', ';', '?', '!', ')'])
+            || contract_marker(text.trim().strip_prefix('§').unwrap_or(text.trim())).is_some()
+            || article.is_some()
+            || title
+            || (numbered
+                && decimal.as_ref().is_some_and(|(_, rest)| {
+                    let (title, has_body) = contract_title(rest);
+                    !has_body && leading_title(title)
+                }));
+        Self {
+            decimal,
+            numbered,
+            article,
+            roman: None,
+            title,
+            ends_unit,
+            kind,
+            toc,
+        }
+    }
+
+    fn number(&self) -> Option<(Vec<String>, &'a str)> {
+        self.decimal.as_ref().filter(|_| self.numbered).cloned()
+    }
 }
 
 fn append_source(
@@ -469,24 +524,58 @@ pub(in crate::pipeline::summary) fn contract_sources(
         }
     }
     let line_text = |f: &SourceFragment| &blocks[f.block_id.as_str()].text[f.start..f.end];
+    let mut read = lines
+        .iter()
+        .map(|fragment| ReadLine::read(line_text(fragment)))
+        .collect::<Vec<_>>();
+    let mut last_roman = None;
+    for index in 0..read.len() {
+        if read[index].article.is_none() {
+            let roman = bare_roman_title(
+                line_text(&lines[index]),
+                read.get(index + 1)
+                    .and_then(|line| line.decimal.as_ref())
+                    .map(|(parts, _)| parts.as_slice()),
+                last_roman,
+            );
+            if let Some((number, _)) = roman {
+                last_roman = Some(number);
+            }
+            read[index].roman = roman;
+        }
+        if read[index].kind == LineKind::Text && read[index].title {
+            let starts_unit = index == 0
+                || lines[index - 1].block_id != lines[index].block_id
+                || read[index - 1].ends_unit;
+            read[index].kind =
+                if starts_unit && read.get(index + 1).is_some_and(|next| next.numbered) {
+                    LineKind::Heading
+                } else {
+                    LineKind::HeadingLike
+                };
+        }
+    }
     let mut clauses: Vec<SourceClause> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     let mut i = 0;
-    let mut last_roman = None;
+    let mut toc_page = None;
     while i < lines.len() {
         let fragment = lines[i].clone();
         let text = line_text(&fragment);
-        if let Some((article, title)) = article_title(text).or_else(|| {
-            let recognized = bare_roman_title(
-                text,
-                lines.get(i + 1).map(line_text).unwrap_or(""),
-                last_roman,
-            );
-            if let Some((number, _)) = recognized {
-                last_roman = Some(number);
+        let page = blocks[fragment.block_id.as_str()].source.page_start;
+        if toc_page.is_some_and(|toc| toc != page) {
+            toc_page = None;
+        }
+        if read[i].toc {
+            toc_page = Some(page);
+        }
+        let uncertain = read[i].kind == LineKind::HeadingLike || toc_page.is_some();
+        if uncertain {
+            if let Some(previous) = clauses.last_mut() {
+                previous.boundary_uncertain = true;
             }
-            recognized
-        }) {
+        }
+        if let Some((article, title)) = read[i].article.or(read[i].roman) {
             stack.clear();
             let index = clauses.len();
             clauses.push(SourceClause {
@@ -497,18 +586,18 @@ pub(in crate::pipeline::summary) fn contract_sources(
                 article: Some(article),
                 opening: false,
                 heading_only: true,
+                boundary_uncertain: uncertain,
             });
             stack.push(index);
             i += 1;
             continue;
         }
         let mut leading = None;
-        let mut numbered = contract_number(text);
-        let starts_unit = i == 0
-            || lines[i - 1].block_id != fragment.block_id
-            || ends_source_unit(line_text(&lines[i - 1]));
-        if numbered.is_none() && starts_unit && leading_title(text) && i + 1 < lines.len() {
-            if let Some(next) = contract_number(line_text(&lines[i + 1])) {
+        let mut numbered = read[i].number();
+        let starts_unit =
+            i == 0 || lines[i - 1].block_id != fragment.block_id || read[i - 1].ends_unit;
+        if numbered.is_none() && starts_unit && read[i].title && i + 1 < lines.len() {
+            if let Some(next) = read[i + 1].number() {
                 leading = Some((
                     fragment.clone(),
                     text.trim_end_matches(['.', ':']).to_string(),
@@ -546,6 +635,7 @@ pub(in crate::pipeline::summary) fn contract_sources(
                         article: None,
                         opening: false,
                         heading_only: true,
+                        boundary_uncertain: uncertain,
                     });
                     stack.push(index);
                 }
@@ -559,6 +649,10 @@ pub(in crate::pipeline::summary) fn contract_sources(
                 article: None,
                 opening: false,
                 heading_only: !has_body && leading.is_none(),
+                boundary_uncertain: uncertain
+                    || read
+                        .get(i.wrapping_sub(1))
+                        .is_some_and(|line| line.kind == LineKind::HeadingLike),
             };
             if let Some((fragment, title)) = leading {
                 clause.headings.push(title);
@@ -572,6 +666,7 @@ pub(in crate::pipeline::summary) fn contract_sources(
             clauses.push(clause);
         } else if let Some(clause) = clauses.last_mut() {
             clause.heading_only = false;
+            clause.boundary_uncertain |= uncertain;
             append_source(clause, fragment, &blocks);
         } else {
             clauses.push(SourceClause {
@@ -582,6 +677,7 @@ pub(in crate::pipeline::summary) fn contract_sources(
                 article: None,
                 opening: true,
                 heading_only: false,
+                boundary_uncertain: uncertain,
             });
         }
         i += 1;
