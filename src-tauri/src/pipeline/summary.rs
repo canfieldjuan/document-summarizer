@@ -19,7 +19,6 @@ use thiserror::Error;
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 use unicode_segmentation::UnicodeSegmentation;
 
-mod clauses;
 mod coherent;
 mod contract_extraction;
 mod direct;
@@ -941,7 +940,10 @@ pub(crate) fn complete_verified_document_with_delivery(
         created_at: Utc::now(),
         integrity_hash: String::new(),
     };
-    if delivery_policy.is_some_and(|policy| summary.text.len() > policy.max_summary_text_bytes()) {
+    if summary.contract_extraction.is_none()
+        && delivery_policy
+            .is_some_and(|policy| summary.text.len() > policy.max_summary_text_bytes())
+    {
         return Err(persist_final_failure(
             conn,
             run_id,
@@ -2774,6 +2776,30 @@ pub(crate) fn delivery_claim_prefix_coverage_satisfied(
     normalized: &NormalizedDocument,
     warnings: &[PipelineWarning],
 ) -> bool {
+    if let Some(extraction) = &citations.contract_extraction {
+        let Ok(units) =
+            contract_extraction::render_units(extraction, &citations.claims, &citations.evidence)
+        else {
+            return false;
+        };
+        if delivered_claim_count == 0 || delivered_claim_count > units.len() {
+            return false;
+        }
+        let ids = units[..delivered_claim_count]
+            .iter()
+            .flat_map(|unit| unit.clause_ids.iter().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let delivered = citations
+            .claims
+            .iter()
+            .filter(|claim| ids.contains(claim.claim_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(cited_pages) = claim_pages(&delivered, &citations.evidence) else {
+            return false;
+        };
+        return delivery_page_coverage_with_warnings(&cited_pages, omissions, normalized, warnings);
+    }
     let presented_claims = presented_claims(
         &citations.presentation_mode,
         &citations.claims,
@@ -4930,7 +4956,14 @@ pub(crate) fn render_citation_claim_lines(
         &artifact.claims,
         &artifact.summary_claims,
     );
-    let lines = render_claim_lines(presented_claims, &evidence)?;
+    let lines = if let Some(extraction) = &artifact.contract_extraction {
+        contract_extraction::render_units(extraction, &artifact.claims, &artifact.evidence)?
+            .into_iter()
+            .map(|unit| unit.text)
+            .collect()
+    } else {
+        render_claim_lines(presented_claims, &evidence)?
+    };
     if lines.join("\n\n") != artifact.rendered_text {
         return Err(stage_failure(
             PipelineStage::Verify,
@@ -6751,8 +6784,12 @@ mod tests {
     }
 
     #[test]
-    fn contract_extraction_persists_source_records_without_model_calls() {
-        for delivery in [None, Some(SummaryDeliveryPolicy::connect())] {
+    fn contract_key_terms_persist_and_deliver_before_full_clause_list() {
+        for delivery in [
+            None,
+            Some(SummaryDeliveryPolicy::connect()),
+            Some(SummaryDeliveryPolicy::for_test(1)),
+        ] {
             let database = TestDatabase::new();
             let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Contract);
             let runtime = FakeRuntime {
@@ -6795,6 +6832,29 @@ mod tests {
             assert_eq!(records.clauses.len(), artifacts.citations.claims.len());
             let view = crate::pipeline::workspace::get_persisted_summary(&conn, &run_id).unwrap();
             assert_eq!(view.summary.contract_extraction.as_ref(), Some(records));
+            assert!(
+                artifacts.summary.text.starts_with("Key terms\n\n"),
+                "key terms must precede the full clause list"
+            );
+            assert!(artifacts.summary.text.contains("Full clause list\n\n"));
+            let typed = serde_json::to_value(records).unwrap();
+            let categories = typed["keyTerms"]
+                .as_array()
+                .expect("typed key terms must persist");
+            assert_eq!(
+                categories
+                    .iter()
+                    .map(|category| category["category"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "parties",
+                    "payment",
+                    "term/renewal",
+                    "termination",
+                    "insurance",
+                    "liability/indemnity"
+                ]
+            );
             let input = crate::connect::contracts::InputArtifact {
                 artifact_id: uuid::Uuid::new_v4().to_string(),
                 media_type: "application/pdf".into(),
@@ -6810,7 +6870,7 @@ mod tests {
                 &lines,
             )
             .unwrap();
-            assert_eq!(count, records.clauses.len());
+            assert_eq!(count, lines.len());
             assert_eq!(wire.outputs[0].content.text, artifacts.summary.text);
             assert_eq!(wire.outputs[0].content.summary_version, "9.0");
             let encoded = serde_json::to_value(&wire.outputs[0].content).unwrap();
@@ -6820,6 +6880,35 @@ mod tests {
             assert_eq!(
                 serde_json::from_str::<SummaryArtifact>(&saved).unwrap(),
                 artifacts.summary
+            );
+            let mut changed_summary = artifacts.summary.clone();
+            changed_summary.text = changed_summary
+                .text
+                .replace("parties: not identified", "parties: Invented entity");
+            assert_ne!(changed_summary.text, artifacts.summary.text);
+            changed_summary.integrity_hash = changed_summary.calculate_integrity_hash().unwrap();
+            let mut changed_citations = artifacts.citations.clone();
+            changed_citations.rendered_text = changed_summary.text.clone();
+            changed_citations.summary_integrity_hash = changed_summary.integrity_hash.clone();
+            changed_citations.integrity_hash =
+                changed_citations.calculate_integrity_hash().unwrap();
+            let summary_json = serde_json::to_string(&changed_summary).unwrap();
+            let citation_json = serde_json::to_string(&changed_citations).unwrap();
+            conn.execute("UPDATE summary_artifacts SET artifact_hash = ?1, summary_artifact = ?2 WHERE run_id = ?3",
+                rusqlite::params![format!("{:x}",Sha256::digest(summary_json.as_bytes())),summary_json,run_id]).unwrap();
+            conn.execute("UPDATE citation_artifacts SET artifact_hash = ?1, citation_artifact = ?2, summary_integrity_hash = ?4 WHERE run_id = ?3",
+                rusqlite::params![format!("{:x}",Sha256::digest(citation_json.as_bytes())),citation_json,run_id,changed_summary.integrity_hash]).unwrap();
+            assert_eq!(
+                db::get_summary_artifact(&conn, &run_id).unwrap().unwrap(),
+                changed_summary
+            );
+            assert_eq!(
+                db::get_citation_artifact(&conn, &run_id).unwrap().unwrap(),
+                changed_citations
+            );
+            assert!(
+                crate::pipeline::workspace::get_persisted_summary(&conn, &run_id).is_err(),
+                "rehashed invented key-term wording must fail source validation"
             );
             let analyzed = get_analyzed_document(&conn, &run_id).unwrap().unwrap();
             let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();

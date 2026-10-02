@@ -573,6 +573,67 @@ pub enum SummaryPresentationMode {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ContractExtraction {
     pub clauses: Vec<ExtractedContractClause>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_terms: Vec<ContractKeyTerm>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContractTermCategory {
+    #[serde(rename = "parties")]
+    Parties,
+    #[serde(rename = "payment")]
+    Payment,
+    #[serde(rename = "term/renewal")]
+    TermRenewal,
+    #[serde(rename = "termination")]
+    Termination,
+    #[serde(rename = "insurance")]
+    Insurance,
+    #[serde(rename = "liability/indemnity")]
+    LiabilityIndemnity,
+}
+
+impl ContractTermCategory {
+    pub const ALL: [Self; 6] = [
+        Self::Parties,
+        Self::Payment,
+        Self::TermRenewal,
+        Self::Termination,
+        Self::Insurance,
+        Self::LiabilityIndemnity,
+    ];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Parties => "parties",
+            Self::Payment => "payment",
+            Self::TermRenewal => "term/renewal",
+            Self::Termination => "termination",
+            Self::Insurance => "insurance",
+            Self::LiabilityIndemnity => "liability/indemnity",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContractSelectionRule {
+    Heading,
+    OpeningBetween,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ContractSectionSelection {
+    pub rule: ContractSelectionRule,
+    pub root_clause_id: String,
+    pub clause_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ContractKeyTerm {
+    pub category: ContractTermCategory,
+    pub selections: Vec<ContractSectionSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

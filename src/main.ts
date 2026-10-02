@@ -165,6 +165,7 @@ type SummaryPresentationMode = "legacyClaimList" | "coherent" | "claimLedgerFall
 
 interface ContractExtraction {
   clauses: { clauseId: string; heading: string | null; text: string; evidenceIds: string[] }[];
+  keyTerms: { category: string; selections: { rule: "heading" | "opening-between"; rootClauseId: string; clauseIds: string[] }[] }[];
 }
 
 interface SummaryArtifact {
@@ -1380,25 +1381,57 @@ function renderClaims(summary: SummaryArtifact): void {
   if (summary.presentationMode === "structuredExtraction") {
     coherentSummarySection.hidden = false;
     const records = summary.contractExtraction?.clauses;
-    if (!records || records.length !== summary.claims.length) {
+    const terms = summary.contractExtraction?.keyTerms;
+    const categories = ["parties", "payment", "term/renewal", "termination", "insurance", "liability/indemnity"];
+    if (!records || records.length !== summary.claims.length || !terms ||
+        terms.length !== categories.length || terms.some((term, index) => term.category !== categories[index])) {
       throw new Error("Contract extraction records do not match their citations");
     }
-    records.forEach((record, index) => {
-      const claim = summary.claims[index];
-      if (record.clauseId !== claim.claimId || record.text !== claim.text) {
-        throw new Error("Contract source record changed after validation");
-      }
+    const byId = new Map(records.map((record, index) => [record.clauseId, { record, index, claim: summary.claims[index] }]));
+    if (byId.size !== records.length || records.some((record, index) =>
+        record.clauseId !== summary.claims[index].claimId || record.text !== summary.claims[index].text)) {
+      throw new Error("Contract source record changed after validation");
+    }
+    const renderRecord = (id: string, parent: HTMLElement): void => {
+      const entry = byId.get(id);
+      if (!entry) throw new Error("Unknown Contract source reference");
+      const { record, claim, index } = entry;
       const item = document.createElement("section");
       item.className = "summary-paragraph";
       const heading = document.createElement("h3");
       heading.textContent = record.heading ?? `Source clause ${index + 1}`;
+      const identifier = document.createElement("code");
+      identifier.textContent = record.clauseId;
       const text = document.createElement("p");
       text.className = "claim-text";
       text.style.whiteSpace = "pre-wrap";
       text.textContent = record.text;
-      item.append(heading, text, citationActions(claim, "contract clause", index));
-      summaryProse.append(item);
+      item.append(heading, identifier, text, citationActions(claim, "contract clause", index));
+      parent.append(item);
+    };
+    const title = document.createElement("h2");
+    title.textContent = "Key terms";
+    summaryProse.append(title);
+    terms.forEach((term) => {
+      const group = document.createElement("section");
+      const heading = document.createElement("h3");
+      heading.textContent = term.category;
+      group.append(heading);
+      if (term.selections.length === 0) {
+        const missing = document.createElement("p");
+        missing.textContent = "not identified";
+        group.append(missing);
+      }
+      term.selections.forEach((selection) => {
+        if (selection.clauseIds[0] !== selection.rootClauseId) throw new Error("Invalid Contract section root");
+        selection.clauseIds.forEach((id) => renderRecord(id, group));
+      });
+      summaryProse.append(group);
     });
+    const fullList = document.createElement("h2");
+    fullList.textContent = "Full clause list";
+    summaryProse.append(fullList);
+    records.forEach((record) => renderRecord(record.clauseId, summaryProse));
     return;
   }
 

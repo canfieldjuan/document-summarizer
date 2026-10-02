@@ -1,8 +1,12 @@
 //! Contract mode copies typed, source-bound clause records without prose generation.
+use super::coherent::whole_clauses;
 use super::*;
-use crate::pipeline::contracts::{ContractExtraction, ExtractedContractClause};
+use crate::pipeline::contracts::{
+    ContractExtraction, ContractKeyTerm, ContractSectionSelection, ContractSelectionRule,
+    ContractTermCategory, ExtractedContractClause,
+};
 
-pub(super) const VERSION: &str = "contract-extraction-1.0.0";
+pub(super) const VERSION: &str = "contract-extraction-2.0.0";
 const RUNTIME: &str = "deterministic-source-extraction";
 
 fn invalid() -> PipelineFailure {
@@ -21,14 +25,11 @@ fn records(
     let blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
     let mut extraction = ContractExtraction {
         clauses: Vec::new(),
+        key_terms: Vec::new(),
     };
     let mut evidence = Vec::new();
-    let ordered = normalized
-        .pages
-        .iter()
-        .flat_map(|p| &p.content)
-        .collect::<Vec<_>>();
-    for (ordinal, clause) in clauses::build_ordered(&ordered).iter().enumerate() {
+    let sources = whole_clauses::contract_sources(normalized);
+    for (ordinal, clause) in sources.iter().enumerate() {
         let mut evidence_ids = Vec::new();
         for fragment in &clause.fragments {
             let block = blocks[fragment.block_id.as_str()];
@@ -60,7 +61,7 @@ fn records(
                 source_span: block.source.clone(),
             });
         }
-        let text = clauses::text(clause, &blocks);
+        let text = clause.text(&blocks);
         let clause_id = deterministic_id(
             "contract-clause",
             &[
@@ -72,7 +73,7 @@ fn records(
         );
         extraction.clauses.push(ExtractedContractClause {
             clause_id,
-            heading: clause.heading.clone(),
+            heading: clause.headings.first().cloned(),
             text,
             evidence_ids,
         });
@@ -80,6 +81,7 @@ fn records(
     if extraction.clauses.is_empty() {
         return Err(invalid());
     }
+    extraction.key_terms = select_key_terms(&sources, &extraction.clauses, &blocks);
     Ok((extraction, evidence))
 }
 
@@ -91,6 +93,9 @@ pub(super) fn analyze(
     cancellation_checkpoint(control, PipelineStage::Analyze)?;
     let (_, evidence) = records(chunked, normalized)?;
     let mut warnings = normalized.warnings.clone();
+    if let Some(warning) = coherent::page_furniture::Furniture::new(normalized).warning() {
+        warnings.push(warning);
+    }
     warnings.push(PipelineWarning { code: "CONTRACT_SOURCE_EXTRACTION".into(),
         message: "Contract clauses are extracted verbatim with source citations. They are not a legal interpretation; OCR-derived text still requires source review.".into(), stage: Some(PipelineStage::Analyze) });
     let chunks = chunked
@@ -160,7 +165,19 @@ pub(super) fn synthesize(
             evidence_ids: c.evidence_ids.clone(),
         })
         .collect::<Vec<_>>();
-    let summary_text = render_cited_summary(&claims, analyzed)?;
+    let summary_text = render_units(
+        &extraction,
+        &claims,
+        &analyzed
+            .chunks
+            .iter()
+            .flat_map(|c| c.evidence.clone())
+            .collect::<Vec<_>>(),
+    )?
+    .into_iter()
+    .map(|unit| unit.text)
+    .collect::<Vec<_>>()
+    .join("\n\n");
     Ok(SynthesizedDocument {
         contract_extraction: Some(extraction),
         document_id: analyzed.document_id.clone(),
@@ -247,4 +264,701 @@ pub(super) fn validate_verified(
         return Err(invalid());
     }
     Ok(())
+}
+
+fn heading_matches(category: ContractTermCategory, heading: &str) -> bool {
+    use ContractTermCategory::*;
+    let normalized = heading
+        .to_ascii_lowercase()
+        .replace('&', " and ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let headings: &[&str] = match category {
+        Parties => &["parties", "parties to the agreement", "contracting parties"],
+        Payment => &[
+            "payment",
+            "payments",
+            "payment terms",
+            "fees",
+            "compensation",
+            "fees and payment",
+            "contract price",
+            "pricing",
+        ],
+        TermRenewal => &[
+            "term",
+            "duration",
+            "renewal",
+            "term and renewal",
+            "term/renewal",
+            "commencement and duration",
+            "initial term",
+            "renewal term",
+            "term and termination",
+        ],
+        Termination => &[
+            "termination",
+            "termination of agreement",
+            "termination of the agreement",
+            "cancellation",
+            "term and termination",
+        ],
+        Insurance => &["insurance", "insurance requirements", "property insurance"],
+        LiabilityIndemnity => &[
+            "liability",
+            "limitation of liability",
+            "indemnity",
+            "indemnification",
+            "liability and indemnity",
+            "liability and indemnification",
+            "hold harmless",
+            "limitations of liability",
+        ],
+    };
+    headings.contains(&normalized.as_str())
+}
+
+fn select_key_terms(
+    sources: &[whole_clauses::SourceClause],
+    clauses: &[ExtractedContractClause],
+    blocks: &HashMap<&str, &NormalizedBlock>,
+) -> Vec<ContractKeyTerm> {
+    ContractTermCategory::ALL
+        .into_iter()
+        .map(|category| {
+            let mut selected = HashSet::new();
+            let mut selections = Vec::new();
+            for (index, source) in sources.iter().enumerate() {
+                if selected.contains(&index)
+                    || !source.headings.iter().any(|h| heading_matches(category, h))
+                {
+                    continue;
+                }
+                let members = whole_clauses::section_members(sources, index);
+                if members.len() == 1 && source.heading_only {
+                    continue;
+                }
+                selected.extend(members.iter().copied());
+                selections.push(ContractSectionSelection {
+                    rule: ContractSelectionRule::Heading,
+                    root_clause_id: clauses[index].clause_id.clone(),
+                    clause_ids: members
+                        .iter()
+                        .map(|&i| clauses[i].clause_id.clone())
+                        .collect(),
+                });
+            }
+            if category == ContractTermCategory::Parties && selections.is_empty() {
+                let first = sources.iter().position(|s| !s.opening);
+                if first.is_some_and(|i| {
+                    sources[i].article == Some(1)
+                        || sources[i].number.as_deref().is_some_and(|n| n == ["1"])
+                }) {
+                    let prefix = &sources[..first.unwrap()];
+                    if prefix.iter().any(|s| {
+                        s.text(blocks)
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .any(|w| w.eq_ignore_ascii_case("between"))
+                    }) {
+                        let ids = clauses[..prefix.len()]
+                            .iter()
+                            .map(|c| c.clause_id.clone())
+                            .collect::<Vec<_>>();
+                        if let Some(root) = ids.first() {
+                            selections.push(ContractSectionSelection {
+                                rule: ContractSelectionRule::OpeningBetween,
+                                root_clause_id: root.clone(),
+                                clause_ids: ids,
+                            });
+                        }
+                    }
+                }
+            }
+            ContractKeyTerm {
+                category,
+                selections,
+            }
+        })
+        .collect()
+}
+
+pub(super) struct RenderUnit {
+    pub text: String,
+    pub clause_ids: Vec<String>,
+}
+
+// Canonical text, atomic delivery boundaries and source accounting share one owner.
+pub(super) fn render_units(
+    extraction: &ContractExtraction,
+    claims: &[CitedClaim],
+    evidence: &[EvidenceItem],
+) -> Result<Vec<RenderUnit>, PipelineFailure> {
+    if extraction
+        .key_terms
+        .iter()
+        .map(|t| t.category)
+        .collect::<Vec<_>>()
+        != ContractTermCategory::ALL
+        || claims.len() != extraction.clauses.len()
+    {
+        return Err(invalid());
+    }
+    let by_evidence = evidence
+        .iter()
+        .map(|e| (e.evidence_id.as_str(), e))
+        .collect::<HashMap<_, _>>();
+    let lines = render_claim_lines(claims, &by_evidence)?;
+    let mut by_id = HashMap::new();
+    for (clause, (claim, line)) in extraction.clauses.iter().zip(claims.iter().zip(lines)) {
+        if clause.clause_id != claim.claim_id
+            || clause.text != claim.text
+            || clause.evidence_ids != claim.evidence_ids
+            || by_id
+                .insert(
+                    clause.clause_id.as_str(),
+                    format!("{}\n{}", clause.clause_id, line),
+                )
+                .is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    let mut result = Vec::new();
+    let mut pending = "Key terms".to_string();
+    for term in &extraction.key_terms {
+        if term.selections.is_empty() {
+            pending.push_str(&format!("\n\n{}: not identified", term.category.label()));
+            continue;
+        }
+        pending.push_str(&format!("\n\n{}", term.category.label()));
+        for selection in &term.selections {
+            if selection.clause_ids.first() != Some(&selection.root_clause_id) {
+                return Err(invalid());
+            }
+            let mut unique = HashSet::new();
+            let quoted = selection
+                .clause_ids
+                .iter()
+                .map(|id| {
+                    if !unique.insert(id) {
+                        return Err(invalid());
+                    }
+                    by_id
+                        .get(id.as_str())
+                        .map(|s| s.as_str())
+                        .ok_or_else(invalid)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n\n");
+            let text = if pending.is_empty() {
+                quoted
+            } else {
+                format!("{pending}\n\n{quoted}")
+            };
+            result.push(RenderUnit {
+                text,
+                clause_ids: selection.clause_ids.clone(),
+            });
+            pending.clear();
+        }
+    }
+    pending.push_str(if pending.is_empty() {
+        "Full clause list"
+    } else {
+        "\n\nFull clause list"
+    });
+    for clause in &extraction.clauses {
+        let line = by_id[clause.clause_id.as_str()].clone();
+        let text = if pending.is_empty() {
+            line
+        } else {
+            format!("{pending}\n\n{line}")
+        };
+        result.push(RenderUnit {
+            text,
+            clause_ids: vec![clause.clause_id.clone()],
+        });
+        pending.clear();
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::contracts::{
+        DocumentChunk, NormalizedBlockKind, NormalizedPage, SourceType,
+    };
+
+    fn fixture(id: &str, pages: &[&str]) -> (NormalizedDocument, ChunkedDocument) {
+        let normalized = NormalizedDocument {
+            document_id: id.into(),
+            normalization_version: "1".into(),
+            warnings: vec![],
+            pages: pages
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let page = i as u32 + 1;
+                    NormalizedPage {
+                        page_number: page,
+                        warnings: vec![],
+                        requires_visual_processing: false,
+                        content: vec![NormalizedBlock {
+                            block_id: format!("{id}-block-{page}"),
+                            kind: NormalizedBlockKind::Text,
+                            text: (*text).into(),
+                            source: SourceSpan {
+                                page_start: page,
+                                page_end: page,
+                                section_id: None,
+                                source_type: SourceType::NativeText,
+                            },
+                        }],
+                    }
+                })
+                .collect(),
+        };
+        let chunked = ChunkedDocument {
+            document_id: id.into(),
+            chunking_version: "1".into(),
+            warnings: vec![],
+            chunks: normalized
+                .pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let block = &p.content[0];
+                    DocumentChunk {
+                        chunk_id: format!("{id}-chunk-{i}"),
+                        ordinal: i as u32,
+                        structure_node_id: "public-node".into(),
+                        text: block.text.clone(),
+                        block_ids: vec![block.block_id.clone()],
+                        source_spans: vec![block.source.clone()],
+                        warnings: vec![],
+                    }
+                })
+                .collect(),
+        };
+        (normalized, chunked)
+    }
+    fn output(
+        id: &str,
+        pages: &[&str],
+    ) -> (ContractExtraction, SynthesizedDocument, Vec<EvidenceItem>) {
+        let (normalized, chunked) = fixture(id, pages);
+        let analyzed = analyze(&chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
+        let synthesized =
+            synthesize(&analyzed, &chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
+        verify(
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        (
+            synthesized.contract_extraction.clone().unwrap(),
+            synthesized,
+            analyzed
+                .chunks
+                .into_iter()
+                .flat_map(|c| c.evidence)
+                .collect(),
+        )
+    }
+    fn selected(
+        extraction: &ContractExtraction,
+        category: ContractTermCategory,
+    ) -> Vec<&ExtractedContractClause> {
+        extraction
+            .key_terms
+            .iter()
+            .find(|t| t.category == category)
+            .unwrap()
+            .selections
+            .iter()
+            .flat_map(|s| &s.clause_ids)
+            .map(|id| {
+                extraction
+                    .clauses
+                    .iter()
+                    .find(|c| &c.clause_id == id)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn accepted_heading_forms_and_aliases_select_whole_source() {
+        use ContractTermCategory::*;
+        for (heading, categories) in [
+            ("Payment", vec![Payment]),
+            ("Pricing", vec![Payment]),
+            ("Initial Term", vec![TermRenewal]),
+            ("Renewal Term", vec![TermRenewal]),
+            ("Hold Harmless", vec![LiabilityIndemnity]),
+            ("Limitations of Liability", vec![LiabilityIndemnity]),
+            ("Term and Termination", vec![TermRenewal, Termination]),
+        ] {
+            for text in [format!("5. {heading}. Client shall comply with the printed conditions.\n6. Notices. Notices shall be written."),
+                format!("{heading}\n5.1 Client shall comply with the printed conditions.\n6. Notices. Notices shall be written."),
+                format!("ARTICLE V - {}\nClient shall comply with the printed conditions.\nARTICLE VI - NOTICES\nNotices shall be written.",heading.to_uppercase())] {
+                let (extraction,_,_)=output("forms", &[&text]);
+                for category in &categories {
+                    let clauses=selected(&extraction,*category);
+                    assert!(!clauses.is_empty(), "{heading}: {category:?}");
+                    let joined=clauses.iter().map(|c|c.text.as_str()).collect::<Vec<_>>().join("\n");
+                    assert!(joined.contains("Client shall comply with the printed conditions."));
+                    assert!(!joined.contains("Notices shall"));
+                }
+                if categories.len()==2 {
+                    assert_eq!(selected(&extraction,TermRenewal),selected(&extraction,Termination));
+                    assert_eq!(extraction.clauses.iter().map(|c|&c.clause_id).collect::<HashSet<_>>().len(),extraction.clauses.len());
+                }
+            }
+        }
+        for separator in ["-", "–", "—", ":"] {
+            let text=format!("ARTICLE V {separator} PAYMENT\nClient shall pay.\nARTICLE VI {separator} OTHER\nOther text.");
+            assert_eq!(selected(&output("article", &[&text]).0, Payment).len(), 1);
+        }
+    }
+
+    #[test]
+    fn unlisted_and_unsupported_heading_forms_never_gain_body_keyword_matches() {
+        for text in [
+            "5. Payment history example. Client shall pay.",
+            "5. Other. Payment terms are printed here.",
+            "5. The Client shall pay $1,000.00 per month.",
+            "Section 5. Payment\nClient shall pay.",
+            "(a) Payment\nClient shall pay.",
+            "payment terms\n5.1 Client shall pay.",
+            "5. Payment Client shall pay.",
+            "ARTICLE V\nPAYMENT\nClient shall pay.",
+            "ARTICLE IIII - PAYMENT\nClient shall pay.",
+        ] {
+            let (extraction, _, _) = output("miss", &[text]);
+            assert!(
+                extraction.key_terms.iter().all(|t| t.selections.is_empty()),
+                "{text}"
+            );
+            for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                assert!(
+                    extraction.clauses.iter().any(|c| c.text.contains(line)),
+                    "source line was lost: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parent_selection_includes_all_children_without_peer_or_duplicate_references() {
+        let (extraction,_,evidence)=output("hierarchy",&["4. Other. Before the payment section.\nPayment Terms\n5.1 First obligation.\n5.1.1 Condition continues", "after the page break.\n5.2 Payment. Second obligation.\n6. Notices. Excluded."]);
+        let payment = selected(&extraction, ContractTermCategory::Payment);
+        assert_eq!(payment.len(), 4);
+        assert!(!extraction.clauses[0].text.contains("Payment Terms"));
+        assert!(payment[0].text.starts_with("Payment Terms"));
+        assert!(payment[2].text.contains("after the page break"));
+        assert_eq!(
+            payment[2]
+                .evidence_ids
+                .iter()
+                .map(|id| evidence
+                    .iter()
+                    .find(|e| &e.evidence_id == id)
+                    .unwrap()
+                    .source_span
+                    .page_start)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(payment.iter().all(|c| !c.text.contains("Excluded")));
+        assert_eq!(extraction.key_terms[1].selections.len(), 1);
+        for (body, count) in [
+            ("5. PAYMENT\n5.1 First.\n5.2 Second.\n50.1 Excluded.", 3),
+            ("5. Other\nPayment Terms\n5.1 First.\n5.2 Excluded.", 1),
+            ("5. PAYMENT\n6. Other. Content.", 0),
+            ("5. PAYMENT\n5.1 First.\n6. OTHER\n6.1 Second.", 2),
+        ] {
+            assert_eq!(
+                selected(&output("parent", &[body]).0, ContractTermCategory::Payment).len(),
+                count
+            );
+        }
+    }
+
+    #[test]
+    fn article_scopes_keep_repeated_numbers_and_equal_text_occurrences_distinct() {
+        let (extraction, _, _) = output("articles", &["ARTICLE I - PAYMENT\n1. Payment. Client shall pay.\n2. Condition. Approval required.\nARTICLE II - OTHER\n1. Payment. Client shall pay.\n2. Other. Excluded."]);
+        let payment = &extraction.key_terms[1].selections;
+        assert_eq!(payment.len(), 2);
+        assert_eq!(payment[0].clause_ids.len(), 3);
+        assert_eq!(payment[1].clause_ids.len(), 1);
+        let clauses = selected(&extraction, ContractTermCategory::Payment);
+        assert_eq!(clauses[1].text, clauses[3].text);
+        assert_ne!(clauses[1].clause_id, clauses[3].clause_id);
+        assert!(clauses.iter().all(|c| !c.text.contains("Excluded")));
+        for text in [
+            "Unlisted Title\n5.1 Printed obligation.",
+            "ARTICLE V - UNLISTED\nPrinted obligation.",
+        ] {
+            assert!(output("unlisted", &[text])
+                .0
+                .key_terms
+                .iter()
+                .all(|t| t.selections.is_empty()));
+        }
+    }
+
+    #[test]
+    fn contract_source_furniture_disclosure_preserves_delivery_coverage() {
+        let (normalized, chunked) = fixture(
+            "furniture",
+            &["1. Payment. Client shall pay.\nPage 1 of 2", "Page 2 of 2"],
+        );
+        let analyzed = analyze(&chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
+        assert!(analyzed
+            .chunks
+            .iter()
+            .flat_map(|c| &c.evidence)
+            .all(|e| !e.exact_quote.contains("Page ")));
+        assert!(analyzed.warnings.iter().any(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED"), "Contract extraction must disclose the existing source owner's excluded furniture-only page");
+        let excluded = coherent::furniture_coverage_exclusions(&analyzed.warnings, &normalized);
+        assert_eq!(excluded, HashSet::from([2]));
+    }
+
+    #[test]
+    fn opening_between_fallback_is_narrow_and_headed_parties_take_precedence() {
+        use ContractTermCategory::Parties;
+        for marker in [
+            "1. Other. Body.",
+            "ARTICLE I - OTHER\nBody.",
+            "Other Title\n1.1 Body.",
+        ] {
+            let text = format!("This agreement is BETWEEN two parties.\n{marker}");
+            let (extraction, _, _) = output("opening", &[&text]);
+            assert_eq!(selected(&extraction, Parties).len(), 1);
+            assert_eq!(
+                selected(&extraction, Parties)[0].text,
+                "This agreement is BETWEEN two parties."
+            );
+            assert_eq!(
+                extraction.key_terms[0].selections[0].rule,
+                ContractSelectionRule::OpeningBetween
+            );
+        }
+        for text in [
+            "1. Other. Between the periods.",
+            "Opening without that word.\n1. Other. Between parties.",
+            "An inbetween item.\n1. Other. Body.",
+            "Opening between parties.\n2. Other. Body.",
+            "Opening between_parties.\n1. Other. Body.",
+        ] {
+            assert!(selected(&output("opening-miss", &[text]).0, Parties).is_empty());
+        }
+        let (extraction,_,_)=output("headed",&["Opening between two parties.\n1. Parties. Named entities sign this agreement.\n2. Other. Body."]);
+        assert_eq!(selected(&extraction, Parties).len(), 1);
+        assert_eq!(
+            extraction.key_terms[0].selections[0].rule,
+            ContractSelectionRule::Heading
+        );
+    }
+
+    #[test]
+    fn source_reconstruction_rejects_altered_text_missing_children_and_cross_document_ids() {
+        let (normalized, chunked) = fixture(
+            "mutation",
+            &["5. Payment\n5.1 Client shall pay.\n5.2 Conditions apply.\n6. Other. Excluded."],
+        );
+        let analyzed = analyze(&chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
+        let base = synthesize(&analyzed, &chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
+        for kind in 0..5 {
+            let mut changed = base.clone();
+            let extraction = changed.contract_extraction.as_mut().unwrap();
+            match kind {
+                0 => {
+                    extraction.key_terms[1].selections[0].clause_ids.pop();
+                }
+                1 => extraction.key_terms[1].selections[0]
+                    .clause_ids
+                    .push(extraction.clauses.last().unwrap().clause_id.clone()),
+                2 => {
+                    extraction.clauses[1].text = "Invented payment.".into();
+                    changed.claims[1].text = "Invented payment.".into();
+                }
+                3 => {
+                    extraction.key_terms[1].selections[0].clause_ids[0] =
+                        "other-document-clause".into()
+                }
+                _ => extraction.key_terms.swap(0, 1),
+            }
+            assert!(validate_synthesis(&changed, &analyzed, &chunked, &normalized).is_err());
+        }
+        let first = output("independent-A", &["1. Payment. Client shall pay."]).0;
+        let second = output("independent-B", &["1. Payment. Client shall pay."]).0;
+        assert_ne!(first.clauses[0].clause_id, second.clauses[0].clause_id);
+        assert_eq!(
+            first,
+            output("independent-A", &["1. Payment. Client shall pay."]).0
+        );
+    }
+
+    #[test]
+    fn atomic_key_term_sections_respect_connect_byte_limits() {
+        use crate::connect::contracts::{InputArtifact, JobResult, MAX_SUMMARY_TEXT_BYTES};
+        let input = InputArtifact {
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            media_type: "application/pdf".into(),
+            byte_size: 1,
+            sha256: "a".repeat(64),
+            display_name: "public.pdf".into(),
+            source_app_id: "test".into(),
+        };
+        let make = |text: &str| {
+            let (extraction, synthesized, evidence) = output("cap", &[text]);
+            let units = render_units(&extraction, &synthesized.claims, &evidence).unwrap();
+            let summary = SummaryArtifact {
+                document_id: "cap".into(),
+                summary_version: "9.0.0".into(),
+                text: synthesized.summary_text,
+                contract_extraction: Some(extraction),
+                warnings: vec![],
+                created_at: Utc::now(),
+                integrity_hash: String::new(),
+            };
+            (summary, units)
+        };
+        let (small, units) = make("5. Payment\n5.1 Body.");
+        let fixed = units[0].text.len();
+        for delta in [-1isize, 0, 1] {
+            let target = (MAX_SUMMARY_TEXT_BYTES as isize + delta) as usize;
+            let padding = target - fixed;
+            let text = format!("5. Payment\n5.1 {}Body.", "x".repeat(padding));
+            let (summary, units) = make(&text);
+            assert_eq!(units[0].text.len(), target);
+            assert!(units[0].text.contains("5.1"));
+            let result = JobResult::from_summary_claim_lines(
+                &input,
+                &summary,
+                &units.iter().map(|u| u.text.clone()).collect::<Vec<_>>(),
+            );
+            if delta > 0 {
+                assert!(result.is_err());
+            } else {
+                let (result, count) = result.unwrap();
+                assert_eq!(count, 1);
+                assert!(result.outputs[0]
+                    .content
+                    .warnings
+                    .iter()
+                    .any(|w| w.code == SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE));
+            }
+        }
+        assert!(small.text.starts_with("Key terms"));
+        let text = format!(
+            "5. Payment\n5.1 {}Body.",
+            "é".repeat(MAX_SUMMARY_TEXT_BYTES / 2)
+        );
+        let (summary, units) = make(&text);
+        assert!(JobResult::from_summary_claim_lines(
+            &input,
+            &summary,
+            &units.iter().map(|u| u.text.clone()).collect::<Vec<_>>()
+        )
+        .is_err());
+    }
+    #[test]
+    #[ignore = "requires the private saved-source A/B fixture and local output path"]
+    fn replay_saved_contract_sources_through_production_extraction() {
+        use crate::connect::contracts::{InputArtifact, JobResult};
+        let input = std::env::var("DOC_SUM_CONTRACT_REPLAY_INPUT").unwrap();
+        let bytes = std::fs::read(input).unwrap();
+        let saved: Value = serde_json::from_slice(&bytes).unwrap();
+        let mut reports = Vec::new();
+        for (index, record) in saved.as_array().unwrap().iter().enumerate() {
+            let alias = if index == 0 { "A" } else { "B" };
+            let normalized: NormalizedDocument =
+                serde_json::from_value(record["normalized"].clone()).unwrap();
+            let chunked: ChunkedDocument =
+                serde_json::from_value(record["chunked"].clone()).unwrap();
+            let analyzed = analyze(&chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
+            let synthesized =
+                synthesize(&analyzed, &chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
+            let verified = verify(
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            let mut summary = SummaryArtifact {
+                document_id: normalized.document_id.clone(),
+                summary_version: "9.0.0".into(),
+                text: verified.summary_text.clone(),
+                contract_extraction: verified.contract_extraction.clone(),
+                warnings: verified.warnings.clone(),
+                created_at: Utc::now(),
+                integrity_hash: String::new(),
+            };
+            summary.integrity_hash = summary.calculate_integrity_hash().unwrap();
+            let citations = build_citation_artifact(
+                &summary,
+                &verified,
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+            )
+            .unwrap();
+            let lines = render_citation_claim_lines(&citations).unwrap();
+            let descriptor = InputArtifact {
+                artifact_id: uuid::Uuid::new_v4().to_string(),
+                media_type: "application/pdf".into(),
+                byte_size: 1,
+                sha256: "a".repeat(64),
+                display_name: format!("contract-{alias}.pdf"),
+                source_app_id: "saved-source-replay".into(),
+            };
+            let (wire, count) =
+                JobResult::from_summary_claim_lines(&descriptor, &summary, &lines).unwrap();
+            assert!(delivery_claim_prefix_coverage_satisfied(
+                &citations,
+                count,
+                &analyzed.omissions,
+                &normalized,
+                &summary.warnings
+            ));
+            let extraction = summary.contract_extraction.as_ref().unwrap();
+            let clauses = whole_clauses::contract_sources(&normalized);
+            let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+            assert_eq!(clauses.len(), extraction.clauses.len());
+            for (source, clause) in clauses.iter().zip(&extraction.clauses) {
+                assert_eq!(source.text(&blocks), clause.text);
+            }
+            let selected=extraction.key_terms.iter().map(|term| {
+                let sections=term.selections.iter().map(|selection| {
+                    let selected=selection.clause_ids.iter().map(|id| {
+                        let clause=extraction.clauses.iter().find(|c| &c.clause_id==id).unwrap();
+                        let pages=clause.evidence_ids.iter().map(|id| citations.evidence.iter().find(|e| &e.evidence_id==id).unwrap().source_span.page_start).collect::<std::collections::BTreeSet<_>>();
+                        json!({"clause_id":id,"heading":clause.heading,"pages":pages})
+                    }).collect::<Vec<_>>();
+                    json!({"rule":selection.rule,"root_clause_id":selection.root_clause_id,"clauses":selected})
+                }).collect::<Vec<_>>();
+                json!({"category":term.category,"status":if sections.is_empty() {"not identified"} else {"selected"},"sections":sections})
+            }).collect::<Vec<_>>();
+            let boundaries=clauses.iter().enumerate().map(|(i,c)|json!({"clause_id":extraction.clauses[i].clause_id,"number":c.number,"article":c.article,"parent":c.parent,"headings":c.headings,"opening":c.opening})).collect::<Vec<_>>();
+            reports.push(json!({"alias":alias,"policy":VERSION,"model_calls":0,"normalized_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&normalized).unwrap())),"chunked_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&chunked).unwrap())),"clauses":extraction.clauses.len(),"categories":selected,"section_boundaries":boundaries,"summary":summary,"citations":citations,"delivered":wire,"delivered_units":count,"total_units":lines.len(),"source_reconstruction":"passed","page_coverage":"passed"}));
+            println!("CONTRACT_REPLAY {alias}: {} source clauses, {} of {} render units delivered; source reconstruction and coverage passed",extraction.clauses.len(),count,lines.len());
+        }
+        let report = json!({"input_sha256":format!("{:x}",Sha256::digest(&bytes)),"input_scope":"saved normalized and chunked sources; Connect descriptor is a public test fixture, not original PDF provenance", "cases":reports});
+        std::fs::write(
+            std::env::var("DOC_SUM_CONTRACT_REPLAY_OUTPUT").unwrap(),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+    }
 }

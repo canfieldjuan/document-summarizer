@@ -1,9 +1,9 @@
 //! Page furniture is excluded as original byte ranges, before quote packing.
 use super::*;
 
-pub(super) struct Furniture {
+pub(in crate::pipeline::summary) struct Furniture {
     retained: HashMap<String, Vec<(usize, usize)>>,
-    pub(super) excluded_pages: HashSet<u32>,
+    pub(in crate::pipeline::summary) excluded_pages: HashSet<u32>,
 }
 
 struct Candidate {
@@ -112,11 +112,14 @@ fn running_label(text: &str, page: u32) -> bool {
 }
 
 impl Furniture {
-    pub(super) fn retained_ranges(&self, block_id: &str) -> &[(usize, usize)] {
+    pub(in crate::pipeline::summary) fn retained_ranges(
+        &self,
+        block_id: &str,
+    ) -> &[(usize, usize)] {
         &self.retained[block_id]
     }
 
-    pub(super) fn new(document: &NormalizedDocument) -> Self {
+    pub(in crate::pipeline::summary) fn new(document: &NormalizedDocument) -> Self {
         let mut candidates = Vec::new();
         for page in &document.pages {
             for (block_index, block) in page.content.iter().enumerate() {
@@ -243,13 +246,13 @@ impl Furniture {
         }
     }
 
-    pub(super) fn has_retained_text(&self, block: &NormalizedBlock) -> bool {
+    pub(in crate::pipeline::summary) fn has_retained_text(&self, block: &NormalizedBlock) -> bool {
         self.retained[&block.block_id]
             .iter()
             .any(|&(start, end)| !block.text[start..end].trim().is_empty())
     }
 
-    pub(super) fn warning(&self) -> Option<PipelineWarning> {
+    pub(in crate::pipeline::summary) fn warning(&self) -> Option<PipelineWarning> {
         if self.excluded_pages.is_empty() {
             return None;
         }
@@ -262,7 +265,7 @@ impl Furniture {
         })
     }
 
-    pub(super) fn segment(
+    pub(in crate::pipeline::summary) fn segment(
         &self,
         block: &NormalizedBlock,
         analysis_version: &str,

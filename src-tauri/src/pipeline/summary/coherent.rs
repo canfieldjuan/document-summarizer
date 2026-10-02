@@ -5,10 +5,10 @@
 use super::*;
 
 mod budget;
-mod page_furniture;
+pub(super) mod page_furniture;
 mod semantic_support;
 mod trim;
-mod whole_clauses;
+pub(super) mod whole_clauses;
 pub(super) use trim::verify_source_contributions;
 
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
