@@ -1,8 +1,8 @@
 # Contract view: key terms first, then the full source-clause list
 
 Status: policy revision 3 accepted in comment 5945128686 and confirmed by the
-operator in this session. Implement after this contract-only commit; freeze before
-any unseen-contract access. Independent review and qualification remain open.
+operator in this session. Implemented and frozen at `edb29fd` before any
+unseen-contract access. Independent review and qualification remain open.
 Operator direction: [PR111 comment 5938758874](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5938758874).
 This document supersedes the earlier combined source-repair/extraction plan.
 Acceptance: [PR111 comment 5943290721](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5943290721).
@@ -456,7 +456,82 @@ Do not substitute prior branch test results or a helper-only replay for the new
 production path. Independent review checks the A/B selections and both negative
 regressions before the implementation can be called complete.
 
-## Implementation summary
+## Policy-3 implementation and regression receipt
+
+Contract-only revision: `642345937154293808159110ec10a027fe1e8b82`.
+Implementation and freeze: `edb29fdbdd41ad564158f6fb8fe7cc9ab49eda6b`.
+The source files, public fixtures and contract documents were hashed at that
+commit before this A/B regression and before opening any unseen document.
+The local mode-600 freeze manifest is `contract-policy3-freeze.json`.
+
+All four `revised_policy_` regressions failed first for their intended class:
+false parties selection, payment parent cut at wrapped `30 days`, missing
+combined match, and missing uppercase whitespace ARTICLE. All four pass after
+implementation, including valid-input controls. Rejected ARTICLE forms are
+asserted not to create an article boundary, not merely to produce no match.
+
+Validation: Contract filter 35 passed, 0 failed, 7 ignored; shared whole-clause
+8 passed; furniture 8 passed with 1 ignored; workspace 11 passed. Frontend build,
+Rust fmt and strict all-target/all-feature Clippy passed. The final additional
+ARTICLE negative assertion passed in the focused 4-test rerun and strict Clippy.
+The General source implementation and alias table remain byte-identical to
+published baseline `f8fa549`. Existing ASCII and multibyte cap fixtures start with
+uppercase text so they still exercise valid numbered clauses under the new rule.
+
+Saved A/B inputs have identical source hashes to the policy-2 regression:
+
+| Alias | Source clauses | Delivered render units | Regression result |
+| --- | ---: | ---: | --- |
+| A | 64 | 69/69 | Wrong parties selection removed; sentence tail remains with predecessor |
+| B | 191 | 197/197 | Wrapped numeric cross-reference retained as continuation, not a clause start |
+
+| Category | A selected sections | B selected sections |
+| --- | ---: | ---: |
+| parties | 0 | 1 |
+| payment | 1 | 2 |
+| term/renewal | 0 | 0 |
+| termination | 1 | 1 |
+| insurance | 1 | 1 |
+| liability/indemnity | 2 | 1 |
+
+These are selection counts, **not correctness ratings**. Reconstructed source
+and citations plus delivery coverage passed, with zero model calls. The raw
+local regression and checks are `policy3-ab-regression.json` and
+`policy3-ab-regression-checks.json`, both mode 600. No private wording is published.
+
+Known limits remain: uppercase number-led address/date/cross-reference lines can
+still look like numeric clauses. Combined matching can select a whole mixed-topic
+section; one B payment selection is a fees section mixed with other obligations.
+Independent review must judge those labels and extents. This regression does not
+establish zero wrong labels, complete section boundaries or full topic coverage.
+The screened unseen set must supply qualification; no C-onward source or manifest
+was opened or searched for, and the held-out run has not started.
+
+Cold diff audit for this revision:
+
+- `docs/PR-CLAUSE-EXTRACTION.md` and `docs/CONTRACTS.md`: accepted rule revision,
+  policy identity and explicit unseen gate; committed before implementation.
+- `summary/coherent/whole_clauses.rs::{contract_number,ends_source_unit,article_title}`:
+  uppercase remainder, preceding-unit guard and uppercase whitespace ARTICLE
+  recognition in the existing Contract view. General code is unchanged.
+- `summary/contract_extraction.rs::{VERSION,heading_matches,tests}`: policy 3,
+  whole-conjunct matching over the unchanged table, fail-first/both-side fixtures,
+  and valid uppercase cap inputs.
+- `connect/provider.rs` test fixture only: uppercase oversized child text retains
+  the same production provider byte-limit failure test. Runtime code is unchanged.
+
+boundary-probe: wrapped sentence tail and lowercase numeric continuation remain
+in their original clauses; true titles/numeric children remain admitted. Terminal
+punctuation, standalone structural lines, block/page starts, all approved heading
+conjunctions and explicit/whitespace ARTICLE forms are covered. Mixed-case ARTICLE,
+non-alias prose, empty/punctuation-only candidates and invalid ordinals stay out.
+
+effect-trace: prevent wrong parties labels and severed payment sections | shared
+source boundary admission before section ancestry/selection | declared fail-first
+public tests, valid controls and frozen A/B regression demonstrate the two repairs.
+Validation alone is not used as proof of semantic boundary accuracy.
+
+## Historical policy-2 implementation summary
 
 Implemented at `6e3c375709689130c707aca8eb727a50835b6120`, after the contract-only
 amendment `281301f`, main reconciliation `ff877cc` and canonical contract `83bae74`.
@@ -569,10 +644,10 @@ identical text cannot reuse another document's IDs; this is not an endurance tes
 
 ## Gap audit
 
-NOT DONE for merge. Policy 2 local checks did not establish correct boundaries.
-Policy 3 implementation/public regressions and the separate unseen-contract gate
-are pending under the accepted revision above. Required
-exact-head CI, independent review of the selections/negative regressions, and
-completion of the summary-fidelity review prerequisite remain. The selector's reported
+NOT DONE for merge. Policy 3 implementation and local regressions are complete.
+The unseen-contract gate, required exact-head CI, independent review of the
+selections/negative regressions and summary-fidelity review prerequisite remain.
+Stop before the held-out run; the screened private manifest must be supplied
+after operator confirmation. A/B are regression evidence only. The selector's reported
 layout/topic limits are unchanged. No fresh PDF ingestion, installed GUI proof,
 new model qualification or broad duplicate CI suite is claimed.
