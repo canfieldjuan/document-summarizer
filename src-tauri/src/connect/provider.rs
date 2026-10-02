@@ -2556,7 +2556,7 @@ mod tests {
             let processing = store::mark_processing(&conn, &job.job_id).unwrap();
             let text = if oversized {
                 format!(
-                    "1. Payment\n1.1 {}\n2. Other. Must not leapfrog the payment section.",
+                    "1. Payment\n1.1 {}.\n2. Other. Must not leapfrog the payment section.",
                     "Printed words ".repeat(90_000)
                 )
             } else {
