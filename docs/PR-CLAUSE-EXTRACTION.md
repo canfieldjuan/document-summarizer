@@ -15,6 +15,16 @@ field labels and opening titles to uncertainty. It also never upgrades an
 admitted Roman inventory root to Heading. Existing tests encode that defect.
 The published 6e6b2b6 lock is invalidated for unseen qualification.
 
+Contract revision from reproduced body-context failures: marker words inside a
+wrapped sentence and long mixed-case list-item bodies are continuations, not
+new section openers. Unknown structural/ordinal lines must start a source unit
+and have a plausible heading remainder (title shape or short unpunctuated
+heading). TOC trailing-number recognition requires a numbered heading; bare
+trailing numbers require actual TOC context or dot leaders. This avoids amount
+fields, dated footers and document identifiers. The public body-context probe
+failed on all eight classes before this correction. The canonical Roman ordinal
+is cached once and reused by inventory admission rather than reparsed.
+
 Required change surface: ReadLine and cached classification finalization in
 whole_clauses.rs; public regression fixtures and policy identity in
 contract_extraction.rs. Admitted Roman roots are reliable Heading boundaries.
