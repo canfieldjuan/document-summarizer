@@ -1,23 +1,71 @@
 # Contract view: key terms first, then the full source-clause list
 
-Current status (2026-10-02): C-G ran under policy 3.0.1 and failed the
-observed zero-wrong-label gate. Its replacement private evidence packet awaits
-independent review. The bare-Roman revision below is a proposal only; no
-production rule changed. The next status paragraph is the earlier freeze
-receipt, before C-G access.
+Current status (2026-10-02): operator-directed origin uncertainty revision is
+implemented and locked at selection policy 3.1.0, source identity 3.0.2. A-O are
+regression inputs now. All nine historical wrong slots abstain. Full inventory
+and provenance are unchanged. New unseen EDGAR qualification and independent
+review remain pending; PR111 remains draft. Stop before the fresh unseen batch.
 
-Status: policy revision 3 accepted in comment 5945128686 and confirmed by the
-operator in this session. The `edb29fd` freeze is superseded by the implemented
-combined-heading narrowing, frozen at `f2f26ae`. Independent confirmation of
-that replacement freeze and qualification remain open. No unseen source has
-been opened.
-Operator direction: [PR111 comment 5938758874](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5938758874).
-This document supersedes the earlier combined source-repair/extraction plan.
-Acceptance: [PR111 comment 5943290721](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5943290721).
-The two required amendments were committed separately in `281301f`, before
-implementation. PR111 remains a draft; acceptance authorized implementation,
-not completion of the summary-fidelity review prerequisite. The acceptance
-thread itself is cleared by review reply 4161807793.
+## Origin regression lock receipt
+
+Tested code commit: `ddcc0fddc31f4a987a10bb7d1411a0fd4a67882b`.
+Public Contract tests: 25 passed, 0 failed, 1 ignored; format and strict Clippy
+passed. Final fresh A-O and same-identity replay: 2 passed, 0 failed. Every case
+has zero model calls, successful reload and complete delivery coverage. Clause
+IDs, text, headings, evidence IDs, quote ranges and provenance exactly match the
+frozen 3.0.2 baseline on identical normalized/chunk identities. Fresh inventories
+also match; only selected-section delivery units are withdrawn.
+
+Durable private artifacts (sha256, aliases only):
+
+- `baseline-raw`: `7e5cffe30c9a53ba72c55f3d2e13b473c0cf0f555c8861daf116c52f5919d213`
+- `new-raw`: `f2822a3c6e4e2c6771b68f51bbe2147c9358134ad59d52ee3ea9a74b75967573`
+- `inventory-replay`: `1115bc8cb3940d16f599ae586ac22ed4d13f0c449d46315a981f69ee2956da17`
+- `category-origin-comparison`: `e0d74670d745f260167a2692eebe211d7057974ce0479f815c6e054c8d8e5d04`
+- `execution-receipt`: `e136e2c3a3d0f7d29ea842d963a65c871f4e6e5909fe6586e0f23e3b0915a638`
+
+The changed slots below all become `not identified`. All other categories are
+unchanged, including 15 identified slots. The 25 additional withdrawals are the
+conservative cost of refusing uncertified boundaries; this revision makes no
+recall improvement. Each row's source event and uncertainty flag are retained
+with the private comparison. Headings and source text remain in the full list.
+
+| Alias | Category | Change | Origin cause |
+|---|---|---|---|
+| A | termination | additional withdrawal | unsupported standalone title |
+| A | insurance | additional withdrawal | unsupported standalone title |
+| A | liability/indemnity | additional withdrawal | unsupported standalone title |
+| B | parties | additional withdrawal | unsupported standalone title |
+| B | payment | additional withdrawal | unsupported standalone title |
+| B | insurance | additional withdrawal | unsupported standalone title; unsupported/split ARTICLE boundary |
+| C | parties | additional withdrawal | unsupported standalone title |
+| D | parties | additional withdrawal | unsupported standalone title |
+| D | termination | additional withdrawal | unsupported standalone title |
+| E | parties | additional withdrawal | unsupported standalone title |
+| E | term/renewal | additional withdrawal | unsupported standalone title |
+| E | termination | additional withdrawal | unsupported standalone title |
+| E | insurance | additional withdrawal | unsupported standalone title |
+| F | parties | additional withdrawal | Roman heading with uncertified boundary; unsupported standalone title |
+| F | payment | historical wrong | Roman heading with uncertified boundary; unsupported/split EXHIBIT boundary |
+| F | term/renewal | additional withdrawal | Roman heading with uncertified boundary |
+| F | termination | historical wrong | Roman heading with uncertified boundary |
+| F | liability/indemnity | additional withdrawal | unsupported standalone title |
+| G | liability/indemnity | additional withdrawal | unsupported standalone title |
+| H | payment | historical wrong | Roman heading with uncertified boundary |
+| H | term/renewal | historical wrong | Roman heading with uncertified boundary; unsupported standalone title |
+| H | termination | additional withdrawal | unsupported standalone title |
+| H | liability/indemnity | historical wrong | Roman heading with uncertified boundary; unsupported standalone title |
+| I | parties | additional withdrawal | unsupported standalone title |
+| I | payment | historical wrong | Roman heading with uncertified boundary; unsupported standalone title; unsupported/split APPENDIX boundary |
+| L | parties | additional withdrawal | unsupported standalone title; unsupported/split EXHIBIT boundary |
+| L | payment | additional withdrawal | unsupported/split EXHIBIT boundary |
+| L | liability/indemnity | additional withdrawal | unsupported standalone title |
+| M | parties | additional withdrawal | unsupported standalone title |
+| M | termination | additional withdrawal | unsupported standalone title |
+| N | parties | historical wrong | TOC run; unsupported standalone title; unsupported/split ARTICLE boundary |
+| N | payment | historical wrong | TOC run; unsupported/split ARTICLE boundary |
+| N | termination | historical wrong | TOC run; unsupported/split ARTICLE boundary |
+| O | parties | additional withdrawal | TOC run; unsupported standalone title; unsupported/split EXHIBIT boundary |
 
 ## Accepted origin uncertainty revision (operator direction)
 
