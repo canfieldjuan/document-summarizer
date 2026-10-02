@@ -6,7 +6,7 @@ use crate::pipeline::contracts::{
     ContractTermCategory, ExtractedContractClause,
 };
 
-pub(super) const VERSION: &str = "contract-extraction-2.0.0";
+pub(super) const VERSION: &str = "contract-extraction-3.0.0";
 const RUNTIME: &str = "deterministic-source-extraction";
 
 fn invalid() -> PipelineFailure {
@@ -317,6 +317,11 @@ fn heading_matches(category: ContractTermCategory, heading: &str) -> bool {
         ],
     };
     headings.contains(&normalized.as_str())
+        || normalized
+            .split([',', ';'])
+            .flat_map(|part| part.split(" and "))
+            .flat_map(|part| part.split(" or "))
+            .any(|part| headings.contains(&part.trim()))
 }
 
 fn select_key_terms(
@@ -593,6 +598,215 @@ mod tests {
     }
 
     #[test]
+    fn revised_policy_wrapped_title_stays_with_its_sentence() {
+        let (extraction, _, _) = output("wrapped-title", &["10. General\n10.1 These duties are agreed between the\nParties.\n10.2 Performance. Deliver the goods."]);
+        assert!(
+            selected(&extraction, ContractTermCategory::Parties).is_empty(),
+            "wrapped sentence tail must not select an unrelated parties section"
+        );
+        assert!(extraction.clauses[1]
+            .text
+            .ends_with("between the\nParties."));
+        assert!(extraction.clauses[2].text.starts_with("10.2 Performance."));
+
+        for ending in [".", ":", ";", "?", "!", ")"] {
+            let text = format!("10. General\n10.1 Prior provision ends here{ending}\nParties\n10.2 Named entities sign.");
+            let extraction = output("real-title", &[&text]).0;
+            assert_eq!(
+                selected(&extraction, ContractTermCategory::Parties).len(),
+                1,
+                "terminal {ending}"
+            );
+        }
+        for previous in ["10.", "10. General", "GENERAL TERMS", "Article X - GENERAL"] {
+            let text = format!("{previous}\nParties\n10.2 Named entities sign.");
+            assert!(
+                !selected(
+                    &output("structural-predecessor", &[&text]).0,
+                    ContractTermCategory::Parties
+                )
+                .is_empty(),
+                "{previous}"
+            );
+        }
+        assert_eq!(
+            selected(
+                &output(
+                    "page-start",
+                    &[
+                        "10. General\n10.1 Prior text continues",
+                        "Parties\n10.2 Named entities sign."
+                    ]
+                )
+                .0,
+                ContractTermCategory::Parties
+            )
+            .len(),
+            1
+        );
+        let (mut normalized, _) =
+            fixture("block-start", &["10. General\n10.1 Prior text continues"]);
+        let mut next = normalized.pages[0].content[0].clone();
+        next.block_id = "block-start-second".into();
+        next.text = "Parties\n10.2 Named entities sign.".into();
+        normalized.pages[0].content.push(next);
+        assert!(whole_clauses::contract_sources(&normalized)
+            .iter()
+            .any(|c| c.headings.iter().any(|h| h == "Parties")));
+    }
+
+    #[test]
+    fn revised_policy_wrapped_number_preserves_payment_parent() {
+        let (extraction, _, _) = output("wrapped-number", &["5. Payment\n5.1 Client shall pay within\n30 days of invoice.\n5.2 Approval is required.\n6. Other. Next section."]);
+        let payment = selected(&extraction, ContractTermCategory::Payment);
+        assert_eq!(
+            payment.len(),
+            3,
+            "wrapped number must not close the payment parent"
+        );
+        assert!(payment[1].text.contains("within\n30 days of invoice."));
+        assert!(payment[2].text.starts_with("5.2 Approval"));
+        assert!(!payment.iter().any(|c| c.text.contains("Next section")));
+        for text in [
+            "5.4 of the prior section",
+            "30 days after acceptance",
+            "7 (calendar days)",
+        ] {
+            let text =
+                format!("5. Payment\n5.1 Conditions continue\n{text}\n5.2 Approval is required.");
+            assert_eq!(
+                selected(
+                    &output("number-continuation", &[&text]).0,
+                    ContractTermCategory::Payment
+                )
+                .len(),
+                3
+            );
+        }
+        assert_eq!(
+            selected(
+                &output(
+                    "number-control",
+                    &["5. Payment\n5.1 Client shall pay.\n5.2 Approval is required."]
+                )
+                .0,
+                ContractTermCategory::Payment
+            )
+            .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn revised_policy_combined_headings_match_whole_conjuncts_only() {
+        use ContractTermCategory::*;
+        for separator in [" and ", ", ", " or ", "; ", " & "] {
+            let text = format!(
+                "5. Payment{separator}Insurance. Printed terms apply.\n6. Other. Excluded."
+            );
+            let extraction = output("combined", &[&text]).0;
+            let payment = selected(&extraction, Payment);
+            assert_eq!(
+                payment.len(),
+                1,
+                "combined separator {separator:?} must match payment"
+            );
+            assert_eq!(payment, selected(&extraction, Insurance));
+            assert_eq!(extraction.clauses.len(), 2);
+        }
+        for title in [
+            "Assignment and Payment",
+            "Insurance and Bonds",
+            "Term and Termination",
+            "Fees and Payment",
+            "Commencement and Duration",
+            "Liability and Indemnity",
+        ] {
+            let text = format!("5. {title}. Printed terms apply.");
+            assert!(
+                output("mixed", &[&text])
+                    .0
+                    .key_terms
+                    .iter()
+                    .any(|t| !t.selections.is_empty()),
+                "{title}"
+            );
+        }
+        for title in [
+            "payment history example",
+            "Repayment and Payment history example",
+            "Terminated or Insurance records example",
+            "Payment|Insurance",
+            "",
+            "and",
+            ", ; &",
+        ] {
+            assert!(
+                ContractTermCategory::ALL
+                    .iter()
+                    .all(|category| !heading_matches(*category, title)),
+                "{title}"
+            );
+        }
+        let extraction = output(
+            "duplicate-conjunct",
+            &["5. Payment and Payment. Printed terms apply."],
+        )
+        .0;
+        assert_eq!(extraction.key_terms[1].selections.len(), 1);
+    }
+
+    #[test]
+    fn revised_policy_whitespace_article_requires_uppercase_keyword_and_title() {
+        use ContractTermCategory::Payment;
+        for header in [
+            "ARTICLE 10    PAYMENTS",
+            "ARTICLE X\tPAYMENTS",
+            "ARTICLE 10 PAYMENTS:",
+        ] {
+            let text = format!("{header}\n10.1 Progress. Pay after acceptance.\n10.2 Conditions apply.\nARTICLE 11    OTHER\n11.1 Excluded.");
+            let payment = selected(&output("article-spaces", &[&text]).0, Payment)
+                .iter()
+                .map(|c| c.text.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                payment.len(),
+                3,
+                "whitespace ARTICLE must select its whole section: {header}"
+            );
+            assert!(!payment.iter().any(|c| c.contains("Excluded")));
+        }
+        for header in [
+            "Article 5 shall apply",
+            "Article 5 PAYMENT",
+            "ARTICLE 5 Payment",
+            "ARTICLE 5 123",
+            "ARTICLE 0 PAYMENTS",
+            "ARTICLE 1000 PAYMENTS",
+            "ARTICLE IIII PAYMENTS",
+        ] {
+            let text = format!("{header}\n5.1 Printed obligation.");
+            let (normalized, _) = fixture("article-miss", &[&text]);
+            assert!(
+                whole_clauses::contract_sources(&normalized)
+                    .iter()
+                    .all(|clause| clause.article.is_none()),
+                "rejected text must not open an article: {header}"
+            );
+            assert!(
+                selected(&output("article-miss", &[&text]).0, Payment).is_empty(),
+                "{header}"
+            );
+        }
+        let extraction = output(
+            "explicit-article",
+            &["Article V - Payment\n5.1 Pay after acceptance."],
+        )
+        .0;
+        assert_eq!(selected(&extraction, Payment).len(), 2);
+    }
+
+    #[test]
     fn accepted_heading_forms_and_aliases_select_whole_source() {
         use ContractTermCategory::*;
         for (heading, categories) in [
@@ -836,7 +1050,7 @@ mod tests {
         for delta in [-1isize, 0, 1] {
             let target = (MAX_SUMMARY_TEXT_BYTES as isize + delta) as usize;
             let padding = target - fixed;
-            let text = format!("5. Payment\n5.1 {}Body.", "x".repeat(padding));
+            let text = format!("5. Payment\n5.1 {}Body.", "X".repeat(padding));
             let (summary, units) = make(&text);
             assert_eq!(units[0].text.len(), target);
             assert!(units[0].text.contains("5.1"));
@@ -860,7 +1074,7 @@ mod tests {
         assert!(small.text.starts_with("Key terms"));
         let text = format!(
             "5. Payment\n5.1 {}Body.",
-            "é".repeat(MAX_SUMMARY_TEXT_BYTES / 2)
+            "É".repeat(MAX_SUMMARY_TEXT_BYTES / 2)
         );
         let (summary, units) = make(&text);
         assert!(JobResult::from_summary_claim_lines(

@@ -2557,7 +2557,7 @@ mod tests {
             let text = if oversized {
                 format!(
                     "1. Payment\n1.1 {}\n2. Other. Must not leapfrog the payment section.",
-                    "printed words ".repeat(90_000)
+                    "Printed words ".repeat(90_000)
                 )
             } else {
                 "Agreement between two public fixture parties.\n1. Payment\n1.1 Client shall pay within thirty days.\n1.2 Payment is subject to acceptance.\n2. Term and Termination. Either party may end the term on notice.\n3. Other. Keep all source clauses.".into()

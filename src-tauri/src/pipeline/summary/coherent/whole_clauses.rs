@@ -177,7 +177,7 @@ fn append(
     order.push((block.block_id.clone(), active, text.to_string()));
 }
 
-// Contract policy v2 exposes source ranges without changing General's versioned
+// Contract policy v3 exposes source ranges without changing General's versioned
 // segmentation above. All ranges follow normalized document order and F1 filtering.
 #[derive(Clone, Debug)]
 pub(in crate::pipeline::summary) struct SourceFragment {
@@ -210,6 +210,19 @@ impl SourceClause {
     }
 }
 
+fn contract_marker(marker: &str) -> Option<Vec<String>> {
+    let marker = marker.trim();
+    let marker = marker.strip_suffix(['.', ')']).unwrap_or(marker);
+    let parts = marker.split('.').collect::<Vec<_>>();
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || p.len() > 3 || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(parts.into_iter().map(str::to_string).collect())
+}
+
 fn contract_number(line: &str) -> Option<(Vec<String>, &str)> {
     let line = line
         .trim()
@@ -217,16 +230,16 @@ fn contract_number(line: &str) -> Option<(Vec<String>, &str)> {
         .unwrap_or(line.trim())
         .trim_start();
     let (marker, rest) = line.split_once(char::is_whitespace)?;
-    let marker = marker.strip_suffix(['.', ')']).unwrap_or(marker);
-    let parts = marker.split('.').collect::<Vec<_>>();
-    if rest.trim().is_empty()
-        || parts
-            .iter()
-            .any(|p| p.is_empty() || p.len() > 3 || !p.bytes().all(|b| b.is_ascii_digit()))
+    // Preserve F2's uppercase-first guard: a wrapped "30 days" is not a clause.
+    if !rest
+        .trim_start()
+        .chars()
+        .next()
+        .is_some_and(char::is_uppercase)
     {
         return None;
     }
-    Some((parts.into_iter().map(str::to_string).collect(), rest.trim()))
+    Some((contract_marker(marker)?, rest.trim()))
 }
 
 fn contract_title(text: &str) -> (&str, bool) {
@@ -266,6 +279,22 @@ fn leading_title(text: &str) -> bool {
         })
 }
 
+// Only structural lines without trailing body qualify as a preceding heading.
+// A numbered sentence ending "between the" must still fail this boundary check.
+fn ends_source_unit(text: &str) -> bool {
+    if text.trim_end().ends_with(['.', ':', ';', '?', '!', ')'])
+        || contract_marker(text.trim().strip_prefix('§').unwrap_or(text.trim())).is_some()
+        || article_title(text).is_some()
+        || leading_title(text)
+    {
+        return true;
+    }
+    contract_number(text).is_some_and(|(_, rest)| {
+        let (title, has_body) = contract_title(rest);
+        !has_body && leading_title(title)
+    })
+}
+
 fn article_title(text: &str) -> Option<(u32, &str)> {
     let (kind, rest) = text.trim().split_once(char::is_whitespace)?;
     if !kind.eq_ignore_ascii_case("article") {
@@ -276,10 +305,22 @@ fn article_title(text: &str) -> Option<(u32, &str)> {
     let ordinal = &rest[..end];
     let rest = rest[end..].trim_start();
     let separator = rest.chars().next()?;
-    if !matches!(separator, '-' | '–' | '—' | ':') {
-        return None;
-    }
-    let title = rest[separator.len_utf8()..].trim();
+    let title = if matches!(separator, '-' | '–' | '—' | ':') {
+        rest[separator.len_utf8()..].trim()
+    } else {
+        // Admit whitespace-only articles only with uppercase keyword/title.
+        // Punctuation does not supply the required alphabetic title character.
+        if kind != "ARTICLE"
+            || !rest.chars().any(char::is_alphabetic)
+            || !rest
+                .chars()
+                .filter(|c| c.is_alphabetic())
+                .all(char::is_uppercase)
+        {
+            return None;
+        }
+        rest
+    };
     if title.is_empty() {
         return None;
     }
@@ -413,7 +454,10 @@ pub(in crate::pipeline::summary) fn contract_sources(
         }
         let mut leading = None;
         let mut numbered = contract_number(text);
-        if numbered.is_none() && leading_title(text) && i + 1 < lines.len() {
+        let starts_unit = i == 0
+            || lines[i - 1].block_id != fragment.block_id
+            || ends_source_unit(line_text(&lines[i - 1]));
+        if numbered.is_none() && starts_unit && leading_title(text) && i + 1 < lines.len() {
             if let Some(next) = contract_number(line_text(&lines[i + 1])) {
                 leading = Some((
                     fragment.clone(),
