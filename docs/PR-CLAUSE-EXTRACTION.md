@@ -19,13 +19,13 @@ implementation. PR111 remains a draft; acceptance authorized implementation,
 not completion of the summary-fidelity review prerequisite. The acceptance
 thread itself is cleared by review reply 4161807793.
 
-## Proposed bare-Roman boundary revision (pending review)
+## Accepted bare-Roman boundary revision
 
 The C-G run exposed a source-boundary failure under policy 3.0.1: a bare Roman
 section heading can be appended to the preceding numbered clause. Exact source
 reconstruction then preserves that wrong extent in a selected key term. This
-proposal changes the shared Contract source view, not the category aliases or
-rendering. It requires review before implementation and a new policy identity.
+revision changes the shared Contract source view, not the category aliases or
+rendering. Operator acceptance: Continue in this session. Implementation requires a new policy identity.
 
 Recognize a complete retained line of the form `<Roman>. <TITLE>` as a
 top-level section boundary only when all of these hold: the Roman ordinal is
