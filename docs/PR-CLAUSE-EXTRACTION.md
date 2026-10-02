@@ -1,8 +1,9 @@
 # Contract view: key terms first, then the full source-clause list
 
 Status: policy revision 3 accepted in comment 5945128686 and confirmed by the
-operator in this session. Implemented and frozen at `edb29fd` before any
-unseen-contract access. Independent review and qualification remain open.
+operator in this session. The `edb29fd` freeze is superseded by the required
+combined-heading narrowing below. Refreeze after implementation; independent
+review and qualification remain open. No unseen source has been opened.
 Operator direction: [PR111 comment 5938758874](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5938758874).
 This document supersedes the earlier combined source-repair/extraction plan.
 Acceptance: [PR111 comment 5943290721](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5943290721).
@@ -24,7 +25,7 @@ repeats these decisions, so it proves consistency, not correct clause boundaries
 
 Required change surface: the shared Contract source view in `whole_clauses.rs`,
 the existing `heading_matches` owner, their public regression fixtures, and
-policy identity `contract-extraction-3.0.0`. General's versioned behavior, the
+policy identity `contract-extraction-3.0.1`. General's versioned behavior, the
 alias table, output shapes, model/runtime settings and all other scope stay fixed.
 
 The only policy amendments are the preceding-unit guard, uppercase numeric
@@ -50,6 +51,42 @@ example`. Positive controls retain real titles, numeric children, existing
 aliases, each approved conjunction, and uppercase ARTICLE headings. Probe every
 preceding-unit route (terminal punctuation, marker, heading, block/page start)
 without changing General or adding a second parser.
+
+### Combined-heading contract revision before qualification
+
+Required review corrections: [comment 5945181625](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5945181625)
+and [comment 5945257806](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5945257806).
+
+Root cause: `heading_matches` treats every conjunct as an independent title.
+Coordinated modifiers can instead share a final head noun: `Payment and
+Performance Bonds` and `Duration and Frequency of Services` must not select
+payment or term/renewal. The prior B regression's mixed-topic fees selection is
+a wrong label, not an acceptable known limit.
+
+Required change surface: narrow the existing matcher, add public negative and
+positive production-extraction fixtures, and use policy identity 3.0.1 in code
+and the canonical contract. Commit this design document alone first. Keep all
+five accepted items, with this narrowing of item 3: always match the final
+conjunct; match earlier conjuncts only when the final conjunct is a single
+whitespace-delimited word. Preserve exact whole-heading aliases. An empty final
+conjunct cannot enable earlier matches. No changes to the alias table, source
+boundaries, General, storage/API shapes, renderer, model settings or dependencies.
+
+Verification plan: fail-first public negatives for the two shared-head examples
+and `Permits, Fees, Licenses, and Other Obligations`. Retain `Invoicing and
+Payment`, `Survival and Termination`, `Insurance and Bonds`, `Term and
+Termination` (both categories), and `Fees and Payment Terms` (final alias).
+`Termination, Suspension or Assignment of the Subcontract` becomes an explained
+miss. Assert rejected headings remain in the full source inventory. Run the
+adjacent Contract tests, formatting and strict Clippy, then commit and hash the
+rules and fixtures again before A/B regression. B's mixed fees payment selection
+must disappear and its combined termination heading becomes an explained miss.
+
+Assumptions/blockers: single-word final conjunct is the approved conservative
+composition rule, not proof of semantic accuracy. No held-out source or manifest
+access; publish the replacement freeze for confirmation before C-G qualification.
+A/B remain regression-only. Implementation/cold diff/gap receipts follow the
+tests; the PR is NOT DONE for merge until all qualification/review gates pass.
 
 ## Root cause
 
@@ -247,8 +284,11 @@ with the word `and` surrounded by spaces, then collapse whitespace. Markers and
 heading delimiters have already been separated by the rules above. Never change displayed source text.
 Keep the exact whole-heading match and also split normalized headings on
 ` and `, `,`, ` or `, `;` and `&` (already normalized to `and`). Trim each
-conjunct and match the **entire conjunct** against the same closed table. Any
-matching conjunct selects that category once; one section can serve several
+conjunct and match the **entire conjunct** against the same closed table. Always
+test the final conjunct. Test earlier conjuncts only when the final conjunct is
+a single whitespace-delimited word; an empty final conjunct does not qualify.
+This prevents shared multi-word heads from making a modifier look like a topic.
+An admitted match selects that category once; one section can serve several
 categories without adding inventory records. `payment history example` remains
 unmatched. This changes composition, not the alias table:
 
