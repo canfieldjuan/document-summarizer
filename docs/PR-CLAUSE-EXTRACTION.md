@@ -32,7 +32,11 @@ top-level section boundary only when all of these hold: the Roman ordinal is
 canonical uppercase I through MMMCMXCIX; the title has at least one alphabetic
 character and every alphabetic character is uppercase; and the next nonblank
 retained line starts with a decimal clause marker whose first component equals
-the Roman ordinal. The ordinal and title are used only for recognition. Keep
+the Roman ordinal. Alternatively, recognize a canonical uppercase Roman title
+when its ordinal is exactly one more than the last recognized bare Roman
+section. Roman I requires the matching-decimal route. Skipped or repeated
+ordinals and sentence-case titles cannot use the sequence route.
+The ordinal and title are used only for recognition. Keep
 the exact source line, its page and its original bytes in the new section.
 The new section resets numeric ancestry, contains its following numbered
 descendants, and ends before the next recognized top-level section. An
