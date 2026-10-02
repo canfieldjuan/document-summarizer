@@ -19,6 +19,66 @@ implementation. PR111 remains a draft; acceptance authorized implementation,
 not completion of the summary-fidelity review prerequisite. The acceptance
 thread itself is cleared by review reply 4161807793.
 
+## Accepted origin uncertainty revision (operator direction)
+
+Root cause: the shared Contract reader treats unrecognized structural lines as
+ordinary continuation. It loses boundary confidence before key-term selection.
+The bare-Roman patch introduced a literal period-space recognizer, missing tabs;
+its separate decimal lookahead parser duplicated grammar with different guards.
+
+Required surface: classify each retained line once at the shared source owner.
+Use whitespace-neutral recognition (tabs are spaces) while retaining original
+bytes. Cache decimal, ARTICLE, Roman, title and source-unit classifications.
+Distinguish reliable headings, unsupported heading-like boundaries, and ordinary
+text. Record uncertainty on affected source clauses at this origin; selection
+consumes this signal and never re-parses selected text. If any candidate section
+for a category crosses uncertainty, the entire category is not identified,
+including opening parties. TOC runs, split ARTICLE lines, unsupported Roman or
+letter headings, and appendix transitions produce uncertainty. Existing Roman
+inventory roots are conservative heading-like boundaries for key terms.
+
+Full inventory is frozen: clause order, text, headings, source ranges, provenance
+and IDs retain policy 3.0.2 behavior. This requires retaining inventory admission
+rules inside the single reader, not a second parser. Selection policy changes to
+3.1.0; source identity remains 3.0.2. No General, furniture, alias, rendering,
+wire/schema, dependency or storage changes. No recall improvements.
+
+Special-case inventory across prior revisions, with disposition:
+
+- Independent Contract segmentation/furniture owner (initial revision): already
+  removed by the shared source revision; do not restore it.
+- Decimal components, optional section symbol/trailing period/parenthesis,
+  three-digit limit and uppercase remainder: retained inventory admission;
+  consolidate into one cached decimal reading.
+- Wrapped-number guard and wrapped sentence-tail/preceding-unit guard: preserve
+  inventory behavior, remove repeated previous/next line reparsing.
+- Leading title plus decimal child, synthesized missing numeric parent,
+  strict-child ancestry and repeated numbers under ARTICLE: retained inventory
+  semantics, consume cached classifications.
+- ARTICLE separators, uppercase whitespace ARTICLE, canonical Roman ordinal,
+  numeric ordinal limits and terminal punctuation: retained inventory grammar;
+  unsupported/split forms mark uncertainty rather than silently certifying terms.
+- Bare Roman uppercase/canonical/matching-decimal/consecutive-ordinal routes:
+  retain existing inventory shape, remove the duplicate decimal parser and
+  literal-whitespace confidence assumption; these roots/crossings are uncertain
+  for key terms pending a later inventory revision.
+- Opening-between fallback, first decimal 1/ARTICLE I/Roman I: retain eligibility,
+  but require an uncertainty-free opening range.
+- Exact heading aliases including pricing/initial term/hold harmless/plural
+  liability and normalized ampersand: retained topic grammar, not boundary logic.
+- Conjunction/comma/semicolon/or matching and shared multiword final-head guard:
+  retained topic grammar; no selected-text rescan or extra category denylist.
+- Furniture disclosure, atomic selected-section delivery and byte/page coverage
+  guards: retain delivery behavior; they do not decide boundary confidence.
+
+Verification: public fail-first fixtures for tab/space Roman crossings, split
+ARTICLE, TOC entries and appendix transitions must become not identified. Clean
+numeric/ARTICLE controls must retain selections. Full inventory equality before
+and after is required, including IDs on the same normalized document. Run A-O
+fresh as regression only, identify the A/B copies against the old policy, show
+all nine historical wrong slots abstain, explain every other category change,
+then commit/hash the rules and stop before the operator's new unseen batch.
+
 ## Accepted bare-Roman boundary revision
 
 The C-G run exposed a source-boundary failure under policy 3.0.1: a bare Roman
