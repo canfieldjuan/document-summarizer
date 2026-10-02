@@ -1,13 +1,62 @@
 # Contract view: key terms first, then the full source-clause list
 
-Current status (2026-10-02): the overbroad 3.1.0 lock is superseded by the
-origin correction, policy 3.1.1 and source identity 3.0.2. All seven wrong H/I/N
-slots at 3.0.2 abstain; F's already-correct admitted-Roman results are retained.
-Of the 25 extra withdrawals, 23 are restored exactly. L/payment still abstains
-at a retained EXHIBIT-number marker, whose role needs independent adjudication;
-O/parties abstains at TOC material in the opening. All other selections and the
-full inventory are unchanged. Independent review and fresh unseen qualification
-remain pending. PR111 is draft. Stop before the operator's new EDGAR batch.
+Current status (2026-10-02): independent v3 review confirmed one unsafe
+selection at the 3.1.1 lock: S liability loses a sentence-ending exception.
+The operator approved the truncation-origin correction in PR comment 5961721085.
+The v4 inputs remain withheld until the replacement lock is independently
+confirmed. A-W are regression inputs only. No recall or alias work is authorized.
+
+## Truncation-origin correction contract (policy 3.1.2)
+
+Root cause: `ReadLine` classification and leading-title admission treat a new
+block as a new source unit even when the previous retained line ends mid-sentence.
+A capitalized continuation followed by a numbered heading becomes that heading's
+leading title. The preceding section is truncated without an uncertainty signal.
+S section 15 and its public two-page fixture reproduce the omitted exception.
+
+Required surface: `whole_clauses.rs` retained-line reader and source assembly;
+public Contract fixtures in `contract_extraction.rs`; policy metadata and these
+contract docs. A unit start depends on the preceding retained line's cached
+`ends_unit` across block/page boundaries (or start of document). Before an
+admitted article, Roman, numeric or leading-title boundary starts a new source,
+mark the preceding source uncertain if its final retained line did not end a
+unit. Selection consumes the existing flag. No downstream text rescan.
+
+This authorized correction supersedes the earlier frozen-inventory restriction
+only where removal of the block-start exception repairs source grouping. Source
+text is neither rewritten nor removed; ranges/provenance remain exact. The
+3.0.2 content-addressed identity recipe stays unchanged: unchanged records keep
+their IDs; changed text, ranges or ordinals obtain their derived IDs. Policy
+analysis/synthesis/verification becomes 3.1.2.
+
+Cleanup: remove both block-start bypasses (classification and leading-title
+assembly). Reuse cached line metadata for the truncation signal; add no number
+parser, selected-text heuristic, category-specific exception or boundary rescan.
+Earlier paragraph/title-shape and Roman guards remain unless this change proves
+them redundant. No speculative simplification of heading grammar.
+
+Explicit non-scope: General, page-furniture filtering, heading aliases, recall,
+UI/rendering, wire/schema/storage, dependencies and v4 sources. No new input
+access before operator confirmation of the final fingerprint.
+
+Assumptions/blockers: the previous retained line already excludes page furniture.
+Existing standalone titles and marker-only lines count as completed structural
+units. A capitalized body tail must not gain a boundary solely from page/block
+placement. Independent review and new unseen qualification remain required.
+
+Verification: fail-first public cross-page and cross-block caps-tail fixtures;
+clean titles following completed sentences; unfinished bodies before numeric,
+ARTICLE and Roman headings; parent/child and mixed-category behavior. Reproduce
+S on its saved identities and fresh PDF, then replay A-W and explain every
+selection/source-inventory change. Run focused Contract/whole-clause tests,
+format and strict Clippy. Lock the four affected files, post fingerprint, stop.
+
+## Historical accepted 3.1.1 receipt
+
+The reviewer confirmed the 3.1.1 lock and A-O reconciliation, including L/payment
+(page furniture, separate issue 117) and O/parties (TOC abstention). The v3 run
+then exposed the truncation defect above; the following receipt describes the
+prior A-O regression only.
 
 ## Corrected 3.1.1 regression receipt
 
