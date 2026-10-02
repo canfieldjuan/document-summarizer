@@ -1,10 +1,46 @@
 # Contract view: key terms first, then the full source-clause list
 
 Current status (2026-10-02): operator-directed origin uncertainty revision is
-implemented and locked at selection policy 3.1.0, source identity 3.0.2. A-O are
+previously published at selection policy 3.1.0, source identity 3.0.2. That lock
+is invalidated by confirmed classifier defects below. A-O are
 regression inputs now. All nine historical wrong slots abstain. Full inventory
 and provenance are unchanged. New unseen EDGAR qualification and independent
 review remain pending; PR111 remains draft. Stop before the fresh unseen batch.
+
+## Required classifier correction (review findings, operator approved)
+
+Root cause: my 3.1.0 classifier equates failed title admission with an unknown
+section boundary. That promotes wrapped sentence tails, long body sentences,
+field labels and opening titles to uncertainty. It also never upgrades an
+admitted Roman inventory root to Heading. Existing tests encode that defect.
+The published 6e6b2b6 lock is invalidated for unseen qualification.
+
+Required change surface: ReadLine and cached classification finalization in
+whole_clauses.rs; public regression fixtures and policy identity in
+contract_extraction.rs. Admitted Roman roots are reliable Heading boundaries.
+Explicit unrecognized Roman/letter and ARTICLE/SECTION/EXHIBIT/APPENDIX/
+SCHEDULE/ATTACHMENT/ANNEX markers and TOC evidence remain uncertain. Generic
+heading-like detection requires a source-unit start, at most eight all-caps
+words, no terminal sentence punctuation, no label colon, and a position after
+the opening block. Titles rejected as wrapped body remain Text. Inventory
+admission and bytes stay 3.0.2; selection policy becomes 3.1.1.
+
+Explicit non-scope: full-list grouping/text/IDs/ranges/provenance, General,
+furniture, topic aliases, rendering, wire/schema/storage and dependencies.
+No downstream text rescan. Shared cached metadata controls certainty only.
+
+Assumptions/blockers: F payment/termination were historical wrong slots at
+3.0.1 but were corrected by admitted Roman boundaries in 3.0.2. Preserve those
+correct selections rather than forcing historical slots to abstain forever.
+New unseen qualification and independent review stay pending.
+
+Verification plan: declare public fail-first probes for admitted matching and
+sequence Roman roots, wrapped tail, long all-caps body, label and opening title.
+Retain negative unsupported/tab/title-case/prose Roman, split ARTICLE, appendix
+and TOC tests and clean controls. Replay the frozen A-O inputs, account for all
+25 additional withdrawals individually, preserve full inventory on identical
+normalized IDs, then lock and stop. Record reproduce/isolate/explain/fix/prove/
+prevent-regression per affected slot using public fixtures per source class.
 
 ## Origin regression lock receipt
 
