@@ -597,7 +597,7 @@ pub(super) fn versioned_page_scope(
     let omission = if omission.is_none()
         && matches!(
             analysis_version,
-            ANALYSIS_VERSION | PRE_CLAUSE_ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION
+            ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION
         )
         && catalog.candidates.is_empty()
     {
@@ -1142,10 +1142,7 @@ pub(super) fn validate_plan(
             (Some(actual), None)
                 if matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION
-                        | PRE_CLAUSE_ANALYSIS_VERSION
-                        | SENTENCE_ANALYSIS_VERSION
-                        | QUOTE_BOUNDARY_ANALYSIS_VERSION
+                    ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION | QUOTE_BOUNDARY_ANALYSIS_VERSION
                 ) && scope
                     .quote_candidates
                     .iter()
@@ -1173,7 +1170,6 @@ pub(super) fn validate_plan(
                 if matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
-                        | PRE_CLAUSE_ANALYSIS_VERSION
                         | SENTENCE_ANALYSIS_VERSION
                         | QUOTE_BOUNDARY_ANALYSIS_VERSION
                         | PUNCTUATION_ANALYSIS_VERSION
@@ -1249,7 +1245,7 @@ pub(super) fn validate_plan(
     let mut boundary_omitted_units = 0usize;
     if matches!(
         analyzed.analysis_version.as_str(),
-        ANALYSIS_VERSION | PRE_CLAUSE_ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION
+        ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION
     ) {
         for page in &analyzed.inspected_pages {
             let (_, _, _, _, omitted_source_units) =
@@ -1283,7 +1279,6 @@ pub(super) fn validate_plan(
     if matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
-            | PRE_CLAUSE_ANALYSIS_VERSION
             | SENTENCE_ANALYSIS_VERSION
             | QUOTE_BOUNDARY_ANALYSIS_VERSION
             | PUNCTUATION_ANALYSIS_VERSION

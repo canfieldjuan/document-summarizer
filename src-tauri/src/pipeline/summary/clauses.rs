@@ -349,45 +349,6 @@ mod tests {
     }
 
     #[test]
-    fn cross_page_clause_context_reaches_the_verification_wire_prompt() {
-        let normalized = document(&["10.2 Substantial completion\nPayment is due when the work is substantially complete.\nThe owner may withhold", "disputed amounts until correction. Such payment is not final payment.\n\n10.3 Final payment\nFinal payment requires acceptance."]);
-        let blocks = normalized
-            .pages
-            .iter()
-            .flat_map(|p| &p.content)
-            .map(|b| (b.block_id.as_str(), b))
-            .collect::<HashMap<_, _>>();
-        let units = build(&blocks);
-        assert_eq!(units.len(), 2);
-        assert_eq!(units[0].fragments.len(), 2);
-        let quote = "Such payment is not final payment.";
-        let evidence = EvidenceItem {
-            evidence_id: "original-evidence".into(),
-            chunk_id: "chunk".into(),
-            block_id: "block-2".into(),
-            claim_text: quote.into(),
-            exact_quote: quote.into(),
-            source_span: normalized.pages[1].content[0].source.clone(),
-        };
-        let claim = CitedClaim {
-            claim_id: "original-claim".into(),
-            text: "Final payment is due at substantial completion.".into(),
-            evidence_ids: vec![evidence.evidence_id.clone()],
-        };
-        let mut prompt = verification_prompt(&[claim], std::slice::from_ref(&evidence)).unwrap();
-        add_clause_context(&mut prompt, &[evidence], &normalized).unwrap();
-        let (wire, _) = identifiers::verification_prompt(&prompt.claims).unwrap();
-        let wire: Value = serde_json::from_str(&wire).unwrap();
-        let supplied = wire["claims"][0]["evidence"][0]["full_clause"]
-            .as_str()
-            .unwrap();
-        assert!(supplied.starts_with("10.2 Substantial completion"));
-        assert!(supplied.contains("disputed amounts until correction"));
-        assert!(!supplied.contains("10.3 Final payment"));
-        assert_eq!(wire["claims"][0]["evidence"][0]["exact_quote"], quote);
-    }
-
-    #[test]
     fn footer_without_blank_separator_preserves_following_clause() {
         let doc = document(&[
             "Copyright 2020. All rights reserved. Licensed reproduction only.\n4. Payment\nPayment is due after acceptance.",

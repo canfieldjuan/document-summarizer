@@ -1170,6 +1170,7 @@ mod tests {
                 result.citations.claims.len(),
                 &analyzed.omissions,
                 &normalized,
+                &result.summary.warnings,
             )
         );
     }

@@ -329,7 +329,6 @@ fn conservative_verification_claim_fits(
         evidence: evidence
             .iter()
             .map(|item| PromptVerificationEvidence {
-                full_clause: None,
                 evidence_id: item.evidence_id.clone(),
                 exact_quote: item.exact_quote.clone(),
             })
