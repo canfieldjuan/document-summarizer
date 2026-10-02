@@ -394,6 +394,7 @@ struct ReadLine<'a> {
     generic_heading_like: bool,
     opening_cover: bool,
     ends_unit: bool,
+    starts_unit: bool,
     kind: LineKind,
     toc: bool,
     toc_entry: bool,
@@ -471,7 +472,6 @@ impl<'a> ReadLine<'a> {
         let ends_unit = text.trim_end().ends_with(['.', ':', ';', '?', '!', ')'])
             || contract_marker(text.trim().strip_prefix('§').unwrap_or(text.trim())).is_some()
             || article.is_some()
-            || title
             || (numbered
                 && decimal.as_ref().is_some_and(|(_, rest)| {
                     let (title, has_body) = contract_title(rest);
@@ -487,6 +487,7 @@ impl<'a> ReadLine<'a> {
             generic_heading_like,
             opening_cover,
             ends_unit,
+            starts_unit: false,
             kind,
             toc,
             toc_entry,
@@ -580,15 +581,17 @@ pub(in crate::pipeline::summary) fn contract_sources(
     }
     let mut in_opening = true;
     for index in 0..read.len() {
-        let starts_unit = index == 0
-            || lines[index - 1].block_id != lines[index].block_id
-            || read[index - 1].ends_unit;
+        let starts_unit = index == 0 || read[index - 1].ends_unit;
+        read[index].starts_unit = starts_unit;
         let leading_admitted = read[index].title
             && starts_unit
             && read.get(index + 1).is_some_and(|next| next.numbered);
         if read[index].kind == LineKind::Heading || leading_admitted {
             if read[index].kind != LineKind::HeadingLike {
                 read[index].kind = LineKind::Heading;
+            }
+            if leading_admitted || read[index].roman.is_some() {
+                read[index].ends_unit = true;
             }
             in_opening = false;
         } else if read[index].numbered {
@@ -623,7 +626,7 @@ pub(in crate::pipeline::summary) fn contract_sources(
             toc_page = Some(page);
         }
         let uncertain = read[i].kind == LineKind::HeadingLike || toc_page.is_some();
-        if uncertain {
+        if uncertain || (read[i].kind == LineKind::Heading && !read[i].starts_unit) {
             if let Some(previous) = clauses.last_mut() {
                 previous.boundary_uncertain = true;
             }
@@ -647,9 +650,7 @@ pub(in crate::pipeline::summary) fn contract_sources(
         }
         let mut leading = None;
         let mut numbered = read[i].number();
-        let starts_unit =
-            i == 0 || lines[i - 1].block_id != fragment.block_id || read[i - 1].ends_unit;
-        if numbered.is_none() && starts_unit && read[i].title && i + 1 < lines.len() {
+        if numbered.is_none() && read[i].starts_unit && read[i].title && i + 1 < lines.len() {
             if let Some(next) = read[i + 1].number() {
                 leading = Some((
                     fragment.clone(),

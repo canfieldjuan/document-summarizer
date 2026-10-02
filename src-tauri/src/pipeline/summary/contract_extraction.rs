@@ -6,7 +6,7 @@ use crate::pipeline::contracts::{
     ContractTermCategory, ExtractedContractClause,
 };
 
-pub(super) const VERSION: &str = "contract-extraction-3.1.1";
+pub(super) const VERSION: &str = "contract-extraction-3.1.2";
 const SOURCE_VERSION: &str = "contract-extraction-3.0.2";
 const RUNTIME: &str = "deterministic-source-extraction";
 
@@ -515,6 +515,101 @@ pub(super) fn render_units(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn truncation_reader_retains_caps_tails_across_units() {
+        let prefix = "15. Limitation of Liability: Neither party is liable unless it acted in an";
+        let caps_prefix = "15. Limitation of Liability: Neither party is liable\nUNLESS SUCH PARTY HAS ACTED IN AN";
+        let tail = "INTENTIONALLY WRONGFUL OR GROSSLY NEGLIGENT MANNER.\n16. Force Majeure: Delays are excused.";
+        let mut failures = Vec::new();
+        for (name, first, same_page) in [
+            ("cross-page", prefix, false),
+            ("cross-block", prefix, true),
+            ("caps-predecessor", caps_prefix, true),
+        ] {
+            let (mut normalized, mut chunked) = fixture(name, &[first, tail]);
+            if same_page {
+                let mut second = normalized.pages.pop().unwrap();
+                for block in &mut second.content {
+                    block.source.page_start = 1;
+                    block.source.page_end = 1;
+                }
+                chunked.chunks[1].source_spans =
+                    second.content.iter().map(|b| b.source.clone()).collect();
+                normalized.pages[0].content.extend(second.content);
+            }
+            let (extraction, _) = records(&chunked, &normalized).unwrap();
+            let terms = selected(&extraction, ContractTermCategory::LiabilityIndemnity);
+            let complete = terms.len() == 1
+                && terms[0].text.contains("GROSSLY NEGLIGENT MANNER.")
+                && !terms[0].text.contains("16.");
+            println!("TRUNCATION_TAIL {name}: complete={complete}");
+            if !complete {
+                failures.push(name);
+            }
+        }
+        let same_block = format!("{caps_prefix}\n{tail}");
+        let extraction = output("same-block-caps", &[&same_block]).0;
+        let terms = selected(&extraction, ContractTermCategory::LiabilityIndemnity);
+        let complete = terms.len() == 1
+            && terms[0].text.contains("GROSSLY NEGLIGENT MANNER.")
+            && !terms[0].text.contains("16.");
+        println!("TRUNCATION_TAIL same-block: complete={complete}");
+        if !complete {
+            failures.push("same-block");
+        }
+        assert!(
+            failures.is_empty(),
+            "caps exception truncated: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn truncation_reader_marks_unfinished_source_at_admitted_heading() {
+        let mut failures = Vec::new();
+        for (name, next) in [
+            ("numbered", "3. Other. Other obligations."),
+            ("article", "ARTICLE III - OTHER\nOther obligations."),
+            ("roman", "III. OTHER\n3.1 Other obligations."),
+        ] {
+            let first = "2. Payment. Pay only after the client has";
+            let extraction = output(name, &[first, next]).0;
+            let abstains = selected(&extraction, ContractTermCategory::Payment).is_empty();
+            println!("TRUNCATION_BOUNDARY {name}: abstains={abstains}");
+            if !abstains {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "unfinished source selected: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn truncation_reader_preserves_completed_title_controls() {
+        for last in [".", ":", ";", "?", "!", ")"] {
+            let first = format!("1. Services. Deliver work{last}");
+            let next = "Payment\n2.1 Pay after acceptance.\n3. Other. Other obligations.";
+            let extraction = output("completed-title", &[&first, next]).0;
+            let terms = selected(&extraction, ContractTermCategory::Payment);
+            assert!(!terms.is_empty(), "clean title rejected after {last}");
+            assert!(terms
+                .iter()
+                .any(|c| c.text.contains("Pay after acceptance.")));
+        }
+        let first = "1. Payment\n1.1 Pay for work.";
+        let extraction = output(
+            "complete-parent",
+            &[first, "2. Insurance\n2.1 Maintain coverage."],
+        )
+        .0;
+        assert!(!selected(&extraction, ContractTermCategory::Payment).is_empty());
+        assert!(!selected(&extraction, ContractTermCategory::Insurance).is_empty());
+        let extraction = output("mixed-truncated", &["1. Payment. Pay upon receipt.\n2. Payment. Pay only after\n3. Insurance. Maintain coverage."]).0;
+        assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
+        assert!(!selected(&extraction, ContractTermCategory::Insurance).is_empty());
+    }
+
+    #[test]
     fn public_boundary_slot_proofs() {
         let fixtures = [
             ("tab-payment", ContractTermCategory::Payment, "2. Payment\n2.1 Pay after acceptance.\nIII.\tOTHER\n3.1 Other obligations.", "2. Payment\n2.1 Pay after acceptance.\n3. Other. Excluded."),
@@ -670,7 +765,12 @@ mod tests {
                 "terminal {ending}"
             );
         }
-        for previous in ["10.", "10. General", "GENERAL TERMS", "Article X - GENERAL"] {
+        for previous in [
+            "10.",
+            "10. General",
+            "GENERAL TERMS.",
+            "Article X - GENERAL",
+        ] {
             let text = format!("{previous}\nParties\n10.2 Named entities sign.");
             assert!(
                 !selected(
@@ -694,7 +794,7 @@ mod tests {
                 ContractTermCategory::Parties
             )
             .len(),
-            1
+            0
         );
         let (mut normalized, _) =
             fixture("block-start", &["10. General\n10.1 Prior text continues"]);
@@ -702,9 +802,12 @@ mod tests {
         next.block_id = "block-start-second".into();
         next.text = "Parties\n10.2 Named entities sign.".into();
         normalized.pages[0].content.push(next);
-        assert!(whole_clauses::contract_sources(&normalized)
+        let sources = whole_clauses::contract_sources(&normalized);
+        assert!(!sources
             .iter()
             .any(|c| c.headings.iter().any(|h| h == "Parties")));
+        assert!(sources[1].boundary_uncertain);
+        assert_eq!(sources[1].fragments.len(), 2);
     }
 
     #[test]
@@ -724,11 +827,20 @@ mod tests {
             "30 days after acceptance",
             "7 (calendar days)",
         ] {
-            let text =
+            let unfinished =
                 format!("5. Payment\n5.1 Conditions continue\n{text}\n5.2 Approval is required.");
+            let extraction = output("number-continuation", &[&unfinished]).0;
+            let expected = if text.ends_with(')') { 3 } else { 0 };
+            assert_eq!(
+                selected(&extraction, ContractTermCategory::Payment).len(),
+                expected
+            );
+            assert!(extraction.clauses[1].text.contains(text));
+            let completed =
+                format!("5. Payment\n5.1 Conditions continue\n{text}.\n5.2 Approval is required.");
             assert_eq!(
                 selected(
-                    &output("number-continuation", &[&text]).0,
+                    &output("number-completed", &[&completed]).0,
                     ContractTermCategory::Payment
                 )
                 .len(),
@@ -905,9 +1017,6 @@ mod tests {
     #[test]
     fn classifier_body_context_and_amount_fields() {
         let cases = [
-            ("amount-field", "1. Termination\n1.1 Give written notice.\nPayment Terms Net 30\n2. Other. Other obligations.", ContractTermCategory::Termination),
-            ("footer-page-number", "1. Termination\n1.1 Give written notice.\n2026 Public Service Agreement 6\n2. Other. Other obligations.", ContractTermCategory::Termination),
-            ("footer-identifier", "1. Termination\n1.1 Give written notice.\nSubcontract 022500\n2. Other. Other obligations.", ContractTermCategory::Termination),
             ("wrapped-exhibit-reference", "1. Payment\n1.1 Pay at the rates in\nExhibit A. Submit an invoice for services.\n2. Other. Other obligations.", ContractTermCategory::Payment),
             ("wrapped-article-reference", "1. Insurance\n1.1 Coverage is pursuant to\nArticle 11. Certificates protect the client.\n2. Other. Other obligations.", ContractTermCategory::Insurance),
             ("wrapped-section-reference", "1. Termination\n1.1 Apply the terms of\nSection 6. The parties shall give written notice.\n2. Other. Other obligations.", ContractTermCategory::Termination),
@@ -926,6 +1035,29 @@ mod tests {
             failures.is_empty(),
             "body context falsely marked uncertain: {failures:?}"
         );
+    }
+
+    #[test]
+    fn unterminated_fields_before_heading_abstain_without_becoming_headings() {
+        for field in [
+            "Payment Terms Net 30",
+            "2026 Public Service Agreement 6",
+            "Subcontract 022500",
+        ] {
+            let text = format!(
+                "1. Termination\n1.1 Give written notice.\n{field}\n2. Other. Other obligations."
+            );
+            let extraction = output("field-boundary", &[&text]).0;
+            assert!(selected(&extraction, ContractTermCategory::Termination).is_empty());
+            assert_eq!(extraction.clauses.len(), 3);
+            assert!(extraction.clauses[1].text.contains(field));
+            let completed = text.replace(field, &format!("{field}."));
+            assert!(!selected(
+                &output("field-completed", &[&completed]).0,
+                ContractTermCategory::Termination
+            )
+            .is_empty());
+        }
     }
 
     #[test]
