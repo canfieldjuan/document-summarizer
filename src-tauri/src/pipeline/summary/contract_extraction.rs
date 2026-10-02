@@ -514,6 +514,35 @@ pub(super) fn render_units(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_boundary_slot_proofs() {
+        let fixtures = [
+            ("tab-payment", ContractTermCategory::Payment, "2. Payment\n2.1 Pay after acceptance.\nIII.\tOTHER\n3.1 Other obligations.", "2. Payment\n2.1 Pay after acceptance.\n3. Other. Excluded."),
+            ("tab-term", ContractTermCategory::TermRenewal, "2. Term\n2.1 The agreement continues.\nIII.\tOTHER\n3.1 Other obligations.", "2. Term\n2.1 The agreement continues.\n3. Other. Excluded."),
+            ("tab-liability", ContractTermCategory::LiabilityIndemnity, "2. Liability\n2.1 Cover losses.\nIII.\tOTHER\n3.1 Other obligations.", "2. Liability\n2.1 Cover losses.\n3. Other. Excluded."),
+            ("appendix-payment", ContractTermCategory::Payment, "2. Payment. Pay after acceptance.\nAPPENDIX A\nI. Services\nOther obligations.\n3. Other. Excluded.", "2. Payment. Pay after acceptance.\n3. Other. Excluded."),
+            ("toc-opening", ContractTermCategory::Parties, "Agreement between Alpha and Beta.\nTABLE OF CONTENTS\nARTICLE I\nSERVICES\n1.1 Services 3", "Agreement between Alpha and Beta.\n1. Services\n1.1 Deliver services."),
+            ("toc-payment", ContractTermCategory::Payment, "TABLE OF CONTENTS\nARTICLE II\nPAYMENT\n2.1 Terms 3", "2. Payment\n2.1 Pay after acceptance.\n3. Other. Excluded."),
+            ("toc-termination", ContractTermCategory::Termination, "TABLE OF CONTENTS\nARTICLE III\nTERMINATION\n3.1 Terms 5", "3. Termination\n3.1 Give written notice.\n4. Other. Excluded."),
+        ];
+        let mut failures = Vec::new();
+        for (name, category, bad, good) in fixtures {
+            let positive = !selected(&output(name, &[good]).0, category).is_empty();
+            let abstained = selected(&output(name, &[bad]).0, category).is_empty();
+            println!(
+                "PUBLIC_SLOT {name}: clean_positive={positive}, uncertain_abstained={abstained}"
+            );
+            assert!(positive, "clean positive control failed: {name}");
+            if !abstained {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "unrecognized boundary fixtures retained wrong selections: {failures:?}"
+        );
+    }
+
     use super::*;
     use crate::pipeline::contracts::{
         DocumentChunk, NormalizedBlockKind, NormalizedPage, SourceType,
