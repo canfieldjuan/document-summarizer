@@ -1,10 +1,13 @@
 # Contract view: key terms first, then the full source-clause list
 
-Status: revised contract for review; key-terms implementation has not started.
+Status: accepted contract implemented at `6e3c375`; independent review and the
+existing summary-first merge hold remain open.
 Operator direction: [PR111 comment 5938758874](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5938758874).
 This document supersedes the earlier combined source-repair/extraction plan.
-Commit this revision on its own and stop for contract review before implementing
-key terms. PR111 remains a draft with its blocking threads open.
+Acceptance: [PR111 comment 5943290721](https://github.com/canfieldjuan/document-summarizer/pull/111#issuecomment-5943290721).
+The two required amendments were committed separately in `281301f`, before
+implementation. PR111 remains a draft; acceptance authorized implementation,
+not release of the summary-first merge hold.
 
 ## Root cause
 
@@ -86,11 +89,11 @@ terms must not remove, reorder, shorten or mutate that full inventory.
 "Unchanged" here means unchanged by the key-term layer over the shared source
 owner; the old PR111 parser's output is not a second authority.
 
-### Deterministic selection policy for review
+### Accepted deterministic selection policy
 
-These are **proposed Contract extraction rules**, not capabilities already
-present in F2. Extend the shared source owner to expose heading ranges, section
-ancestry and ordered source fragments under a new extraction policy version.
+These Contract extraction rules extend F2 through the shared source owner with
+heading ranges, section ancestry and ordered source fragments under a new
+extraction policy version.
 Do not change General's current segmentation or historical artifact dispatch.
 Category matching consumes this view; it must not become another parser.
 
@@ -309,18 +312,14 @@ frozen and PR116's hold is independent of this contract.
 
 ## Assumptions/blockers
 
-The operator approved the product direction: key terms first, then the full
-clause list. The detailed matcher and data/delivery rules above are **proposed
-for contract review**, not already implemented or accepted. Heading boundaries
-and whole-section enumeration require extending the shared owner, and the narrow
-opening rule does not promise complete party identification. A/B replay must
-report actual selections and known misses rather than infer a result.
+The accepted view is key terms first, then the full clause list. The amendments
+and canonical contract were committed before implementation. The shared-source
+view and all public grammar/table fixtures were frozen at `6e3c375` before A/B
+replay. No rule was changed after observing real selections.
 
-PR111 still has the summary-first hold, duplicate-owner review thread and merge
-conflicts. A contract-only commit does not resolve them. After contract review,
-reconcile with the shared F1/F2 owners and complete the agreed summary-fidelity
-review prerequisite before claiming extraction is ready to merge. No fresh A/B
-inference is required for the deterministic extraction replay.
+The summary-first hold and independent review of this implementation remain
+merge gates. General/F3 verification is outside this PR. No fresh model inference
+is required for this deterministic extraction replay.
 
 ## Verification plan
 
@@ -402,29 +401,115 @@ regressions before the implementation can be called complete.
 
 ## Implementation summary
 
-This revision changes **only this contract**. It specifies the approved view
-order, fixed categories, exact-source references, explicit heading grammar,
-complete-section selection, opening-parties fallback, frozen aliases,
-validation/delivery behavior, shared ownership and settling evidence. The
-existing implementation at `847ca3e` has no key-terms feature. No branch
-reconciliation, source deletion, tests, inference or product changes were made
-for this contract revision.
+Implemented at `6e3c375709689130c707aca8eb727a50835b6120`, after the contract-only
+amendment `281301f`, main reconciliation `ff877cc` and canonical contract `83bae74`.
+The former `summary/clauses.rs` is deleted. Contract policy v2 uses F1 retained
+source ranges and F2's shared module, preserving General's existing policy.
+The typed six-category view, persisted validation, desktop projection and
+Connect text all resolve the same source records. Selected sections are atomic
+for bounded delivery; full-list clauses remain individual units. Existing
+furniture-only-page disclosure is propagated to coverage checks.
+
+### Verification receipt
+
+- Declared fail-first `contract_key_terms_persist_and_deliver_before_full_clause_list`
+  failed because the saved output had no key-terms prefix; it now passes,
+  including reload and rejection of changed text with recomputed summary and
+  citation hashes/metadata.
+- Declared fail-first `contract_source_furniture_disclosure_preserves_delivery_coverage`
+  failed on missing existing-source warning; it now passes after propagation.
+- `cargo test --quiet --locked --lib contract_`: 31 passed, 0 failed, 7 ignored.
+  This includes public grammar/alias/hierarchy negatives, independent document
+  identities, mutation rejection, byte-cap boundaries and the production-stage
+  provider completion test with both ordinary and oversized selected sections.
+- Adjacent filters: `whole_clause` 8 passed; `furniture_` 8 passed, 1 ignored;
+  `pipeline::workspace::tests` 11 passed; `connect::contracts::tests` 5 passed.
+  Each of the bounded-prefix and below-page-coverage provider regressions passed.
+- `npm run build`, `cargo fmt --all --check` and
+  `cargo clippy --locked --all-targets --all-features -- -D warnings`: passed.
+- Private saved-source replay (ignored test explicitly enabled): 1 passed.
+  No LLM, model server or inference configuration was used or changed.
+
+### A/B replay after freeze
+
+| Alias | Source clauses | Delivered render units | Text bytes | Model calls |
+| --- | ---: | ---: | ---: | ---: |
+| A | 67 | 71/71 | 57,368 | 0 |
+| B | 183 | 186/186 | 92,266 | 0 |
+
+All current shared-source clauses equal the final inventory texts. Adding key
+terms adds only references, not inventory records. Source reconstruction,
+citation validation and actual delivered-reference page coverage passed.
+The earlier prototype receipt records 65/181 clauses but contains counts only;
+that is not a per-record equivalence claim across the changed source policies.
+
+| Category | A: sections / clause references | B: sections / clause references |
+| --- | --- | --- |
+| parties | 1 / 3 | 1 / 1 |
+| payment | not identified | not identified |
+| term/renewal | not identified | not identified |
+| termination | not identified | not identified |
+| insurance | 1 / 4 | 1 / 4 |
+| liability/indemnity | 2 / 8 | 1 / 3 |
+
+These misses are reported, not tuned away. The corresponding document text
+remains in the full inventory; this is not complete key-term identification or
+semantic/legal qualification.
+
+The required extent assessment found no numbered TOC in A. A's final unmatched
+section absorbs signature/attachment material; none enters a selected key term.
+B contains a numbered TOC. Its final item absorbs an unsupported ARTICLE heading,
+not a preamble in these normalized sources, and is not selected. The heading-only
+payment TOC entry is not selected. B's ending is a numbered document-enumeration
+clause with subitems, not a trailing unnumbered signature/appendix block. These
+observations do not remove the general TOC/trailing-material risks in the policy.
+
+This replay starts at saved normalized/chunked sources, not fresh PDF ingestion
+or installed GUI operation. Its Connect input descriptor is a public fixture;
+it does not establish original PDF-byte provenance. The separate public provider
+test covers production stage persistence, workspace reload, completion and
+oversized-section failure. Full requests are inapplicable: there are no model
+calls. Source hashes, exact quotes, IDs, pages, rules, raw rendered results and
+extent annotations remain in the ignored local evidence packet for review.
 
 ## Cold diff audit
 
-`docs/PR-CLAUSE-EXTRACTION.md` addresses the undefined-heading and parent-stub
-review blockers plus the recommended opening-party rule and heading aliases.
-It keeps the accepted presentation/source-validation boundaries and review gate.
-Source citations name the inspected PR head and current-main owner APIs. New
-heading/section behavior is distinguished from capabilities present in code.
-The contract-only diff must leave all source, fixtures and approved model case
-files unchanged; check that plus Markdown whitespace before committing.
+| File / owner | Change and contract trace | Verification |
+| --- | --- | --- |
+| `docs/CONTRACTS.md` | Canonical typed policy, versions, scope and delivery invariants | Contract committed before feature code; cold diff |
+| `docs/PR-CLAUSE-EXTRACTION.md` | Accepted amendments, unchanged frozen rules and this receipt | Acceptance and pre-replay freeze hashes |
+| `pipeline/contracts.rs::ContractExtraction` | Strict typed source records/selections, optional artifact fields, integrity binding | Mutation, JSON/persistence and historical workspace tests |
+| `summary/contract_extraction.rs` | Deterministic extraction, selection, authoritative rebuild, canonical atomic rendering | Public fixtures, mutations, cap boundaries, A/B replay |
+| `summary/coherent/whole_clauses.rs::contract_sources` | Versioned source view and section ancestry within shared owner | Grammar, cross-page/parent/article tests; existing General whole-clause tests |
+| `summary/coherent/page_furniture.rs` | Exposes existing F1 range/warning API within summary module; no detector change | Existing furniture tests and Contract disclosure regression |
+| `summary.rs` | Contract dispatch, versions, validation, canonical rendering and unique-source prefix coverage | Persist/reload regression, provider size path, replay |
+| `pipeline/workspace.rs::SummaryView` | Typed desktop view and binding to validated citation artifact | Workspace tests and modified-output rejection |
+| `src/main.ts::renderClaims` | Key terms then full list, source IDs/citations, text-only DOM insertion | TypeScript/build plus persisted projection fixture; installed GUI not exercised |
+| `connect/provider.rs` | Public fixture for real production stage completion and oversize failure; existing runtime logic unchanged | Ordinary completion and first-section-too-large case |
+| `connect/contracts.rs`, `connect/v2.rs` | Existing test initializers explicitly have no extraction | Connect tests, strict all-target Clippy |
+| `summary/coherent.rs`, `coherent/trim.rs`, `direct.rs`, `legacy_generation.rs` | Optional-field and closed-enum plumbing; existing General algorithms unchanged | Whole-clause/furniture/workspace tests and strict Clippy |
+| Former `summary/clauses.rs` | Removed duplicate source owner | No module reference; all extraction uses shared owner |
+
+boundary-probe: accepted and unsupported layouts, heading-only section, peer
+exclusion, complete parent with nested/cross-page children, repeated numbers in
+different articles, dual-category references, changed/omitted/cross-document
+selections and checksum-consistent text tampering. UTF-8 delivery tests cover
+cap-minus-one, cap and cap-plus-one; the actual provider rejects an oversized
+first selected section without delivering a heading stub or later unit.
+
+effect-trace: key terms precede the full inventory | typed source references and
+`render_units` control persisted/Connect order; `renderClaims` consumes the same
+validated view | fail-first persisted regression, provider completion and frozen
+A/B replay demonstrate the order and source-bound content.
+
+Concurrency remains per-run existing transactions/state-version checks. Selection
+has no shared mutable document state. Interleaved public document runs prove
+identical text cannot reuse another document's IDs; this is not an endurance test.
 
 ## Gap audit
 
-NOT DONE for implementation or merge. This contract revision is ready for review.
-Pending: contract acceptance, main reconciliation and duplicate-owner removal,
-key-term implementation, failing-before/passing-after regressions, real A/B
-extraction replay and independent review, required exact-head CI, and release of
-the existing summary-first hold. Stop after publishing this separate contract
-commit; do not implement key terms while review is pending.
+NOT DONE for merge. Implementation and local verification are complete. Required
+exact-head CI, independent review of the selections/negative regressions, and
+release of the existing summary-first hold remain. The selector's reported
+layout/topic limits are unchanged. No fresh PDF ingestion, installed GUI proof,
+new model qualification or broad duplicate CI suite is claimed.
