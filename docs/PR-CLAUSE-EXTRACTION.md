@@ -66,6 +66,59 @@ S on its saved identities and fresh PDF, then replay A-W and explain every
 selection/source-inventory change. Run focused Contract/whole-clause tests,
 format and strict Clippy. Lock the four affected files, post fingerprint, stop.
 
+## 3.1.2 regression receipt
+
+Tested runtime c41452e6892c4f8bcfea09c4d64fab67caea58bf. Public truncation probes:
+0 passed/3 expected failed before; 3 passed/0 failed after. Contract suite
+36 passed/0 failed/1 ignored; General whole-clause slice8 passed/0 failed.
+Format and strict all-target/all-feature Clippy passed. A-W fresh ingestion plus
+same-identity replay:2 passed/0 failed. Every case has zero model calls, exact
+source reconstruction, successful reload and complete Connect delivery. A later
+test-only trace replay matches the original saved replay exactly.
+
+S's original omitted exception is retained in the selected section15. The cause
+was title-shape completion on a same-block caps predecessor as well as the
+independent block/page-start shortcut; both are removed. The full inventory also
+repairs W's unselected caps continuation. Public fixtures cover both layouts,
+completed-title controls, article/Roman/numeric cuts and whole-category abstention.
+
+A-W selection changes (all other slots unchanged):
+
+| Alias | Category | Result / cause |
+|---|---|---|
+| A | termination | Retains address label with preceding source; existing form noise remains |
+| A | insurance | Abstains: unfinished caps amount before numeric child |
+| B | payment | Abstains: unfinished body before numeric child |
+| B | insurance | Abstains: unfinished amount/limit and non-completing header lines |
+| D | term/renewal | Abstains: unpunctuated end before next section |
+| D | termination | Abstains: retained footer/identifier before next section |
+| L | payment | Now selects prior exact source; retained filing label is mid-sentence continuation |
+| N | payment | Now selects narrower printed2.01 section after split-parent grouping changes |
+| N | termination | Now selects narrower printed3.01 section after split-parent grouping changes |
+| S | liability/indemnity | Full exception retained in section15 |
+
+The L/N gains are incidental confidence/grouping changes, not alias/recall
+changes. They remain explicit for independent adjudication before v4 access.
+F's accepted selections and H/I abstentions are unchanged.
+
+Inventory grouping changes in A,G,M,N,R,S,W; other inventories retain exact IDs,
+text, headings and evidence references on saved identities. N changes69->59
+records and R27->22 as unsupported split titles stop being inferred parents.
+Counts in A/G/M/S/W are unchanged. All retained source text remains in order
+(after normalization of join whitespace); runtime range reconstruction is exact.
+This receipt does not claim full-inventory equality for changed groupings.
+
+Durable evidence aliases (sha256):
+
+- `regression-manifest.json`: `0deae9e6463c652de8fca110933bce39467605a323f67b8ee66edbce6d0f4cdf`
+- `run/output.json`: `33bdea91bdfe726e8cdd859b1ae676dec15dee23627f87c4c82cd1afd7cb6ec7`
+- `saved-replay.json`: `db8129e56d866a7237cdabe48f3118bb022de98a951f10fd2262201656c6ac12`
+- `comparison.json`: `f828039f63ec02a48cbb420aae94d99ddaf580099f9e377b3172fea5c10b4ac4`
+- `selection-reconciliation.json`: `fce28582fc9c02cd1375570d2b803cb97e3c81556e0f678b1bb83176a1003b20`
+- `boundary-trace.jsonl`: `0b8bd0a6609c46fc5e146060d5df38288d6df0d5ad5be9ae9fa5131190e0618e`
+- `REVIEW.md`: `1302b09aac6195d8d066e3e9261d55cb0dde137db3770fa1359038e0857044c6`
+- `execution-receipt.json`: `f9e49b43cfb4f291acd0f0e072291cc18e7d778a4e3fa927a7328157cfe627cb`
+
 ## Historical accepted 3.1.1 receipt
 
 The reviewer confirmed the 3.1.1 lock and A-O reconciliation, including L/payment
