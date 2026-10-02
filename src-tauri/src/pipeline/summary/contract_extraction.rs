@@ -866,6 +866,46 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_boundaries_cover_all_affected_term_categories() {
+        for (category, heading) in [
+            (ContractTermCategory::Payment, "Payment"),
+            (ContractTermCategory::TermRenewal, "Term and Renewal"),
+            (ContractTermCategory::Termination, "Termination"),
+            (
+                ContractTermCategory::LiabilityIndemnity,
+                "Liability and Indemnity",
+            ),
+        ] {
+            for boundary in [
+                "III.\tOTHER",
+                "III. OTHER",
+                "ARTICLE III\nOTHER",
+                "APPENDIX A\nI. Services",
+            ] {
+                let text = format!(
+                    "2. {heading}\n2.1 Operative obligation.\n{boundary}\n3.1 Other obligations."
+                );
+                assert!(selected(&output("category-boundary", &[&text]).0, category).is_empty());
+            }
+        }
+        let text = "Agreement between Alpha and Beta.\nTABLE OF CONTENTS\n1. Services\n1.1 Services 3\n2. Payment 4";
+        assert!(selected(
+            &output("opening-toc", &[text]).0,
+            ContractTermCategory::Parties
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn cached_roman_lookahead_keeps_inventory_admission() {
+        let text = "2. Payment. Pay as agreed.\nIII. OTHER\n§ 3.1 Other obligations.";
+        let extraction = output("section-symbol-lookahead", &[text]).0;
+        assert_eq!(extraction.clauses.len(), 2);
+        assert!(extraction.clauses[0].text.ends_with("III. OTHER"));
+        assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
+    }
+
+    #[test]
     fn uncertainty_abstains_the_whole_category_and_preserves_clean_siblings() {
         let text = "1. Payment. Clean obligation.\n2. Other. Other obligation.\n3. Payment. Uncertain obligation.\nAPPENDIX A\nI. Services\nUnnumbered prose.\n4. Insurance. Maintain coverage.";
         let (normalized, _) = fixture("mixed-boundary", &[text]);

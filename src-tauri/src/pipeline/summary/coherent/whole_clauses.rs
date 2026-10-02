@@ -401,6 +401,7 @@ enum LineKind {
 struct ReadLine<'a> {
     decimal: Option<(Vec<String>, &'a str)>,
     numbered: bool,
+    roman_decimal: bool,
     article: Option<(u32, &'a str)>,
     roman: Option<(u32, &'a str)>,
     title: bool,
@@ -456,6 +457,7 @@ impl<'a> ReadLine<'a> {
         Self {
             decimal,
             numbered,
+            roman_decimal: !text.trim_start().starts_with('§'),
             article,
             roman: None,
             title,
@@ -534,6 +536,7 @@ pub(in crate::pipeline::summary) fn contract_sources(
             let roman = bare_roman_title(
                 line_text(&lines[index]),
                 read.get(index + 1)
+                    .filter(|line| line.roman_decimal)
                     .and_then(|line| line.decimal.as_ref())
                     .map(|(parts, _)| parts.as_slice()),
                 last_roman,
