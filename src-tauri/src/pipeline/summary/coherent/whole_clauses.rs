@@ -392,9 +392,12 @@ struct ReadLine<'a> {
     article: Option<(u32, &'a str)>,
     roman: Option<(u32, &'a str)>,
     title: bool,
+    generic_heading_like: bool,
+    opening_cover: bool,
     ends_unit: bool,
     kind: LineKind,
     toc: bool,
+    toc_entry: bool,
 }
 
 impl<'a> ReadLine<'a> {
@@ -410,22 +413,49 @@ impl<'a> ReadLine<'a> {
         let upper = recognition.to_ascii_uppercase();
         let toc = upper == "TABLE OF CONTENTS";
         let (marker, remainder) = recognition.split_once(' ').unwrap_or((&recognition, ""));
-        let roman_or_letter = marker.strip_suffix('.').is_some_and(|ordinal| {
-            !ordinal.is_empty()
-                && (ordinal.len() == 1 && ordinal.chars().all(char::is_uppercase)
-                    || ordinal
-                        .chars()
-                        .all(|c| matches!(c, 'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M')))
-                && leading_title(remainder)
-        });
-        let structural = toc
-            || roman_or_letter
-            || matches!(
-                marker.to_ascii_uppercase().as_str(),
-                "ARTICLE" | "APPENDIX" | "EXHIBIT"
-            )
-            || (title && upper.split_whitespace().any(|word| word == "APPENDIX"));
-        let kind = if article.is_some() || numbered {
+        let ordinal = marker.trim_end_matches(['.', ')']);
+        let roman = !ordinal.is_empty()
+            && ordinal.chars().all(|c| {
+                matches!(
+                    c.to_ascii_uppercase(),
+                    'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'
+                )
+            })
+            && !remainder.is_empty();
+        let letter = marker.ends_with(['.', ')'])
+            && ordinal.len() == 1
+            && ordinal.chars().all(char::is_alphabetic)
+            && !remainder.is_empty();
+        let structural_marker = matches!(
+            marker.to_ascii_uppercase().as_str(),
+            "ARTICLE" | "SECTION" | "EXHIBIT" | "APPENDIX" | "SCHEDULE" | "ATTACHMENT" | "ANNEX"
+        );
+        let words = recognition.split_whitespace().collect::<Vec<_>>();
+        let toc_words = decimal.as_ref().map_or_else(
+            || words.clone(),
+            |(_, rest)| rest.split_whitespace().collect::<Vec<_>>(),
+        );
+        let toc_entry = recognition.contains("...")
+            || (toc_words.len() > 1
+                && toc_words
+                    .last()
+                    .is_some_and(|word| word.chars().all(|c| c.is_ascii_digit()))
+                && leading_title(toc_words[..toc_words.len() - 1].join(" ").as_str()));
+        let generic_heading_like = words.len() <= 8
+            && !recognition.ends_with(['.', ':', ';', '?', '!', ')'])
+            && recognition.chars().any(char::is_alphabetic)
+            && recognition
+                .chars()
+                .filter(|c| c.is_alphabetic())
+                .all(char::is_uppercase);
+        let opening_cover = matches!(
+            marker.to_ascii_uppercase().as_str(),
+            "EXHIBIT" | "APPENDIX" | "SCHEDULE" | "ATTACHMENT" | "ANNEX"
+        );
+        let structural = toc || roman || letter || structural_marker || toc_entry;
+        let kind = if toc || toc_entry {
+            LineKind::HeadingLike
+        } else if article.is_some() || numbered {
             LineKind::Heading
         } else if structural {
             LineKind::HeadingLike
@@ -448,9 +478,12 @@ impl<'a> ReadLine<'a> {
             article,
             roman: bare_roman_title(text),
             title,
+            generic_heading_like,
+            opening_cover,
             ends_unit,
             kind,
             toc,
+            toc_entry,
         }
     }
 
@@ -534,17 +567,34 @@ pub(in crate::pipeline::summary) fn contract_sources(
                 last_roman = Some(number);
             }
             read[index].roman = roman;
+            if roman.is_some() && !read[index].toc_entry {
+                read[index].kind = LineKind::Heading;
+            }
         }
-        if read[index].kind == LineKind::Text && read[index].title {
-            let starts_unit = index == 0
-                || lines[index - 1].block_id != lines[index].block_id
-                || read[index - 1].ends_unit;
-            read[index].kind =
-                if starts_unit && read.get(index + 1).is_some_and(|next| next.numbered) {
-                    LineKind::Heading
-                } else {
-                    LineKind::HeadingLike
-                };
+    }
+    let mut in_opening = true;
+    for index in 0..read.len() {
+        let starts_unit = index == 0
+            || lines[index - 1].block_id != lines[index].block_id
+            || read[index - 1].ends_unit;
+        let leading_admitted = read[index].title
+            && starts_unit
+            && read.get(index + 1).is_some_and(|next| next.numbered);
+        if read[index].kind == LineKind::Heading || leading_admitted {
+            if read[index].kind != LineKind::HeadingLike {
+                read[index].kind = LineKind::Heading;
+            }
+            in_opening = false;
+        } else if read[index].numbered {
+            in_opening = false;
+        } else if in_opening && read[index].opening_cover {
+            read[index].kind = LineKind::Text;
+        } else if read[index].kind == LineKind::Text
+            && read[index].generic_heading_like
+            && starts_unit
+            && !in_opening
+        {
+            read[index].kind = LineKind::HeadingLike;
         }
     }
     let mut clauses: Vec<SourceClause> = Vec::new();

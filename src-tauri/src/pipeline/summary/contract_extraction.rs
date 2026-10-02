@@ -6,7 +6,7 @@ use crate::pipeline::contracts::{
     ContractTermCategory, ExtractedContractClause,
 };
 
-pub(super) const VERSION: &str = "contract-extraction-3.1.0";
+pub(super) const VERSION: &str = "contract-extraction-3.1.1";
 const SOURCE_VERSION: &str = "contract-extraction-3.0.2";
 const RUNTIME: &str = "deterministic-source-extraction";
 
@@ -848,10 +848,86 @@ mod tests {
     }
 
     #[test]
+    fn classifier_false_withdrawals_preserve_clean_terms() {
+        let cases = [
+            ("admitted-matching-roman", "2. Payment\n2.1 Pay after acceptance.\nIII. OTHER\n3.1 Other obligations.", ContractTermCategory::Payment),
+            ("admitted-sequence-roman", "II. PAYMENT\n2.1 Pay after acceptance.\nIII. OTHER\nUnnumbered other obligations.", ContractTermCategory::Payment),
+            ("admitted-roman-term", "II. PAYMENT\n2.1 Pay after acceptance.\nIII. TERM AND TERMINATION\n3.1 Term obligations.\nIV. OTHER\n4.1 Other obligations.", ContractTermCategory::Termination),
+            ("wrapped-sentence-tail", "1. Termination\n1.1 Either party may terminate this\nAgreement.\n2. Other. Other obligations.", ContractTermCategory::Termination),
+            ("long-caps-body", "1. Insurance\n1.1 Maintain coverage:\nCONTRACTOR WILL MAINTAIN THE FOLLOWING INSURANCE POLICIES IN FULL FORCE AND EFFECT\nfor the duration.\n2. Other. Other obligations.", ContractTermCategory::Insurance),
+            ("field-label", "1. Termination\n1.1 Send notices to the following address.\nName/Title:\nAn authorized representative.\n2. Other. Other obligations.", ContractTermCategory::Termination),
+            ("opening-title", "SERVICE AGREEMENT\nAgreement between Alpha and Beta.\n1. Services\n1.1 Deliver the services.", ContractTermCategory::Parties),
+            ("opening-party-name", "ALPHA CORPORATION\nBETA CORPORATION\nAgreement between Alpha and Beta.\n1. Services\n1.1 Deliver the services.", ContractTermCategory::Parties),
+        ];
+        let failures = cases
+            .into_iter()
+            .filter_map(|(name, text, category)| {
+                selected(&output(name, &[text]).0, category)
+                    .is_empty()
+                    .then_some(name)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            failures.is_empty(),
+            "classifier falsely withdrew clean terms: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn classifier_bounds_and_unknown_markers() {
+        for boundary in [
+            "III OTHER",
+            "iii. Other",
+            "iii\tOther",
+            "A. Other",
+            "SECTION Other",
+            "SCHEDULE Other",
+            "ATTACHMENT Other",
+            "ANNEX Other",
+            "2.1 Payment ........ 3",
+            "2.1 Payment 3",
+            "II. PAYMENT 3",
+            "OTHER EXTRA SECTION TITLE WITH EIGHT TOTAL WORDS",
+        ] {
+            let text = format!("1. Payment\n1.1 Pay after acceptance.\n{boundary}\nOrdinary prose.\n3. Other. Other obligations.");
+            assert!(
+                selected(
+                    &output("unknown-boundary", &[&text]).0,
+                    ContractTermCategory::Payment
+                )
+                .is_empty(),
+                "unknown boundary passed: {boundary}"
+            );
+        }
+        for continuation in [
+            "OTHER EXTRA SECTION TITLE WITH NINE TOTAL WORDS HERE",
+            "OTHER TERMS APPLY.",
+            "Name/Title:",
+            "Representative:",
+        ] {
+            let text = format!("1. Payment\n1.1 Pay after acceptance.\n{continuation}\nOrdinary prose.\n3. Other. Other obligations.");
+            assert!(
+                !selected(
+                    &output("body-continuation", &[&text]).0,
+                    ContractTermCategory::Payment
+                )
+                .is_empty(),
+                "body falsely rejected: {continuation}"
+            );
+        }
+        let wrapped = "1. Payment\n1.1 Pay after acceptance of the\nOTHER MATERIAL\nby the client.\n3. Other. Other obligations.";
+        assert!(!selected(
+            &output("wrapped-caps", &[wrapped]).0,
+            ContractTermCategory::Payment
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn uncertain_layouts_abstain_at_source() {
         for (layout, text) in [
             ("tab-roman", "2. Payment\n2.1 Pay after acceptance.\nIII.\tOTHER\n3.1 Other obligations."),
-            ("space-roman", "2. Payment\n2.1 Pay after acceptance.\nIII. OTHER\n3.1 Other obligations."),
+            ("prose-roman", "2. Payment\n2.1 Pay after acceptance.\nIII. OTHER\nOther obligations."),
             ("split-article", "2. Payment\n2.1 Pay after acceptance.\nARTICLE III\nOTHER\n3.1 Other obligations."),
             ("toc", "TABLE OF CONTENTS\n2. Payment\n2.1 Terms 3\n3. Other 4"),
             ("appendix", "2. Payment. Pay after acceptance.\nAPPENDIX A\nI. Services\nOther obligations.\n3. Other. Excluded."),
@@ -878,7 +954,7 @@ mod tests {
         ] {
             for boundary in [
                 "III.\tOTHER",
-                "III. OTHER",
+                "III. Other",
                 "ARTICLE III\nOTHER",
                 "APPENDIX A\nI. Services",
             ] {
@@ -923,8 +999,14 @@ mod tests {
     fn bare_roman_sections_stop_selected_extent() {
         let text = "2. Payment\n2.1 Client shall pay.\nIII. TERM AND TERMINATION\n3.1 Either party may terminate.\nIV. GENERAL PROVISIONS\n4.1 Notices shall be written.";
         let extraction = output("roman-boundaries", &[text]).0;
-        assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
-        assert!(selected(&extraction, ContractTermCategory::Termination).is_empty());
+        assert_eq!(
+            selected(&extraction, ContractTermCategory::Payment).len(),
+            2
+        );
+        assert_eq!(
+            selected(&extraction, ContractTermCategory::Termination).len(),
+            2
+        );
         assert_eq!(extraction.clauses.len(), 6);
         assert!(extraction
             .clauses
@@ -936,7 +1018,10 @@ mod tests {
     fn bare_roman_first_section_preserves_opening_parties() {
         let text = "Agreement between Alpha and Beta.\nI. SERVICES\n1.1 Services shall be delivered.\nII. OTHER\n2.1 Other terms apply.";
         let extraction = output("roman-opening", &[text]).0;
-        assert!(selected(&extraction, ContractTermCategory::Parties).is_empty());
+        assert_eq!(
+            selected(&extraction, ContractTermCategory::Parties).len(),
+            1
+        );
         assert_eq!(
             extraction.clauses[0].text,
             "Agreement between Alpha and Beta."
