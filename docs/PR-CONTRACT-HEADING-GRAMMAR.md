@@ -148,7 +148,7 @@ minority title lines are exactly PR-A's source change, independently reviewed
 there. Heading work adds no source removal. Gains here are locally checked;
 independent PR-B review and v5 qualification remain pending.
 
-## Evidence aliases and SHA256
+## Initial-candidate evidence (superseded lock)
 
 Durable evidence is outside worktrees. Public logs and private corpus artifacts
 are cited by alias/hash only:
@@ -164,7 +164,7 @@ are cited by alias/hash only:
 | B-final-replay | ec280381029d81e381ac333c752f2d8984e0fdaa1465832ff6696c0166df8f04 |
 | B-final-diffs | 3b483b28b1225b8de4efad0806dcd39e8cbb75b67d56d3ec60d93799758473d8 |
 | B-source-adjudication | 356908e883eacdbb24af2ba2ea2af7bb88f25db6057855f596663474edbca31e |
-| Combined-implementation-fingerprint | b71ed257ab5d634f17d21d003086a7614d4121523053cbd74a504d1e8e5cab68 |
+| Combined-initial-superseded-fingerprint | b71ed257ab5d634f17d21d003086a7614d4121523053cbd74a504d1e8e5cab68 |
 
 ## Cold diff audit
 
@@ -185,12 +185,104 @@ state or privileged operation; new classification/scope state is document-local.
 Customer-visible boundary errors are the blocking risk, covered by the
 regression cases above and still subject to independent review.
 
+## Review correction: ordinal-prefix compatibility
+
+The P2 review at da6a480 is **confirmed**. The correction is implemented in
+`b9ceee7ec7a963d7a62383284c44771af3074bf1`. The previous combined lock is superseded; no v5 sources were used.
+
+### Contract revision
+
+The old synthetic ARTICLE/TITLE call admitted a canonical ordinal prefix before
+whitespace, hyphen, en dash, em dash or colon. My eef572d refactor instead parsed
+the whole token at `whole_clauses.rs:448` (that commit), turning unsupported
+heading shapes into ordinary text under every saved grammar. This is my
+regression, not another unsupported layout requiring a new admission rule.
+The correction restores the existing prefix semantics at the reader and keeps
+split ARTICLE admission strict. No furniture, alias, selector, schema, version
+identifier or source-ID rule changes are required.
+
+### Six-step evidence
+
+1. **Reproduce:** on da6a480 production code with only the public test added,
+   `cargo test --lib heading_grammar_ordinal_prefix_boundaries_preserve_saved_versions -- --nocapture`
+   failed: 0 passed, 1 failed. The printed liability selection included the
+   payment heading and body for `2:`, `IV:` and `2-1`, plus separator/case siblings,
+   under 3.1.2, 3.2.0 and 3.3.0. The exact failing patch and log are retained.
+2. **Isolate:** the minimal fixture is a complete numbered liability clause,
+   the unsupported payment-heading line, and a payment sentence. The divergence
+   starts in `ReadLine::read`: whole-token ordinal parsing loses the structural
+   classification. The selector then receives a falsely certain source extent.
+3. **Explain:** the old call split the prefix before validating the ordinal.
+   Refactoring away the synthetic string accidentally removed that split. Saved
+   versions shared the refactored reader, so their boundary behavior changed too.
+4. **Fix:** `whole_clauses.rs:325` now owns `article_ordinal_prefix`; inline ARTICLE
+   (`:297`) and bare-marker classification (`:453`) share it. It delegates number
+   validation to the existing canonical parser. The old inline prefix split is
+   removed. No parallel number parser, synthetic string, special-case marker list
+   or downstream re-scan is added. Split ARTICLE still validates the whole token
+   (`:457`) before admitting a heading.
+5. **Prove:** the isolated test and clean controls pass (2 passed, 0 failed).
+   The adjacent Contract suite passes (45 passed, 0 failed, 1 ignored); format,
+   strict all-target/all-feature Clippy and diff checks pass. A-AH replay passes
+   all 34 cases and 68 historical artifact sets. Compared with da6a480, the new
+   replay has zero changes in selections, source clauses, boundaries, summary
+   text/warnings, coverage or delivery counts. General source files are unchanged;
+   its prior evidence is retained. CI owns the duplicated broad suite.
+6. **Prevent regression:** `contract_extraction.rs:560` checks all three saved/
+   current versions, numeric/Roman prefixes, colon/hyphen/en-dash/em-dash siblings,
+   lowercase Roman markers and tabs. It requires abstention and byte-exact full
+   clause text. `:592` checks exact clean liability/payment extents for decimal and
+   inline ARTICLE headings and rejects malformed or punctuated split markers.
+
+`boundary-probe: unsupported ordinal-prefix headings abstain across all three
+versions while exact clean extents remain selected; full source text is retained;
+malformed and punctuated split ARTICLE markers remain unsupported.`
+
+`effect-trace: restore abstention at uncertain ordinal boundaries | prefix parsing
+in ReadLine::read produces HeadingLike and existing boundary_uncertain | the same
+public test prints merged liability before and empty selections after, with exact
+full-clause text preserved; A-AH comparison has zero changed fields.`
+
+### Cold diff audit
+
+- `whole_clauses.rs:297,325,453`: only shared prefix decomposition and its callers;
+  canonical ordinal validation and downstream selection stay unchanged. Covered
+  by fail-before/pass-after fixtures and replay.
+- `contract_extraction.rs:560,592`: regression and clean/invalid controls only;
+  production extraction/version logic stays unchanged.
+- This document: correction, evidence and superseded-lock disclosure only.
+
+The runtime change is local pure parsing. It adds no I/O, privileges, shared state,
+concurrency behavior or dependencies. One published PR119 correction round fixes
+my own earlier implementation. The two earlier draft regression classes were
+also mine. Stop after this correction is relocked; no recall tuning.
+
+### Corrected evidence aliases
+
+| Alias | SHA256 |
+| --- | --- |
+| B-prefix-contract | ff0fb5b113926602d8aedf1f7a721df8c51042aff58b3485e53acf9a7602ba2a |
+| B-prefix-failing-test | 24b6cf3b6521a07ecad52709fa3cfa8b5393e5692819ada6d5fefc2313f2dd80 |
+| B-prefix-fail | 18e3593749db2633e8fd7a5d330b9ce3065dae1864f776fc42dd93d128a72978 |
+| B-prefix-pass | ba9193851edabdded274d07e8dc219e985fadc7c2c0c133d4b15029c49c0f9ab |
+| B-prefix-Contract-tests | 91fe41582ab63d35bb873d74e981d8a0a3aa81ac53fc7c04a165aca4ec968afd |
+| B-prefix-Clippy | 49a63d9a1e611b39650ee1b651fa922542c880a2d078bbd31e751724d283acd4 |
+| B-prefix-replay-comparison | 3faee444af2f63c4a55adedc9e0a5bed44287cfb509420b8331a360fa16c749c |
+| Combined-corrected-fingerprint | 790c39e965f140312057e38bcdaed4cb6e3920bf6558d47b708c7291f789482f |
+| B-prefix-replay | f434b3316cdcdf824e79610c9bbe77bcb66ba84144a6303de9e5c10582068579 |
+
+The earlier replay/adjudication remains valid for every A-AH slot because the
+comparison above is exact for those fields. This corpus did not contain the
+reported prefix forms; the public code-level regression is the missing proof.
+
 ## Gap audit and stop condition
 
-DONE: contract-first commit, reproductions, origin implementation, cleanup,
-public regression tests, historical replay, A-AH reconciliation and local checks.
+DONE: the reported P2 is reproduced, isolated, explained and fixed at the reader;
+public regression/clean controls, Contract tests, A-AH replay and historical
+artifact checks pass. Correction code and documentation are separate commits.
 
-NOT DONE: exact-head CI, independent PR-B review, operator verification of both
-locks and the single fresh combined v5 batch. Keep draft. Freeze the combined
-implementation fingerprint above; stop tuning and wait for the operator's
-unseen release. PR118 also remains draft for that combined qualification gate.
+NOT DONE: corrected-head CI and independent review, operator verification of the
+replacement combined lock, and the fresh combined v5 qualification. Keep both
+PR118 and PR119 draft. The original da6a480 lock is superseded. Use the corrected
+fingerprint in the table immediately above; stop tuning and wait for review and
+the operator's unseen release.
