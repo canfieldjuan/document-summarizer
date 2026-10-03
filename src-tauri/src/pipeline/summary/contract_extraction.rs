@@ -557,6 +557,75 @@ pub(super) fn render_units(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn heading_grammar_ordinal_prefix_boundaries_preserve_saved_versions() {
+        let mut failures = Vec::new();
+        for marker in ["2:", "IV:", "2-1", "IV-1", "2–1", "IV—1", "iv:"] {
+            for separator in [" ", "\t"] {
+                let text = format!("1. Limitation of Liability. Neither party is liable for indirect damages.\n{marker}{separator}Payment Terms\nClient shall pay invoices within thirty days.");
+                let (normalized, chunked) = fixture("ordinal-prefix-boundary", &[&text]);
+                for version in [PREVIOUS_VERSION, PRE_HEADING_VERSION, VERSION] {
+                    let (extraction, _) = records(&chunked, &normalized, version).unwrap();
+                    let liability = selected(&extraction, ContractTermCategory::LiabilityIndemnity);
+                    println!(
+                        "ORDINAL_PREFIX {version} {marker:?} {separator:?}: liability={:?}",
+                        liability
+                            .iter()
+                            .map(|c| c.text.as_str())
+                            .collect::<Vec<_>>()
+                    );
+                    if !liability.is_empty() {
+                        failures.push((version, marker, separator));
+                    }
+                    assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
+                    assert_eq!(extraction.clauses.len(), 1);
+                    assert_eq!(extraction.clauses[0].text, text);
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "ordinal-prefix lookalikes silently extended liability: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn heading_grammar_ordinal_prefix_clean_controls() {
+        let liability = "1. Limitation of Liability. Neither party is liable for indirect damages.";
+        for heading in [
+            "2. Payment Terms",
+            "ARTICLE 2: Payment Terms",
+            "ARTICLE IV - Payment Terms",
+            "ARTICLE IV PAYMENT TERMS",
+        ] {
+            let text =
+                format!("{liability}\n{heading}\nClient shall pay invoices within thirty days.");
+            let (normalized, chunked) = fixture("ordinal-prefix-control", &[&text]);
+            for version in [PREVIOUS_VERSION, PRE_HEADING_VERSION, VERSION] {
+                let (extraction, _) = records(&chunked, &normalized, version).unwrap();
+                let terms = selected(&extraction, ContractTermCategory::LiabilityIndemnity);
+                assert_eq!(terms.len(), 1, "{version}: {heading}");
+                assert_eq!(terms[0].text, liability);
+                let payment = selected(&extraction, ContractTermCategory::Payment);
+                assert_eq!(payment.len(), 1, "{version}: {heading}");
+                assert_eq!(
+                    payment[0].text,
+                    format!("{heading}\nClient shall pay invoices within thirty days.")
+                );
+            }
+        }
+        for marker in ["0:", "1000:", "IIII:", "MMMM:", "-2", ":IV"] {
+            let text = format!("ARTICLE {marker}\nPAYMENT TERMS\nClient shall pay.");
+            let extraction = output("invalid-split-ordinal", &[&text]).0;
+            assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
+        }
+        for marker in ["2:", "IV:", "2-1"] {
+            let text = format!("ARTICLE {marker}\nPAYMENT TERMS\nClient shall pay.");
+            let extraction = output("unsupported-split-ordinal", &[&text]).0;
+            assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
+        }
+    }
+
+    #[test]
     fn heading_origin_reproduction_section_prefix() {
         for prefix in ["Section ", "SECTION\t"] {
             let source = format!("{prefix}5 PAYMENT\n{prefix}5.1 Fees. Client shall pay after acceptance.\n{prefix}5.2 Timing. Payment is due in thirty days.\n{prefix}6 Notices. Written notice is required.");

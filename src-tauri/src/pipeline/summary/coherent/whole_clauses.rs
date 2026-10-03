@@ -294,10 +294,8 @@ fn article_title(text: &str) -> Option<(u32, &str)> {
     if !kind.eq_ignore_ascii_case("article") {
         return None;
     }
-    let rest = rest.trim();
-    let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '-' | '–' | '—' | ':'))?;
-    let ordinal = &rest[..end];
-    let rest = rest[end..].trim_start();
+    let (number, rest) = article_ordinal_prefix(rest.trim())?;
+    let rest = rest.trim_start();
     let separator = rest.chars().next()?;
     let title = if matches!(separator, '-' | '–' | '—' | ':') {
         rest[separator.len_utf8()..].trim()
@@ -318,11 +316,17 @@ fn article_title(text: &str) -> Option<(u32, &str)> {
     if title.is_empty() {
         return None;
     }
-    let number = article_ordinal(ordinal)?;
     Some((
         number,
         title.strip_suffix(['.', ':']).unwrap_or(title).trim_end(),
     ))
+}
+
+fn article_ordinal_prefix(text: &str) -> Option<(u32, &str)> {
+    let end = text
+        .find(|c: char| c.is_whitespace() || matches!(c, '-' | '–' | '—' | ':'))
+        .unwrap_or(text.len());
+    Some((article_ordinal(&text[..end])?, &text[end..]))
 }
 
 fn article_ordinal(ordinal: &str) -> Option<u32> {
@@ -445,7 +449,8 @@ impl<'a> ReadLine<'a> {
                     .filter(|c| c.is_alphabetic())
                     .all(char::is_uppercase));
         let ordinal = marker.trim_end_matches(['.', ')']);
-        let roman_number = article_ordinal(&ordinal.to_ascii_uppercase());
+        let roman_number =
+            article_ordinal_prefix(&ordinal.to_ascii_uppercase()).map(|(number, _)| number);
         let article_marker = (grammar == HeadingGrammar::SectionAndSplitArticle
             && words.len() == 2
             && words[0] == "ARTICLE")
