@@ -6,7 +6,20 @@ use crate::pipeline::contracts::{
     ContractTermCategory, ExtractedContractClause,
 };
 
-pub(super) const VERSION: &str = "contract-extraction-3.1.2";
+pub(super) const VERSION: &str = "contract-extraction-3.2.0";
+const PREVIOUS_VERSION: &str = "contract-extraction-3.1.2";
+
+pub(super) fn version_supported(version: &str) -> bool {
+    matches!(version, VERSION | PREVIOUS_VERSION)
+}
+
+fn furniture_policy(version: &str) -> Result<coherent::page_furniture::Policy, PipelineFailure> {
+    match version {
+        VERSION => Ok(coherent::page_furniture::Policy::RunningMetadata),
+        PREVIOUS_VERSION => Ok(coherent::page_furniture::Policy::Original),
+        _ => Err(invalid()),
+    }
+}
 const SOURCE_VERSION: &str = "contract-extraction-3.0.2";
 const RUNTIME: &str = "deterministic-source-extraction";
 
@@ -22,6 +35,7 @@ fn invalid() -> PipelineFailure {
 fn records(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
+    version: &str,
 ) -> Result<(ContractExtraction, Vec<EvidenceItem>), PipelineFailure> {
     let blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
     let mut extraction = ContractExtraction {
@@ -29,7 +43,8 @@ fn records(
         key_terms: Vec::new(),
     };
     let mut evidence = Vec::new();
-    let sources = whole_clauses::contract_sources(normalized);
+    let sources =
+        whole_clauses::contract_sources_for_policy(normalized, furniture_policy(version)?);
     for (ordinal, clause) in sources.iter().enumerate() {
         let mut evidence_ids = Vec::new();
         for fragment in &clause.fragments {
@@ -91,10 +106,22 @@ pub(super) fn analyze(
     normalized: &NormalizedDocument,
     control: &dyn ExecutionControl,
 ) -> Result<AnalyzedDocument, PipelineFailure> {
+    analyze_for_version(chunked, normalized, control, VERSION)
+}
+
+fn analyze_for_version(
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+    control: &dyn ExecutionControl,
+    version: &str,
+) -> Result<AnalyzedDocument, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Analyze)?;
-    let (_, evidence) = records(chunked, normalized)?;
+    let (_, evidence) = records(chunked, normalized, version)?;
     let mut warnings = normalized.warnings.clone();
-    if let Some(warning) = coherent::page_furniture::Furniture::new(normalized).warning() {
+    if let Some(warning) =
+        coherent::page_furniture::Furniture::for_policy(normalized, furniture_policy(version)?)
+            .warning()
+    {
         warnings.push(warning);
     }
     warnings.push(PipelineWarning { code: "CONTRACT_SOURCE_EXTRACTION".into(),
@@ -122,7 +149,7 @@ pub(super) fn analyze(
         .collect();
     Ok(AnalyzedDocument {
         document_id: normalized.document_id.clone(),
-        analysis_version: VERSION.into(),
+        analysis_version: version.into(),
         runtime_id: RUNTIME.into(),
         model_id: "none".into(),
         chunks,
@@ -142,7 +169,14 @@ pub(super) fn validate_analysis(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
-    if *analyzed != analyze(chunked, normalized, &UNCONTROLLED_EXECUTION)? {
+    if *analyzed
+        != analyze_for_version(
+            chunked,
+            normalized,
+            &UNCONTROLLED_EXECUTION,
+            &analyzed.analysis_version,
+        )?
+    {
         return Err(invalid());
     }
     Ok(())
@@ -156,7 +190,7 @@ pub(super) fn synthesize(
 ) -> Result<SynthesizedDocument, PipelineFailure> {
     cancellation_checkpoint(control, PipelineStage::Synthesize)?;
     validate_analysis(analyzed, chunked, normalized)?;
-    let (extraction, _) = records(chunked, normalized)?;
+    let (extraction, _) = records(chunked, normalized, &analyzed.analysis_version)?;
     let claims = extraction
         .clauses
         .iter()
@@ -182,7 +216,7 @@ pub(super) fn synthesize(
     Ok(SynthesizedDocument {
         contract_extraction: Some(extraction),
         document_id: analyzed.document_id.clone(),
-        synthesis_version: VERSION.into(),
+        synthesis_version: analyzed.analysis_version.clone(),
         runtime_id: RUNTIME.into(),
         model_id: "none".into(),
         presentation_mode: SummaryPresentationMode::StructuredExtraction,
@@ -229,7 +263,7 @@ pub(super) fn verify(
     Ok(VerifiedDocument {
         contract_extraction: synthesized.contract_extraction.clone(),
         document_id: synthesized.document_id.clone(),
-        verification_version: VERSION.into(),
+        verification_version: synthesized.synthesis_version.clone(),
         synthesis_attempt_ordinal: 0,
         runtime_id: RUNTIME.into(),
         model_id: "none".into(),
@@ -536,7 +570,7 @@ mod tests {
                     second.content.iter().map(|b| b.source.clone()).collect();
                 normalized.pages[0].content.extend(second.content);
             }
-            let (extraction, _) = records(&chunked, &normalized).unwrap();
+            let (extraction, _) = records(&chunked, &normalized, VERSION).unwrap();
             let terms = selected(&extraction, ContractTermCategory::LiabilityIndemnity);
             let complete = terms.len() == 1
                 && terms[0].text.contains("GROSSLY NEGLIGENT MANNER.")
@@ -1473,6 +1507,75 @@ mod tests {
     }
 
     #[test]
+    fn furniture_policy_versions_preserve_saved_contract_artifacts() {
+        let pages = (1..=3).map(|n| format!("Exhibit 10.25\n{n}. Payment\nClient shall pay after acceptance.\nPublic Service Agreement Page {n} of 3\nInitials and Date\nPUBLIC COMPANY")).collect::<Vec<_>>();
+        let (normalized, chunked) = fixture(
+            "versioned-furniture",
+            &pages.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        for version in [PREVIOUS_VERSION, VERSION] {
+            let analyzed =
+                analyze_for_version(&chunked, &normalized, &UNCONTROLLED_EXECUTION, version)
+                    .unwrap();
+            let synthesized =
+                synthesize(&analyzed, &chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
+            let verified = verify(
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            let saved: VerifiedDocument =
+                serde_json::from_str(&serde_json::to_string(&verified).unwrap()).unwrap();
+            super::super::validate_verified_document(
+                &saved,
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+            )
+            .unwrap();
+            assert_eq!(saved.verification_version, version);
+            let quotes = analyzed
+                .chunks
+                .iter()
+                .flat_map(|c| &c.evidence)
+                .map(|e| e.exact_quote.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                quotes.contains("Exhibit 10.25"),
+                version == PREVIOUS_VERSION
+            );
+            assert_eq!(
+                quotes.contains("Initials and Date"),
+                version == PREVIOUS_VERSION
+            );
+            assert!(quotes.contains("Client shall pay after acceptance."));
+            assert!(
+                coherent::furniture_coverage_exclusions(&analyzed.warnings, &normalized).is_empty()
+            );
+            assert_eq!(
+                analyzed
+                    .warnings
+                    .iter()
+                    .any(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED"),
+                version == VERSION
+            );
+            let mut forged = analyzed;
+            forged.analysis_version = if version == VERSION {
+                PREVIOUS_VERSION
+            } else {
+                VERSION
+            }
+            .into();
+            assert!(validate_analysis(&forged, &chunked, &normalized).is_err());
+        }
+    }
+
+    #[test]
     fn contract_source_furniture_disclosure_preserves_delivery_coverage() {
         let (normalized, chunked) = fixture(
             "furniture",
@@ -1638,11 +1741,34 @@ mod tests {
         let saved: Value = serde_json::from_slice(&bytes).unwrap();
         let mut reports = Vec::new();
         for (index, record) in saved.as_array().unwrap().iter().enumerate() {
-            let alias = if index == 0 { "A" } else { "B" };
+            let alias = record["alias"]
+                .as_str()
+                .unwrap_or(if index == 0 { "A" } else { "B" });
             let normalized: NormalizedDocument =
                 serde_json::from_value(record["normalized"].clone()).unwrap();
             let chunked: ChunkedDocument =
                 serde_json::from_value(record["chunked"].clone()).unwrap();
+            let historical_replay = if record.get("analyzed").is_some() {
+                let old_analysis: AnalyzedDocument =
+                    serde_json::from_value(record["analyzed"].clone()).unwrap();
+                let old_synthesis: SynthesizedDocument =
+                    serde_json::from_value(record["synthesized"].clone()).unwrap();
+                let old_verified: VerifiedDocument =
+                    serde_json::from_value(record["verified"].clone()).unwrap();
+                super::super::validate_analyzed_content(&old_analysis, &chunked, &normalized)
+                    .unwrap();
+                super::super::validate_verified_document(
+                    &old_verified,
+                    &old_synthesis,
+                    &old_analysis,
+                    &chunked,
+                    &normalized,
+                )
+                .unwrap();
+                true
+            } else {
+                false
+            };
             let analyzed = analyze(&chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
             let synthesized =
                 synthesize(&analyzed, &chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
@@ -1709,8 +1835,8 @@ mod tests {
                 }).collect::<Vec<_>>();
                 json!({"category":term.category,"status":if sections.is_empty() {"not identified"} else {"selected"},"sections":sections})
             }).collect::<Vec<_>>();
-            let boundaries=clauses.iter().enumerate().map(|(i,c)|json!({"clause_id":extraction.clauses[i].clause_id,"number":c.number,"article":c.article,"parent":c.parent,"headings":c.headings,"opening":c.opening})).collect::<Vec<_>>();
-            reports.push(json!({"alias":alias,"policy":VERSION,"model_calls":0,"normalized_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&normalized).unwrap())),"chunked_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&chunked).unwrap())),"clauses":extraction.clauses.len(),"categories":selected,"section_boundaries":boundaries,"summary":summary,"citations":citations,"delivered":wire,"delivered_units":count,"total_units":lines.len(),"source_reconstruction":"passed","page_coverage":"passed"}));
+            let boundaries=clauses.iter().enumerate().map(|(i,c)|json!({"clause_id":extraction.clauses[i].clause_id,"number":c.number,"article":c.article,"parent":c.parent,"headings":c.headings,"opening":c.opening,"boundary_uncertain":c.boundary_uncertain,"fragments":c.fragments.iter().map(|f|json!({"block_id":f.block_id,"start":f.start,"end":f.end})).collect::<Vec<_>>()})).collect::<Vec<_>>();
+            reports.push(json!({"alias":alias,"policy":VERSION,"model_calls":0,"historical_replay":historical_replay,"analyzed":analyzed,"synthesized":synthesized,"verified":verified,"normalized_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&normalized).unwrap())),"chunked_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&chunked).unwrap())),"clauses":extraction.clauses.len(),"categories":selected,"section_boundaries":boundaries,"summary":summary,"citations":citations,"delivered":wire,"delivered_units":count,"total_units":lines.len(),"source_reconstruction":"passed","page_coverage":"passed"}));
             println!("CONTRACT_REPLAY {alias}: {} source clauses, {} of {} render units delivered; source reconstruction and coverage passed",extraction.clauses.len(),count,lines.len());
         }
         let report = json!({"input_sha256":format!("{:x}",Sha256::digest(&bytes)),"input_scope":"saved normalized and chunked sources; Connect descriptor is a public test fixture, not original PDF provenance", "cases":reports});
