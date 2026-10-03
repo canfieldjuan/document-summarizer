@@ -522,10 +522,18 @@ fn strict_child(child: &[String], parent: &[String]) -> bool {
     child.len() > parent.len() && child.starts_with(parent)
 }
 
+#[cfg(test)]
 pub(in crate::pipeline::summary) fn contract_sources(
     document: &NormalizedDocument,
 ) -> Vec<SourceClause> {
-    let furniture = page_furniture::Furniture::new(document);
+    contract_sources_for_policy(document, page_furniture::Policy::RunningMetadata)
+}
+
+pub(in crate::pipeline::summary) fn contract_sources_for_policy(
+    document: &NormalizedDocument,
+    policy: page_furniture::Policy,
+) -> Vec<SourceClause> {
+    let furniture = page_furniture::Furniture::for_policy(document, policy);
     let blocks = document
         .pages
         .iter()

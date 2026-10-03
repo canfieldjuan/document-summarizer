@@ -2886,16 +2886,20 @@ pub(super) fn furniture_coverage_exclusions(
     }
     // Disclosure activates the versioned policy, but cannot choose exemptions:
     // both the page set and the exact warning are reconstructed from source.
-    let furniture = page_furniture::Furniture::new(normalized);
-    if furniture
-        .warning()
-        .as_ref()
-        .is_some_and(|expected| supplied == vec![expected])
-    {
-        furniture.excluded_pages
-    } else {
-        HashSet::new()
+    for policy in [
+        page_furniture::Policy::RunningMetadata,
+        page_furniture::Policy::Original,
+    ] {
+        let furniture = page_furniture::Furniture::for_policy(normalized, policy);
+        if furniture
+            .warning()
+            .as_ref()
+            .is_some_and(|expected| supplied == vec![expected])
+        {
+            return furniture.excluded_pages;
+        }
     }
+    HashSet::new()
 }
 
 fn synthesize_with_delivery_coverage(
@@ -6548,6 +6552,7 @@ pub(super) fn validate_model_output_fallback_boundary(
             || !matches!(
                 synthesized.synthesis_version.as_str(),
                 VERSION
+                    | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
                     | PRE_CLAUSE_SYNTHESIS_VERSION
                     | PRE_FURNITURE_SYNTHESIS_VERSION
                     | PRE_BALANCED_SYNTHESIS_VERSION
@@ -6607,7 +6612,10 @@ fn page_balanced_catalog(
     if profile != SummaryProfile::General
         || !matches!(
             version,
-            VERSION | PRE_CLAUSE_SYNTHESIS_VERSION | PRE_FURNITURE_SYNTHESIS_VERSION
+            VERSION
+                | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+                | PRE_CLAUSE_SYNTHESIS_VERSION
+                | PRE_FURNITURE_SYNTHESIS_VERSION
         )
     {
         return catalog.clone();
@@ -7510,7 +7518,10 @@ fn source_catalog_for_profile(
         normalized,
         analyzed,
         profile == SummaryProfile::General
-            && matches!(synthesis_version, VERSION | PRE_CLAUSE_SYNTHESIS_VERSION),
+            && matches!(
+                synthesis_version,
+                VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+            ),
     )?;
     if profile == SummaryProfile::Contract {
         if let Some(contract_catalog) = contract_source_catalog(&catalog, synthesis_version) {
@@ -7600,7 +7611,8 @@ fn source_catalog_with_furniture_policy(
     analyzed: Option<&AnalyzedDocument>,
     exclude_furniture: bool,
 ) -> Result<SourceCatalog, PipelineFailure> {
-    let furniture = exclude_furniture.then(|| page_furniture::Furniture::new(normalized));
+    let furniture = exclude_furniture
+        .then(|| page_furniture::Furniture::for_synthesis_version(normalized, synthesis_version));
     // Before analysis 14, coherent catalogs used v13 even for older analysis.
     // Replay that policy rather than rebuilding saved evidence under today's rules.
     let analysis_version = analyzed
@@ -7608,7 +7620,12 @@ fn source_catalog_with_furniture_policy(
         .map_or(ANALYSIS_VERSION, |_| SENTENCE_ANALYSIS_VERSION);
     let clauses = furniture
         .as_ref()
-        .filter(|_| synthesis_version == VERSION)
+        .filter(|_| {
+            matches!(
+                synthesis_version,
+                VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+            )
+        })
         .map(|furniture| whole_clauses::Clauses::new(normalized, furniture, analysis_version));
     let blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
     let framing_at_block_starts = source_framing_at_block_starts(normalized);
@@ -7783,9 +7800,12 @@ pub(super) fn validate_for_runtime(
     let expected = (profile == SummaryProfile::General
         && matches!(
             synthesized.synthesis_version.as_str(),
-            VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+            VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
         ))
-    .then(|| page_furniture::Furniture::new(normalized).warning())
+    .then(|| {
+        page_furniture::Furniture::for_synthesis_version(normalized, &synthesized.synthesis_version)
+            .warning()
+    })
     .flatten();
     let actual = synthesized
         .warnings
@@ -7939,13 +7959,16 @@ pub(super) fn validate_content(
     if !supplied.is_empty()
         && (!matches!(
             synthesized.synthesis_version.as_str(),
-            VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+            VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
         ) || supplied
-            != page_furniture::Furniture::new(normalized)
-                .warning()
-                .as_ref()
-                .into_iter()
-                .collect::<Vec<_>>())
+            != page_furniture::Furniture::for_synthesis_version(
+                normalized,
+                &synthesized.synthesis_version,
+            )
+            .warning()
+            .as_ref()
+            .into_iter()
+            .collect::<Vec<_>>())
     {
         return Err(invalid_document());
     }
@@ -7977,7 +8000,7 @@ pub(super) fn validate_content(
             )?;
             let general_catalog = (matches!(
                 synthesized.synthesis_version.as_str(),
-                VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+                VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
             ))
             .then(|| {
                 source_catalog_for_profile(
@@ -8072,6 +8095,7 @@ fn fallback_warning(synthesized: &SynthesizedDocument) -> Option<&PipelineWarnin
             || matches!(
                 synthesized.synthesis_version.as_str(),
                 VERSION
+                    | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
                     | PRE_CLAUSE_SYNTHESIS_VERSION
                     | PRE_FURNITURE_SYNTHESIS_VERSION
                     | PRE_BALANCED_SYNTHESIS_VERSION
@@ -8464,7 +8488,7 @@ mod tests {
     }
 
     #[test]
-    fn whole_clause_revision_reloads_version_eleven_furniture_fallback() {
+    fn furniture_revision_reloads_versions_eleven_and_twelve_fallback() {
         let (mut normalized, mut chunked) = contract_documents();
         set_furniture_fixture(&mut normalized, &mut chunked, |n| {
             if n == 2 {
@@ -8500,31 +8524,39 @@ mod tests {
             inspected_pages: Vec::new(),
             warnings: Vec::new(),
         };
-        let mut saved = fallback_document(
-            &AdmissionRuntime { failure_code: None },
-            &analyzed,
-            &chunked,
-            direct::source_ordered_claims(&analyzed).unwrap(),
-            FallbackReason::RequestTooLarge,
-        )
-        .unwrap();
-        saved.synthesis_version = PRE_CLAUSE_SYNTHESIS_VERSION.into();
-        saved.warnings.push(
-            page_furniture::Furniture::new(&normalized)
+        for version in [
+            PRE_CLAUSE_SYNTHESIS_VERSION,
+            PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION,
+        ] {
+            let mut saved = fallback_document(
+                &AdmissionRuntime { failure_code: None },
+                &analyzed,
+                &chunked,
+                direct::source_ordered_claims(&analyzed).unwrap(),
+                FallbackReason::RequestTooLarge,
+            )
+            .unwrap();
+            saved.synthesis_version = version.into();
+            saved.warnings.push(
+                page_furniture::Furniture::for_synthesis_version(
+                    &normalized,
+                    &saved.synthesis_version,
+                )
                 .warning()
                 .unwrap(),
-        );
-        let saved: SynthesizedDocument =
-            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
-        validate_content(&saved, &analyzed, &chunked, &normalized).unwrap();
-        let mut forged = saved;
-        forged
-            .warnings
-            .last_mut()
-            .unwrap()
-            .message
-            .push_str(" incorrect");
-        assert!(validate_content(&forged, &analyzed, &chunked, &normalized).is_err());
+            );
+            let saved: SynthesizedDocument =
+                serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+            validate_content(&saved, &analyzed, &chunked, &normalized).unwrap();
+            let mut forged = saved;
+            forged
+                .warnings
+                .last_mut()
+                .unwrap()
+                .message
+                .push_str(" incorrect");
+            assert!(validate_content(&forged, &analyzed, &chunked, &normalized).is_err());
+        }
     }
 
     #[test]
@@ -8575,6 +8607,43 @@ mod tests {
             assert!(offered
                 .iter()
                 .all(|c| page.content[0].text.contains(&c.evidence.exact_quote)));
+        }
+    }
+
+    #[test]
+    fn running_furniture_general_catalog_preserves_historical_policy() {
+        let (mut normalized, mut chunked) = contract_documents();
+        set_furniture_fixture(&mut normalized, &mut chunked, |n| {
+            format!("Exhibit 10.25\n{n}. Payment\nClient shall pay after acceptance.\nPublic Service Agreement Page {n} of 6")
+        });
+        for version in [
+            PRE_CLAUSE_SYNTHESIS_VERSION,
+            PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION,
+            VERSION,
+        ] {
+            let catalog = source_catalog_for_profile(
+                SummaryProfile::General,
+                version,
+                &chunked,
+                &normalized,
+                None,
+            )
+            .unwrap();
+            let quotes = catalog
+                .candidates
+                .iter()
+                .map(|c| c.evidence.exact_quote.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(quotes.contains("Exhibit 10.25"), version != VERSION);
+            assert_eq!(
+                quotes.contains("Public Service Agreement Page"),
+                version != VERSION
+            );
+            assert!(quotes.contains("Client shall pay after acceptance."));
+            let warning =
+                page_furniture::Furniture::for_synthesis_version(&normalized, version).warning();
+            assert_eq!(warning.is_some(), version == VERSION);
         }
     }
 

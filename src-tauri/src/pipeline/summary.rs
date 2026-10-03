@@ -46,7 +46,8 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "12.0.0";
+pub const SYNTHESIS_VERSION: &str = "13.0.0";
+const PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION: &str = "12.0.0";
 const PRE_CLAUSE_SYNTHESIS_VERSION: &str = "11.0.0";
 const PRE_FURNITURE_SYNTHESIS_VERSION: &str = "10.0.0";
 const PRE_BALANCED_SYNTHESIS_VERSION: &str = "9.0.0";
@@ -153,6 +154,7 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
         SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
             | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
@@ -169,6 +171,7 @@ fn coherent_verification_versions_match(
     (matches!(
         synthesis_version,
         SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
             | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
@@ -634,7 +637,7 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
         db::start_synthesis(conn, run_id, run.state_version)?;
     let synthesis = match (delivery_policy, summary_profile) {
         (_, SummaryProfile::Contract) => {
-            if persisted_analysis.analysis_version == contract_extraction::VERSION {
+            if contract_extraction::version_supported(&persisted_analysis.analysis_version) {
                 contract_extraction::synthesize(&persisted_analysis, &chunked, &normalized, control)
             } else {
                 Err(stage_failure(PipelineStage::Synthesize, "CONTRACT_CHECKPOINT_REQUIRES_RETRY",
@@ -928,7 +931,7 @@ pub(crate) fn complete_verified_document_with_delivery(
         }
         PRE_CONTEXT_VERIFICATION_VERSION => PRE_CONTEXT_SUMMARY_VERSION,
         VERIFICATION_VERSION => SUMMARY_VERSION,
-        contract_extraction::VERSION => "9.0.0",
+        version if contract_extraction::version_supported(version) => "9.0.0",
         _ => unreachable!("verified document validation rejects unknown versions"),
     };
     let mut summary = SummaryArtifact {
@@ -1242,7 +1245,7 @@ fn verify(
     select_key_points: bool,
     control: &dyn ExecutionControl,
 ) -> Result<VerifiedDocument, PipelineFailure> {
-    if synthesized.synthesis_version == contract_extraction::VERSION {
+    if contract_extraction::version_supported(&synthesized.synthesis_version) {
         return contract_extraction::verify(synthesized, analyzed, chunked, normalized, control);
     }
 
@@ -1387,6 +1390,7 @@ fn verify(
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
         SYNTHESIS_VERSION
+        | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
         | PRE_CLAUSE_SYNTHESIS_VERSION
         | PRE_FURNITURE_SYNTHESIS_VERSION
         | PRE_BALANCED_SYNTHESIS_VERSION
@@ -1858,6 +1862,7 @@ fn verification_claim_budget(
     if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
             | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
@@ -3828,7 +3833,7 @@ fn validate_analyzed_document(
     normalized: &NormalizedDocument,
     runtime: &dyn ModelRuntime,
 ) -> Result<(), PipelineFailure> {
-    if analyzed.analysis_version == contract_extraction::VERSION {
+    if contract_extraction::version_supported(&analyzed.analysis_version) {
         return contract_extraction::validate_analysis(analyzed, chunked, normalized);
     }
 
@@ -3850,7 +3855,7 @@ fn validate_analyzed_content(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
-    if analyzed.analysis_version == contract_extraction::VERSION {
+    if contract_extraction::version_supported(&analyzed.analysis_version) {
         return contract_extraction::validate_analysis(analyzed, chunked, normalized);
     }
 
@@ -4157,7 +4162,7 @@ fn validate_synthesized_document(
     normalized: &NormalizedDocument,
     runtime: &dyn ModelRuntime,
 ) -> Result<(), PipelineFailure> {
-    if synthesized.synthesis_version == contract_extraction::VERSION {
+    if contract_extraction::version_supported(&synthesized.synthesis_version) {
         return contract_extraction::validate_synthesis(synthesized, analyzed, chunked, normalized);
     }
     if synthesized.contract_extraction.is_some() {
@@ -4205,7 +4210,7 @@ fn validate_synthesized_document_without_runtime(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
-    if synthesized.synthesis_version == contract_extraction::VERSION {
+    if contract_extraction::version_supported(&synthesized.synthesis_version) {
         return contract_extraction::validate_synthesis(synthesized, analyzed, chunked, normalized);
     }
     if synthesized.contract_extraction.is_some() {
@@ -4221,6 +4226,7 @@ fn validate_synthesized_document_without_runtime(
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
             | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
@@ -4239,6 +4245,7 @@ fn validate_synthesized_document_without_runtime(
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
             | PRE_FURNITURE_SYNTHESIS_VERSION
             | PRE_BALANCED_SYNTHESIS_VERSION
@@ -4382,7 +4389,7 @@ fn validate_verified_document(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
-    if synthesized.synthesis_version == contract_extraction::VERSION {
+    if contract_extraction::version_supported(&synthesized.synthesis_version) {
         return contract_extraction::validate_verified(
             verified,
             synthesized,
@@ -4502,7 +4509,7 @@ fn validate_coherent_verified_document(
 ) -> Result<(), PipelineFailure> {
     let delivery_coverage_fallback = matches!(
         synthesized.synthesis_version.as_str(),
-        SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
     ) && verified.verification_version == VERIFICATION_VERSION
         && synthesized.presentation_mode == SummaryPresentationMode::Coherent
         && verified.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback;
@@ -12533,7 +12540,8 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "12.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "13.0.0");
+        assert_eq!(PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION, "12.0.0");
         assert_eq!(PRE_FURNITURE_SYNTHESIS_VERSION, "10.0.0");
         assert_eq!(PRE_BALANCED_SYNTHESIS_VERSION, "9.0.0");
         assert_eq!(PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION, "8.0.0");
