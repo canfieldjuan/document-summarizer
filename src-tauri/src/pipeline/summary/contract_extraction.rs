@@ -6,16 +6,17 @@ use crate::pipeline::contracts::{
     ContractTermCategory, ExtractedContractClause,
 };
 
-pub(super) const VERSION: &str = "contract-extraction-3.2.0";
+pub(super) const VERSION: &str = "contract-extraction-3.3.0";
+const PRE_HEADING_VERSION: &str = "contract-extraction-3.2.0";
 const PREVIOUS_VERSION: &str = "contract-extraction-3.1.2";
 
 pub(super) fn version_supported(version: &str) -> bool {
-    matches!(version, VERSION | PREVIOUS_VERSION)
+    matches!(version, VERSION | PRE_HEADING_VERSION | PREVIOUS_VERSION)
 }
 
 fn furniture_policy(version: &str) -> Result<coherent::page_furniture::Policy, PipelineFailure> {
     match version {
-        VERSION => Ok(coherent::page_furniture::Policy::RunningMetadata),
+        VERSION | PRE_HEADING_VERSION => Ok(coherent::page_furniture::Policy::RunningMetadata),
         PREVIOUS_VERSION => Ok(coherent::page_furniture::Policy::Original),
         _ => Err(invalid()),
     }
@@ -43,8 +44,15 @@ fn records(
         key_terms: Vec::new(),
     };
     let mut evidence = Vec::new();
-    let sources =
-        whole_clauses::contract_sources_for_policy(normalized, furniture_policy(version)?);
+    let sources = whole_clauses::contract_sources_for_policy(
+        normalized,
+        furniture_policy(version)?,
+        if version == VERSION {
+            whole_clauses::HeadingGrammar::SectionAndSplitArticle
+        } else {
+            whole_clauses::HeadingGrammar::Original
+        },
+    );
     for (ordinal, clause) in sources.iter().enumerate() {
         let mut evidence_ids = Vec::new();
         for fragment in &clause.fragments {
@@ -548,6 +556,195 @@ pub(super) fn render_units(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn heading_origin_reproduction_section_prefix() {
+        for prefix in ["Section ", "SECTION\t"] {
+            let source = format!("{prefix}5 PAYMENT\n{prefix}5.1 Fees. Client shall pay after acceptance.\n{prefix}5.2 Timing. Payment is due in thirty days.\n{prefix}6 Notices. Written notice is required.");
+            let (extraction, _, _) = output("public-section-layout", &[&source]);
+            let payment = selected(&extraction, ContractTermCategory::Payment);
+            assert_eq!(
+                payment.len(),
+                3,
+                "Section parent and children were not identified: {prefix:?}"
+            );
+            assert!(payment[1].text.contains("after acceptance"));
+            assert!(payment[2].text.contains("thirty days"));
+            assert!(payment.iter().all(|c| !c.text.contains("Written notice")));
+        }
+    }
+
+    #[test]
+    fn heading_origin_reproduction_split_article() {
+        let source = "ARTICLE III\nPAYMENT\nClient shall pay after acceptance.\nARTICLE IV\nNOTICES\nWritten notice is required.";
+        let (extraction, _, _) = output("public-article-layout", &[source]);
+        let payment = selected(&extraction, ContractTermCategory::Payment);
+        assert_eq!(payment.len(), 1, "split ARTICLE was not identified");
+        assert_eq!(
+            payment[0].text,
+            "ARTICLE III\nPAYMENT\nClient shall pay after acceptance."
+        );
+        assert!(!payment[0].text.contains("NOTICES"));
+    }
+
+    #[test]
+    fn heading_grammar_keeps_clean_forms_and_rejects_lookalikes() {
+        for prefix in ["Section ", "SECTION\t", "§ ", "§", ""] {
+            let source = format!("{prefix}5.1 Payment. Client shall pay.\n{prefix}5.2 Notices. Written notice is required.");
+            let (extraction, _, _) = output("decimal-forms", &[&source]);
+            let terms = selected(&extraction, ContractTermCategory::Payment);
+            assert_eq!(terms.len(), 1, "{prefix:?}");
+            assert!(!terms[0].text.contains("Notices"));
+        }
+        for source in [
+            "Section Five Payment\nClient shall pay.",
+            "Section 5..1 Payment\nClient shall pay.",
+            "Section 1000 Payment\nClient shall pay.",
+            "section 5 Payment\nClient shall pay.",
+            "See Section 5 Payment for the applicable rate.",
+            "ARTICLE IIII\nPAYMENT\nClient shall pay.",
+            "ARTICLE 0\nPAYMENT\nClient shall pay.",
+            "ARTICLE 1000\nPAYMENT\nClient shall pay.",
+            "ARTICLE III\nPayment\nClient shall pay.",
+            "article III\nPAYMENT\nClient shall pay.",
+            "ARTICLE III\nPAYMENT",
+            "ARTICLE III\nPAYMENT ... 5",
+            "TABLE OF CONTENTS\nARTICLE III\nPAYMENT\nARTICLE IV\nINSURANCE",
+            "Section 5. Payment Terms ... 4\nSection 6. Insurance ... 5",
+            "Section 5 Payment\nClient shall pay.\nSection Five Conditions\nApproval required.",
+        ] {
+            let (extraction, _, _) = output("heading-lookalikes", &[source]);
+            assert!(
+                extraction.key_terms.iter().all(|t| t.selections.is_empty()),
+                "{source}"
+            );
+            for line in source.lines().filter(|line| !line.is_empty()) {
+                assert!(
+                    extraction.clauses.iter().any(|c| c.text.contains(line)),
+                    "lost line: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn heading_grammar_split_article_scope_and_original_ranges() {
+        let pages = ["ARTICLE III", "PAYMENT\n3.1 Amount. Client shall pay.\n3.2 Timing. Due on acceptance.\nARTICLE IV\nNOTICES\n4.1 Delivery. Written notice is required."];
+        let (mut normalized, mut chunked) = fixture("split-blocks", &pages);
+        // A page boundary is deliberately unsupported and keeps payment uncertain.
+        let (old, _) = records(&chunked, &normalized, VERSION).unwrap();
+        assert!(selected(&old, ContractTermCategory::Payment).is_empty());
+        let mut second = normalized.pages.pop().unwrap();
+        for block in &mut second.content {
+            block.source.page_start = 1;
+            block.source.page_end = 1;
+        }
+        chunked.chunks[1].source_spans = second.content.iter().map(|b| b.source.clone()).collect();
+        normalized.pages[0].content.extend(second.content);
+        let (extraction, evidence) = records(&chunked, &normalized, VERSION).unwrap();
+        let payment = selected(&extraction, ContractTermCategory::Payment);
+        assert_eq!(payment.len(), 3);
+        assert_eq!(payment[0].text, "ARTICLE III\n\nPAYMENT");
+        assert_eq!(payment[0].evidence_ids.len(), 2);
+        assert!(payment.iter().all(|c| !c.text.contains("NOTICES")));
+        for item in evidence {
+            assert!(normalized.pages[0]
+                .content
+                .iter()
+                .any(|b| b.block_id == item.block_id && b.text.contains(&item.exact_quote)));
+        }
+        let (extraction, _, _) = output("unfinished-boundary", &["2. Liability. Neither party is liable unless\nARTICLE III\nPAYMENT\nClient shall pay."]);
+        assert!(selected(&extraction, ContractTermCategory::LiabilityIndemnity).is_empty());
+        assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
+        assert!(extraction.clauses[0].text.ends_with("unless"));
+    }
+
+    #[test]
+    fn heading_grammar_wrapped_named_reference_is_uncertain() {
+        let mut failures = Vec::new();
+        for marker in ["Section 6 Termination", "ARTICLE VI\nTERMINATION"] {
+            let text = format!("1. Payment\nClient shall pay according to\n{marker}\nprocedures printed in the attached agreement.\n7. Other. Other obligations.");
+            let (extraction, _, _) = output("wrapped-named-section", &[&text]);
+            if !selected(&extraction, ContractTermCategory::Termination).is_empty() {
+                failures.push(marker);
+            }
+            assert!(selected(&extraction, ContractTermCategory::Payment).is_empty());
+            for line in text.lines() {
+                assert!(extraction.clauses.iter().any(|c| c.text.contains(line)));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "wrapped named references gained false termination labels: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn heading_grammar_mixed_numeric_scope_abstains() {
+        let text = "Section 2. Fees. The rates are:\n1. Setup fee is $10.\n2. Weekly fee is $20.\nSection 3. Notices. Send written notice.";
+        let (extraction, _, _) = output("mixed-numbering", &[text]);
+        assert!(
+            selected(&extraction, ContractTermCategory::Payment).is_empty(),
+            "mixed numbering selected fee introduction without its prices"
+        );
+        for line in text.lines() {
+            assert!(extraction.clauses.iter().any(|c| c.text.contains(line)));
+        }
+        for child_prefix in ["Section ", "SECTION\t", "§ ", ""] {
+            let clean = format!("Section 2. Fees. The rates are:\n{child_prefix}2.1 Setup fee is $10.\n{child_prefix}2.2 Weekly fee is $20.\nSection 3. Notices. Send written notice.");
+            let (extraction, _, _) = output("decimal-children", &[&clean]);
+            let payment = selected(&extraction, ContractTermCategory::Payment);
+            assert_eq!(payment.len(), 3, "{child_prefix}");
+            assert!(payment[1].text.contains("$10."));
+            assert!(payment[2].text.contains("$20."));
+        }
+    }
+
+    #[test]
+    fn heading_grammar_reloads_both_historical_versions() {
+        let (normalized, chunked) = fixture("versioned-headings", &["ARTICLE III\nPAYMENT\nClient shall pay.\nSection 4 Insurance. Coverage is required."]);
+        for version in [PREVIOUS_VERSION, PRE_HEADING_VERSION, VERSION] {
+            let analyzed =
+                analyze_for_version(&chunked, &normalized, &UNCONTROLLED_EXECUTION, version)
+                    .unwrap();
+            let synthesized =
+                synthesize(&analyzed, &chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
+            let verified = verify(
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            let saved: VerifiedDocument =
+                serde_json::from_str(&serde_json::to_string(&verified).unwrap()).unwrap();
+            super::super::validate_verified_document(
+                &saved,
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+            )
+            .unwrap();
+            let extraction = saved.contract_extraction.as_ref().unwrap();
+            assert_eq!(
+                !selected(extraction, ContractTermCategory::Payment).is_empty(),
+                version == VERSION
+            );
+            assert_eq!(
+                !selected(extraction, ContractTermCategory::Insurance).is_empty(),
+                version == VERSION
+            );
+        }
+        assert!(analyze_for_version(
+            &chunked,
+            &normalized,
+            &UNCONTROLLED_EXECUTION,
+            "contract-extraction-unknown"
+        )
+        .is_err());
+    }
+
     #[test]
     fn truncation_reader_retains_caps_tails_across_units() {
         let prefix = "15. Limitation of Liability: Neither party is liable unless it acted in an";
@@ -1183,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_layouts_abstain_at_source() {
+    fn boundary_layouts_follow_versioned_admission() {
         for (layout, text) in [
             ("tab-roman", "2. Payment\n2.1 Pay after acceptance.\nIII.\tOTHER\n3.1 Other obligations."),
             ("prose-roman", "2. Payment\n2.1 Pay after acceptance.\nIII. OTHER\nOther obligations."),
@@ -1192,7 +1389,14 @@ mod tests {
             ("appendix", "2. Payment. Pay after acceptance.\nAPPENDIX A\nI. Services\nOther obligations.\n3. Other. Excluded."),
         ] {
             let extraction = output(layout, &[text]).0;
-            assert!(selected(&extraction, ContractTermCategory::Payment).is_empty(), "uncertain boundary must abstain: {layout}");
+            assert_eq!(selected(&extraction, ContractTermCategory::Payment).is_empty(), layout != "split-article", "boundary result: {layout}");
+            if layout == "split-article" {
+                let (normalized, chunked) = fixture(layout, &[text]);
+                for version in [PREVIOUS_VERSION, PRE_HEADING_VERSION] {
+                    assert!(selected(&records(&chunked, &normalized, version).unwrap().0, ContractTermCategory::Payment).is_empty());
+                }
+                assert!(selected(&extraction, ContractTermCategory::Payment).iter().all(|c| !c.text.contains("OTHER")));
+            }
             assert!(!extraction.clauses.is_empty());
         }
         for text in ["2. Payment\n2.1 Pay after acceptance.\n3. Other. Excluded.", "ARTICLE II - PAYMENT\n2.1 Pay after acceptance.\nARTICLE III - OTHER\n3.1 Other obligations."] {
@@ -1220,7 +1424,24 @@ mod tests {
                 let text = format!(
                     "2. {heading}\n2.1 Operative obligation.\n{boundary}\n3.1 Other obligations."
                 );
-                assert!(selected(&output("category-boundary", &[&text]).0, category).is_empty());
+                let extraction = output("category-boundary", &[&text]).0;
+                assert_eq!(
+                    selected(&extraction, category).is_empty(),
+                    boundary != "ARTICLE III\nOTHER"
+                );
+                if boundary == "ARTICLE III\nOTHER" {
+                    assert!(selected(&extraction, category)
+                        .iter()
+                        .all(|c| !c.text.contains("OTHER")));
+                    let (normalized, chunked) = fixture("category-boundary", &[&text]);
+                    for version in [PREVIOUS_VERSION, PRE_HEADING_VERSION] {
+                        assert!(selected(
+                            &records(&chunked, &normalized, version).unwrap().0,
+                            category
+                        )
+                        .is_empty());
+                    }
+                }
             }
         }
         let text = "Agreement between Alpha and Beta.\nTABLE OF CONTENTS\n1. Services\n1.1 Services 3\n2. Payment 4";
@@ -1426,11 +1647,9 @@ mod tests {
             "5. Payment history example. Client shall pay.",
             "5. Other. Payment terms are printed here.",
             "5. The Client shall pay $1,000.00 per month.",
-            "Section 5. Payment\nClient shall pay.",
             "(a) Payment\nClient shall pay.",
             "payment terms\n5.1 Client shall pay.",
             "5. Payment Client shall pay.",
-            "ARTICLE V\nPAYMENT\nClient shall pay.",
             "ARTICLE IIII - PAYMENT\nClient shall pay.",
         ] {
             let (extraction, _, _) = output("miss", &[text]);
@@ -1513,7 +1732,7 @@ mod tests {
             "versioned-furniture",
             &pages.iter().map(String::as_str).collect::<Vec<_>>(),
         );
-        for version in [PREVIOUS_VERSION, VERSION] {
+        for version in [PREVIOUS_VERSION, PRE_HEADING_VERSION, VERSION] {
             let analyzed =
                 analyze_for_version(&chunked, &normalized, &UNCONTROLLED_EXECUTION, version)
                     .unwrap();
@@ -1562,10 +1781,10 @@ mod tests {
                     .warnings
                     .iter()
                     .any(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED"),
-                version == VERSION
+                version != PREVIOUS_VERSION
             );
             let mut forged = analyzed;
-            forged.analysis_version = if version == VERSION {
+            forged.analysis_version = if version != PREVIOUS_VERSION {
                 PREVIOUS_VERSION
             } else {
                 VERSION
@@ -1748,13 +1967,25 @@ mod tests {
                 serde_json::from_value(record["normalized"].clone()).unwrap();
             let chunked: ChunkedDocument =
                 serde_json::from_value(record["chunked"].clone()).unwrap();
-            let historical_replay = if record.get("analyzed").is_some() {
+            let historical = record
+                .get("historical_artifacts")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().collect::<Vec<_>>())
+                .unwrap_or_else(|| {
+                    if record.get("analyzed").is_some() {
+                        vec![record]
+                    } else {
+                        vec![]
+                    }
+                });
+            let mut historical_versions = Vec::new();
+            for saved in &historical {
                 let old_analysis: AnalyzedDocument =
-                    serde_json::from_value(record["analyzed"].clone()).unwrap();
+                    serde_json::from_value(saved["analyzed"].clone()).unwrap();
                 let old_synthesis: SynthesizedDocument =
-                    serde_json::from_value(record["synthesized"].clone()).unwrap();
+                    serde_json::from_value(saved["synthesized"].clone()).unwrap();
                 let old_verified: VerifiedDocument =
-                    serde_json::from_value(record["verified"].clone()).unwrap();
+                    serde_json::from_value(saved["verified"].clone()).unwrap();
                 super::super::validate_analyzed_content(&old_analysis, &chunked, &normalized)
                     .unwrap();
                 super::super::validate_verified_document(
@@ -1765,10 +1996,9 @@ mod tests {
                     &normalized,
                 )
                 .unwrap();
-                true
-            } else {
-                false
-            };
+                historical_versions.push(old_analysis.analysis_version);
+            }
+            let historical_replay = !historical.is_empty();
             let analyzed = analyze(&chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
             let synthesized =
                 synthesize(&analyzed, &chunked, &normalized, &UNCONTROLLED_EXECUTION).unwrap();
@@ -1836,7 +2066,7 @@ mod tests {
                 json!({"category":term.category,"status":if sections.is_empty() {"not identified"} else {"selected"},"sections":sections})
             }).collect::<Vec<_>>();
             let boundaries=clauses.iter().enumerate().map(|(i,c)|json!({"clause_id":extraction.clauses[i].clause_id,"number":c.number,"article":c.article,"parent":c.parent,"headings":c.headings,"opening":c.opening,"boundary_uncertain":c.boundary_uncertain,"fragments":c.fragments.iter().map(|f|json!({"block_id":f.block_id,"start":f.start,"end":f.end})).collect::<Vec<_>>()})).collect::<Vec<_>>();
-            reports.push(json!({"alias":alias,"policy":VERSION,"model_calls":0,"historical_replay":historical_replay,"analyzed":analyzed,"synthesized":synthesized,"verified":verified,"normalized_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&normalized).unwrap())),"chunked_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&chunked).unwrap())),"clauses":extraction.clauses.len(),"categories":selected,"section_boundaries":boundaries,"summary":summary,"citations":citations,"delivered":wire,"delivered_units":count,"total_units":lines.len(),"source_reconstruction":"passed","page_coverage":"passed"}));
+            reports.push(json!({"alias":alias,"policy":VERSION,"model_calls":0,"historical_replay":historical_replay,"historical_versions":historical_versions,"analyzed":analyzed,"synthesized":synthesized,"verified":verified,"normalized_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&normalized).unwrap())),"chunked_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&chunked).unwrap())),"clauses":extraction.clauses.len(),"categories":selected,"section_boundaries":boundaries,"summary":summary,"citations":citations,"delivered":wire,"delivered_units":count,"total_units":lines.len(),"source_reconstruction":"passed","page_coverage":"passed"}));
             println!("CONTRACT_REPLAY {alias}: {} source clauses, {} of {} render units delivered; source reconstruction and coverage passed",extraction.clauses.len(),count,lines.len());
         }
         let report = json!({"input_sha256":format!("{:x}",Sha256::digest(&bytes)),"input_scope":"saved normalized and chunked sources; Connect descriptor is a public test fixture, not original PDF provenance", "cases":reports});
