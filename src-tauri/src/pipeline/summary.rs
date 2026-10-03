@@ -10840,6 +10840,15 @@ mod tests {
                 recovered,
                 "final summary must disclose actual recovery independently of historical analysis omissions"
             );
+            if recovered {
+                let warning = final_result
+                    .summary
+                    .warnings
+                    .iter()
+                    .find(|warning| warning.code == "SUMMARY_ANALYSIS_PAGES_RECOVERED")
+                    .unwrap();
+                assert_eq!(warning.message, "Pages omitted during analysis and recovered through verified summary citations: 1. Original analysis decisions are retained.");
+            }
             assert_eq!(
                 serde_json::to_vec(&get_analyzed_document(&conn, &run_id).unwrap().unwrap())
                     .unwrap(),

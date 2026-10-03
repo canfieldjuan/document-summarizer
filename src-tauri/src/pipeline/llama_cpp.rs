@@ -45,6 +45,7 @@ pub struct GgufRuntimeConfig {
     pub expected_server_digest: String,
     pub expected_runtime_libraries: &'static [QualifiedRuntimeFile],
     pub context_tokens: u32,
+    pub disable_thinking: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,14 +389,15 @@ impl LlamaCppRuntime {
             let _ = child.wait();
             return Err(error);
         }
-        let prompt_framing = match PromptFraming::load(&client, &base_url, &api_token) {
-            Ok(prompt_framing) => prompt_framing,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
+        let prompt_framing =
+            match PromptFraming::load(&client, &base_url, &api_token, config.disable_thinking) {
+                Ok(prompt_framing) => prompt_framing,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
         let model_identity_guard = ModelIdentityGuard {
             path: config.model_path,
             file: model_file,
@@ -1411,7 +1413,12 @@ fn create_private_api_key_file(
 }
 
 impl PromptFraming {
-    fn load(client: &Client, base_url: &str, token: &str) -> Result<Self, ModelRuntimeFailure> {
+    fn load(
+        client: &Client,
+        base_url: &str,
+        token: &str,
+        disable_thinking: bool,
+    ) -> Result<Self, ModelRuntimeFailure> {
         let system_open = tokenize_text(client, base_url, token, "<|im_start|>system\n", true)?;
         let system_close_user_open = tokenize_text(
             client,
@@ -1424,7 +1431,11 @@ impl PromptFraming {
             client,
             base_url,
             token,
-            "<|im_end|>\n<|im_start|>assistant\n",
+            if disable_thinking {
+                "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            } else {
+                "<|im_end|>\n<|im_start|>assistant\n"
+            },
             true,
         )?;
         if system_open.is_empty()
@@ -1514,6 +1525,7 @@ fn runtime_cache_key(config: &GgufRuntimeConfig) -> Result<String, ModelRuntimeF
             .to_be_bytes(),
     );
     hasher.update(config.context_tokens.to_be_bytes());
+    hasher.update([u8::from(config.disable_thinking)]);
     hasher.update(config.expected_server_digest.as_bytes());
     for library in config.expected_runtime_libraries {
         validate_runtime_file_name(library.file_name)?;
@@ -2154,6 +2166,44 @@ mod tests {
             _runtime_library_directory: runtime_directory,
             _api_key_file: api_key_file,
         }
+    }
+
+    #[test]
+    fn nonthinking_framing_closes_the_block_before_generation() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            let mut frames = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut bytes = [0; 4096];
+                let count = stream.read(&mut bytes).unwrap();
+                let request = String::from_utf8_lossy(&bytes[..count]);
+                frames.push(
+                    serde_json::from_str::<serde_json::Value>(
+                        request.split("\r\n\r\n").nth(1).unwrap(),
+                    )
+                    .unwrap(),
+                );
+                let body = r#"{"tokens":[7]}"#;
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+            frames
+        });
+        let framing = PromptFraming::load(
+            &Client::new(),
+            &format!("http://{address}"),
+            "fixture",
+            true,
+        )
+        .unwrap();
+        assert!(!framing.user_close_assistant_open.is_empty());
+        let frames = worker.join().unwrap();
+        assert_eq!(
+            frames[2]["content"],
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+        assert_eq!(frames[2]["parse_special"], true);
     }
 
     #[test]
@@ -2857,6 +2907,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: LIBRARIES,
             context_tokens: 8_192,
+            disable_thinking: false,
         };
         let exact = runtime_cache_key(&config).unwrap();
         assert_eq!(runtime_cache_key(&config).unwrap(), exact);
@@ -2879,6 +2930,14 @@ mod tests {
         assert_ne!(
             runtime_cache_key(&GgufRuntimeConfig {
                 runtime_parent: PathBuf::from("/other-runtime"),
+                ..config.clone()
+            })
+            .unwrap(),
+            exact
+        );
+        assert_ne!(
+            runtime_cache_key(&GgufRuntimeConfig {
+                disable_thinking: true,
                 ..config.clone()
             })
             .unwrap(),
@@ -3008,6 +3067,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: &[],
             context_tokens: 8_192,
+            disable_thinking: false,
         };
         let mut runtime =
             LlamaCppRuntime::for_test("http://127.0.0.1:1".to_string(), "secret".to_string());
@@ -3045,6 +3105,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: &[],
             context_tokens: 8_192,
+            disable_thinking: false,
         };
         let mut child = Command::new("true").spawn().unwrap();
         child.wait().unwrap();

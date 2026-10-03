@@ -1,3 +1,4 @@
+use document_summarizer_lib::pipeline;
 use document_summarizer_lib::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
 use document_summarizer_lib::pipeline::contracts::{
     AnalysisOmissionReason, ModelOutputFormat, ModelProfileSnapshot, ModelRequest, ModelResponse,
@@ -10,10 +11,8 @@ use document_summarizer_lib::pipeline::db::{
     get_synthesis_attempt, get_verified_document, init_db, list_pipeline_events,
 };
 use document_summarizer_lib::pipeline::ingest::ingest_pdf;
-use document_summarizer_lib::pipeline::model::OllamaRuntime;
-use document_summarizer_lib::pipeline::model_settings::{
-    runtime_from_settings, QwenProfileRuntime,
-};
+#[path = "support/live_runtime.rs"]
+mod live_runtime;
 use document_summarizer_lib::pipeline::normalize::{normalize_document, CanonicalNormalizer};
 use document_summarizer_lib::pipeline::parser::{parse_document, PdfExtractParser};
 use document_summarizer_lib::pipeline::service::{process_pdf_to_summary, SummaryComponents};
@@ -23,6 +22,7 @@ use document_summarizer_lib::pipeline::structure::{
 use document_summarizer_lib::pipeline::summary::{
     analyze_chunked_document, remaining_page_omissions, summary_cited_pages,
 };
+use live_runtime::configured_live_runtime;
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -34,31 +34,6 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 struct TestDatabase(PathBuf);
-
-fn configured_live_runtime(db_path: &Path) -> Box<dyn ModelRuntime> {
-    if let Some(settings_path) = env::var_os("DOC_SUM_MODEL_SETTINGS_PATH") {
-        return runtime_from_settings(Path::new(&settings_path), db_path)
-            .expect("selected product model settings should configure");
-    }
-    if let Ok(analysis_model) = env::var("DOC_SUM_QUALIFICATION_ANALYSIS_MODEL") {
-        let verification_model = env::var("DOC_SUM_QUALIFICATION_VERIFICATION_MODEL")
-            .unwrap_or_else(|_| "qwen3-30b-a3b:latest".to_string());
-        let context_tokens = env::var("DOC_SUM_QUALIFICATION_CONTEXT_TOKENS")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(8_192);
-        return Box::new(
-            QwenProfileRuntime::qualification_candidate(
-                &analysis_model,
-                &verification_model,
-                context_tokens,
-            )
-            .expect("qualification stage models should configure"),
-        );
-    }
-    Box::new(OllamaRuntime::from_environment().expect("Ollama should configure"))
-}
 
 fn coverage_at_least_sixty_percent(cited: usize, total: usize) -> bool {
     total > 0 && cited <= total && (cited as u128) * 5 >= (total as u128) * 3
@@ -200,6 +175,10 @@ impl<'a> RecordingRuntime<'a> {
 }
 
 impl ModelRuntime for RecordingRuntime<'_> {
+    fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        self.inner.preflight_request(request)
+    }
+
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
         self.requests
             .lock()
@@ -249,6 +228,63 @@ impl ModelRuntime for RecordingRuntime<'_> {
 
     fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
         self.inner.profile_snapshot()
+    }
+}
+
+#[test]
+fn recording_runtime_preserves_preflight_without_generating() {
+    struct AdmissionRuntime;
+    impl ModelRuntime for AdmissionRuntime {
+        fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            panic!("preflight must not generate");
+        }
+        fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            assert_eq!(request.stage, PipelineStage::Synthesize);
+            if request.user_prompt == "too large" {
+                Err(ModelRuntimeFailure {
+                    code: "MODEL_CONTEXT_EXCEEDED".into(),
+                    message: "exact runtime admission rejected the request".into(),
+                    recoverable: false,
+                    request_attempts: Vec::new(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "admission-runtime"
+        }
+        fn model_id(&self) -> &str {
+            "admission-model"
+        }
+    }
+    let inner = AdmissionRuntime;
+    let recorder = RecordingRuntime::new(&inner);
+    for prompt in ["fits", "too large"] {
+        let request = ModelRequest {
+            stage: PipelineStage::Synthesize,
+            ordinal: 0,
+            system_prompt: "fixture".into(),
+            user_prompt: prompt.into(),
+            output_format: ModelOutputFormat::Text,
+            seed: 0,
+            max_output_tokens: 128,
+        };
+        let expected = inner.preflight_request(&request);
+        let actual = recorder.preflight_request(&request);
+        assert_eq!(
+            actual.as_ref().err().map(|error| &error.code),
+            expected.as_ref().err().map(|error| &error.code)
+        );
+        assert_eq!(
+            actual.as_ref().err().map(|error| &error.message),
+            expected.as_ref().err().map(|error| &error.message)
+        );
+        assert!(recorder.requests().is_empty());
+        assert!(recorder.responses().is_empty());
     }
 }
 
@@ -744,16 +780,16 @@ fn office_pdf_deterministic_checkpoints_survive_reopen() {
 }
 
 #[test]
-#[ignore = "requires one external PDF in DOC_SUM_OFFICE_PDF and configured Ollama"]
+#[ignore = "requires DOC_SUM_OFFICE_PDF and explicit model settings or DOC_SUM_QUALIFICATION_GGUF"]
 fn office_pdf_live_ollama_analysis_satisfies_evidence_contract() {
     let paths = configured_paths("DOC_SUM_OFFICE_PDF");
     assert_eq!(paths.len(), 1, "DOC_SUM_OFFICE_PDF must contain one path");
     let source = &paths[0];
     let database = TestDatabase::new("analysis");
-    let ollama = configured_live_runtime(&database.0);
+    let (ollama, _runtime_directory) = configured_live_runtime(&database.0);
     ollama
         .health()
-        .expect("selected Ollama model should be available");
+        .expect("selected production model should be available");
     let runtime = RecordingRuntime::new(ollama.as_ref());
     let mut conn = init_db(&database.0).expect("analysis database should initialize");
     let (_, run) = ingest_pdf(
@@ -803,7 +839,7 @@ fn office_pdf_live_ollama_analysis_satisfies_evidence_contract() {
 }
 
 #[test]
-#[ignore = "requires one external PDF in DOC_SUM_OFFICE_PDF and configured Ollama"]
+#[ignore = "requires DOC_SUM_OFFICE_PDF and explicit model settings or DOC_SUM_QUALIFICATION_GGUF"]
 fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let started = std::time::Instant::now();
     let paths = configured_paths("DOC_SUM_OFFICE_PDF");
@@ -811,10 +847,10 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let source = &paths[0];
     let database = TestDatabase::new("live");
     let (source_bytes, source_hash, source_size) = file_identity(source);
-    let ollama = configured_live_runtime(&database.0);
+    let (ollama, _runtime_directory) = configured_live_runtime(&database.0);
     ollama
         .health()
-        .expect("selected Ollama model should be available");
+        .expect("selected production model should be available");
     let runtime = RecordingRuntime::new(ollama.as_ref());
     let parser = PdfExtractParser::new();
     let normalizer = CanonicalNormalizer::new();
@@ -972,6 +1008,17 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
         !recovered_pages.is_empty(),
         "final recovery must be disclosed without erasing analysis history"
     );
+    if let Some(warning) = result
+        .summary
+        .warnings
+        .iter()
+        .find(|warning| warning.code == "SUMMARY_ANALYSIS_PAGES_RECOVERED")
+    {
+        assert_eq!(warning.message, format!(
+            "Pages omitted during analysis and recovered through verified summary citations: {}. Original analysis decisions are retained.",
+            recovered_pages.len()
+        ), "recovery disclosure must report the actual number of recovered pages");
+    }
     let material_omitted_pages = analyzed
         .omissions
         .iter()

@@ -23,6 +23,10 @@ pub mod summary;
 pub mod workspace;
 
 #[cfg(test)]
+#[path = "../../tests/support/live_runtime.rs"]
+pub(crate) mod live_runtime;
+
+#[cfg(test)]
 mod tests {
     use super::contracts::{PipelineProgress, PipelineRun, PipelineStage, PipelineState};
     use super::state::StateMachine;

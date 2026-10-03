@@ -34,24 +34,25 @@ gateway deployment and release acceptance are completed.
 
 ## Direct runtime fallback
 
-The retained default is:
+The default for fresh settings is **Qwen3.5-9B Q4_K_M**, with thinking disabled
+and a 32,768-token context for both analysis and verification. Choose **Add GGUF
+file** in the desktop model card and select the existing model file. The app
+admits only the pinned SHA-256
+`cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13`.
+It records the file identity without copying weights or importing them into
+Ollama. Missing or mismatched files leave the preset unavailable.
 
-```text
-Ollama endpoint: http://127.0.0.1:11434/
-Qualified preset: Qwen 3 30B-A3B
-Effective context: 8192 tokens per native /api/chat request
-```
+On Linux, the app starts a private, authenticated llama.cpp child and sends the
+pipeline prompts through `/completion`. Its trusted Qwen framing closes the
+thinking block before generation, matching the GGUF template's non-thinking
+branch. The qualified `llama-server` and its llama/ggml libraries must be the
+exact tested bundle in one directory, available on `PATH` or through
+`DOC_SUM_LLAMA_SERVER_PATH`. Direct GGUF execution is currently Linux-only;
+this preset does not establish Windows execution or a minimum-RAM guarantee.
 
-An opt-in full preset is also qualified for the exact Jack Qwen 3.8 27B Coder
-GGUF used by this project. Choose **Add GGUF file** in the desktop model card and
-select that existing file. The app records its exact bytes and file identity; it
-does not scan model folders, copy weights, use LM Studio, or import the file into
-Ollama. On Linux it starts a private, authenticated llama.cpp child and sends
-the existing pipeline prompts through direct `/completion` requests with a
-pinned minimal Qwen template. The qualified `llama-server` and its llama/ggml
-libraries must be the exact tested bundle in one directory, available on
-`PATH` or through `DOC_SUM_LLAMA_SERVER_PATH`. Other GGUF or runtime hashes stay
-visible but disabled until separately qualified.
+Existing saved selections are preserved. The Qwen 3 30B-A3B Ollama preset and
+Jack Qwen 3.8 27B Coder GGUF preset remain explicit options. Other GGUF or runtime
+hashes stay visible but disabled until separately qualified.
 
 Ollama remains managed outside the application. The desktop app checks
 readiness, discovers Ollama models, combines them with explicit GGUF

@@ -59,7 +59,7 @@ separator, so Windows uses `;`.
 ## Combined summary-profile release acceptance
 
 `scripts/profile-release-acceptance.sh` runs the four live profile gates in a
-fixed order against the configured Ollama model:
+fixed order against the production default Qwen3.5-9B profile:
 
 1. automatic routing across an agreement, a contract article, a legal story,
    an anecdotal report, and mixed content;
@@ -71,21 +71,23 @@ fixed order against the configured Ollama model:
 The script accepts only the documented DOL deck whose SHA-256 is
 `12097e00b956e8f387e2cd43dd609a9cecc1ca1580c32cc3b87b60518307382b`.
 That fixed public input makes it safe for the script to reveal the General
-summary needed for semantic review. It also requires the selected model to be
-preloaded in Ollama at `100% GPU` on the exact loopback endpoint
-`http://127.0.0.1:11434/v1/`; a different endpoint, missing model, CPU offload,
-or wrong fixture fails before any Rust test runs. The command runs the
-TypeScript/Vite production build itself and stops if current frontend sources do
-not compile. Binding the checked endpoint to the endpoint used by the tests
-prevents a local GPU process from masking execution against another server. The
-command also rejects an inherited `OLLAMA_HOST`, product model-settings path, or
-qualification-model override because those variables can redirect the CLI
-check or the General integration harness away from the runtime being accepted.
+summary needed for semantic review. Set `DOC_SUM_QUALIFICATION_GGUF` to the
+pinned Qwen3.5-9B Q4_K_M file. Each live lane uses the same test-only helper to
+register the file in private isolated settings and call the production runtime
+factory. Model/runtime checksums, context admission and child lifecycle remain
+production checks. No resident Ollama model is required. Model-settings and
+qualification-model overrides are rejected to prevent selecting a different
+profile. The script builds the frontend and stops on a failed lane.
+
+Reserve the GPU using the existing local inference lock before running; the
+script itself does not claim exclusive hardware or prove GPU residency.
+A live run must retain source/model/runtime identities and hardware evidence.
 
 From the repository root, after `npm ci`:
 
 ```bash
-scripts/profile-release-acceptance.sh \
+DOC_SUM_QUALIFICATION_GGUF=/absolute/path/to/Qwen3.5-9B-Q4_K_M.gguf \
+  scripts/profile-release-acceptance.sh \
   /absolute/path/to/dol-workplace-poster.pdf
 ```
 
