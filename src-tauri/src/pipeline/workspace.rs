@@ -62,6 +62,7 @@ pub struct PersistedSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SummaryView {
+    pub contract_extraction: Option<crate::pipeline::contracts::ContractExtraction>,
     pub text: String,
     pub warnings: Vec<PipelineWarning>,
     pub created_at: DateTime<Utc>,
@@ -297,6 +298,7 @@ fn summary_view(
                     != Some(citations.citation_version.as_str())
                 || citations.summary_integrity_hash != summary.integrity_hash
                 || citations.rendered_text != summary.text
+                || citations.contract_extraction != summary.contract_extraction
                 || (citations.presentation_mode != SummaryPresentationMode::Coherent
                     && citations.claims.is_empty())
                 || citations.evidence.is_empty()
@@ -310,6 +312,7 @@ fn summary_view(
                     return Err(WorkspaceError::CitationMismatch(summary.document_id));
                 }
                 SummaryPresentationMode::ClaimLedgerFallback
+                | SummaryPresentationMode::StructuredExtraction
                 | SummaryPresentationMode::LegacyClaimList
                     if !citations.summary_claims.is_empty() =>
                 {
@@ -379,6 +382,7 @@ fn summary_view(
         return Err(WorkspaceError::CitationMismatch(summary.document_id));
     }
     Ok(SummaryView {
+        contract_extraction: summary.contract_extraction,
         text: summary.text,
         warnings: summary.warnings,
         created_at: summary.created_at,

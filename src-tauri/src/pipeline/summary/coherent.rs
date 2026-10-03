@@ -5,10 +5,10 @@
 use super::*;
 
 mod budget;
-mod page_furniture;
+pub(super) mod page_furniture;
 mod semantic_support;
 mod trim;
-mod whole_clauses;
+pub(super) mod whole_clauses;
 pub(super) use trim::verify_source_contributions;
 
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
@@ -3117,6 +3117,7 @@ fn synthesize_with_delivery_coverage(
         });
     }
     let result = SynthesizedDocument {
+        contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.to_string(),
         runtime_id: runtime
@@ -6573,6 +6574,7 @@ fn fallback_document(
         stage: Some(PipelineStage::Synthesize),
     });
     Ok(SynthesizedDocument {
+        contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.to_string(),
         runtime_id: runtime
@@ -8034,7 +8036,8 @@ pub(super) fn validate_content(
                 return Err(invalid_document());
             }
         }
-        SummaryPresentationMode::LegacyClaimList => return Err(invalid_document()),
+        SummaryPresentationMode::LegacyClaimList
+        | SummaryPresentationMode::StructuredExtraction => return Err(invalid_document()),
     }
     Ok(())
 }
@@ -15716,6 +15719,7 @@ mod tests {
         )
         .unwrap();
         let mut verified = VerifiedDocument {
+            contract_extraction: None,
             document_id: "contract-document".into(),
             verification_version: VERIFICATION_VERSION.into(),
             synthesis_attempt_ordinal: 0,

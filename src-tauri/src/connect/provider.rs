@@ -2486,6 +2486,169 @@ mod tests {
     }
 
     #[test]
+    fn contract_provider_persists_key_terms_from_full_pipeline_without_model_calls() {
+        use crate::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
+        use crate::pipeline::contracts::{
+            ContractTermCategory, DocumentParser, IngestedDocument, ParsedDocument,
+        };
+        use crate::pipeline::structure::{structure_document, DeterministicStructureInterpreter};
+        use crate::pipeline::summary;
+        struct PublicContractParser {
+            text: String,
+        }
+        impl DocumentParser for PublicContractParser {
+            fn id(&self) -> &'static str {
+                "public-contract-fixture"
+            }
+            fn version(&self) -> &'static str {
+                "1"
+            }
+            fn parse(
+                &self,
+                document: &IngestedDocument,
+            ) -> Result<ParsedDocument, PipelineFailure> {
+                let mut parsed = PdfExtractParser::new().parse(document)?;
+                parsed.pages.truncate(1);
+                parsed.pages[0].text = self.text.clone();
+                parsed.parser_id = self.id().into();
+                parsed.parser_version = self.version().into();
+                Ok(parsed)
+            }
+        }
+        struct NoInference;
+        impl ModelRuntime for NoInference {
+            fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                panic!("Contract route must not call a model")
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                panic!("Contract route must not require model health")
+            }
+            fn runtime_id(&self) -> &str {
+                "unavailable"
+            }
+            fn model_id(&self) -> &str {
+                "none"
+            }
+        }
+        for oversized in [false, true] {
+            let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/structured_report.pdf");
+            let bytes = fs::read(&source).unwrap();
+            let request = fixture_request(&bytes);
+            let (document, run) =
+                prepare_pdf_ingestion(source.to_str().unwrap(), Some("public-contract.pdf"))
+                    .unwrap();
+            let mut conn = db::init_db(":memory:").unwrap();
+            let (_, job) = store::accept_job_with_ingestion_guarded(
+                &mut conn,
+                &request,
+                &request.canonical_hash().unwrap(),
+                source.to_str().unwrap(),
+                &Uuid::new_v4().to_string(),
+                &document,
+                &run,
+                SummaryProfile::Contract,
+                None,
+                || true,
+            )
+            .unwrap()
+            .unwrap();
+            let processing = store::mark_processing(&conn, &job.job_id).unwrap();
+            let text = if oversized {
+                format!(
+                    "1. Payment\n1.1 {}.\n2. Other. Must not leapfrog the payment section.",
+                    "Printed words ".repeat(90_000)
+                )
+            } else {
+                "Agreement between two public fixture parties.\n1. Payment\n1.1 Client shall pay within thirty days.\n1.2 Payment is subject to acceptance.\n2. Term and Termination. Either party may end the term on notice.\n3. Other. Keep all source clauses.".into()
+            };
+            parse_document(&mut conn, &PublicContractParser { text }, &run.run_id).unwrap();
+            normalize_document(&mut conn, &CanonicalNormalizer::new(), &run.run_id).unwrap();
+            structure_document(
+                &mut conn,
+                &DeterministicStructureInterpreter::new(),
+                &run.run_id,
+            )
+            .unwrap();
+            chunk_document(&mut conn, &DeterministicDocumentChunker::new(), &run.run_id).unwrap();
+            let control = &crate::pipeline::control::UNCONTROLLED_EXECUTION;
+            let policy = Some(SummaryDeliveryPolicy::connect());
+            summary::analyze_chunked_document_controlled_with_delivery(
+                &mut conn,
+                &NoInference,
+                &run.run_id,
+                control,
+                policy,
+            )
+            .unwrap();
+            summary::synthesize_analyzed_document_controlled_with_delivery(
+                &mut conn,
+                &NoInference,
+                &run.run_id,
+                control,
+                policy,
+            )
+            .unwrap();
+            summary::verify_synthesized_document_controlled_with_delivery(
+                &mut conn,
+                &NoInference,
+                &run.run_id,
+                control,
+                policy,
+            )
+            .unwrap();
+            let artifacts =
+                summary::complete_verified_document_with_delivery(&mut conn, &run.run_id, policy)
+                    .unwrap();
+            let normalized = db::get_normalized_document(&conn, &run.run_id)
+                .unwrap()
+                .unwrap();
+            if oversized {
+                assert!(
+                    artifacts.summary.text.len()
+                        > crate::connect::contracts::MAX_SUMMARY_TEXT_BYTES
+                );
+                let error =
+                    persist_completed_summary(&conn, &processing, &artifacts, &[], &normalized)
+                        .unwrap_err();
+                assert!(matches!(error, ProcessJobError::Contract(_)));
+                let stored = store::get_job(&conn, &job.job_id).unwrap().unwrap();
+                assert_eq!(stored.state, JobState::Processing);
+                assert!(stored.result.is_none());
+                // The caller turns this error into the existing failed-job path.
+                // A failed delivery must not destroy the full desktop inventory.
+                let view =
+                    crate::pipeline::workspace::get_persisted_summary(&conn, &run.run_id).unwrap();
+                assert_eq!(view.summary.text, artifacts.summary.text);
+                continue;
+            }
+            persist_completed_summary(&conn, &processing, &artifacts, &[], &normalized).unwrap();
+            let persisted = store::get_job(&conn, &job.job_id).unwrap().unwrap();
+            assert_eq!(persisted.state, JobState::Completed);
+            let content = &persisted.result.unwrap().outputs[0].content;
+            assert_eq!(content.text, artifacts.summary.text);
+            assert!(content.text.starts_with("Key terms\n\n"));
+            assert!(content.text.contains("Full clause list\n\n"));
+            assert!(content.text.contains("Payment is subject to acceptance."));
+            let view =
+                crate::pipeline::workspace::get_persisted_summary(&conn, &run.run_id).unwrap();
+            let extraction = view.summary.contract_extraction.unwrap();
+            let term = extraction
+                .key_terms
+                .iter()
+                .find(|t| t.category == ContractTermCategory::TermRenewal)
+                .unwrap();
+            let termination = extraction
+                .key_terms
+                .iter()
+                .find(|t| t.category == ContractTermCategory::Termination)
+                .unwrap();
+            assert_eq!(term.selections, termination.selections);
+            assert_eq!(term.selections.len(), 1);
+        }
+    }
+
+    #[test]
     fn completed_connect_job_persists_a_bounded_whole_claim_prefix() {
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
@@ -2550,6 +2713,7 @@ mod tests {
         let now = Utc::now();
         let summary = SummaryArtifacts {
             summary: SummaryArtifact {
+                contract_extraction: None,
                 document_id: document.document_id.clone(),
                 summary_version: crate::pipeline::summary::SUMMARY_VERSION.to_string(),
                 text: rendered_text.clone(),
@@ -2558,6 +2722,7 @@ mod tests {
                 integrity_hash: "summary-integrity".to_string(),
             },
             citations: CitationArtifact {
+                contract_extraction: None,
                 document_id: document.document_id,
                 citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
                 summary_integrity_hash: "summary-integrity".to_string(),
@@ -2677,6 +2842,7 @@ mod tests {
         let now = Utc::now();
         let summary = SummaryArtifacts {
             summary: SummaryArtifact {
+                contract_extraction: None,
                 document_id: document.document_id.clone(),
                 summary_version: crate::pipeline::summary::SUMMARY_VERSION.to_string(),
                 text: rendered_text.clone(),
@@ -2685,6 +2851,7 @@ mod tests {
                 integrity_hash: "summary-integrity".to_string(),
             },
             citations: CitationArtifact {
+                contract_extraction: None,
                 document_id: document.document_id,
                 citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
                 summary_integrity_hash: "summary-integrity".to_string(),

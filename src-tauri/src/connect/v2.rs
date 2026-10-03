@@ -574,6 +574,7 @@ mod tests {
         let result = v1::JobResult::from_summary(
             &request.inputs[0],
             &SummaryArtifact {
+                contract_extraction: None,
                 document_id: "44444444-4444-4444-8444-444444444444".to_string(),
                 summary_version: "1.0.0".to_string(),
                 text: "Invoice due Friday.".to_string(),
@@ -600,6 +601,7 @@ mod tests {
         let mut result = v1::JobResult::from_summary(
             &request.inputs[0],
             &SummaryArtifact {
+                contract_extraction: None,
                 document_id: "44444444-4444-4444-8444-444444444444".to_string(),
                 summary_version: "1.0.0".to_string(),
                 text: "Invoice due Friday.".to_string(),

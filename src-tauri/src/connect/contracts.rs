@@ -584,6 +584,7 @@ mod tests {
     fn summary_output_enforces_both_valid_and_oversized_boundaries() {
         let request = valid_request();
         let mut summary = SummaryArtifact {
+            contract_extraction: None,
             document_id: Uuid::new_v4().to_string(),
             summary_version: "1.0.0".to_string(),
             text: "Grounded summary.".to_string(),
@@ -611,6 +612,7 @@ mod tests {
     fn summary_text_limit_is_utf8_bytes_and_never_splits_a_scalar() {
         let request = valid_request();
         let mut summary = SummaryArtifact {
+            contract_extraction: None,
             document_id: Uuid::new_v4().to_string(),
             summary_version: "5.0.0".to_string(),
             text: "😀".repeat(MAX_SUMMARY_TEXT_BYTES / 4),
@@ -656,6 +658,7 @@ mod tests {
         let request = valid_request();
         let lines = vec!["\"".repeat(524_280), "\"".repeat(524_280)];
         let summary = SummaryArtifact {
+            contract_extraction: None,
             document_id: Uuid::new_v4().to_string(),
             summary_version: "5.0.0".to_string(),
             text: lines.join("\n\n"),

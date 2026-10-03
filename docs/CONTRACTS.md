@@ -5,6 +5,66 @@ This document describes contracts implemented by the Rust core in
 commands, and renders results; it does not assign identity, hash bytes, write
 SQLite, or mutate pipeline state.
 
+## Complete clause sources and Contract extraction
+
+The accepted Contract extraction policy is frozen in
+[PR-CLAUSE-EXTRACTION.md](PR-CLAUSE-EXTRACTION.md), including its heading grammar,
+section extents, fixed category table, opening-parties fallback and known limits.
+`summary/coherent/page_furniture.rs` remains the furniture owner;
+`summary/coherent/whole_clauses.rs` owns the versioned Contract source view.
+General keeps main's analysis 14 and synthesis 12 source and verification behavior.
+No independent Contract parser or furniture detector is retained.
+
+Contract profile (also Automatic resolving to Contract) uses
+`contract-extraction-3.1.2` for deterministic analysis, synthesis and verification.
+Source clause/evidence identities retain the 3.0.2 content-addressed recipe.
+The source reader carries sentence continuity across blocks and pages, repairs
+false leading-title splits, and records unfinished or unsupported heading/TOC
+boundaries; any affected key-term
+category renders `not identified`. Selection consumes origin uncertainty rather
+than re-parsing selected text.
+It stores ordered source clauses and typed selections for parties, payment,
+term/renewal, termination, insurance and liability/indemnity. Each selection
+contains a rule, root source-clause ID and all clause IDs in the selected section.
+Both term/renewal and termination may reference the same section; this adds no
+inventory records. Missing matches render `not identified`, not an inferred term.
+
+Desktop and Connect show key terms first, then every source clause. Source text,
+IDs and page citations are reconstructed and validated before persistence and
+on reload; recomputing hashes cannot authorize altered wording or section extent.
+Summary 9.0.0 and citation 5.0.0 bind the complete typed extraction and rendering.
+Released historical prose artifacts retain their original validation and hashes;
+incompatible extraction checkpoints require explicit retry, never reinterpretation.
+No model generation, ranking or semantic verification is used by this route.
+
+Policy 3 requires an uppercase-first numeric remainder and a preceding-unit
+boundary before a standalone title can move to the next clause. It accepts an
+uppercase ARTICLE/title with a whitespace-only separator and matches complete
+heading conjuncts against the existing alias table. The final conjunct is always
+matched; earlier conjuncts qualify only when the final conjunct is one word.
+Exact whole-heading aliases remain accepted; an empty final conjunct cannot
+enable earlier matches. These rules apply only to
+Contract extraction. A/B now serve as regressions, not qualification: freeze the
+rules/fixtures before opening the operator-screened C-onward set, then require
+zero wrong labels and independent review from fresh PDF ingestion. Stop before
+that held-out run until the private manifest is confirmed and supplied.
+
+Connect retains its closed text envelope and existing byte limits. A selected
+key-term section and all its citations form one atomic delivery unit; a prefix
+cannot deliver a heading stub or omit children. Full-list clauses are atomic
+individually. Labels and repeated references do not inflate source coverage.
+The existing truncation warning identifies omitted output; invalid extraction or
+an unacceptable prefix is a failure, not `not identified`. The full persisted
+inventory remains available to desktop. Existing run transactions, cancellation,
+state-version checks and retry ownership remain in force.
+
+The selector is positional, not a legal interpretation: numbered TOCs and
+trailing unnumbered material can be included under the wrong category. A/B replay
+must report these consequences locally. OCR wording retains its provenance and
+warnings; exact copying does not establish transcription accuracy. Model setup,
+General summaries, external capability/schema and storage migrations are outside
+this change.
+
 ## `PipelineRun`
 Represents an instance of processing a document.
 
@@ -576,8 +636,8 @@ a model-output reason, disclosed by `COHERENT_SUMMARY_MODEL_OUTPUT_INVALID`.
 Only a typed rejection of model-produced content admits that fallback; transport,
 identity, cancellation, runtime-admission and artifact/invariant failures do not.
 Rejected prose and citations are never delivered. The fallback still requires
-semantic verification and final page coverage. Story, Contract and source-ID
-selection failures retain their existing behavior.
+semantic verification and final page coverage. Story and source-ID selection
+failures retain their existing behavior. New Contract runs use source extraction.
 
 A narrow deterministic guard compares modal predicates in each prose unit with
 matching statements in its cited quotations. Predicate, bounded subject context,
@@ -621,10 +681,10 @@ reconstructs canonical synthesis-evidence identities with the artifact's
 synthesis version; mixed-version evidence identities fail validation.
 
 Connect General delivery-policy runs continue to use the version-5 direct
-claim-ledger synthesis path. Story and Contract use their source-aware coherent
-synthesis profiles. Before either specialized coherent result can persist, its
-cited evidence must satisfy Connect's existing raw and omission-adjusted page
-coverage floors. An undercovered specialized result becomes the verified
+claim-ledger synthesis path. Story uses its source-aware coherent synthesis
+profile; new Contract runs use the structured extraction contract above. Before
+a Story coherent result can persist, its cited evidence must satisfy Connect's
+existing raw and omission-adjusted page coverage floors. An undercovered Story result becomes the verified
 claim-ledger fallback, which preserves the delivery gate rather than weakening
 it for source-selective prose.
 
@@ -685,19 +745,15 @@ substitute a mutable current setting. A missing profile rejects synthesis,
 retry, continuation or workspace projection at the applicable boundary rather
 than permitting incompatible result reuse.
 
-Standalone General, Story and Contract runs share ingestion, normalization, bounded exact
-source catalogs, response shape, durable citations, semantic verification,
-fallback, retry, continuation and rendering. General synthesis preserves the
-main message, important support and qualifications. Story synthesis instead
-asks for a readable synopsis that preserves sourced character identity and
-motivation, conflict, causal relationships, major events, chronology and the
-resolution or explicitly unresolved ending. It must not infer a motivation,
-internal state or causal link from sequence alone. Contract synthesis produces a
-plain-language overview organized around parties and roles, scope and term,
-obligations, conditions, exceptions, deadlines, amounts, confidentiality,
-termination and remedies when present. It must retain who acts, what they do,
-the recipient, trigger, qualifications, timing and amount without adding legal
-advice, enforceability conclusions or judgments about a term.
+All profiles share ingestion, normalization, durable citations, retry and
+continuation. New Contract runs use the structured extraction route above.
+General synthesis preserves the main message, important support and
+qualifications. Story synthesis produces a readable synopsis preserving sourced
+character identity, motivation, conflict, causality, major events, chronology and
+resolution. Neither infers unstated motivations or relationships from sequence.
+
+The following Contract prose rules describe historical artifacts only. They are
+retained for validation/reopening and are not used by new Contract runs:
 
 Contract clause references are application-owned provenance. Ordinary source
 segments require a number token ending in a period and a clause title ending
@@ -744,9 +800,10 @@ and semantic acceptance criterion, not a mechanically measured quality score.
 
 Connect admissions assign the requested General, Story or Contract profile
 explicitly in their existing acceptance transaction. General retains direct
-delivery synthesis. Story and Contract retain their named coherent behavior and
-fall back to the verified ledger when their generated evidence cannot satisfy
-Connect page coverage. This contract does not add persisted document-type
+delivery synthesis. Story retains its named coherent behavior; new Contract runs
+use structured extraction. Story falls back to the verified ledger when its
+generated evidence cannot satisfy Connect page coverage. Contract keeps whole
+source clauses and the existing delivery-size gate. This contract does not add persisted document-type
 metadata, measured classification reliability, trained adapters, a parallel
 synthesis framework or a renderer redesign.
 
