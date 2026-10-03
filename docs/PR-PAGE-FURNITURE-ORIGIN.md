@@ -75,13 +75,113 @@ when the resulting source extent is correct; unexplained changes block lock.
 
 ## Implementation summary
 
-Pending. First commit contains only this contract.
+Implemented in `80613f4`, following contract-only `3bc8e6b`:
+
+- Origin: `src-tauri/src/pipeline/summary/coherent/page_furniture.rs:256`.
+  The page reader keeps original byte offsets across blocks, admits bounded
+  metadata candidates by edge position, then counts distinct pages.
+- Current recognition is centralized at `page_furniture.rs:172`; old
+  first/last-line label recognition and digit-erasing keys run only under
+  `Policy::Original`. Copyright recognition remains shared.
+- General synthesis13.0.0 and Contract extraction3.2.0 use the new policy.
+  General11/12 and Contract3.1.2 reconstruct the old policy and exact warning.
+  Contract source-ID recipe3.0.2 remains unchanged.
+- The existing disclosure code now reports partial-page removal under policy2.
+  Coverage subtracts only the source-backed set of wholly excluded pages.
+
+## Reproduce, isolate, explain, fix, prove, prevent regression
+
+1. Reproduce: at contract-only `3bc8e6bee8dff9b3d186ea55ac64739993cc54f6`,
+   `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
+   furniture_origin_reproduction -- --nocapture` produced 0passed/5failed.
+   All failures showed metadata still present in retained source bytes.
+2. Isolate: public fixtures cover filing labels, combined running headers,
+   date footers, multi-line margins, and typed EDGAR headers. Failure starts
+   in furniture admission, before clause construction or category selection.
+3. Explain: the old owner recognizes only selected metadata at the outermost
+   lines; unsupported margins pass through as clause text or uncertain headings.
+   This is an existing owner limitation, not a key-term alias defect.
+4. Fix: recognize those forms at the owner and pass its retained byte ranges to
+   both consumers. No Contract-level compensation filter or source re-scan.
+5. Prove: those same5 tests pass. Final owner tests10passed/0failed; adjacent
+   furniture tests20passed/0failed/1ignored; full library all-features714passed/
+   0failed/20ignored. Strict all-target/all-feature Clippy, format and diff checks
+   pass. The final edit moved the test module below runtime items for Clippy;
+   final owner tests and Clippy were rerun after that move.
+6. Prevent regression: committed negatives retain operative clauses, governing
+   headings, unique/minority/position-changing metadata, distinct filing IDs,
+   and numbers outside admitted counter fields. Tests cover edge-band limits,
+   invalid counters, empty/single-page inputs, mixed content, cross-block UTF-8
+   byte ranges, disclosure/coverage and historical policy dispatch.
+
+Test scaffolding corrections during implementation: missing imports, CRLF
+fixture construction, and Clippy's test-module placement rule. These were my
+mistakes; none was a production fix prompted by a new corpus example.
+
+## A-AH reconciliation
+
+Saved normalized/chunked inputs from34 prior cases were replayed through current
+analysis, synthesis, verification, citations and Connect delivery. All34 saved
+Contract3.1.2 analysis/synthesis/verification artifacts validate under the
+historical policy. Every new clause reconstructs from original source ranges;
+all render units deliver and coverage passes. No model is invoked. This is a
+saved-source regression, not fresh PDF ingestion or an unseen evaluation.
+
+There are17 changed category slots, no lost selections, and26 changed source
+inventories. Every change is recorded in the private source adjudication.
+
+| Aliases | Category change | Explanation |
+| --- | --- | --- |
+| I, M, P, Q, S, T, W, Z, AB, AG | Parties | Typed EDGAR record removed; substantive opening unchanged. |
+| L | Parties; payment | EDGAR opening cleanup; repeated filing label removed from payment continuation, both sides retained. |
+| AE | Parties; liability/indemnity | EDGAR opening cleanup; complete sections4 (including4.1-4.3) and10 (including exception) become selectable after marked footer removal. |
+| AF | Parties; insurance; liability/indemnity | EDGAR opening cleanup; date footer removed inside complete article24, preserving both sides. |
+
+All other slots are unchanged. Source inventory changes consist of metadata
+removal, plus two N title lines restored because they do not meet strict-majority
+same-position admission. AF loses eight metadata-only numbered/date clauses,
+changing46clauses to38. A-G source inventories and selections are unchanged.
+The AE gain is locally source-checked; independent review and combined v5 remain
+required. Remaining unsupported heading forms belong to PR-B.
+
+## Evidence aliases and hashes
+
+Evidence is durable outside worktrees. Only aliases and SHA256 appear here:
+
+| Alias | SHA256 |
+| --- | --- |
+| A-fail-before | 039667828bbc6a055274100398ab7e65e6b1826ed0aa803816ec6d923133df5d |
+| A-pass-after | 9d96eadf96b6005202f32dc3cfc5cc948208ef326c2bb2ee9d406040b7ebae7e |
+| A-full-library | 5f8369450f5ca6fc2f2f1fae639867a7f8d6a78acb9051d6498f941167e1ee15 |
+| A-strict-Clippy | cb9d57e86c6053b078d3dab27aa81d2ad7c58480cd8a355229bcb64f9fa86974 |
+| A-regression-input | bc0c1c2aad2204caa5e3cf12e2ec2eac143c33cb6239e450604d8e754cef5a37 |
+| A-regression-replay | b23b5535df15c7d4b0b43cfcc40026ced0209a23c855f179db4e96efafa103c4 |
+| A-selection-diff | ab60b5cb646150964f66e48c6f569844aecc105c68f7cbfe92fc1f663eef5670 |
+| A-source-adjudication | 0b7da8d7ecbf801600b56842b7505849f73bba4a0e99cf6192488b644de7a150 |
+| A-implementation-fingerprint | ecf6216e52c4f1deb70988cfd2a680b15fb6693d3b3cdeee9fa17b51517dcaec |
 
 ## Cold diff audit
 
-Pending implementation and proof.
+`boundary-probe: metadata removal and source preservation both exercised;
+minority/unique/mixed inputs retained; page-band and numeric counter boundaries
+passed; downstream General/Contract use owner-produced byte ranges; forged
+warnings/version relabeling rejected; no new default fallback or shared state.`
 
-## Gap audit
+`effect-trace: remove running metadata from source sections | Furniture retained
+byte ranges control General catalogs and Contract records | five fail-before
+fixtures pass after; A-AH inventory/selection diffs account for all changes.`
 
-NOT DONE: public reproductions, implementation, historical/current regression,
-A-AH reconciliation, independent review and lock remain.
+The diff adds version dispatch and historical reconstruction in addition to the
+owner change. It does not add filesystem/network effects or shared mutable state;
+existing concurrent pipeline tests remain green. Customer-visible source
+removal is the relevant risk and is covered by the positive/negative probes and
+source adjudication. Independent review must still challenge the policy.
+
+## Gap audit and stop condition
+
+DONE: public reproductions; owner fix; special-case inventory; historical/current
+regression; A-AH source reconciliation; local tests/Clippy/format.
+
+NOT DONE: exact-head CI, independent review, PR-B heading implementation, and the
+single fresh combined v5 qualification. Keep this PR draft. Freeze this owner
+policy at the recorded implementation fingerprint; do not tune it on v5.
