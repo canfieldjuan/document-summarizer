@@ -2101,10 +2101,15 @@ The operator changes this manager choice through
 `document-summarizer --connect-background enable|disable`. Before stopping an
 owner or changing systemd state, the controller durably writes one immutable,
 owner-private generation under the per-user configuration root. Its monotonic
-enable phases are `intent_recorded`, `source_stopped`, `manager_enabled`, and
-`successor_ready`; disable uses `intent_recorded`, `publisher_stopped`, and
-`manager_disabled`. An enable readiness failure durably changes to rollback and
-restores the recorded prior choice. `status` reports an incomplete generation
+enable phases are `intent-recorded`, `source-stopped`, `manager-enabled`, and
+`successor-ready`; disable uses `intent-recorded`, `publisher-stopped`, and
+`manager-disabled`. An enable readiness failure durably changes to rollback,
+starts a fresh bounded rollback attempt, and restores the recorded prior choice.
+An enabled prior choice is started with `enable --now`; its exact generation may
+start in `rollback-target-stopped` and `prior-choice-restored`. Jobs remain
+barred until the restored provider passes readiness. A failed restoration keeps
+the rollback record for explicit recovery. A disabled prior choice stays stopped.
+`status` reports an incomplete generation
 and `recover` resumes only that exact generation. A shared admission lock plus
 the record blocks job creation through commit while a transition is incomplete.
 Each explicit recovery attempt refreshes the 35/40/45-second transition deadlines
@@ -2191,6 +2196,13 @@ provider lifetime. An existing live owner therefore fails startup closed; a
 safe stale fixed registration may be replaced only after its ownership lock is
 held.
 
+Linux lifecycle shutdown authenticates one registration snapshot against the
+expected executable, UID, network namespace and listener ownership. It opens a
+pidfd before process authentication, retains it through signaling, and signals
+that handle. A later registration rewrite or numeric PID reuse cannot redirect
+the signal. Unsupported process handles fail closed without a numeric-PID
+fallback. Acquisition failures preserve their reason for diagnostic tests.
+
 Provider shutdown first closes new-job admission and requests cooperative
 cancellation from every retained Connect worker. The 30-second timeout bounds
 the HTTP job-creation request, including receipt of its body. Database lookup,
@@ -2240,9 +2252,16 @@ application data, lifecycle control, and systemd enablement paths, so package
 discovery does not enumerate `/etc/passwd` or guess XDG locations. Public package
 records and removal/install receipts establish mode 0644 before atomic
 publication, independently of the controller's process umask. The shared
-participant directory is an untrusted inbox: discovery admits only canonical UID
-filenames, matching owner-private regular files and valid owner-bound record
-contents. Temporary, malformed, foreign-owned and unsafe entries have no
+participant directory is an untrusted inbox. Publication exclusively creates a
+random `UID.UUID.json` slot, then reuses that owned slot for atomic updates;
+another UID cannot reserve its destination. Slot selection and publication hold
+the inbox directory inode exclusively; discovery holds it shared and purge
+holds it exclusively. Operations use the held inode, and only the first valid
+slot in filename order is authoritative for a UID. Interrupted empty slots are
+ignored by discovery and reused by their owner. Acknowledgement temporaries
+establish exact mode 0600 before publication, independently of umask. Discovery
+requires matching owner-private regular files and valid owner-bound record
+contents. Fixed UID names, temporary, malformed, foreign-owned and unsafe entries have no
 package-wide authority. File reads cannot block on a substituted FIFO. Once a
 participant is accepted, its directory identities and pending transitions remain
 strict lifecycle checks; root-owned package records still fail closed.
