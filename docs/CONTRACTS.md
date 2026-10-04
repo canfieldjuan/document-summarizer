@@ -2268,6 +2268,16 @@ unsafe file types/ownership/modes, conflicting operations and unsettled state
 fail closed. Cleanup never traverses participant application-data paths.
 Ordinary removal continues to preserve its reinstall receipt and controller.
 
+If removal preparation fails, `postinst abort-remove` invokes the installed
+controller's explicit rollback action. It persists a rollback disposition on
+the same removal generation before clearing the quiesce marker, then uses the
+existing settlement path to restore each recorded background choice. Only the
+exact pending enabled participant may start during settlement; ordinary jobs
+remain blocked until the operation clears. Interrupted rollback resumes its
+saved progress and cannot be completed as forward removal or purge. It writes
+no completed-removal receipt. Forward records retain their previous serialized
+shape; an absent disposition is forward, and rollback is valid only for removal.
+
 When a package participant was captured with no runtime directory, a runtime
 created by a later login remains untrusted until the system manager reports the
 exact runtime path, the named user manager reports the same
@@ -2292,6 +2302,15 @@ validates the same record and quarantine, creates the exact package operation,
 durably advances the marker to `adopted`, and removes only the matching private
 quarantine. A crash before or after removal resumes from that phase. Malformed,
 replayed-different, or tampered bootstrap state remains a barrier.
+
+A failed preinstall upgrade is unwound by `postrm abort-upgrade` before the new
+package payload is required. Under the stable controller and quiesce locks it
+validates the exact bootstrap receipt and quarantined executable, atomically
+restores the prior executable at its fixed installed pathname with mode 0755,
+then removes its quarantine and quiesce marker. It never executes the old
+binary. Replay after executable restoration recognizes the same validated
+content. Mismatched versions, foreign installed content, unsafe quarantine
+files, or an adopted package operation remain blocked instead of being cleared.
 
 On Unix, publication, startup scavenging, and removal share an owner-only
 lifecycle-file lock. Windows publication writes a fixed same-directory
