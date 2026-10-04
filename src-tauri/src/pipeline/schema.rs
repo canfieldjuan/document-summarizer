@@ -1,7 +1,29 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 18;
+pub const CURRENT_SCHEMA_VERSION: u32 = 22;
+
+const V20_TO_V21: &str = r#"
+CREATE TABLE ocr_text_corrections (
+    document_id TEXT PRIMARY KEY REFERENCES documents(document_id),
+    run_id TEXT NOT NULL UNIQUE REFERENCES pipeline_runs(run_id),
+    source_document_id TEXT NOT NULL UNIQUE REFERENCES documents(document_id),
+    source_run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id),
+    source_version INTEGER NOT NULL CHECK (source_version > 0),
+    source_parsed_hash TEXT NOT NULL,
+    corrected_parsed_hash TEXT NOT NULL,
+    corrected_parsed TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER ocr_text_corrections_no_update
+BEFORE UPDATE ON ocr_text_corrections BEGIN
+    SELECT RAISE(ABORT, 'OCR text corrections are immutable');
+END;
+CREATE TRIGGER ocr_text_corrections_no_delete
+BEFORE DELETE ON ocr_text_corrections BEGIN
+    SELECT RAISE(ABORT, 'OCR text corrections are immutable');
+END;
+"#;
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE documents (
@@ -723,6 +745,115 @@ BEGIN
 END;
 "#;
 
+const V18_TO_V19: &str = r#"
+ALTER TABLE documents
+ADD COLUMN source_type TEXT NOT NULL DEFAULT 'native_text'
+CHECK (source_type IN ('native_text', 'ocr_text'));
+"#;
+
+const V19_TO_V20: &str = r#"
+CREATE TABLE ocr_handoffs (
+    handoff_id TEXT PRIMARY KEY,
+    root_run_id TEXT NOT NULL UNIQUE,
+    root_document_id TEXT NOT NULL,
+    source_artifact_id TEXT NOT NULL UNIQUE,
+    source_byte_size INTEGER NOT NULL CHECK (
+        source_byte_size > 0 AND source_byte_size <= 33554432
+    ),
+    source_sha256 TEXT NOT NULL CHECK (
+        length(source_sha256) = 64
+        AND source_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    source_display_name TEXT NOT NULL,
+    source_bytes BLOB NOT NULL CHECK (length(source_bytes) = source_byte_size),
+    provider_app_id TEXT NOT NULL CHECK (provider_app_id = 'document-ocr'),
+    provider_instance_id TEXT NOT NULL,
+    provider_job_id TEXT NOT NULL UNIQUE,
+    provider_request_json TEXT NOT NULL,
+    provider_request_sha256 TEXT NOT NULL CHECK (
+        length(provider_request_sha256) = 64
+        AND provider_request_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    phase TEXT NOT NULL CHECK (phase IN (
+        'prepared', 'submission_uncertain', 'running', 'output_ready',
+        'child_admitted', 'completed', 'failed'
+    )),
+    provider_status_json TEXT,
+    ocr_pdf_artifact_id TEXT UNIQUE,
+    ocr_pdf_sha256 TEXT CHECK (
+        ocr_pdf_sha256 IS NULL OR (
+            length(ocr_pdf_sha256) = 64
+            AND ocr_pdf_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    ocr_pdf_byte_size INTEGER CHECK (
+        ocr_pdf_byte_size IS NULL OR (
+            ocr_pdf_byte_size > 0 AND ocr_pdf_byte_size <= 2097152
+        )
+    ),
+    ocr_pdf_bytes BLOB,
+    text_artifact_id TEXT UNIQUE,
+    text_sha256 TEXT CHECK (
+        text_sha256 IS NULL OR (
+            length(text_sha256) = 64
+            AND text_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    text_byte_size INTEGER CHECK (
+        text_byte_size IS NULL OR (
+            text_byte_size > 0 AND text_byte_size <= 262144
+        )
+    ),
+    text_bytes BLOB,
+    child_document_id TEXT NOT NULL UNIQUE,
+    child_run_id TEXT NOT NULL UNIQUE,
+    derived_path TEXT NOT NULL UNIQUE,
+    error_code TEXT,
+    error_message TEXT,
+    error_retryable INTEGER CHECK (error_retryable IS NULL OR error_retryable IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(root_run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(root_document_id) REFERENCES documents(document_id),
+    CHECK (
+        (ocr_pdf_bytes IS NULL AND ocr_pdf_artifact_id IS NULL
+            AND ocr_pdf_sha256 IS NULL AND ocr_pdf_byte_size IS NULL)
+        OR (ocr_pdf_bytes IS NOT NULL AND ocr_pdf_artifact_id IS NOT NULL
+            AND ocr_pdf_sha256 IS NOT NULL
+            AND length(ocr_pdf_bytes) = ocr_pdf_byte_size)
+    ),
+    CHECK (
+        (text_bytes IS NULL AND text_artifact_id IS NULL
+            AND text_sha256 IS NULL AND text_byte_size IS NULL)
+        OR (text_bytes IS NOT NULL AND text_artifact_id IS NOT NULL
+            AND text_sha256 IS NOT NULL AND length(text_bytes) = text_byte_size)
+    )
+);
+
+CREATE INDEX ocr_handoffs_phase_idx ON ocr_handoffs(phase, created_at);
+
+CREATE TABLE ocr_lineage (
+    handoff_id TEXT PRIMARY KEY,
+    producer_output_artifact_id TEXT NOT NULL UNIQUE,
+    child_run_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(handoff_id) REFERENCES ocr_handoffs(handoff_id),
+    FOREIGN KEY(child_run_id) REFERENCES pipeline_runs(run_id)
+);
+
+CREATE TRIGGER ocr_lineage_no_update
+BEFORE UPDATE ON ocr_lineage
+BEGIN
+    SELECT RAISE(ABORT, 'ocr lineage is immutable');
+END;
+
+CREATE TRIGGER ocr_lineage_no_delete
+BEFORE DELETE ON ocr_lineage
+BEGIN
+    SELECT RAISE(ABORT, 'ocr lineage is immutable');
+END;
+"#;
+
 const LEGACY_TO_V2: &str = r#"
 DROP TRIGGER IF EXISTS pipeline_events_no_update;
 DROP TRIGGER IF EXISTS pipeline_events_no_delete;
@@ -911,8 +1042,12 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
         tx.execute_batch(V15_TO_V16)?;
         tx.execute_batch(V16_TO_V17)?;
         tx.execute_batch(V17_TO_V18)?;
-        tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+        tx.execute_batch(V18_TO_V19)?;
+        tx.execute_batch(V19_TO_V20)?;
+        tx.execute_batch(V20_TO_V21)?;
+        tx.pragma_update(None, "user_version", 21)?;
         tx.commit()?;
+        migrate_v21_to_v22(conn)?;
         return validate(conn);
     }
 
@@ -982,8 +1117,72 @@ pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     }
     if current_version == 17 {
         migrate_v17_to_v18(conn)?;
+        current_version = 18;
+    }
+    if current_version == 18 {
+        migrate_v18_to_v19(conn)?;
+        current_version = 19;
+    }
+    if current_version == 19 {
+        migrate_v19_to_v20(conn)?;
+        current_version = 20;
+    }
+    if current_version == 20 {
+        migrate_additive(conn, V20_TO_V21, 21)?;
+        current_version = 21;
+    }
+    if current_version == 21 {
+        migrate_v21_to_v22(conn)?;
     }
     validate(conn)
+}
+
+#[cfg(test)]
+pub(crate) fn create_v21_fixture(conn: &Connection) {
+    for sql in [
+        SCHEMA_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5, V5_TO_V6, V6_TO_V7, V7_TO_V8, V8_TO_V9, V9_TO_V10,
+        V10_TO_V11, V11_TO_V12, V12_TO_V13, V13_TO_V14, V14_TO_V15, V15_TO_V16, V16_TO_V17,
+        V17_TO_V18, V18_TO_V19, V19_TO_V20, V20_TO_V21,
+    ] {
+        conn.execute_batch(sql).unwrap();
+    }
+    conn.pragma_update(None, "user_version", 21).unwrap();
+}
+
+fn migrate_v21_to_v22(conn: &mut Connection) -> Result<(), MigrationError> {
+    let foreign_keys: bool = conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = (|| -> Result<(), MigrationError> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if version(&tx)? == 22 {
+            return Ok(());
+        }
+        let definition = V19_TO_V20.split("CREATE INDEX ocr_handoffs_phase_idx").next().unwrap()
+            .replace("CREATE TABLE ocr_handoffs (", "CREATE TABLE ocr_handoffs_v22 (")
+            .replace("ocr_pdf_byte_size <= 2097152", "ocr_pdf_byte_size <= CASE WHEN json_valid(provider_request_json) THEN CASE WHEN json_extract(provider_request_json, '$.protocol_version') = 3 AND json_extract(provider_request_json, '$.capability.version') = '1.1' THEN 37748736 ELSE 2097152 END ELSE 2097152 END");
+        tx.execute_batch(&definition)?;
+        tx.execute_batch(
+            "INSERT INTO ocr_handoffs_v22 SELECT * FROM ocr_handoffs;
+DROP TABLE ocr_handoffs;
+ALTER TABLE ocr_handoffs_v22 RENAME TO ocr_handoffs;
+CREATE INDEX ocr_handoffs_phase_idx ON ocr_handoffs(phase, created_at);",
+        )?;
+        let violation: Option<String> = tx
+            .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
+            .optional()?;
+        if violation.is_some() {
+            return Err(MigrationError::Invariant(
+                "OCR migration broke a foreign key".to_string(),
+            ));
+        }
+        tx.pragma_update(None, "user_version", 22)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    let restored = conn.pragma_update(None, "foreign_keys", foreign_keys);
+    result?;
+    restored?;
+    Ok(())
 }
 
 pub fn version(conn: &Connection) -> Result<u32, MigrationError> {
@@ -1083,6 +1282,14 @@ fn migrate_v17_to_v18(conn: &mut Connection) -> Result<(), MigrationError> {
     migrate_additive(conn, V17_TO_V18, 18)
 }
 
+fn migrate_v18_to_v19(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V18_TO_V19, 19)
+}
+
+fn migrate_v19_to_v20(conn: &mut Connection) -> Result<(), MigrationError> {
+    migrate_additive(conn, V19_TO_V20, 20)
+}
+
 fn migrate_additive(
     conn: &mut Connection,
     statements: &str,
@@ -1101,6 +1308,71 @@ fn validate(conn: &Connection) -> Result<(), MigrationError> {
         return Err(MigrationError::Invariant(format!(
             "quick_check returned {quick_check}"
         )));
+    }
+
+    let source_type_columns: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name = 'source_type'",
+        [],
+        |row| row.get(0),
+    )?;
+    if source_type_columns != 1 {
+        return Err(MigrationError::Invariant(
+            "documents.source_type is missing".to_string(),
+        ));
+    }
+    let invalid_source_types: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM documents WHERE source_type NOT IN ('native_text', 'ocr_text')",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_source_types != 0 {
+        return Err(MigrationError::Invariant(
+            "documents contains an invalid source_type".to_string(),
+        ));
+    }
+
+    for (table, expected_columns) in [
+        ("ocr_handoffs", 31_u32),
+        ("ocr_lineage", 4_u32),
+        ("ocr_text_corrections", 9_u32),
+    ] {
+        let columns: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if columns != expected_columns {
+            return Err(MigrationError::Invariant(format!(
+                "{table} schema is incomplete"
+            )));
+        }
+    }
+    let invalid_ocr_handoffs: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM ocr_handoffs
+         WHERE root_run_id NOT IN (SELECT run_id FROM pipeline_runs)
+            OR root_document_id NOT IN (SELECT document_id FROM documents)",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_ocr_handoffs != 0 {
+        return Err(MigrationError::Invariant(
+            "ocr handoff ownership is invalid".to_string(),
+        ));
+    }
+    for trigger in [
+        "ocr_lineage_no_update",
+        "ocr_lineage_no_delete",
+        "ocr_text_corrections_no_update",
+        "ocr_text_corrections_no_delete",
+    ] {
+        let present: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [trigger],
+            |row| row.get(0),
+        )?;
+        if present != 1 {
+            return Err(MigrationError::Invariant(format!("{trigger} is missing")));
+        }
     }
 
     let event_sequence_columns: u32 = conn.query_row(
@@ -2503,6 +2775,21 @@ mod tests {
             .unwrap(),
             "pipeline_run"
         );
+        assert_eq!(
+            conn.query_row(
+                "SELECT source_type FROM documents WHERE document_id = 'owner-document'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "native_text"
+        );
+        assert!(conn
+            .execute(
+                "UPDATE documents SET source_type = 'unknown' WHERE document_id = 'owner-document'",
+                [],
+            )
+            .is_err());
         assert!(conn
             .execute(
                 "UPDATE model_request_owners SET created_at = 'changed' WHERE owner_id = 'owner-run'",
@@ -2533,7 +2820,10 @@ mod tests {
         migrate(&mut conn).expect("current schema should initialize");
         conn.execute_batch(
             r#"
-            INSERT INTO documents VALUES (
+            INSERT INTO documents (
+                document_id, original_filename, file_type, byte_size, content_hash,
+                local_source_path, created_at
+            ) VALUES (
                 'missing-owner-document', 'missing-owner.pdf', 'pdf', 12, 'hash',
                 '/missing-owner.pdf', '2026-09-11T18:00:00Z'
             );
@@ -2562,5 +2852,53 @@ mod tests {
             Err(MigrationError::Invariant(message))
                 if message == "every pipeline run must have an immutable model request owner"
         ));
+    }
+
+    #[test]
+    fn current_schema_owns_one_ocr_handoff_and_lineage_edge() {
+        let mut conn = Connection::open_in_memory().expect("database should open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys should enable");
+        migrate(&mut conn).expect("current schema should initialize");
+
+        for table in ["ocr_handoffs", "ocr_lineage"] {
+            let present: u32 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(present, 1, "{table} must exist");
+        }
+    }
+    #[test]
+    fn v22_rollback_preserves_v21_and_restores_foreign_keys() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        create_v21_fixture(&conn);
+        // A broken old relationship must not be silently migrated away.
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute("INSERT INTO ocr_lineage VALUES ('missing-handoff','artifact','missing-run','2026-09-28T00:00:00Z')",[]).unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert!(migrate_v21_to_v22(&mut conn).is_err());
+        assert_eq!(version(&conn).unwrap(), 21);
+        assert!(conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get::<_, bool>(0))
+            .unwrap());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |r| r
+                .get::<_, usize>(0))
+                .unwrap(),
+            1
+        );
+        assert!(!table_exists(&conn, "ocr_handoffs_v22").unwrap());
+        let definition: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='ocr_handoffs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(definition.contains("ocr_pdf_byte_size <= 2097152"));
     }
 }

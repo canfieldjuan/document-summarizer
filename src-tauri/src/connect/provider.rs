@@ -1,7 +1,7 @@
 use crate::connect::contracts::{
     job_error, valid_uuid_v4, AppManifest, AuthRegistration, ErrorEnvelope, InputArtifact,
     JobError, JobRequest, JobResult, JobStatus, RuntimeRegistration, TransportRegistration, APP_ID,
-    DEFAULT_MAX_INPUT_BYTES, MAX_REQUEST_JSON_BYTES, PROTOCOL_VERSION,
+    DEFAULT_MAX_INPUT_BYTES, INPUT_MEDIA_TYPE, MAX_REQUEST_JSON_BYTES, PROTOCOL_VERSION,
 };
 use crate::connect::entitlement::{EntitlementConfigurationError, EntitlementGate};
 #[cfg(target_os = "linux")]
@@ -14,19 +14,23 @@ use crate::connect::v2;
 use crate::connect::windows_storage::{self, FileLockError, WindowsFileLock};
 use crate::pipeline::chunk::DeterministicDocumentChunker;
 use crate::pipeline::contracts::{
-    AnalysisPageOmission, ModelRuntime, ModelRuntimeFailure, NormalizedDocument, SummaryArtifacts,
-    SummaryProfile,
+    AnalysisPageOmission, DocumentParser, ModelRuntime, ModelRuntimeFailure, NormalizedDocument,
+    SourceType, SummaryArtifacts, SummaryProfile,
 };
 #[cfg(test)]
 use crate::pipeline::contracts::{ModelProfileSnapshot, ModelStageProfileSnapshot};
 use crate::pipeline::control::CancellationToken;
 use crate::pipeline::db;
+#[cfg(test)]
 use crate::pipeline::ingest::prepare_pdf_ingestion;
+use crate::pipeline::ingest::prepare_pdf_ingestion_with_source_type;
 #[cfg(feature = "connect-proof-runtime")]
 use crate::pipeline::model_settings::connect_proof_runtime_from_environment;
 use crate::pipeline::model_settings::{runtime_from_settings, settings_path};
 use crate::pipeline::normalize::CanonicalNormalizer;
+#[cfg(test)]
 use crate::pipeline::parser::PdfExtractParser;
+use crate::pipeline::parser::{SourceParserSet, TaggedOcrParser};
 #[cfg(any(unix, windows))]
 use crate::pipeline::recovery::reconcile_interrupted_runs;
 use crate::pipeline::service::{
@@ -1413,6 +1417,13 @@ impl WireVersion {
             Self::V2 => "/v2/manifest",
         }
     }
+
+    fn accepts_media_type(self, media_type: &str) -> bool {
+        match self {
+            Self::V1 => media_type == INPUT_MEDIA_TYPE,
+            Self::V2 => matches!(media_type, INPUT_MEDIA_TYPE | v2::OCR_INPUT_MEDIA_TYPE),
+        }
+    }
 }
 
 fn parse_job_request(
@@ -1632,15 +1643,16 @@ async fn create_job_for(
         .ok_or_else(|| {
             ProviderHttpError::bad_request("ARTIFACT_MISSING", "The artifact part is missing.")
         })?;
+    let input = request.inputs[0].clone();
     if artifact_field.name() != Some("artifact")
-        || artifact_field.content_type() != Some("application/pdf")
+        || artifact_field.content_type() != Some(input.media_type.as_str())
+        || !version.accepts_media_type(&input.media_type)
     {
         return Err(ProviderHttpError::bad_request(
             "ARTIFACT_INVALID",
-            "The second multipart field must be an application/pdf artifact.",
+            "The artifact content type must match its admitted input descriptor.",
         ));
     }
-    let input = request.inputs[0].clone();
     let mut pending_import =
         receive_artifact(&state, &request.job_id, &input, artifact_field).await?;
     if multipart
@@ -1666,13 +1678,21 @@ async fn create_job_for(
             ));
         }
     };
-    let (mut document, run) =
-        match prepare_pdf_ingestion(staging_path_text, Some(&input.display_name)) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(ProviderHttpError::domain(error.code()));
-            }
-        };
+    let source_type = if input.media_type == v2::OCR_INPUT_MEDIA_TYPE {
+        SourceType::OcrText
+    } else {
+        SourceType::NativeText
+    };
+    let (mut document, run) = match prepare_pdf_ingestion_with_source_type(
+        staging_path_text,
+        Some(&input.display_name),
+        source_type,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Err(ProviderHttpError::domain(error.code()));
+        }
+    };
     if document.byte_size != input.byte_size || document.content_hash != input.sha256 {
         return Err(ProviderHttpError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1680,6 +1700,11 @@ async fn create_job_for(
             "The promoted artifact no longer matches its declared identity.",
             false,
         ));
+    }
+    if source_type == SourceType::OcrText {
+        if let Err(failure) = TaggedOcrParser::new().parse(&document) {
+            return Err(ProviderHttpError::domain(&failure.code));
+        }
     }
     let mut runtime = match (state.runtime_factory)() {
         Ok(runtime) => runtime,
@@ -1867,7 +1892,12 @@ fn process_job(
         let conn = db::init_db(&state.db_path)?;
         let job = store::mark_processing(&conn, &job_id)?;
         let mut pipeline_conn = db::init_db(&state.db_path)?;
-        let parser = PdfExtractParser::new();
+        let run = db::get_pipeline_run(&pipeline_conn, &job.pipeline_run_id)?
+            .ok_or_else(|| db::StoreError::RunNotFound(job.pipeline_run_id.clone()))?;
+        let document = db::get_document(&pipeline_conn, &run.document_id)?
+            .ok_or_else(|| db::StoreError::DocumentNotFound(run.document_id.clone()))?;
+        let parsers = SourceParserSet::new();
+        let parser = parsers.select(document.source_type);
         let normalizer = CanonicalNormalizer::new();
         let interpreter = DeterministicStructureInterpreter::new();
         let chunker = DeterministicDocumentChunker::new();
@@ -1875,7 +1905,7 @@ fn process_job(
             &mut pipeline_conn,
             &job.pipeline_run_id,
             SummaryComponents {
-                parser: &parser,
+                parser,
                 normalizer: &normalizer,
                 interpreter: &interpreter,
                 chunker: &chunker,
@@ -1932,6 +1962,7 @@ fn persist_completed_summary(
         delivered_claim_count,
         omissions,
         normalized,
+        &summary.summary.warnings,
     ) {
         return Err(
             crate::connect::contracts::ContractBuildError::InvalidSummary(
@@ -4023,6 +4054,169 @@ mod tests {
     }
 
     #[test]
+    fn contract_provider_persists_key_terms_from_full_pipeline_without_model_calls() {
+        use crate::pipeline::chunk::{chunk_document, DeterministicDocumentChunker};
+        use crate::pipeline::contracts::{
+            ContractTermCategory, DocumentParser, IngestedDocument, ParsedDocument,
+        };
+        use crate::pipeline::structure::{structure_document, DeterministicStructureInterpreter};
+        use crate::pipeline::summary;
+        struct PublicContractParser {
+            text: String,
+        }
+        impl DocumentParser for PublicContractParser {
+            fn id(&self) -> &'static str {
+                "public-contract-fixture"
+            }
+            fn version(&self) -> &'static str {
+                "1"
+            }
+            fn parse(
+                &self,
+                document: &IngestedDocument,
+            ) -> Result<ParsedDocument, PipelineFailure> {
+                let mut parsed = PdfExtractParser::new().parse(document)?;
+                parsed.pages.truncate(1);
+                parsed.pages[0].text = self.text.clone();
+                parsed.parser_id = self.id().into();
+                parsed.parser_version = self.version().into();
+                Ok(parsed)
+            }
+        }
+        struct NoInference;
+        impl ModelRuntime for NoInference {
+            fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                panic!("Contract route must not call a model")
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                panic!("Contract route must not require model health")
+            }
+            fn runtime_id(&self) -> &str {
+                "unavailable"
+            }
+            fn model_id(&self) -> &str {
+                "none"
+            }
+        }
+        for oversized in [false, true] {
+            let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/structured_report.pdf");
+            let bytes = fs::read(&source).unwrap();
+            let request = fixture_request(&bytes);
+            let (document, run) =
+                prepare_pdf_ingestion(source.to_str().unwrap(), Some("public-contract.pdf"))
+                    .unwrap();
+            let mut conn = db::init_db(":memory:").unwrap();
+            let (_, job) = store::accept_job_with_ingestion_guarded(
+                &mut conn,
+                &request,
+                &request.canonical_hash().unwrap(),
+                source.to_str().unwrap(),
+                &Uuid::new_v4().to_string(),
+                &document,
+                &run,
+                SummaryProfile::Contract,
+                None,
+                || true,
+            )
+            .unwrap()
+            .unwrap();
+            let processing = store::mark_processing(&conn, &job.job_id).unwrap();
+            let text = if oversized {
+                format!(
+                    "1. Payment\n1.1 {}.\n2. Other. Must not leapfrog the payment section.",
+                    "Printed words ".repeat(90_000)
+                )
+            } else {
+                "Agreement between two public fixture parties.\n1. Payment\n1.1 Client shall pay within thirty days.\n1.2 Payment is subject to acceptance.\n2. Term and Termination. Either party may end the term on notice.\n3. Other. Keep all source clauses.".into()
+            };
+            parse_document(&mut conn, &PublicContractParser { text }, &run.run_id).unwrap();
+            normalize_document(&mut conn, &CanonicalNormalizer::new(), &run.run_id).unwrap();
+            structure_document(
+                &mut conn,
+                &DeterministicStructureInterpreter::new(),
+                &run.run_id,
+            )
+            .unwrap();
+            chunk_document(&mut conn, &DeterministicDocumentChunker::new(), &run.run_id).unwrap();
+            let control = &crate::pipeline::control::UNCONTROLLED_EXECUTION;
+            let policy = Some(SummaryDeliveryPolicy::connect());
+            summary::analyze_chunked_document_controlled_with_delivery(
+                &mut conn,
+                &NoInference,
+                &run.run_id,
+                control,
+                policy,
+            )
+            .unwrap();
+            summary::synthesize_analyzed_document_controlled_with_delivery(
+                &mut conn,
+                &NoInference,
+                &run.run_id,
+                control,
+                policy,
+            )
+            .unwrap();
+            summary::verify_synthesized_document_controlled_with_delivery(
+                &mut conn,
+                &NoInference,
+                &run.run_id,
+                control,
+                policy,
+            )
+            .unwrap();
+            let artifacts =
+                summary::complete_verified_document_with_delivery(&mut conn, &run.run_id, policy)
+                    .unwrap();
+            let normalized = db::get_normalized_document(&conn, &run.run_id)
+                .unwrap()
+                .unwrap();
+            if oversized {
+                assert!(
+                    artifacts.summary.text.len()
+                        > crate::connect::contracts::MAX_SUMMARY_TEXT_BYTES
+                );
+                let error =
+                    persist_completed_summary(&conn, &processing, &artifacts, &[], &normalized)
+                        .unwrap_err();
+                assert!(matches!(error, ProcessJobError::Contract(_)));
+                let stored = store::get_job(&conn, &job.job_id).unwrap().unwrap();
+                assert_eq!(stored.state, JobState::Processing);
+                assert!(stored.result.is_none());
+                // The caller turns this error into the existing failed-job path.
+                // A failed delivery must not destroy the full desktop inventory.
+                let view =
+                    crate::pipeline::workspace::get_persisted_summary(&conn, &run.run_id).unwrap();
+                assert_eq!(view.summary.text, artifacts.summary.text);
+                continue;
+            }
+            persist_completed_summary(&conn, &processing, &artifacts, &[], &normalized).unwrap();
+            let persisted = store::get_job(&conn, &job.job_id).unwrap().unwrap();
+            assert_eq!(persisted.state, JobState::Completed);
+            let content = &persisted.result.unwrap().outputs[0].content;
+            assert_eq!(content.text, artifacts.summary.text);
+            assert!(content.text.starts_with("Key terms\n\n"));
+            assert!(content.text.contains("Full clause list\n\n"));
+            assert!(content.text.contains("Payment is subject to acceptance."));
+            let view =
+                crate::pipeline::workspace::get_persisted_summary(&conn, &run.run_id).unwrap();
+            let extraction = view.summary.contract_extraction.unwrap();
+            let term = extraction
+                .key_terms
+                .iter()
+                .find(|t| t.category == ContractTermCategory::TermRenewal)
+                .unwrap();
+            let termination = extraction
+                .key_terms
+                .iter()
+                .find(|t| t.category == ContractTermCategory::Termination)
+                .unwrap();
+            assert_eq!(term.selections, termination.selections);
+            assert_eq!(term.selections.len(), 1);
+        }
+    }
+
+    #[test]
     fn completed_connect_job_persists_a_bounded_whole_claim_prefix() {
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
@@ -4087,6 +4281,7 @@ mod tests {
         let now = Utc::now();
         let summary = SummaryArtifacts {
             summary: SummaryArtifact {
+                contract_extraction: None,
                 document_id: document.document_id.clone(),
                 summary_version: crate::pipeline::summary::SUMMARY_VERSION.to_string(),
                 text: rendered_text.clone(),
@@ -4095,6 +4290,7 @@ mod tests {
                 integrity_hash: "summary-integrity".to_string(),
             },
             citations: CitationArtifact {
+                contract_extraction: None,
                 document_id: document.document_id,
                 citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
                 summary_integrity_hash: "summary-integrity".to_string(),
@@ -4214,6 +4410,7 @@ mod tests {
         let now = Utc::now();
         let summary = SummaryArtifacts {
             summary: SummaryArtifact {
+                contract_extraction: None,
                 document_id: document.document_id.clone(),
                 summary_version: crate::pipeline::summary::SUMMARY_VERSION.to_string(),
                 text: rendered_text.clone(),
@@ -4222,6 +4419,7 @@ mod tests {
                 integrity_hash: "summary-integrity".to_string(),
             },
             citations: CitationArtifact {
+                contract_extraction: None,
                 document_id: document.document_id,
                 citation_version: crate::pipeline::summary::CITATION_VERSION.to_string(),
                 summary_integrity_hash: "summary-integrity".to_string(),
@@ -4516,6 +4714,129 @@ mod tests {
         );
     }
 
+    #[test]
+    fn v2_ocr_media_is_bound_validated_and_persisted_before_summary() {
+        let root = TestDirectory::new("doc-sum-connect-ocr-media");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&runtime_root).unwrap();
+        ensure_private_directory(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .expect("provider should start");
+        let registration: v2::RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path_v2()).unwrap()).unwrap();
+        let http = client();
+        let bytes = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf"),
+        )
+        .expect("OCR fixture should read");
+
+        let mut vendor_as_pdf = fixture_request_v2(&bytes);
+        vendor_as_pdf.inputs[0].media_type = v2::OCR_INPUT_MEDIA_TYPE.to_string();
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form_v2(&vendor_as_pdf, bytes.clone()))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.json::<ErrorEnvelope>().unwrap().error.code,
+            "ARTIFACT_INVALID"
+        );
+
+        let pdf_as_vendor = fixture_request_v2(&bytes);
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form_v2_with_media(
+                &pdf_as_vendor,
+                bytes.clone(),
+                v2::OCR_INPUT_MEDIA_TYPE,
+            ))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.json::<ErrorEnvelope>().unwrap().error.code,
+            "ARTIFACT_INVALID"
+        );
+
+        let malformed = b"%PDF-1.4\nnot a tagged OCR document\n%%EOF".to_vec();
+        let mut malformed_request = fixture_request_v2(&malformed);
+        malformed_request.inputs[0].media_type = v2::OCR_INPUT_MEDIA_TYPE.to_string();
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form_v2_with_media(
+                &malformed_request,
+                malformed,
+                v2::OCR_INPUT_MEDIA_TYPE,
+            ))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response.json::<ErrorEnvelope>().unwrap().error.code,
+            "OCR_STRUCTURE_INVALID"
+        );
+
+        let mut request = fixture_request_v2(&bytes);
+        request.inputs[0].media_type = v2::OCR_INPUT_MEDIA_TYPE.to_string();
+        request.inputs[0].display_name = "recognized.pdf".to_string();
+        let response = http
+            .post(format!("{}v2/jobs", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .multipart(form_v2_with_media(
+                &request,
+                bytes,
+                v2::OCR_INPUT_MEDIA_TYPE,
+            ))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let terminal = wait_for_terminal_v2(
+            &http,
+            provider.base_url(),
+            &registration.auth.token,
+            &request.job_id,
+        );
+        assert_eq!(terminal.status, JobState::Completed, "{:?}", terminal.error);
+
+        let conn = db::init_db(db_path).unwrap();
+        assert!(store::get_job(&conn, &vendor_as_pdf.job_id)
+            .unwrap()
+            .is_none());
+        assert!(store::get_job(&conn, &pdf_as_vendor.job_id)
+            .unwrap()
+            .is_none());
+        assert!(store::get_job(&conn, &malformed_request.job_id)
+            .unwrap()
+            .is_none());
+        let stored = store::get_job(&conn, &request.job_id)
+            .unwrap()
+            .expect("OCR job should persist");
+        let run = db::get_pipeline_run(&conn, &stored.pipeline_run_id)
+            .unwrap()
+            .expect("OCR run should persist");
+        let document = db::get_document(&conn, &run.document_id)
+            .unwrap()
+            .expect("OCR document should persist");
+        let parsed = db::get_parsed_document(&conn, &run.run_id)
+            .unwrap()
+            .expect("OCR parsed artifact should persist");
+        assert_eq!(document.source_type, SourceType::OcrText);
+        assert_eq!(parsed.source_type, SourceType::OcrText);
+        assert_eq!(parsed.parser_id, "local-connect-tagged-ocr");
+    }
+
     fn form(request: &JobRequest, bytes: Vec<u8>) -> multipart::Form {
         multipart::Form::new()
             .part(
@@ -4534,6 +4855,14 @@ mod tests {
     }
 
     fn form_v2(request: &v2::JobRequest, bytes: Vec<u8>) -> multipart::Form {
+        form_v2_with_media(request, bytes, INPUT_MEDIA_TYPE)
+    }
+
+    fn form_v2_with_media(
+        request: &v2::JobRequest,
+        bytes: Vec<u8>,
+        media_type: &str,
+    ) -> multipart::Form {
         multipart::Form::new()
             .part(
                 "request",
@@ -4545,7 +4874,7 @@ mod tests {
                 "artifact",
                 multipart::Part::bytes(bytes)
                     .file_name("attachment.pdf")
-                    .mime_str("application/pdf")
+                    .mime_str(media_type)
                     .unwrap(),
             )
     }

@@ -161,9 +161,15 @@ interface BackgroundRunAccepted {
   summaryProfile: SummaryProfile;
 }
 
-type SummaryPresentationMode = "legacyClaimList" | "coherent" | "claimLedgerFallback";
+type SummaryPresentationMode = "legacyClaimList" | "coherent" | "claimLedgerFallback" | "structuredExtraction";
+
+interface ContractExtraction {
+  clauses: { clauseId: string; heading: string | null; text: string; evidenceIds: string[] }[];
+  keyTerms: { category: string; selections: { rule: "heading" | "opening-between"; rootClauseId: string; clauseIds: string[] }[] }[];
+}
 
 interface SummaryArtifact {
+  contractExtraction: ContractExtraction | null;
   text: string;
   warnings: PipelineWarning[];
   createdAt: string;
@@ -195,6 +201,15 @@ interface PersistedSummary {
 interface CommandError {
   code: string;
   message: string;
+}
+
+interface OcrReview {
+  runId: string;
+  expectedStateVersion: number;
+  sourceParsedHash: string;
+  pages: { pageNumber: number; text: string }[];
+  correctionOfRunId: string | null;
+  correctedRunId: string | null;
 }
 
 const selectButton = element<HTMLButtonElement>("#select-btn");
@@ -257,6 +272,15 @@ const continueButton = element<HTMLButtonElement>("#continue-btn");
 const continueHint = element<HTMLParagraphElement>("#continue-hint");
 const retryButton = element<HTMLButtonElement>("#retry-btn");
 const retryHint = element<HTMLParagraphElement>("#retry-hint");
+const ocrReviewPanel = element<HTMLDetailsElement>("#ocr-review");
+const ocrPages = element<HTMLDivElement>("#ocr-pages");
+const ocrLineage = element<HTMLDivElement>("#ocr-lineage");
+const ocrSave = element<HTMLButtonElement>("#ocr-save");
+const ocrOpenSource = element<HTMLButtonElement>("#ocr-open-source");
+const ocrStatus = element<HTMLParagraphElement>("#ocr-review-status");
+let ocrReview: OcrReview | null = null;
+let ocrLoadSequence = 0;
+let ocrSaving = false;
 
 let runtimeReady = false;
 let selectedModelLabel: string | null = null;
@@ -291,7 +315,106 @@ function showStage(view: "empty" | "processing" | "summary" | "failure"): void {
   processingView.hidden = view !== "processing";
   summaryView.hidden = view !== "summary";
   failureView.hidden = view !== "failure";
+  ocrLoadSequence += 1;
+  ocrReviewPanel.hidden = true;
+  ocrReview = null;
+  if ((view === "summary" || view === "failure") && activeRunId) {
+    void loadOcrReview(activeRunId, ocrLoadSequence);
+  }
 }
+
+async function loadOcrReview(runId: string, sequence: number): Promise<void> {
+  try {
+    const review = await invoke<OcrReview | null>("get_ocr_review", { runId });
+    if (sequence !== ocrLoadSequence || activeRunId !== runId || !review) return;
+    ocrReview = review;
+    ocrPages.replaceChildren();
+    ocrLineage.replaceChildren();
+    ocrStatus.textContent = "";
+    ocrSave.disabled = review.correctedRunId !== null || ocrSaving;
+    for (const page of review.pages) {
+      const label = document.createElement("label");
+      label.textContent = `Page ${page.pageNumber}`;
+      const text = document.createElement("textarea");
+      text.value = page.text;
+      text.dataset.pageNumber = String(page.pageNumber);
+      text.rows = 8;
+      text.readOnly = review.correctedRunId !== null;
+      label.append(text);
+      ocrPages.append(label);
+    }
+    for (const [id, title] of [
+      [review.correctionOfRunId, "Open source run"],
+      [review.correctedRunId, "Open corrected successor"],
+    ]) {
+      if (!id) continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "quiet-button";
+      button.textContent = title;
+      button.addEventListener("click", () => void openOcrRelatedRun(id));
+      ocrLineage.append(button);
+    }
+    if (review.correctedRunId) {
+      ocrStatus.textContent = "This source already has a corrected successor. Open it for further changes.";
+    }
+    ocrReviewPanel.open = false;
+    ocrReviewPanel.hidden = false;
+  } catch (error) {
+    if (sequence !== ocrLoadSequence) return;
+    ocrStatus.textContent = normalizeCommandError(error).message;
+    ocrPages.replaceChildren();
+    ocrLineage.replaceChildren();
+    ocrSave.disabled = true;
+    ocrReviewPanel.hidden = false;
+  }
+}
+
+async function openOcrRelatedRun(runId: string): Promise<void> {
+  try {
+    const run = await invoke<RunHistoryItem>("get_run_status", { runId });
+    await openHistoryRun(run);
+  } catch (error) {
+    ocrStatus.textContent = normalizeCommandError(error).message;
+  }
+}
+
+ocrOpenSource.addEventListener("click", async () => {
+  if (!ocrReview) return;
+  try {
+    await invoke("open_ocr_source", { runId: ocrReview.runId });
+  } catch (error) {
+    ocrStatus.textContent = normalizeCommandError(error).message;
+  }
+});
+
+ocrSave.addEventListener("click", async () => {
+  const review = ocrReview;
+  if (!review || ocrSaving || review.correctedRunId) return;
+  const sequence = ocrLoadSequence;
+  const pages = [...ocrPages.querySelectorAll<HTMLTextAreaElement>("textarea")]
+    .map((input) => ({ pageNumber: Number(input.dataset.pageNumber), text: input.value }))
+    .filter((page) => page.text !== review.pages.find((old) => old.pageNumber === page.pageNumber)?.text);
+  if (pages.length === 0) {
+    ocrStatus.textContent = "Change the text before saving a correction.";
+    return;
+  }
+  ocrSaving = true;
+  ocrSave.disabled = true;
+  try {
+    const run = await invoke<RunHistoryItem>("save_ocr_correction", {
+      request: { runId: review.runId, expectedStateVersion: review.expectedStateVersion,
+        sourceParsedHash: review.sourceParsedHash, pages },
+    });
+    await refreshHistory();
+    if (sequence === ocrLoadSequence) await openHistoryRun(run);
+  } catch (error) {
+    if (sequence === ocrLoadSequence) ocrStatus.textContent = normalizeCommandError(error).message;
+  } finally {
+    ocrSaving = false;
+    ocrSave.disabled = ocrReview === null || ocrReview.correctedRunId !== null;
+  }
+});
 
 function syncPrimaryAction(): void {
   selectButton.disabled = !runtimeReady || processing;
@@ -1242,6 +1365,11 @@ function renderClaims(summary: SummaryArtifact): void {
   evidenceLabel.textContent = "";
   evidenceQuote.textContent = "";
 
+  const outputLabel = coherentSummarySection.querySelector(".utility-label");
+  if (outputLabel) {
+    outputLabel.textContent = summary.presentationMode === "structuredExtraction" ? "Contract clauses" : "Overview";
+  }
+
   if (summary.claims.length === 0 && summary.presentationMode !== "coherent") {
     summaryText.hidden = false;
     summaryText.textContent = summary.text;
@@ -1250,6 +1378,63 @@ function renderClaims(summary: SummaryArtifact): void {
 
   summaryText.textContent = "";
   summaryText.hidden = true;
+  if (summary.presentationMode === "structuredExtraction") {
+    coherentSummarySection.hidden = false;
+    const records = summary.contractExtraction?.clauses;
+    const terms = summary.contractExtraction?.keyTerms;
+    const categories = ["parties", "payment", "term/renewal", "termination", "insurance", "liability/indemnity"];
+    if (!records || records.length !== summary.claims.length || !terms ||
+        terms.length !== categories.length || terms.some((term, index) => term.category !== categories[index])) {
+      throw new Error("Contract extraction records do not match their citations");
+    }
+    const byId = new Map(records.map((record, index) => [record.clauseId, { record, index, claim: summary.claims[index] }]));
+    if (byId.size !== records.length || records.some((record, index) =>
+        record.clauseId !== summary.claims[index].claimId || record.text !== summary.claims[index].text)) {
+      throw new Error("Contract source record changed after validation");
+    }
+    const renderRecord = (id: string, parent: HTMLElement): void => {
+      const entry = byId.get(id);
+      if (!entry) throw new Error("Unknown Contract source reference");
+      const { record, claim, index } = entry;
+      const item = document.createElement("section");
+      item.className = "summary-paragraph";
+      const heading = document.createElement("h3");
+      heading.textContent = record.heading ?? `Source clause ${index + 1}`;
+      const identifier = document.createElement("code");
+      identifier.textContent = record.clauseId;
+      const text = document.createElement("p");
+      text.className = "claim-text";
+      text.style.whiteSpace = "pre-wrap";
+      text.textContent = record.text;
+      item.append(heading, identifier, text, citationActions(claim, "contract clause", index));
+      parent.append(item);
+    };
+    const title = document.createElement("h2");
+    title.textContent = "Key terms";
+    summaryProse.append(title);
+    terms.forEach((term) => {
+      const group = document.createElement("section");
+      const heading = document.createElement("h3");
+      heading.textContent = term.category;
+      group.append(heading);
+      if (term.selections.length === 0) {
+        const missing = document.createElement("p");
+        missing.textContent = "not identified";
+        group.append(missing);
+      }
+      term.selections.forEach((selection) => {
+        if (selection.clauseIds[0] !== selection.rootClauseId) throw new Error("Invalid Contract section root");
+        selection.clauseIds.forEach((id) => renderRecord(id, group));
+      });
+      summaryProse.append(group);
+    });
+    const fullList = document.createElement("h2");
+    fullList.textContent = "Full clause list";
+    summaryProse.append(fullList);
+    records.forEach((record) => renderRecord(record.clauseId, summaryProse));
+    return;
+  }
+
   if (summary.presentationMode === "coherent") {
     coherentSummarySection.hidden = false;
     renderProseList(summaryProse, summary.summaryClaims);

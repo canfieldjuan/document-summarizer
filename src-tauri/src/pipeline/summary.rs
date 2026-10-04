@@ -20,11 +20,13 @@ use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 use unicode_segmentation::UnicodeSegmentation;
 
 mod coherent;
+mod contract_extraction;
 mod direct;
 mod eligibility;
 mod identifiers;
 mod key_points;
 mod pages;
+mod quote_segments;
 #[cfg(test)]
 mod repair;
 #[cfg(test)]
@@ -32,7 +34,8 @@ mod structural;
 #[cfg(test)]
 include!("summary/legacy_generation.rs");
 
-pub const ANALYSIS_VERSION: &str = "13.0.0";
+pub const ANALYSIS_VERSION: &str = "14.0.0";
+const SENTENCE_ANALYSIS_VERSION: &str = "13.0.0";
 const QUOTE_BOUNDARY_ANALYSIS_VERSION: &str = "12.0.0";
 const PUNCTUATION_ANALYSIS_VERSION: &str = "11.0.0";
 const TOLERANT_ANALYSIS_VERSION: &str = "10.0.0";
@@ -43,7 +46,11 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "9.0.0";
+pub const SYNTHESIS_VERSION: &str = "13.0.0";
+const PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION: &str = "12.0.0";
+const PRE_CLAUSE_SYNTHESIS_VERSION: &str = "11.0.0";
+const PRE_FURNITURE_SYNTHESIS_VERSION: &str = "10.0.0";
+const PRE_BALANCED_SYNTHESIS_VERSION: &str = "9.0.0";
 pub const VERIFICATION_VERSION: &str = "10.0.0";
 pub const SUMMARY_VERSION: &str = "8.0.0";
 pub const CITATION_VERSION: &str = "4.0.0";
@@ -110,6 +117,7 @@ const QUOTE_BOUNDARY_OMITTED_WARNING_CODE: &str = "ANALYSIS_QUOTE_BOUNDARY_OMITT
 pub const MAX_DELIVERY_SUMMARY_TEXT_BYTES: usize = 1024 * 1024;
 pub const SUMMARY_TRUNCATED_FOR_DELIVERY_WARNING_CODE: &str = "SUMMARY_TRUNCATED_FOR_DELIVERY";
 const SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE: &str = "SUMMARY_DELIVERY_COVERAGE_FALLBACK";
+const SUMMARY_ANALYSIS_PAGES_RECOVERED_WARNING_CODE: &str = "SUMMARY_ANALYSIS_PAGES_RECOVERED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryDeliveryPolicy {
@@ -146,6 +154,10 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
         SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+            | PRE_CLAUSE_SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -158,7 +170,12 @@ fn coherent_verification_versions_match(
 ) -> bool {
     (matches!(
         synthesis_version,
-        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+            | PRE_CLAUSE_SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
+            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
     ) && verification_version == VERIFICATION_VERSION)
         || (synthesis_version == PRE_CONTEXT_SYNTHESIS_VERSION
             && verification_version == PRE_CONTEXT_VERIFICATION_VERSION)
@@ -550,14 +567,21 @@ pub(crate) fn analyze_chunked_document_controlled_with_delivery(
     let normalized = db::get_normalized_document(conn, run_id)?
         .ok_or_else(|| StoreError::NormalizedArtifactNotFound(run_id.to_string()))?;
     let (analyzing_run, chunked) = db::start_analysis(conn, run_id, run.state_version)?;
-    let analyzed = match analyze_with_delivery(
-        runtime,
-        &chunked,
-        &normalized,
-        generation_seed_for_run(run_id),
-        control,
-        delivery_policy,
-    ) {
+    let profile = db::get_run_summary_profile(conn, run_id)?
+        .ok_or_else(|| StoreError::SummaryProfileUnavailable(run_id.to_string()))?;
+    let analysis = if profile == SummaryProfile::Contract {
+        contract_extraction::analyze(&chunked, &normalized, control)
+    } else {
+        analyze_with_delivery(
+            runtime,
+            &chunked,
+            &normalized,
+            generation_seed_for_run(run_id),
+            control,
+            delivery_policy,
+        )
+    };
+    let analyzed = match analysis {
         Ok(analyzed) => analyzed,
         Err(failure) if cancellation_observed(&failure) => {
             return Err(SummaryPipelineError::CancellationObserved);
@@ -612,6 +636,14 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
     let (synthesizing_run, persisted_analysis) =
         db::start_synthesis(conn, run_id, run.state_version)?;
     let synthesis = match (delivery_policy, summary_profile) {
+        (_, SummaryProfile::Contract) => {
+            if contract_extraction::version_supported(&persisted_analysis.analysis_version) {
+                contract_extraction::synthesize(&persisted_analysis, &chunked, &normalized, control)
+            } else {
+                Err(stage_failure(PipelineStage::Synthesize, "CONTRACT_CHECKPOINT_REQUIRES_RETRY",
+                    "This Contract checkpoint predates structured extraction; retry the document to extract complete clauses", true))
+            }
+        }
         (Some(_), SummaryProfile::General) => {
             direct::synthesize(runtime, &persisted_analysis, &chunked, &normalized, control)
         }
@@ -717,12 +749,15 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
         control,
     )
     .and_then(|verified| {
+        let require_coverage = page_coverage_required(summary_profile, delivery_policy)
+            && (delivery_policy.is_some() || !verified.summary_claims.is_empty());
         let verified = apply_verified_delivery_coverage_fallback(
             verified,
             &persisted_synthesis,
             &persisted_analysis,
             &normalized,
-            delivery_policy,
+            require_coverage,
+            delivery_policy.is_some(),
         )?;
         validate_verified_document(
             &verified,
@@ -731,7 +766,13 @@ pub(crate) fn verify_synthesized_document_controlled_with_delivery(
             &chunked,
             &normalized,
         )?;
-        coherent::validate_verified_profile(summary_profile, &verified, &chunked, &normalized)?;
+        coherent::validate_verified_profile(
+            summary_profile,
+            &verified,
+            &chunked,
+            &normalized,
+            Some(&persisted_analysis),
+        )?;
         Ok(verified)
     }) {
         Ok(verified) => verified,
@@ -779,6 +820,8 @@ pub(crate) fn complete_verified_document_with_delivery(
         .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
     let normalized = db::get_normalized_document(conn, run_id)?
         .ok_or_else(|| StoreError::NormalizedArtifactNotFound(run_id.to_string()))?;
+    let summary_profile = db::get_run_summary_profile(conn, run_id)?
+        .ok_or_else(|| StoreError::SummaryProfileUnavailable(run_id.to_string()))?;
     let chunked = db::get_chunked_document(conn, run_id)?
         .ok_or_else(|| StoreError::ChunkedArtifactNotFound(run_id.to_string()))?;
     let persisted_analysis = db::get_analyzed_document(conn, run_id)?.ok_or_else(|| {
@@ -839,6 +882,43 @@ pub(crate) fn complete_verified_document_with_delivery(
             ),
         ));
     }
+    let presented_claims = presented_claims(
+        &verified.presentation_mode,
+        &verified.claims,
+        &verified.summary_claims,
+    );
+    let Some(cited_pages) = claim_pages(
+        presented_claims,
+        persisted_analysis
+            .chunks
+            .iter()
+            .flat_map(|chunk| &chunk.evidence)
+            .chain(&verified.synthesis_evidence),
+    ) else {
+        return Err(persist_final_failure(
+            conn,
+            run_id,
+            run.state_version,
+            stage_failure(
+                PipelineStage::Verify,
+                "INVALID_CITATION_ARTIFACT",
+                "The presented summary references unavailable evidence",
+                false,
+            ),
+        ));
+    };
+    let mut warnings = verified.warnings.clone();
+    let recovered_count = persisted_analysis.omissions.len()
+        - remaining_page_omissions(&persisted_analysis.omissions, &cited_pages).len();
+    if recovered_count > 0 {
+        warnings.push(PipelineWarning {
+            code: SUMMARY_ANALYSIS_PAGES_RECOVERED_WARNING_CODE.to_string(),
+            message: format!(
+                "Pages omitted during analysis and recovered through verified summary citations: {recovered_count}. Original analysis decisions are retained."
+            ),
+            stage: Some(PipelineStage::Verify),
+        });
+    }
     let summary_version = match verified.verification_version.as_str() {
         LEGACY_VERIFICATION_VERSION => LEGACY_SUMMARY_VERSION,
         PREVIOUS_VERIFICATION_VERSION => PREVIOUS_SUMMARY_VERSION,
@@ -851,17 +931,22 @@ pub(crate) fn complete_verified_document_with_delivery(
         }
         PRE_CONTEXT_VERIFICATION_VERSION => PRE_CONTEXT_SUMMARY_VERSION,
         VERIFICATION_VERSION => SUMMARY_VERSION,
+        version if contract_extraction::version_supported(version) => "9.0.0",
         _ => unreachable!("verified document validation rejects unknown versions"),
     };
     let mut summary = SummaryArtifact {
+        contract_extraction: verified.contract_extraction.clone(),
         document_id: verified.document_id.clone(),
         summary_version: summary_version.to_string(),
         text: verified.summary_text.clone(),
-        warnings: verified.warnings.clone(),
+        warnings,
         created_at: Utc::now(),
         integrity_hash: String::new(),
     };
-    if delivery_policy.is_some_and(|policy| summary.text.len() > policy.max_summary_text_bytes()) {
+    if summary.contract_extraction.is_none()
+        && delivery_policy
+            .is_some_and(|policy| summary.text.len() > policy.max_summary_text_bytes())
+    {
         return Err(persist_final_failure(
             conn,
             run_id,
@@ -909,29 +994,29 @@ pub(crate) fn complete_verified_document_with_delivery(
             ));
         }
     };
-    if delivery_policy.is_some() {
-        let cited_pages = citations
-            .evidence
-            .iter()
-            .map(|evidence| evidence.source_span.page_start)
-            .collect::<HashSet<_>>();
-        if !delivery_page_coverage_satisfied(
+    if page_coverage_required(summary_profile, delivery_policy)
+        && !delivery_page_coverage_with_warnings(
             &cited_pages,
             &persisted_analysis.omissions,
             &normalized,
-        ) {
-            return Err(persist_final_failure(
-                conn,
-                run_id,
-                run.state_version,
-                stage_failure(
-                    PipelineStage::Verify,
-                    "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED",
-                    "The supported Connect summary does not satisfy raw and omission-adjusted page coverage",
-                    false,
-                ),
-            ));
-        }
+            &persisted_synthesis.warnings,
+        )
+    {
+        return Err(persist_final_failure(
+            conn,
+            run_id,
+            run.state_version,
+            stage_failure(
+                PipelineStage::Verify,
+                "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED",
+                if delivery_policy.is_some() {
+                    "The supported Connect summary does not satisfy raw and omission-adjusted page coverage"
+                } else {
+                    "The supported summary does not satisfy raw and omission-adjusted page coverage"
+                },
+                false,
+            ),
+        ));
     }
     if let Err(source) = db::complete_summary(conn, run_id, run.state_version, &summary, &citations)
     {
@@ -989,12 +1074,9 @@ fn document_claim_budget(normalized: &NormalizedDocument) -> Result<usize, Pipel
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                matches!(
-                    block.source.source_type,
-                    crate::pipeline::contracts::SourceType::NativeText
-                ) && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .count();
     let scaled_pages = native_text_pages
@@ -1163,8 +1245,13 @@ fn verify(
     select_key_points: bool,
     control: &dyn ExecutionControl,
 ) -> Result<VerifiedDocument, PipelineFailure> {
+    if contract_extraction::version_supported(&synthesized.synthesis_version) {
+        return contract_extraction::verify(synthesized, analyzed, chunked, normalized, control);
+    }
+
     cancellation_checkpoint(control, PipelineStage::Verify)?;
     validate_synthesized_document_without_runtime(synthesized, analyzed, chunked, normalized)?;
+    coherent::validate_model_output_fallback_boundary(summary_profile, synthesized)?;
     let ledger_evidence = analyzed
         .chunks
         .iter()
@@ -1227,9 +1314,22 @@ fn verify(
         &synthesized.synthesis_evidence,
         &mut summary_claim_verifications,
     )?;
-    if let Some(required_evidence_ids) =
-        coherent::required_short_contract_evidence_ids(summary_profile, chunked, normalized)?
-    {
+    if summary_profile == SummaryProfile::General {
+        coherent::verify_source_contributions(
+            runtime,
+            synthesized,
+            &mut summary_claim_verifications,
+            generation_seed,
+            &mut next_request_ordinal,
+            control,
+        )?;
+    }
+    if let Some(required_evidence_ids) = coherent::required_short_contract_evidence_ids(
+        summary_profile,
+        chunked,
+        normalized,
+        Some(analyzed),
+    )? {
         apply_contract_material_coverage(
             runtime,
             &synthesized.summary_claims,
@@ -1253,9 +1353,9 @@ fn verify(
         SummaryPresentationMode::Coherent => {
             render_cited_summary_with_evidence(&summary_claims, &synthesized.synthesis_evidence)?
         }
-        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList => {
-            render_cited_summary(&claims, analyzed)?
-        }
+        SummaryPresentationMode::ClaimLedgerFallback
+        | SummaryPresentationMode::LegacyClaimList
+        | SummaryPresentationMode::StructuredExtraction => render_cited_summary(&claims, analyzed)?,
     };
     let all_verifications = claim_verifications
         .iter()
@@ -1289,7 +1389,12 @@ fn verify(
             Vec::new()
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
-        SYNTHESIS_VERSION | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
+        SYNTHESIS_VERSION
+        | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+        | PRE_CLAUSE_SYNTHESIS_VERSION
+        | PRE_FURNITURE_SYNTHESIS_VERSION
+        | PRE_BALANCED_SYNTHESIS_VERSION
+        | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION => VERIFICATION_VERSION,
         PRE_CONTEXT_SYNTHESIS_VERSION => PRE_CONTEXT_VERIFICATION_VERSION,
         PRE_DISCLOSURE_SYNTHESIS_VERSION
             if synthesized.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback =>
@@ -1301,6 +1406,7 @@ fn verify(
         _ => HIERARCHICAL_VERIFICATION_VERSION,
     };
     let verified = VerifiedDocument {
+        contract_extraction: None,
         document_id: synthesized.document_id.clone(),
         verification_version: verification_version.to_string(),
         synthesis_attempt_ordinal,
@@ -1756,6 +1862,10 @@ fn verification_claim_budget(
     if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+            | PRE_CLAUSE_SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -2374,6 +2484,22 @@ fn derive_analysis_quote_catalog_for_blocks(
     normalized_blocks: &HashMap<&str, &NormalizedBlock>,
     allowed_block_ids: &[String],
 ) -> Result<AnalysisQuoteCatalog, PipelineFailure> {
+    derive_quote_catalog_with_segmentation(
+        analysis_version,
+        chunk,
+        normalized_blocks,
+        allowed_block_ids,
+        |block| analysis_quote_segmentation_for_version(analysis_version, &block.text),
+    )
+}
+
+fn derive_quote_catalog_with_segmentation(
+    analysis_version: &str,
+    chunk: &crate::pipeline::contracts::DocumentChunk,
+    normalized_blocks: &HashMap<&str, &NormalizedBlock>,
+    allowed_block_ids: &[String],
+    segment: impl Fn(&NormalizedBlock) -> AnalysisQuoteSegmentation,
+) -> Result<AnalysisQuoteCatalog, PipelineFailure> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
     let mut block_segments = Vec::with_capacity(allowed_block_ids.len());
@@ -2388,7 +2514,7 @@ fn derive_analysis_quote_catalog_for_blocks(
                 false,
             )
         })?;
-        let segmentation = analysis_quote_segmentation_for_version(analysis_version, &block.text);
+        let segmentation = segment(block);
         omitted_source_units = omitted_source_units
             .checked_add(segmentation.omitted_source_units)
             .ok_or_else(|| {
@@ -2447,7 +2573,11 @@ fn derive_analysis_quote_catalog_for_blocks(
         }
     }
 
-    if candidates.is_empty() && !(analysis_version == ANALYSIS_VERSION && omitted_source_units > 0)
+    if candidates.is_empty()
+        && !(matches!(
+            analysis_version,
+            ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION
+        ) && omitted_source_units > 0)
     {
         return Err(stage_failure(
             PipelineStage::Analyze,
@@ -2518,27 +2648,115 @@ fn analysis_scope_minimum(page_count: usize) -> Result<usize, PipelineFailure> {
         })
 }
 
+/// Historical analysis decisions still unresolved by the delivered citation pages.
+/// Callers must obtain these pages from validated, presented claims, not all evidence.
+pub fn remaining_page_omissions<'a>(
+    omissions: &'a [AnalysisPageOmission],
+    cited_pages: &HashSet<u32>,
+) -> Vec<&'a AnalysisPageOmission> {
+    omissions
+        .iter()
+        .filter(|omission| !cited_pages.contains(&omission.page_number))
+        .collect()
+}
+
+fn presented_claims<'a>(
+    mode: &SummaryPresentationMode,
+    claims: &'a [CitedClaim],
+    summary_claims: &'a [CitedClaim],
+) -> &'a [CitedClaim] {
+    match mode {
+        SummaryPresentationMode::Coherent => summary_claims,
+        SummaryPresentationMode::ClaimLedgerFallback
+        | SummaryPresentationMode::LegacyClaimList
+        | SummaryPresentationMode::StructuredExtraction => claims,
+    }
+}
+
+fn claim_pages<'a>(
+    claims: &[CitedClaim],
+    evidence: impl IntoIterator<Item = &'a EvidenceItem>,
+) -> Option<HashSet<u32>> {
+    let evidence_by_id = evidence
+        .into_iter()
+        .map(|item| (item.evidence_id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    let mut pages = HashSet::new();
+    for evidence_id in claims.iter().flat_map(|claim| &claim.evidence_ids) {
+        let evidence = evidence_by_id.get(evidence_id.as_str())?;
+        pages.extend(evidence.source_span.page_start..=evidence.source_span.page_end);
+    }
+    Some(pages)
+}
+
+/// Citation pages actually presented by an already validated final artifact.
+/// Evidence kept only for the undisplayed claim ledger does not contribute.
+pub fn summary_cited_pages(citations: &CitationArtifact) -> Option<HashSet<u32>> {
+    claim_pages(
+        presented_claims(
+            &citations.presentation_mode,
+            &citations.claims,
+            &citations.summary_claims,
+        ),
+        &citations.evidence,
+    )
+}
+
+fn page_coverage_required(
+    profile: SummaryProfile,
+    delivery: Option<SummaryDeliveryPolicy>,
+) -> bool {
+    profile == SummaryProfile::General || delivery.is_some()
+}
+
+fn native_text_pages(normalized: &NormalizedDocument) -> HashSet<u32> {
+    normalized
+        .pages
+        .iter()
+        .filter(|page| {
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
+        })
+        .map(|page| page.page_number)
+        .collect()
+}
+
 fn delivery_page_coverage_satisfied(
     cited_pages: &HashSet<u32>,
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
 ) -> bool {
-    let native_pages = normalized
-        .pages
-        .iter()
-        .filter(|page| {
-            page.content.iter().any(|block| {
-                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
-                    && !block.text.trim().is_empty()
-            })
-        })
-        .map(|page| page.page_number)
-        .collect::<HashSet<_>>();
+    delivery_page_coverage_with_warnings(cited_pages, omissions, normalized, &[])
+}
+
+fn delivery_page_coverage_with_warnings(
+    cited_pages: &HashSet<u32>,
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+    warnings: &[PipelineWarning],
+) -> bool {
+    let native_pages = native_text_pages(normalized);
     if native_pages.is_empty() || !cited_pages.is_subset(&native_pages) {
         return false;
     }
-    let material_omissions = omissions
+    if omissions
         .iter()
+        .any(|omission| !native_pages.contains(&omission.page_number))
+    {
+        return false;
+    }
+    let excluded = coherent::furniture_coverage_exclusions(warnings, normalized);
+    let native_pages = native_pages
+        .difference(&excluded)
+        .copied()
+        .collect::<HashSet<_>>();
+    let cited_pages = cited_pages
+        .difference(&excluded)
+        .copied()
+        .collect::<HashSet<_>>();
+    let material_omissions = remaining_page_omissions(omissions, &cited_pages)
+        .into_iter()
         .filter(|omission| {
             matches!(
                 omission.reason,
@@ -2547,11 +2765,8 @@ fn delivery_page_coverage_satisfied(
             )
         })
         .map(|omission| omission.page_number)
+        .filter(|page| native_pages.contains(page))
         .collect::<HashSet<_>>();
-    if !material_omissions.is_subset(&native_pages) || !material_omissions.is_disjoint(cited_pages)
-    {
-        return false;
-    }
     let adjusted_total = native_pages.len() - material_omissions.len();
     cited_pages.len() <= adjusted_total
         && (cited_pages.len() as u128) * 2 >= native_pages.len() as u128
@@ -2564,32 +2779,47 @@ pub(crate) fn delivery_claim_prefix_coverage_satisfied(
     delivered_claim_count: usize,
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
+    warnings: &[PipelineWarning],
 ) -> bool {
-    let presented_claims = match citations.presentation_mode {
-        SummaryPresentationMode::Coherent => &citations.summary_claims,
-        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList => {
-            &citations.claims
+    if let Some(extraction) = &citations.contract_extraction {
+        let Ok(units) =
+            contract_extraction::render_units(extraction, &citations.claims, &citations.evidence)
+        else {
+            return false;
+        };
+        if delivered_claim_count == 0 || delivered_claim_count > units.len() {
+            return false;
         }
-    };
+        let ids = units[..delivered_claim_count]
+            .iter()
+            .flat_map(|unit| unit.clause_ids.iter().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let delivered = citations
+            .claims
+            .iter()
+            .filter(|claim| ids.contains(claim.claim_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(cited_pages) = claim_pages(&delivered, &citations.evidence) else {
+            return false;
+        };
+        return delivery_page_coverage_with_warnings(&cited_pages, omissions, normalized, warnings);
+    }
+    let presented_claims = presented_claims(
+        &citations.presentation_mode,
+        &citations.claims,
+        &citations.summary_claims,
+    );
     if delivered_claim_count == 0 || delivered_claim_count > presented_claims.len() {
         return false;
     }
-    let evidence_by_id = citations
-        .evidence
-        .iter()
-        .map(|evidence| (evidence.evidence_id.as_str(), evidence))
-        .collect::<HashMap<_, _>>();
-    let mut cited_pages = HashSet::new();
-    for evidence_id in presented_claims[..delivered_claim_count]
-        .iter()
-        .flat_map(|claim| &claim.evidence_ids)
-    {
-        let Some(evidence) = evidence_by_id.get(evidence_id.as_str()) else {
-            return false;
-        };
-        cited_pages.insert(evidence.source_span.page_start);
-    }
-    delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
+    let Some(cited_pages) = claim_pages(
+        &presented_claims[..delivered_claim_count],
+        &citations.evidence,
+    ) else {
+        return false;
+    };
+    delivery_page_coverage_with_warnings(&cited_pages, omissions, normalized, warnings)
 }
 
 #[cfg(test)]
@@ -2645,6 +2875,7 @@ fn versioned_analysis_selected_pages(
     // Historical plans and identities must not acquire new retention obligations.
     let mut selected = analysis_selected_pages(normalized)?;
     if version != ANALYSIS_VERSION
+        && version != SENTENCE_ANALYSIS_VERSION
         && version != QUOTE_BOUNDARY_ANALYSIS_VERSION
         && version != PUNCTUATION_ANALYSIS_VERSION
         && version != TOLERANT_ANALYSIS_VERSION
@@ -2657,16 +2888,16 @@ fn versioned_analysis_selected_pages(
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
-                    && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .map(|page| page.page_number)
         .collect::<Vec<_>>();
     let target = if matches!(
         version,
         ANALYSIS_VERSION
+            | SENTENCE_ANALYSIS_VERSION
             | QUOTE_BOUNDARY_ANALYSIS_VERSION
             | PUNCTUATION_ANALYSIS_VERSION
             | TOLERANT_ANALYSIS_VERSION
@@ -2707,12 +2938,9 @@ fn analysis_selected_pages(
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                matches!(
-                    block.source.source_type,
-                    crate::pipeline::contracts::SourceType::NativeText
-                ) && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .map(|page| page.page_number)
         .collect::<Vec<_>>();
@@ -2834,6 +3062,8 @@ fn analysis_quote_segmentation_for_version(
     source: &str,
 ) -> AnalysisQuoteSegmentation {
     if analysis_version == ANALYSIS_VERSION {
+        quote_segments::segment(source)
+    } else if analysis_version == SENTENCE_ANALYSIS_VERSION {
         analysis_quote_segments_v13(source)
     } else {
         AnalysisQuoteSegmentation {
@@ -2923,22 +3153,7 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
         };
     }
 
-    let mut units = Vec::new();
-    let mut unit_start = source_start;
-    for (relative_start, proposed) in
-        source[source_start..source_end].split_sentence_bound_indices()
-    {
-        let proposed_end = source_start + relative_start + proposed.len();
-        if safe_analysis_sentence_boundary(source, unit_start, proposed_end, source_end) {
-            let start = unit_start + source[unit_start..proposed_end].len()
-                - source[unit_start..proposed_end].trim_start().len();
-            let end = unit_start + source[unit_start..proposed_end].trim_end().len();
-            if start < end {
-                units.push((start, end));
-            }
-            unit_start = proposed_end;
-        }
-    }
+    let (units, unit_start) = analysis_sentence_units_v13(source);
 
     let mut segments = Vec::new();
     let mut omitted_source_units = 0usize;
@@ -2975,11 +3190,47 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
     }
 }
 
+fn analysis_sentence_units_v13(source: &str) -> (Vec<(usize, usize)>, usize) {
+    let source_start = source.len() - source.trim_start().len();
+    let source_end = source.trim_end().len();
+    if source_start >= source_end {
+        return (Vec::new(), source_end);
+    }
+    let mut units = Vec::new();
+    let mut unit_start = source_start;
+    for (relative_start, proposed) in
+        source[source_start..source_end].split_sentence_bound_indices()
+    {
+        let proposed_end = source_start + relative_start + proposed.len();
+        if safe_analysis_sentence_boundary(source, unit_start, proposed_end, source_end) {
+            let start = unit_start + source[unit_start..proposed_end].len()
+                - source[unit_start..proposed_end].trim_start().len();
+            let end = unit_start + source[unit_start..proposed_end].trim_end().len();
+            if start < end {
+                units.push((start, end));
+            }
+            unit_start = proposed_end;
+        }
+    }
+
+    (units, unit_start)
+}
+
 fn safe_analysis_sentence_boundary(
     source: &str,
     unit_start: usize,
     proposed_end: usize,
     source_end: usize,
+) -> bool {
+    analysis_sentence_boundary(source, unit_start, proposed_end, source_end, true)
+}
+
+fn analysis_sentence_boundary(
+    source: &str,
+    unit_start: usize,
+    proposed_end: usize,
+    source_end: usize,
+    legacy_short_abbreviations: bool,
 ) -> bool {
     let candidate = source[unit_start..proposed_end].trim_end();
     let without_closers = candidate.trim_end_matches(is_analysis_sentence_closer);
@@ -3027,7 +3278,8 @@ fn safe_analysis_sentence_boundary(
         .any(|character| analysis_sentence_break(character) == SentenceBreak::ATerm)
         || token.chars().count() == 1 && token.chars().all(char::is_alphabetic)
         || AMBIGUOUS_ABBREVIATIONS.contains(&lower.as_str())
-        || short_open_set_abbreviation
+        || legacy_short_abbreviations && short_open_set_abbreviation
+        || !legacy_short_abbreviations && lower == "dept"
     {
         return false;
     }
@@ -3468,39 +3720,51 @@ fn no_supported_claims_failure() -> PipelineFailure {
 }
 
 fn presented_claims_empty(verified: &VerifiedDocument) -> bool {
-    match verified.presentation_mode {
-        SummaryPresentationMode::Coherent => verified.summary_claims.is_empty(),
-        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList => {
-            verified.claims.is_empty()
-        }
-    }
+    presented_claims(
+        &verified.presentation_mode,
+        &verified.claims,
+        &verified.summary_claims,
+    )
+    .is_empty()
 }
 
+#[cfg(test)]
 fn claims_satisfy_delivery_page_coverage(
     claims: &[CitedClaim],
     evidence: &[EvidenceItem],
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
 ) -> bool {
-    let evidence_by_id = evidence
-        .iter()
-        .map(|item| (item.evidence_id.as_str(), item))
-        .collect::<HashMap<_, _>>();
-    let mut cited_pages = HashSet::new();
-    for evidence_id in claims.iter().flat_map(|claim| &claim.evidence_ids) {
-        let Some(item) = evidence_by_id.get(evidence_id.as_str()) else {
-            return false;
-        };
-        cited_pages.insert(item.source_span.page_start);
-    }
-    delivery_page_coverage_satisfied(&cited_pages, omissions, normalized)
+    claims_satisfy_delivery_page_coverage_with_warnings(
+        claims,
+        evidence,
+        omissions,
+        normalized,
+        &[],
+    )
 }
 
-fn delivery_coverage_fallback_warning() -> PipelineWarning {
+fn claims_satisfy_delivery_page_coverage_with_warnings(
+    claims: &[CitedClaim],
+    evidence: &[EvidenceItem],
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+    warnings: &[PipelineWarning],
+) -> bool {
+    let Some(cited_pages) = claim_pages(claims, evidence) else {
+        return false;
+    };
+    delivery_page_coverage_with_warnings(&cited_pages, omissions, normalized, warnings)
+}
+
+fn delivery_coverage_fallback_warning(connect_delivery: bool) -> PipelineWarning {
     PipelineWarning {
         code: SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE.to_string(),
-        message: "Semantic verification reduced coherent page coverage; showing the verified source claims instead"
-            .to_string(),
+        message: if connect_delivery {
+            "Semantic verification reduced coherent page coverage; showing the verified source claims instead"
+        } else {
+            "The supported coherent summary does not satisfy page coverage; showing verified source claims instead"
+        }.to_string(),
         stage: Some(PipelineStage::Verify),
     }
 }
@@ -3510,15 +3774,17 @@ fn apply_verified_delivery_coverage_fallback(
     synthesized: &SynthesizedDocument,
     analyzed: &AnalyzedDocument,
     normalized: &NormalizedDocument,
-    delivery_policy: Option<SummaryDeliveryPolicy>,
+    require_coverage: bool,
+    connect_delivery: bool,
 ) -> Result<VerifiedDocument, PipelineFailure> {
-    if delivery_policy.is_none()
+    if !require_coverage
         || synthesized.presentation_mode != SummaryPresentationMode::Coherent
-        || claims_satisfy_delivery_page_coverage(
+        || claims_satisfy_delivery_page_coverage_with_warnings(
             &verified.summary_claims,
             &verified.synthesis_evidence,
             &analyzed.omissions,
             normalized,
+            &synthesized.warnings,
         )
     {
         return Ok(verified);
@@ -3555,7 +3821,9 @@ fn apply_verified_delivery_coverage_fallback(
     verified.presentation_mode = SummaryPresentationMode::ClaimLedgerFallback;
     verified.summary_text = render_cited_summary(&verified.claims, analyzed)?;
     verified.summary_claims.clear();
-    verified.warnings.push(delivery_coverage_fallback_warning());
+    verified
+        .warnings
+        .push(delivery_coverage_fallback_warning(connect_delivery));
     Ok(verified)
 }
 
@@ -3565,6 +3833,10 @@ fn validate_analyzed_document(
     normalized: &NormalizedDocument,
     runtime: &dyn ModelRuntime,
 ) -> Result<(), PipelineFailure> {
+    if contract_extraction::version_supported(&analyzed.analysis_version) {
+        return contract_extraction::validate_analysis(analyzed, chunked, normalized);
+    }
+
     if analyzed.runtime_id != runtime.runtime_id_for_stage(PipelineStage::Analyze)
         || analyzed.model_id != runtime.model_id_for_stage(PipelineStage::Analyze)
     {
@@ -3583,11 +3855,16 @@ fn validate_analyzed_content(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
+    if contract_extraction::version_supported(&analyzed.analysis_version) {
+        return contract_extraction::validate_analysis(analyzed, chunked, normalized);
+    }
+
     let normalized_blocks = validate_normalized_chunk_boundary(normalized, chunked)?;
     if analyzed.document_id != chunked.document_id
         || !matches!(
             analyzed.analysis_version.as_str(),
             ANALYSIS_VERSION
+                | SENTENCE_ANALYSIS_VERSION
                 | QUOTE_BOUNDARY_ANALYSIS_VERSION
                 | PUNCTUATION_ANALYSIS_VERSION
                 | TOLERANT_ANALYSIS_VERSION
@@ -3616,6 +3893,7 @@ fn validate_analyzed_content(
     let materiality_analysis = matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | SENTENCE_ANALYSIS_VERSION
             | QUOTE_BOUNDARY_ANALYSIS_VERSION
             | PUNCTUATION_ANALYSIS_VERSION
             | TOLERANT_ANALYSIS_VERSION
@@ -3747,6 +4025,7 @@ fn validate_analyzed_content(
             );
             let claim_character_limit = match analyzed.analysis_version.as_str() {
                 ANALYSIS_VERSION
+                | SENTENCE_ANALYSIS_VERSION
                 | QUOTE_BOUNDARY_ANALYSIS_VERSION
                 | PUNCTUATION_ANALYSIS_VERSION
                 | TOLERANT_ANALYSIS_VERSION => MAX_DIRECT_ANALYSIS_CLAIM_CHARACTERS,
@@ -3771,6 +4050,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | SENTENCE_ANALYSIS_VERSION
                         | QUOTE_BOUNDARY_ANALYSIS_VERSION
                         | PUNCTUATION_ANALYSIS_VERSION
                         | TOLERANT_ANALYSIS_VERSION
@@ -3781,7 +4061,7 @@ fn validate_analyzed_content(
                         | COMPLETION_ANALYSIS_VERSION
                 ) && !(if matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION | QUOTE_BOUNDARY_ANALYSIS_VERSION
+                    ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION | QUOTE_BOUNDARY_ANALYSIS_VERSION
                 ) {
                     pages::completion_valid(&evidence.claim_text)
                 } else {
@@ -3798,6 +4078,7 @@ fn validate_analyzed_content(
                 || (matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | SENTENCE_ANALYSIS_VERSION
                         | QUOTE_BOUNDARY_ANALYSIS_VERSION
                         | PUNCTUATION_ANALYSIS_VERSION
                         | TOLERANT_ANALYSIS_VERSION
@@ -3851,6 +4132,7 @@ fn validate_analyzed_content(
     if matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | SENTENCE_ANALYSIS_VERSION
             | QUOTE_BOUNDARY_ANALYSIS_VERSION
             | PUNCTUATION_ANALYSIS_VERSION
             | TOLERANT_ANALYSIS_VERSION
@@ -3880,6 +4162,18 @@ fn validate_synthesized_document(
     normalized: &NormalizedDocument,
     runtime: &dyn ModelRuntime,
 ) -> Result<(), PipelineFailure> {
+    if contract_extraction::version_supported(&synthesized.synthesis_version) {
+        return contract_extraction::validate_synthesis(synthesized, analyzed, chunked, normalized);
+    }
+    if synthesized.contract_extraction.is_some() {
+        return Err(stage_failure(
+            PipelineStage::Synthesize,
+            "INVALID_SYNTHESIZED_DOCUMENT",
+            "Prose artifacts cannot contain Contract extraction records",
+            false,
+        ));
+    }
+
     let runtime_stage = if coherent_synthesis_version_supported(&synthesized.synthesis_version) {
         PipelineStage::Synthesize
     } else {
@@ -3916,10 +4210,26 @@ fn validate_synthesized_document_without_runtime(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
+    if contract_extraction::version_supported(&synthesized.synthesis_version) {
+        return contract_extraction::validate_synthesis(synthesized, analyzed, chunked, normalized);
+    }
+    if synthesized.contract_extraction.is_some() {
+        return Err(stage_failure(
+            PipelineStage::Synthesize,
+            "INVALID_SYNTHESIZED_DOCUMENT",
+            "Prose artifacts cannot contain Contract extraction records",
+            false,
+        ));
+    }
+
     validate_analyzed_content(analyzed, chunked, normalized)?;
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+            | PRE_CLAUSE_SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -3935,6 +4245,10 @@ fn validate_synthesized_document_without_runtime(
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+            | PRE_CLAUSE_SYNTHESIS_VERSION
+            | PRE_FURNITURE_SYNTHESIS_VERSION
+            | PRE_BALANCED_SYNTHESIS_VERSION
             | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
             | PRE_CONTEXT_SYNTHESIS_VERSION
             | PRE_DISCLOSURE_SYNTHESIS_VERSION
@@ -4075,6 +4389,24 @@ fn validate_verified_document(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
+    if contract_extraction::version_supported(&synthesized.synthesis_version) {
+        return contract_extraction::validate_verified(
+            verified,
+            synthesized,
+            analyzed,
+            chunked,
+            normalized,
+        );
+    }
+    if verified.contract_extraction.is_some() {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "INVALID_VERIFIED_DOCUMENT",
+            "Prose artifacts cannot contain Contract extraction records",
+            false,
+        ));
+    }
+
     validate_synthesized_document_without_runtime(synthesized, analyzed, chunked, normalized)?;
     if verified.verification_version == LEGACY_VERIFICATION_VERSION {
         return validate_legacy_verified_document(verified, synthesized);
@@ -4175,8 +4507,10 @@ fn validate_coherent_verified_document(
     analyzed: &AnalyzedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
-    let delivery_coverage_fallback = synthesized.synthesis_version == SYNTHESIS_VERSION
-        && verified.verification_version == VERIFICATION_VERSION
+    let delivery_coverage_fallback = matches!(
+        synthesized.synthesis_version.as_str(),
+        SYNTHESIS_VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+    ) && verified.verification_version == VERIFICATION_VERSION
         && synthesized.presentation_mode == SummaryPresentationMode::Coherent
         && verified.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback;
     let metadata_valid = coherent_verification_versions_match(
@@ -4225,11 +4559,12 @@ fn validate_coherent_verified_document(
         .map(|(claim, _)| claim.clone())
         .collect::<Vec<_>>();
     let delivery_coverage_fallback_valid = !delivery_coverage_fallback
-        || !claims_satisfy_delivery_page_coverage(
+        || !claims_satisfy_delivery_page_coverage_with_warnings(
             &supported_summary_claims,
             &synthesized.synthesis_evidence,
             &analyzed.omissions,
             normalized,
+            &synthesized.warnings,
         );
     let expected_summary_claims = if delivery_coverage_fallback {
         Vec::new()
@@ -4244,7 +4579,8 @@ fn validate_coherent_verified_document(
         SummaryPresentationMode::ClaimLedgerFallback => {
             render_cited_summary(&supported_claims, analyzed)?
         }
-        SummaryPresentationMode::LegacyClaimList => String::new(),
+        SummaryPresentationMode::LegacyClaimList
+        | SummaryPresentationMode::StructuredExtraction => String::new(),
     };
     let all_verifications = verified
         .claim_verifications
@@ -4254,7 +4590,11 @@ fn validate_coherent_verified_document(
         .collect::<Vec<_>>();
     let mut expected_warnings = verification_warnings(synthesized, &all_verifications, false);
     if delivery_coverage_fallback {
-        expected_warnings.push(delivery_coverage_fallback_warning());
+        // Both exact route-specific forms remain readable; arbitrary warning
+        // text, codes, stages and verdicts still fail validation.
+        let connect_warning = delivery_coverage_fallback_warning(true);
+        let use_connect_warning = verified.warnings.last() == Some(&connect_warning);
+        expected_warnings.push(delivery_coverage_fallback_warning(use_connect_warning));
     }
     if !ledger_coverage_valid
         || !summary_coverage_valid
@@ -4618,13 +4958,19 @@ pub(crate) fn render_citation_claim_lines(
         .iter()
         .map(|item| (item.evidence_id.as_str(), item))
         .collect::<HashMap<_, _>>();
-    let presented_claims = match artifact.presentation_mode {
-        SummaryPresentationMode::Coherent => &artifact.summary_claims,
-        SummaryPresentationMode::ClaimLedgerFallback | SummaryPresentationMode::LegacyClaimList => {
-            &artifact.claims
-        }
+    let presented_claims = presented_claims(
+        &artifact.presentation_mode,
+        &artifact.claims,
+        &artifact.summary_claims,
+    );
+    let lines = if let Some(extraction) = &artifact.contract_extraction {
+        contract_extraction::render_units(extraction, &artifact.claims, &artifact.evidence)?
+            .into_iter()
+            .map(|unit| unit.text)
+            .collect()
+    } else {
+        render_claim_lines(presented_claims, &evidence)?
     };
-    let lines = render_claim_lines(presented_claims, &evidence)?;
     if lines.join("\n\n") != artifact.rendered_text {
         return Err(stage_failure(
             PipelineStage::Verify,
@@ -4691,6 +5037,7 @@ fn build_citation_artifact(
             )
         })?;
     let mut artifact = CitationArtifact {
+        contract_extraction: verified.contract_extraction.clone(),
         document_id: summary.document_id.clone(),
         citation_version: citation_version.to_string(),
         summary_integrity_hash: summary.integrity_hash.clone(),
@@ -4724,6 +5071,7 @@ fn build_citation_artifact(
 
 pub(crate) fn expected_citation_version(summary_version: &str) -> Option<&'static str> {
     match summary_version {
+        "9.0.0" => Some("5.0.0"),
         SUMMARY_VERSION | PRE_CONTEXT_SUMMARY_VERSION | PRE_DISCLOSURE_SUMMARY_VERSION => {
             Some(CITATION_VERSION)
         }
@@ -4769,6 +5117,8 @@ pub(crate) fn validate_citation_artifact(
         || artifact.summary_integrity_hash != summary.integrity_hash
         || artifact.rendered_text != summary.text
         || artifact.presentation_mode != verified.presentation_mode
+        || artifact.contract_extraction != verified.contract_extraction
+        || summary.contract_extraction != verified.contract_extraction
         || artifact.summary_claims != verified.summary_claims
         || artifact.claims != verified.claims
         || artifact.evidence.is_empty()
@@ -5956,6 +6306,157 @@ mod tests {
         (conn, run.run_id)
     }
 
+    #[test]
+    fn furniture_only_page_delivers_with_disclosed_exclusion() {
+        use crate::pipeline::contracts::{DocumentParser, IngestedDocument, ParsedDocument};
+        struct FurniturePageParser;
+        impl DocumentParser for FurniturePageParser {
+            fn id(&self) -> &'static str {
+                "furniture-page-fixture"
+            }
+            fn version(&self) -> &'static str {
+                "1"
+            }
+            fn parse(
+                &self,
+                document: &IngestedDocument,
+            ) -> Result<ParsedDocument, PipelineFailure> {
+                let mut parsed = PdfExtractParser::new().parse(document)?;
+                let mut pages = parsed.pages.clone();
+                let body = pages[0].text.clone();
+                for (index, page) in pages.iter_mut().enumerate() {
+                    page.page_number = (index + 1) as u32;
+                    if page.text.trim().is_empty() {
+                        page.text = body.clone();
+                        page.requires_visual_processing = false;
+                        page.warnings.clear();
+                    }
+                }
+                pages[1].text = "Page 2".into();
+                parsed.pages = pages;
+                parsed.parser_id = self.id().into();
+                parsed.parser_version = self.version().into();
+                Ok(parsed)
+            }
+        }
+        for fallback in [false, true] {
+            let database = TestDatabase::new();
+            let mut conn = init_db(&database.0).unwrap();
+            let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/structured_report.pdf");
+            let (_, run) = ingest_pdf_with_profiles(
+                &mut conn,
+                source.to_str().unwrap(),
+                None,
+                SummaryProfile::General,
+                None,
+            )
+            .unwrap();
+            let run_id = &run.run_id;
+            parse_document(&mut conn, &FurniturePageParser, run_id).unwrap();
+            normalize_document(&mut conn, &CanonicalNormalizer::new(), run_id).unwrap();
+            structure_document(&mut conn, &DeterministicStructureInterpreter::new(), run_id)
+                .unwrap();
+            chunk_document(&mut conn, &DeterministicDocumentChunker::new(), run_id).unwrap();
+            let runtime =
+                rejected_general_runtime(if fallback { "malformed" } else { "unused" }, false);
+            let good = GeneralCoverageRuntime {
+                requests: Mutex::new(vec![]),
+                good_initial: true,
+                corrects: false,
+                withhold_ledger: false,
+                bad_repair: None,
+            };
+            let completed = summarize_chunked_document(
+                &mut conn,
+                if fallback { &runtime } else { &good },
+                run_id,
+            )
+            .expect("furniture-only page must not fail substantive document delivery");
+            assert_eq!(
+                completed.citations.presentation_mode,
+                if fallback {
+                    SummaryPresentationMode::ClaimLedgerFallback
+                } else {
+                    SummaryPresentationMode::Coherent
+                }
+            );
+            let warning = completed
+                .summary
+                .warnings
+                .iter()
+                .find(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED")
+                .expect("delivery must disclose the excluded page");
+            assert!(warning.message.contains("[2]"));
+            assert!(get_summary_artifact(&conn, run_id).unwrap().is_some());
+            let analyzed = get_analyzed_document(&conn, run_id).unwrap().unwrap();
+            let normalized = get_normalized_document(&conn, run_id).unwrap().unwrap();
+            assert_eq!(normalized.pages.len(), 6);
+            assert!(delivery_claim_prefix_coverage_satisfied(
+                &completed.citations,
+                presented_claims(
+                    &completed.citations.presentation_mode,
+                    &completed.citations.claims,
+                    &completed.citations.summary_claims
+                )
+                .len(),
+                &analyzed.omissions,
+                &normalized,
+                &completed.summary.warnings
+            ));
+            if !fallback {
+                assert!(!summary_cited_pages(&completed.citations)
+                    .unwrap()
+                    .contains(&2));
+                assert!(
+                    !delivery_claim_prefix_coverage_satisfied(
+                        &completed.citations,
+                        completed.citations.summary_claims.len(),
+                        &analyzed.omissions,
+                        &normalized,
+                        &[]
+                    ),
+                    "final prefix needs the disclosed source scope"
+                );
+            }
+            let saved = get_synthesized_document(&conn, run_id).unwrap().unwrap();
+            let chunks = get_chunked_document(&conn, run_id).unwrap().unwrap();
+            for remove in [false, true] {
+                let mut invalid = saved.clone();
+                if remove {
+                    invalid
+                        .warnings
+                        .retain(|w| w.code != "SUMMARY_FURNITURE_PAGES_EXCLUDED");
+                } else {
+                    invalid
+                        .warnings
+                        .iter_mut()
+                        .find(|w| w.code == "SUMMARY_FURNITURE_PAGES_EXCLUDED")
+                        .unwrap()
+                        .message
+                        .push_str(" [3]");
+                }
+                assert!(coherent::validate_for_runtime(
+                    SummaryProfile::General,
+                    &invalid,
+                    &analyzed,
+                    &chunks,
+                    &normalized,
+                    if fallback { &runtime } else { &good }
+                )
+                .is_err());
+            }
+            // The historical ledger may still display a counter claim, but it
+            // cannot earn coverage credit for an excluded page.
+            assert!(!delivery_page_coverage_with_warnings(
+                &HashSet::from([2]),
+                &analyzed.omissions,
+                &normalized,
+                &completed.summary.warnings
+            ));
+        }
+    }
+
     fn sparse_page_scope_fixture(
         page_count: usize,
         characters_per_page: usize,
@@ -6290,6 +6791,150 @@ mod tests {
     }
 
     #[test]
+    fn contract_key_terms_persist_and_deliver_before_full_clause_list() {
+        for delivery in [
+            None,
+            Some(SummaryDeliveryPolicy::connect()),
+            Some(SummaryDeliveryPolicy::for_test(1)),
+        ] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Contract);
+            let runtime = FakeRuntime {
+                calls: AtomicUsize::new(0),
+                failure: Some(FailurePoint::Health),
+            };
+            analyze_chunked_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            synthesize_analyzed_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            verify_synthesized_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            let artifacts =
+                complete_verified_document_with_delivery(&mut conn, &run_id, delivery).unwrap();
+            assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                artifacts.citations.presentation_mode,
+                SummaryPresentationMode::StructuredExtraction
+            );
+            let records = artifacts.summary.contract_extraction.as_ref().unwrap();
+            assert!(!records.clauses.is_empty());
+            assert_eq!(records.clauses.len(), artifacts.citations.claims.len());
+            let view = crate::pipeline::workspace::get_persisted_summary(&conn, &run_id).unwrap();
+            assert_eq!(view.summary.contract_extraction.as_ref(), Some(records));
+            assert!(
+                artifacts.summary.text.starts_with("Key terms\n\n"),
+                "key terms must precede the full clause list"
+            );
+            assert!(artifacts.summary.text.contains("Full clause list\n\n"));
+            let typed = serde_json::to_value(records).unwrap();
+            let categories = typed["keyTerms"]
+                .as_array()
+                .expect("typed key terms must persist");
+            assert_eq!(
+                categories
+                    .iter()
+                    .map(|category| category["category"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "parties",
+                    "payment",
+                    "term/renewal",
+                    "termination",
+                    "insurance",
+                    "liability/indemnity"
+                ]
+            );
+            let input = crate::connect::contracts::InputArtifact {
+                artifact_id: uuid::Uuid::new_v4().to_string(),
+                media_type: "application/pdf".into(),
+                byte_size: 100,
+                sha256: "a".repeat(64),
+                display_name: "public-contract.pdf".into(),
+                source_app_id: "test-consumer".into(),
+            };
+            let lines = render_citation_claim_lines(&artifacts.citations).unwrap();
+            let (wire, count) = crate::connect::contracts::JobResult::from_summary_claim_lines(
+                &input,
+                &artifacts.summary,
+                &lines,
+            )
+            .unwrap();
+            assert_eq!(count, lines.len());
+            assert_eq!(wire.outputs[0].content.text, artifacts.summary.text);
+            assert_eq!(wire.outputs[0].content.summary_version, "9.0");
+            let encoded = serde_json::to_value(&wire.outputs[0].content).unwrap();
+            assert_eq!(encoded.as_object().unwrap().len(), 4);
+            assert!(encoded.get("contract_extraction").is_none());
+            let saved = serde_json::to_string(&artifacts.summary).unwrap();
+            assert_eq!(
+                serde_json::from_str::<SummaryArtifact>(&saved).unwrap(),
+                artifacts.summary
+            );
+            let mut changed_summary = artifacts.summary.clone();
+            changed_summary.text = changed_summary
+                .text
+                .replace("parties: not identified", "parties: Invented entity");
+            assert_ne!(changed_summary.text, artifacts.summary.text);
+            changed_summary.integrity_hash = changed_summary.calculate_integrity_hash().unwrap();
+            let mut changed_citations = artifacts.citations.clone();
+            changed_citations.rendered_text = changed_summary.text.clone();
+            changed_citations.summary_integrity_hash = changed_summary.integrity_hash.clone();
+            changed_citations.integrity_hash =
+                changed_citations.calculate_integrity_hash().unwrap();
+            let summary_json = serde_json::to_string(&changed_summary).unwrap();
+            let citation_json = serde_json::to_string(&changed_citations).unwrap();
+            conn.execute("UPDATE summary_artifacts SET artifact_hash = ?1, summary_artifact = ?2 WHERE run_id = ?3",
+                rusqlite::params![format!("{:x}",Sha256::digest(summary_json.as_bytes())),summary_json,run_id]).unwrap();
+            conn.execute("UPDATE citation_artifacts SET artifact_hash = ?1, citation_artifact = ?2, summary_integrity_hash = ?4 WHERE run_id = ?3",
+                rusqlite::params![format!("{:x}",Sha256::digest(citation_json.as_bytes())),citation_json,run_id,changed_summary.integrity_hash]).unwrap();
+            assert_eq!(
+                db::get_summary_artifact(&conn, &run_id).unwrap().unwrap(),
+                changed_summary
+            );
+            assert_eq!(
+                db::get_citation_artifact(&conn, &run_id).unwrap().unwrap(),
+                changed_citations
+            );
+            assert!(
+                crate::pipeline::workspace::get_persisted_summary(&conn, &run_id).is_err(),
+                "rehashed invented key-term wording must fail source validation"
+            );
+            let analyzed = get_analyzed_document(&conn, &run_id).unwrap().unwrap();
+            let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
+            let chunked = get_chunked_document(&conn, &run_id).unwrap().unwrap();
+            let mut synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+            synthesized.contract_extraction.as_mut().unwrap().clauses[0]
+                .text
+                .push_str(" Invented payment obligation.");
+            assert!(validate_synthesized_document_without_runtime(
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn generation_seed_is_stable_for_one_run_and_changes_with_run_identity() {
         let run_id = "run-00000000-0000-0000-0000-000000000001";
         let seed = generation_seed_for_run(run_id);
@@ -6536,6 +7181,28 @@ mod tests {
         let error = ensure_evidence_coverage_is_representable(&evidence_fixture(129), 8)
             .expect_err("one evidence item beyond bounded claim capacity must fail");
         assert_eq!(error.code, "SYNTHESIS_EVIDENCE_COVERAGE_UNSATISFIABLE");
+    }
+
+    #[test]
+    fn ocr_text_pages_enter_claim_budget_and_analysis_plan() {
+        let (mut normalized, _) = sparse_page_scope_fixture(3, 400);
+        for page in &mut normalized.pages {
+            for block in &mut page.content {
+                block.source.source_type = crate::pipeline::contracts::SourceType::OcrText;
+            }
+        }
+
+        assert_eq!(document_claim_budget(&normalized).unwrap(), 8);
+        assert_eq!(
+            analysis_selected_pages(&normalized).unwrap(),
+            HashSet::from([1, 2, 3])
+        );
+        assert_eq!(pages::plan(&normalized).unwrap(), (vec![1, 2, 3], 3));
+        assert!(delivery_page_coverage_satisfied(
+            &HashSet::from([1, 2, 3]),
+            &[],
+            &normalized
+        ));
     }
 
     #[test]
@@ -7627,6 +8294,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let previous_verified = VerifiedDocument {
+            contract_extraction: None,
             document_id: previous.document_id.clone(),
             verification_version: PREVIOUS_VERIFICATION_VERSION.to_string(),
             synthesis_attempt_ordinal: 0,
@@ -7836,6 +8504,405 @@ mod tests {
             .expect_err("malformed, foreign, mixed, and duplicate selections must fail closed");
             assert_eq!(error.code, "MODEL_EVIDENCE_RESPONSE_INVALID");
         }
+    }
+
+    #[test]
+    fn source_preservation_keeps_colon_prefixed_prose() {
+        for label in ["Summary", "The issue is", "Description"] {
+            for separator in [" ", "\n", "\r\n"] {
+                let first = format!(
+                    "{label}: The parties {} recorded.",
+                    "discussed details ".repeat(20)
+                );
+                let second = format!("The reviewer {} completed.", "verified records ".repeat(20));
+                let source = format!("{first}{separator}{second}");
+                let (normalized, chunked) = materiality_fixture(&[source]);
+                let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+                let chunk = &chunked.chunks[0];
+                let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+                    ANALYSIS_VERSION,
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                )
+                .unwrap();
+                assert_eq!(
+                    catalog.omitted_source_units, 0,
+                    "prefix {label}, separator {separator:?}"
+                );
+                assert_eq!(
+                    catalog
+                        .candidates
+                        .iter()
+                        .map(|c| c.exact_quote.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![first.as_str(), second.as_str()]
+                );
+                validate_analysis_quote_catalog_for_blocks(
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                    &catalog.candidates,
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn source_preservation_keeps_independent_conditional_sentences() {
+        let first = format!("The supplier {} records.", "maintains detailed ".repeat(20));
+        for prefix in ["If", "When", "But"] {
+            let second = if prefix == "But" {
+                format!("But the client may request {} supporting records, and the supplier must provide the documentation.", "additional records and ".repeat(12))
+            } else {
+                format!("{prefix} the client requests {} supporting records, the supplier must provide the documentation.", "additional records and ".repeat(12))
+            };
+            for separator in [" ", "\n\n"] {
+                let source = format!("{first}{separator}{second}");
+                let old = analysis_quote_segments_v13(&source);
+                assert_eq!(old.omitted_source_units, 0);
+                assert_eq!(old.segments, vec![first.clone(), second.clone()]);
+                let current = analysis_quote_segmentation_for_version(ANALYSIS_VERSION, &source);
+                assert_eq!(current.omitted_source_units, 0, "prefix {prefix}");
+                assert_eq!(current.segments, old.segments);
+            }
+        }
+    }
+
+    #[test]
+    fn source_preservation_retains_bounded_historical_abbreviation_units() {
+        let first = format!("{}.", "a".repeat(549));
+        let cases = ["Bldg", "Twp", "Assn", "Approx", "Govt", "Qzrt"]
+            .into_iter()
+            .flat_map(|word| [word.to_string(), word.to_lowercase()])
+            .map(|word| {
+                let second = format!(
+                    "Department staff contacted the {word}. Records officers completed the review."
+                );
+                let source = format!("{first} {second}");
+                let old = analysis_quote_segments_v13(&source);
+                // Approx. was already outside v13's 2..=5-letter defense.
+                assert_eq!(
+                    old.segments.contains(&second),
+                    !word.eq_ignore_ascii_case("approx")
+                );
+                (word, source, old)
+            })
+            .collect::<Vec<_>>();
+        for (word, source, old) in cases {
+            let current = analysis_quote_segmentation_for_version(ANALYSIS_VERSION, &source);
+            assert_eq!(current.segments, old.segments, "abbreviation {word}");
+            assert_eq!(current.omitted_source_units, old.omitted_source_units);
+        }
+    }
+
+    #[test]
+    fn source_preservation_keeps_ordinary_short_sentence_endings() {
+        for ending in [
+            "days", "work", "loss", "paid", "time", "Owner", "DAYS", "WORK", "LOSS", "PAID",
+            "TIME", "OWNER", "NASA",
+        ] {
+            let first = format!("The parties {} {ending}.", "recorded details ".repeat(20));
+            let second = format!("The reviewer {} completed.", "verified records ".repeat(20));
+            let source = format!("{first} {second}");
+            let (normalized, chunked) = materiality_fixture(std::slice::from_ref(&source));
+            let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+            let chunk = &chunked.chunks[0];
+            let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+                ANALYSIS_VERSION,
+                chunk,
+                &blocks,
+                &chunk.block_ids,
+            )
+            .unwrap();
+            assert_eq!(catalog.omitted_source_units, 0, "ending {ending}");
+            assert_eq!(
+                catalog
+                    .candidates
+                    .iter()
+                    .map(|c| c.exact_quote.as_str())
+                    .collect::<Vec<_>>(),
+                vec![first.as_str(), second.as_str()]
+            );
+            validate_analysis_quote_catalog_for_blocks(
+                chunk,
+                &blocks,
+                &chunk.block_ids,
+                &catalog.candidates,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn source_preservation_keeps_prose_valued_clause_rows() {
+        for labels in [
+            ["(a) Scope", "(b) Term", "(c) Payment"],
+            ["Article I", "Article II", "Article III"],
+            ["Section A", "Section B", "Section C"],
+            ["Background", "Procedure", "Outcome"],
+        ] {
+            for sentences in [1, 2] {
+                let rows = labels.map(|label| {
+                    format!(
+                        "{label}: The supplier {} records.{}",
+                        "keeps supporting ".repeat(12),
+                        if sentences == 2 {
+                            format!(" The reviewer {} completed.", "verified details ".repeat(6))
+                        } else {
+                            String::new()
+                        }
+                    )
+                });
+                for newline in ["\n", "\r\n"] {
+                    let source = rows.join(newline);
+                    assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+                    let (normalized, chunked) = materiality_fixture(&[source]);
+                    let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+                    let chunk = &chunked.chunks[0];
+                    let old = build_versioned_analysis_quote_catalog_for_blocks(
+                        SENTENCE_ANALYSIS_VERSION,
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                    )
+                    .unwrap();
+                    assert_eq!(old.omitted_source_units, 0);
+                    assert!(!old.candidates.is_empty());
+                    let current = build_versioned_analysis_quote_catalog_for_blocks(
+                        ANALYSIS_VERSION,
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        current.omitted_source_units, 0,
+                        "prose-valued rows dropped: {labels:?}, {newline:?}"
+                    );
+                    assert_eq!(
+                        current
+                            .candidates
+                            .iter()
+                            .map(|c| c.exact_quote.as_str())
+                            .collect::<Vec<_>>(),
+                        old.candidates
+                            .iter()
+                            .map(|c| c.exact_quote.as_str())
+                            .collect::<Vec<_>>()
+                    );
+                    validate_analysis_quote_catalog_for_blocks(
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                        &current.candidates,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_preservation_keeps_common_form_labels() {
+        let complete = format!("{}.", "a".repeat(599));
+        let unfinished = "Unfinished preceding prose";
+        for label in [
+            "Address Line 1",
+            "Address Line 2",
+            "Owner's Name",
+            "Owner’s Name",
+            "R&D Contact",
+            "Reference #",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                for size in [599, 600, 601] {
+                    let rows = format!("{label}: recorded value{newline}Details: ");
+                    let form = format!("{rows}{}", "x".repeat(size - rows.chars().count()));
+                    let source =
+                        format!("{complete}{newline}{newline}{unfinished}{newline}{newline}{form}");
+                    let (normalized, chunked) = materiality_fixture(&[source]);
+                    let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+                    let chunk = &chunked.chunks[0];
+                    let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+                        ANALYSIS_VERSION,
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                    )
+                    .unwrap();
+                    let expected = if size <= MAX_ANALYSIS_QUOTE_CHARACTERS {
+                        vec![complete.as_str(), form.as_str()]
+                    } else {
+                        vec![complete.as_str()]
+                    };
+                    assert_eq!(
+                        catalog.candidates.iter().map(|c| c.exact_quote.as_str()).collect::<Vec<_>>(),
+                        expected,
+                        "bounded form lost or oversized form admitted: {label}, {newline:?}, {size}"
+                    );
+                    assert_eq!(catalog.omitted_source_units, 1);
+                    validate_analysis_quote_catalog_for_blocks(
+                        chunk,
+                        &blocks,
+                        &chunk.block_ids,
+                        &catalog.candidates,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_preservation_keeps_numbered_prose_out_of_form_groups() {
+        for (first_label, second_label) in [
+            ("1", "2"),
+            ("3.2 Termination", "3.3 Renewal"),
+            ("1 Termination", "2 Renewal"),
+            ("(1) Termination", "(2) Renewal"),
+            ("1) Termination", "2) Renewal"),
+        ] {
+            let first = format!(
+                "{first_label}: The parties {} recorded.",
+                "discussed details ".repeat(20)
+            );
+            let second = format!(
+                "{second_label}: The reviewer {} completed.",
+                "verified records ".repeat(20)
+            );
+            for newline in ["\n", "\r\n"] {
+                let source = format!("{first}{newline}{second}");
+                assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+                let (normalized, chunked) = materiality_fixture(&[source]);
+                let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+                let chunk = &chunked.chunks[0];
+                let old = build_versioned_analysis_quote_catalog_for_blocks(
+                    SENTENCE_ANALYSIS_VERSION,
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                )
+                .unwrap();
+                assert_eq!(old.omitted_source_units, 0);
+                assert_eq!(
+                    old.candidates
+                        .iter()
+                        .map(|c| c.exact_quote.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![first.as_str(), second.as_str()]
+                );
+                let current = build_versioned_analysis_quote_catalog_for_blocks(
+                    ANALYSIS_VERSION,
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                )
+                .unwrap();
+                assert_eq!(
+                    current.omitted_source_units, 0,
+                    "numbered prose became a form: {first_label}"
+                );
+                assert_eq!(
+                    current
+                        .candidates
+                        .iter()
+                        .map(|c| c.exact_quote.as_str())
+                        .collect::<Vec<_>>(),
+                    old.candidates
+                        .iter()
+                        .map(|c| c.exact_quote.as_str())
+                        .collect::<Vec<_>>()
+                );
+                validate_analysis_quote_catalog_for_blocks(
+                    chunk,
+                    &blocks,
+                    &chunk.block_ids,
+                    &current.candidates,
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn source_preservation_keeps_forms_after_short_unfinished_prose() {
+        let complete = format!("{}.", "intro".repeat(119));
+        let unfinished = "Unfinished preceding prose";
+        let form = "Contract value: $800\nOn site: No";
+        let source = format!("{complete}\n\n{unfinished}\n\n{form}");
+        let (normalized, chunked) = materiality_fixture(&[source]);
+        let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+        let chunk = &chunked.chunks[0];
+        let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+            ANALYSIS_VERSION,
+            chunk,
+            &blocks,
+            &chunk.block_ids,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog
+                .candidates
+                .iter()
+                .map(|c| c.exact_quote.as_str())
+                .collect::<Vec<_>>(),
+            vec![complete.as_str(), form]
+        );
+        assert_eq!(catalog.omitted_source_units, 1);
+        validate_analysis_quote_catalog_for_blocks(
+            chunk,
+            &blocks,
+            &chunk.block_ids,
+            &catalog.candidates,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn source_preservation_keeps_bounded_form_and_table_groups_on_long_pages() {
+        let party = format!(
+            "Supplier: Example Company\nServices: {}",
+            "routine maintenance ".repeat(13)
+        );
+        let table = format!(
+            "Insurance schedule:\nGeneral liability per event: $500,000\nCoverage description: {}",
+            "equipment and supplies ".repeat(10)
+        );
+        let payment = format!(
+            "Payment method: Bank transfer\nScope: {}",
+            "scheduled cleaning ".repeat(15)
+        );
+        let source = format!("{party}\n\n{table}\n\n{payment}");
+        assert!(source.chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS);
+        let (normalized, chunked) = materiality_fixture(&[source]);
+        let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+        let chunk = &chunked.chunks[0];
+        let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+            ANALYSIS_VERSION,
+            chunk,
+            &blocks,
+            &chunk.block_ids,
+        )
+        .unwrap();
+        assert_eq!(catalog.omitted_source_units, 0);
+        for group in [party, table, payment] {
+            assert!(
+                catalog
+                    .candidates
+                    .iter()
+                    .any(|c| c.exact_quote.contains(group.trim())),
+                "a form or table group lost its label/value context"
+            );
+        }
+        validate_analysis_quote_catalog_for_blocks(
+            chunk,
+            &blocks,
+            &chunk.block_ids,
+            &catalog.candidates,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -8288,6 +9355,15 @@ mod tests {
                 && warning.stage == Some(PipelineStage::Analyze)
         }));
         validate_analyzed_content(&analyzed, &chunked, &normalized).unwrap();
+        let mut historical = analyzed.clone();
+        historical.analysis_version = SENTENCE_ANALYSIS_VERSION.into();
+        historical.omissions[0].filter_version = SENTENCE_ANALYSIS_VERSION.into();
+        let saved = serde_json::to_string(&historical).unwrap();
+        let historical: AnalyzedDocument = serde_json::from_str(&saved).unwrap();
+        validate_analyzed_content(&historical, &chunked, &normalized).unwrap();
+        let mut wrong_stamp = analyzed.clone();
+        wrong_stamp.omissions[0].filter_version = SENTENCE_ANALYSIS_VERSION.into();
+        assert!(validate_analyzed_content(&wrong_stamp, &chunked, &normalized).is_err());
         let mut missing_warning = analyzed.clone();
         missing_warning
             .warnings
@@ -8682,6 +9758,7 @@ mod tests {
                 "17 references must still fail"
             );
             let synthesized = SynthesizedDocument {
+                contract_extraction: None,
                 document_id: analyzed.document_id.clone(),
                 synthesis_version: HIERARCHICAL_SYNTHESIS_VERSION.into(),
                 runtime_id: "fixture-runtime".into(),
@@ -9636,6 +10713,7 @@ mod tests {
             warnings: vec![],
         };
         let synthesized = SynthesizedDocument {
+            contract_extraction: None,
             document_id: normalized.document_id.clone(),
             synthesis_version: LEGACY_SYNTHESIS_VERSION.to_string(),
             runtime_id: analyzed.runtime_id.clone(),
@@ -9667,12 +10745,318 @@ mod tests {
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
     }
 
+    #[derive(Default)]
+    struct OmittedTitleRuntime {
+        withheld_quotes: HashSet<String>,
+    }
+
+    impl ModelRuntime for OmittedTitleRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let omit = matches!(&request.output_format,
+                ModelOutputFormat::JsonSchema { name, schema }
+                    if name.starts_with("document_quote_paraphrase_")
+                        && schema.get("anyOf").is_some() && request.ordinal == 1);
+            Ok(ModelResponse {
+                text: if omit {
+                    r#"{"outcome":"no_substantive_content"}"#.into()
+                } else if matches!(&request.output_format,
+                    ModelOutputFormat::JsonSchema { name, .. } if name == VERIFICATION_SCHEMA_NAME)
+                {
+                    let prompt: VerificationPrompt =
+                        serde_json::from_str(&request.user_prompt).unwrap();
+                    let verdicts = prompt
+                        .claims
+                        .into_iter()
+                        .map(|claim| RawClaimVerdict {
+                            verdict: if claim.evidence.iter().any(|evidence| {
+                                self.withheld_quotes.contains(&evidence.exact_quote)
+                            }) {
+                                ClaimVerdict::Unsupported
+                            } else {
+                                ClaimVerdict::Supported
+                            },
+                            claim_id: claim.claim_id,
+                        })
+                        .collect();
+                    serde_json::to_string(&RawVerificationResponse { verdicts }).unwrap()
+                } else {
+                    fixture_model_output(request)
+                },
+                runtime_id: self.runtime_id().into(),
+                model_id: self.model_id().into(),
+                request_attempts: Vec::new(),
+            })
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "omitted-title-runtime"
+        }
+        fn model_id(&self) -> &str {
+            "omitted-title-model"
+        }
+    }
+
+    #[test]
+    fn final_summary_discloses_recovered_page_without_rewriting_analysis() {
+        for (profile, delivery, recovered) in [
+            (SummaryProfile::General, None, true),
+            (
+                SummaryProfile::Story,
+                Some(SummaryDeliveryPolicy::connect()),
+                true,
+            ),
+            (
+                SummaryProfile::General,
+                Some(SummaryDeliveryPolicy::connect()),
+                false,
+            ),
+        ] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
+            let runtime = OmittedTitleRuntime::default();
+            let analyzed = analyze_chunked_document(&mut conn, &runtime, &run_id).unwrap();
+            assert_eq!(analyzed.omissions.len(), 1);
+            assert_eq!(analyzed.omissions[0].page_number, 1);
+            assert_eq!(
+                analyzed.omissions[0].reason,
+                AnalysisOmissionReason::NoSubstantiveContent
+            );
+            let original = serde_json::to_vec(&analyzed).unwrap();
+            synthesize_analyzed_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            verify_synthesized_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            let final_result =
+                complete_verified_document_with_delivery(&mut conn, &run_id, delivery).unwrap();
+            assert_eq!(
+                final_result.summary.warnings.iter().any(|warning| warning.code == "SUMMARY_ANALYSIS_PAGES_RECOVERED"),
+                recovered,
+                "final summary must disclose actual recovery independently of historical analysis omissions"
+            );
+            assert_eq!(
+                serde_json::to_vec(&get_analyzed_document(&conn, &run_id).unwrap().unwrap())
+                    .unwrap(),
+                original
+            );
+            assert_eq!(
+                final_result.summary.calculate_integrity_hash().unwrap(),
+                final_result.summary.integrity_hash
+            );
+            assert_eq!(
+                final_result.citations.calculate_integrity_hash().unwrap(),
+                final_result.citations.integrity_hash
+            );
+            assert_eq!(
+                final_result.citations.summary_integrity_hash,
+                final_result.summary.integrity_hash
+            );
+            assert_eq!(
+                get_summary_artifact(&conn, &run_id).unwrap().unwrap(),
+                final_result.summary
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_material_page_returns_to_the_coverage_denominator() {
+        let (normalized, _) = materiality_fixture(&[
+            "A source sentence.".into(),
+            "Another source sentence.".into(),
+        ]);
+        let omission = AnalysisPageOmission {
+            page_number: 1,
+            chunk_id: "fixture".into(),
+            reason: AnalysisOmissionReason::NoSubstantiveContent,
+            origin: AnalysisOmissionOrigin::ModelNoSubstantiveContent,
+            filter_version: "fixture".into(),
+            source_fingerprint: "fixture".into(),
+            catalog_fingerprint: Some("fixture".into()),
+        };
+        assert!(
+            delivery_page_coverage_satisfied(
+                &HashSet::from([1, 2]),
+                std::slice::from_ref(&omission),
+                &normalized
+            ),
+            "supported recovery must not conflict with the earlier stage omission"
+        );
+        assert!(
+            !delivery_page_coverage_satisfied(
+                &HashSet::from([1]),
+                std::slice::from_ref(&omission),
+                &normalized
+            ),
+            "recovered material cannot stay excluded to inflate adjusted coverage"
+        );
+        assert!(delivery_page_coverage_satisfied(
+            &HashSet::from([2]),
+            std::slice::from_ref(&omission),
+            &normalized
+        ));
+        assert!(!delivery_page_coverage_satisfied(
+            &HashSet::new(),
+            std::slice::from_ref(&omission),
+            &normalized
+        ));
+        assert!(!delivery_page_coverage_satisfied(
+            &HashSet::from([1, 2, 3]),
+            &[omission],
+            &normalized
+        ));
+    }
+
+    #[test]
+    fn rejected_recovery_cannot_complete_or_clear_analysis_omission() {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let mut runtime = OmittedTitleRuntime::default();
+        let analyzed = analyze_chunked_document(&mut conn, &runtime, &run_id).unwrap();
+        let synthesized = synthesize_analyzed_document(&mut conn, &runtime, &run_id).unwrap();
+        runtime.withheld_quotes = synthesized
+            .synthesis_evidence
+            .iter()
+            .filter(|evidence| evidence.source_span.page_start == 1)
+            .map(|evidence| evidence.exact_quote.clone())
+            .collect();
+        assert!(
+            !runtime.withheld_quotes.is_empty(),
+            "synthesis must propose recovery before verification rejects it"
+        );
+        let error = verify_synthesized_document(&mut conn, &runtime, &run_id)
+            .expect_err("rejecting the only coherent claim must prevent recovery and delivery");
+        assert_eq!(error.code(), "NO_SEMANTICALLY_SUPPORTED_CLAIMS");
+        assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+        assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+        assert_eq!(
+            get_analyzed_document(&conn, &run_id).unwrap().unwrap(),
+            analyzed
+        );
+    }
+
+    #[test]
+    fn final_page_accounting_ignores_undisplayed_evidence_and_checks_delivered_prefix() {
+        let (normalized, _) = materiality_fixture(&[
+            "First source sentence.".into(),
+            "Second source sentence.".into(),
+        ]);
+        let evidence = normalized
+            .pages
+            .iter()
+            .map(|page| {
+                let block = &page.content[0];
+                EvidenceItem {
+                    evidence_id: format!("e{}", page.page_number),
+                    chunk_id: "fixture".into(),
+                    block_id: block.block_id.clone(),
+                    claim_text: block.text.clone(),
+                    exact_quote: block.text.clone(),
+                    source_span: block.source.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let claims = evidence
+            .iter()
+            .map(|item| CitedClaim {
+                claim_id: item.evidence_id.clone(),
+                text: item.claim_text.clone(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            })
+            .collect::<Vec<_>>();
+        // A technical omission stays in the denominator even when not recovered.
+        let omissions = vec![AnalysisPageOmission {
+            page_number: 2,
+            chunk_id: "fixture".into(),
+            reason: AnalysisOmissionReason::QuoteBoundaryUnusable,
+            origin: AnalysisOmissionOrigin::QuoteBoundaryUnusable,
+            filter_version: "fixture".into(),
+            source_fingerprint: "fixture".into(),
+            catalog_fingerprint: None,
+        }];
+        let mut citations = CitationArtifact {
+            contract_extraction: None,
+            document_id: normalized.document_id.clone(),
+            citation_version: CITATION_VERSION.into(),
+            summary_integrity_hash: "fixture".into(),
+            rendered_text: "fixture".into(),
+            presentation_mode: SummaryPresentationMode::Coherent,
+            claims: claims.clone(),
+            summary_claims: claims.clone(),
+            evidence,
+            created_at: Utc::now(),
+            integrity_hash: "fixture".into(),
+        };
+        for mode in [
+            SummaryPresentationMode::Coherent,
+            SummaryPresentationMode::ClaimLedgerFallback,
+            SummaryPresentationMode::LegacyClaimList,
+        ] {
+            citations.presentation_mode = mode;
+            assert!(delivery_claim_prefix_coverage_satisfied(
+                &citations,
+                2,
+                &omissions,
+                &normalized,
+                &[]
+            ));
+            for count in [0, 1, 3, usize::MAX] {
+                assert!(!delivery_claim_prefix_coverage_satisfied(
+                    &citations,
+                    count,
+                    &omissions,
+                    &normalized,
+                    &[]
+                ));
+            }
+        }
+        citations.presentation_mode = SummaryPresentationMode::Coherent;
+        citations.summary_claims.truncate(1);
+        assert_eq!(summary_cited_pages(&citations), Some(HashSet::from([1])));
+        assert_eq!(
+            remaining_page_omissions(&omissions, &summary_cited_pages(&citations).unwrap()),
+            omissions.iter().collect::<Vec<_>>()
+        );
+        // Keeping ledger evidence for page 2 cannot rescue absent prose citations.
+        assert!(!delivery_claim_prefix_coverage_satisfied(
+            &citations,
+            1,
+            &omissions,
+            &normalized,
+            &[]
+        ));
+        citations.summary_claims[0]
+            .evidence_ids
+            .push("missing-evidence".into());
+        assert_eq!(summary_cited_pages(&citations), None);
+        assert!(!delivery_claim_prefix_coverage_satisfied(
+            &citations,
+            1,
+            &omissions,
+            &normalized,
+            &[]
+        ));
+        citations.summary_claims.clear();
+        assert_eq!(summary_cited_pages(&citations), Some(HashSet::new()));
+    }
+
     #[test]
     fn profiles_use_source_aware_synthesis_and_exact_citation_context() {
         for (profile, expected_schema) in [
             (SummaryProfile::General, coherent::SCHEMA_NAME),
             (SummaryProfile::Story, coherent::STORY_SCHEMA_NAME),
-            (SummaryProfile::Contract, coherent::CONTRACT_SCHEMA_NAME),
         ] {
             let database = TestDatabase::new();
             let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
@@ -9936,8 +11320,9 @@ mod tests {
     }
 
     #[test]
-    fn connect_delivery_synthesizes_each_specialized_summary_profile() {
-        for profile in [SummaryProfile::Story, SummaryProfile::Contract] {
+    fn connect_delivery_synthesizes_story_profile() {
+        {
+            let profile = SummaryProfile::Story;
             let database = TestDatabase::new();
             let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
             let runtime = FakeRuntime::healthy();
@@ -10026,56 +11411,194 @@ mod tests {
     }
 
     #[test]
-    fn oversized_complete_general_source_context_uses_bounded_source_selection() {
-        let runtime = LowSynthesisContextRuntime::new();
-        let database = TestDatabase::new();
-        let (mut conn, run_id) = chunked_run(&database);
+    fn page_balanced_sparse_catalog_keeps_pages_or_falls_back_before_generation() {
+        struct CatalogRuntime(LowSynthesisContextRuntime);
+        impl ModelRuntime for CatalogRuntime {
+            fn generate(
+                &self,
+                request: &ModelRequest,
+            ) -> Result<ModelResponse, ModelRuntimeFailure> {
+                let mut response = self.0.generate(request)?;
+                if matches!(&request.output_format, ModelOutputFormat::JsonSchema { name, .. }
+                    if name == coherent::SCHEMA_NAME)
+                {
+                    let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                    let sources = prompt["source_segments"].as_array().unwrap();
+                    // One concise unit per source exercises both admissions
+                    // without filling the response with synthetic padding.
+                    let maximum = prompt["maximum_units"].as_u64().unwrap() as usize;
+                    let units = sources
+                        .iter()
+                        .take(maximum)
+                        .map(|source| {
+                            json!({
+                                "text": format!("Page {} contains the supplied source text.", source["page_number"]),
+                                "source_ids": [source["source_id"]],
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    response.text = json!({"units": units}).to_string();
+                }
+                Ok(response)
+            }
+            fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+                self.0.preflight_request(request)
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                self.0.health()
+            }
+            fn runtime_id(&self) -> &str {
+                self.0.runtime_id()
+            }
+            fn model_id(&self) -> &str {
+                self.0.model_id()
+            }
+            fn context_tokens(&self, stage: PipelineStage) -> u32 {
+                self.0.context_tokens(stage)
+            }
+        }
+        let (normalized, chunked) = sparse_page_scope_fixture(30, 500);
+        for context in [32_768, LEGACY_MODEL_CONTEXT_TOKENS] {
+            let runtime = CatalogRuntime(
+                LowSynthesisContextRuntime::with_synthesis_context_tokens(context),
+            );
+            let analyzed = analyze(
+                &runtime,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            let synthesized = coherent::synthesize(
+                SummaryProfile::General,
+                &runtime,
+                &analyzed,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            coherent::validate_for_runtime(
+                SummaryProfile::General,
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+                &runtime,
+            )
+            .unwrap();
+            let selected = runtime
+                .0
+                .schema_names
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|name| name == coherent::SOURCE_SELECTION_SCHEMA_NAME);
+            assert!(
+                !selected,
+                "a page-balanced General catalog cannot lose pages to model selection"
+            );
+            assert_eq!(
+                synthesized
+                    .warnings
+                    .iter()
+                    .any(|warning| { warning.code == coherent::SOURCE_SELECTION_WARNING_CODE }),
+                selected
+            );
+            if synthesized.presentation_mode == SummaryPresentationMode::Coherent {
+                assert!(runtime.0.preflight_calls.load(Ordering::SeqCst) > 0);
+                assert!(
+                    runtime
+                        .0
+                        .verification_preflight_calls
+                        .load(Ordering::SeqCst)
+                        > 0
+                );
+            } else {
+                assert!(!runtime
+                    .0
+                    .schema_names
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|n| n == coherent::SCHEMA_NAME));
+            }
+        }
+    }
 
-        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
-            .expect("bounded General source selection should produce a coherent summary");
-        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
-        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
-
+    #[test]
+    fn coherent_larger_context_still_requires_exact_runtime_admission() {
+        let (normalized, chunked) = sparse_page_scope_fixture(30, 500);
+        let runtime = LowSynthesisContextRuntime {
+            synthesis_context_tokens: 32_768,
+            ..LowSynthesisContextRuntime::rejecting_exact_synthesis_admission()
+        };
+        let analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let synthesized = coherent::synthesize(
+            SummaryProfile::General,
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
         assert_eq!(
             synthesized.presentation_mode,
-            SummaryPresentationMode::Coherent
+            SummaryPresentationMode::ClaimLedgerFallback
         );
-        assert!(!synthesized.summary_claims.is_empty());
-        assert!(!synthesized.synthesis_evidence.is_empty());
+        assert!(!runtime
+            .requests
+            .lock()
+            .unwrap()
+            .contains(&PipelineStage::Synthesize));
+        assert!(runtime.preflight_calls.load(Ordering::SeqCst) > 0);
         assert!(synthesized
             .warnings
             .iter()
-            .all(|warning| warning.code != coherent::FALLBACK_WARNING_CODE));
-        let selection_warning = synthesized
+            .any(|w| w.code == coherent::FALLBACK_WARNING_CODE));
+    }
+
+    #[test]
+    fn oversized_page_balanced_catalog_falls_back_without_silently_losing_pages() {
+        let runtime = LowSynthesisContextRuntime::new();
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id).unwrap();
+        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::ClaimLedgerFallback
+        );
+        assert!(synthesized.summary_claims.is_empty());
+        assert!(synthesized.synthesis_evidence.is_empty());
+        assert!(synthesized
             .warnings
             .iter()
-            .find(|warning| warning.code == coherent::SOURCE_SELECTION_WARNING_CODE)
-            .expect("bounded General selection should be disclosed");
-        assert_eq!(selection_warning.stage, Some(PipelineStage::Synthesize));
-        assert!(selection_warning
-            .message
-            .contains("available source segments"));
-        let schema_names = runtime.schema_names.lock().unwrap();
-        assert!(schema_names
+            .any(|w| w.code == coherent::FALLBACK_WARNING_CODE));
+        let schemas = runtime.schema_names.lock().unwrap();
+        assert!(!schemas
             .iter()
-            .any(|name| name == coherent::SOURCE_SELECTION_SCHEMA_NAME));
-        assert!(schema_names
-            .iter()
-            .any(|name| name == coherent::SCHEMA_NAME));
-        assert!(runtime.preflight_calls.load(Ordering::SeqCst) > 0);
+            .any(|n| n == coherent::SOURCE_SELECTION_SCHEMA_NAME || n == coherent::SCHEMA_NAME));
         assert_eq!(
             verified.presentation_mode,
-            SummaryPresentationMode::Coherent
+            SummaryPresentationMode::ClaimLedgerFallback
         );
-        assert!(!verified.summary_claim_verifications.is_empty());
+        assert!(!verified.claim_verifications.is_empty());
         assert_eq!(completed.summary.text, verified.summary_text);
-        assert_eq!(
-            completed.citations.presentation_mode,
-            verified.presentation_mode
-        );
-        assert!(!completed.citations.summary_claims.is_empty());
-        assert!(!completed.citations.claims.is_empty());
-        assert_eq!(synthesized.warnings, verified.warnings);
+        assert!(completed.citations.summary_claims.is_empty());
+        assert_eq!(summary_cited_pages(&completed.citations).unwrap().len(), 5);
         assert_eq!(completed.summary.warnings, verified.warnings);
     }
 
@@ -10136,60 +11659,23 @@ mod tests {
     }
 
     #[test]
-    fn oversized_complete_contract_source_context_uses_bounded_contract_selection() {
+    fn contract_extraction_does_not_depend_on_synthesis_context_or_selection() {
         let runtime = LowSynthesisContextRuntime::with_synthesis_context_tokens(3_900);
         let database = TestDatabase::new();
         let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Contract);
-
-        let completed = summarize_chunked_document(&mut conn, &runtime, &run_id)
-            .expect("bounded Contract source selection should produce a coherent summary");
-        let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
-        let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
-
+        let result = summarize_chunked_document(&mut conn, &runtime, &run_id).unwrap();
         assert_eq!(
-            db::get_run_summary_profile(&conn, &run_id).unwrap(),
-            Some(SummaryProfile::Contract)
+            result.citations.presentation_mode,
+            SummaryPresentationMode::StructuredExtraction
         );
-        assert_eq!(
-            synthesized.presentation_mode,
-            SummaryPresentationMode::Coherent
-        );
-        assert!(!synthesized.summary_claims.is_empty());
-        assert!(!synthesized.synthesis_evidence.is_empty());
-        assert!(synthesized
-            .warnings
-            .iter()
-            .all(|warning| warning.code != coherent::FALLBACK_WARNING_CODE));
-        assert!(synthesized
-            .warnings
-            .iter()
-            .any(|warning| warning.code == coherent::SOURCE_SELECTION_WARNING_CODE));
-        let schema_names = runtime.schema_names.lock().unwrap();
-        assert!(schema_names
-            .iter()
-            .any(|name| name == coherent::CONTRACT_SOURCE_SELECTION_SCHEMA_NAME));
-        assert!(schema_names
-            .iter()
-            .any(|name| name == coherent::CONTRACT_SCHEMA_NAME));
-        assert!(schema_names.iter().all(|name| {
-            name != coherent::SOURCE_SELECTION_SCHEMA_NAME
-                && name != coherent::STORY_SOURCE_SELECTION_SCHEMA_NAME
-        }));
-        assert!(runtime.preflight_calls.load(Ordering::SeqCst) > 0);
-        assert_eq!(
-            verified.presentation_mode,
-            SummaryPresentationMode::Coherent
-        );
-        assert!(!verified.summary_claim_verifications.is_empty());
-        assert_eq!(completed.summary.text, verified.summary_text);
-        assert_eq!(
-            completed.citations.presentation_mode,
-            verified.presentation_mode
-        );
-        assert!(!completed.citations.summary_claims.is_empty());
-        assert!(!completed.citations.claims.is_empty());
-        assert_eq!(synthesized.warnings, verified.warnings);
-        assert_eq!(completed.summary.warnings, verified.warnings);
+        assert!(runtime.schema_names.lock().unwrap().is_empty());
+        assert_eq!(runtime.preflight_calls.load(Ordering::SeqCst), 0);
+        assert!(!result
+            .summary
+            .contract_extraction
+            .unwrap()
+            .clauses
+            .is_empty());
     }
 
     #[test]
@@ -10261,7 +11747,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(runtime.preflight_calls.load(Ordering::SeqCst), 1);
+        assert!((1..=64).contains(&runtime.preflight_calls.load(Ordering::SeqCst)));
         assert_eq!(
             runtime.verification_preflight_calls.load(Ordering::SeqCst),
             1
@@ -10291,7 +11777,7 @@ mod tests {
         let error = summarize_chunked_document(&mut conn, &runtime, &run_id)
             .expect_err("non-context verification admission must fail synthesis");
         assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
-        assert_eq!(runtime.preflight_calls.load(Ordering::SeqCst), 1);
+        assert!((1..=64).contains(&runtime.preflight_calls.load(Ordering::SeqCst)));
         assert_eq!(
             runtime.verification_preflight_calls.load(Ordering::SeqCst),
             1
@@ -10351,6 +11837,443 @@ mod tests {
         );
     }
 
+    struct GeneralCoverageRuntime {
+        requests: Mutex<Vec<ModelRequest>>,
+        good_initial: bool,
+        corrects: bool,
+        withhold_ledger: bool,
+        bad_repair: Option<&'static str>,
+    }
+
+    impl ModelRuntime for GeneralCoverageRuntime {
+        fn runtime_id(&self) -> &str {
+            "coverage-fixture"
+        }
+        fn model_id(&self) -> &str {
+            "coverage-fixture"
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            self.requests.lock().unwrap().push(request.clone());
+            let ModelOutputFormat::JsonSchema { name, .. } = &request.output_format else {
+                unreachable!()
+            };
+            let text = if name == coherent::SCHEMA_NAME {
+                let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                if prompt.get("validation_feedback").is_some() {
+                    if let Some(kind) = self.bad_repair {
+                        if kind == "transport" {
+                            return Err(ModelRuntimeFailure {
+                                code: "FIXTURE_TRANSPORT_FAILED".into(),
+                                message: "fixture transport failure".into(),
+                                recoverable: true,
+                                request_attempts: vec![],
+                            });
+                        }
+                        let bad = match kind {
+                            "clipped" => json!({"units":[{"text":"x".repeat(1199)+" ","source_ids":[prompt["source_segments"][0]["source_id"].clone()]}]}).to_string(),
+                            "foreign" => json!({"units":[{"text":"Unsupported repair content.","source_ids":["foreign-source"]}]}).to_string(),
+                            "malformed" => "{".to_string(),
+                            "undercovered" => json!({"units":[{"text":"The document outlines other supporting details.","source_ids":[prompt["source_segments"][0]["source_id"].clone()]}]}).to_string(),
+                            "modal" => {
+                                let source = prompt["source_segments"].as_array().unwrap().iter()
+                                    .find(|source| source["exact_quote"].as_str().unwrap().contains("The interpreter should retain"))
+                                    .expect("modal control requires the source's weaker predicate");
+                                json!({"units":[{"text":"The interpreter must retain it under Section 1 across the page boundary.","source_ids":[source["source_id"].clone()]}]}).to_string()
+                            },
+                            _ => unreachable!(),
+                        };
+                        return Ok(ModelResponse {
+                            text: bad,
+                            runtime_id: self.runtime_id().into(),
+                            model_id: self.model_id().into(),
+                            request_attempts: vec![],
+                        });
+                    }
+                }
+                let good = self.good_initial
+                    || (self.corrects && prompt.get("validation_feedback").is_some());
+                let mut pages = HashSet::new();
+                let selected = prompt["source_segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|source| pages.insert(source["page_number"].as_u64().unwrap()))
+                    .take(if good { 3 } else { 1 })
+                    .collect::<Vec<_>>();
+                json!({"units":[{
+                    "text": "The document presents its central information, supporting details, and material qualifications.",
+                    "source_ids":selected.iter().map(|source|source["source_id"].clone()).collect::<Vec<_>>()
+                }]}).to_string()
+            } else if name == VERIFICATION_SCHEMA_NAME && self.withhold_ledger {
+                let prompt: VerificationPrompt =
+                    serde_json::from_str(&request.user_prompt).unwrap();
+                serde_json::to_string(&RawVerificationResponse {
+                    verdicts: prompt
+                        .claims
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, claim)| RawClaimVerdict {
+                            claim_id: claim.claim_id,
+                            verdict: if i == 0 {
+                                ClaimVerdict::Supported
+                            } else {
+                                ClaimVerdict::Unsupported
+                            },
+                        })
+                        .collect(),
+                })
+                .unwrap()
+            } else {
+                fixture_model_output(request)
+            };
+            Ok(ModelResponse {
+                text,
+                runtime_id: self.runtime_id().into(),
+                model_id: self.model_id().into(),
+                request_attempts: vec![],
+            })
+        }
+    }
+
+    struct RejectedGeneralRuntime {
+        inner: GeneralCoverageRuntime,
+        kind: &'static str,
+    }
+
+    impl ModelRuntime for RejectedGeneralRuntime {
+        fn runtime_id(&self) -> &str {
+            self.inner.runtime_id()
+        }
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn context_tokens(&self, stage: PipelineStage) -> u32 {
+            if self.kind == "selected" && stage == PipelineStage::Synthesize {
+                4_050
+            } else {
+                LEGACY_MODEL_CONTEXT_TOKENS
+            }
+        }
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            if matches!(&request.output_format, ModelOutputFormat::JsonSchema { name, .. } if matches!(name.as_str(), coherent::SCHEMA_NAME | coherent::STORY_SCHEMA_NAME | coherent::CONTRACT_SCHEMA_NAME))
+            {
+                self.inner.requests.lock().unwrap().push(request.clone());
+                if self.kind == "transport" {
+                    return Err(ModelRuntimeFailure {
+                        code: "MODEL_SUMMARY_RESPONSE_INVALID".into(),
+                        message: "Operational failure with a model-output-looking code".into(),
+                        recoverable: true,
+                        request_attempts: vec![],
+                    });
+                }
+                let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+                let source = prompt["source_segments"][0]["source_id"].clone();
+                let text = match self.kind {
+                    "malformed" | "selected" => "{".to_string(),
+                    "empty" => json!({"units":[]}).to_string(),
+                    "foreign" => json!({"units":[{"text":"Rejected model prose.","source_ids":["foreign-source"]}]}).to_string(),
+                    "limit" => json!({"units":[{"text":"x".repeat(1200),"source_ids":[source]}]}).to_string(),
+                    "clipped" => json!({"units":[{"text":"x".repeat(1198),"source_ids":[source]}]}).to_string(),
+                    "identity" => "{".to_string(),
+                    _ => unreachable!(),
+                };
+                return Ok(ModelResponse {
+                    text,
+                    runtime_id: if self.kind == "identity" {
+                        "foreign-runtime"
+                    } else {
+                        self.runtime_id()
+                    }
+                    .into(),
+                    model_id: self.model_id().into(),
+                    request_attempts: vec![],
+                });
+            }
+            self.inner.generate(request)
+        }
+    }
+
+    fn rejected_general_runtime(
+        kind: &'static str,
+        withhold_ledger: bool,
+    ) -> RejectedGeneralRuntime {
+        RejectedGeneralRuntime {
+            kind,
+            inner: GeneralCoverageRuntime {
+                requests: Mutex::new(vec![]),
+                good_initial: false,
+                corrects: false,
+                withhold_ledger,
+                bad_repair: None,
+            },
+        }
+    }
+
+    #[test]
+    fn general_rejected_prose_requires_independently_verified_adequate_ledger() {
+        for kind in ["clipped", "limit", "malformed", "empty", "foreign"] {
+            for withhold_ledger in [false, true] {
+                let database = TestDatabase::new();
+                let (mut conn, run_id) = chunked_run(&database);
+                let runtime = rejected_general_runtime(kind, withhold_ledger);
+                let result = summarize_chunked_document(&mut conn, &runtime, &run_id);
+                if withhold_ledger {
+                    assert_eq!(
+                        result.unwrap_err().code(),
+                        "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED"
+                    );
+                    assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+                    assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+                } else {
+                    let completed =
+                        result.expect("rejected prose must retain the verified delivery floor");
+                    assert_eq!(
+                        completed.citations.presentation_mode,
+                        SummaryPresentationMode::ClaimLedgerFallback
+                    );
+                    assert_eq!(summary_cited_pages(&completed.citations).unwrap().len(), 5);
+                    assert!(completed
+                        .summary
+                        .warnings
+                        .iter()
+                        .any(|w| w.code == "COHERENT_SUMMARY_MODEL_OUTPUT_INVALID"));
+                    assert!(!completed.summary.text.contains("Rejected model prose"));
+                    let saved = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+                    assert!(saved.summary_claims.is_empty());
+                    assert!(saved.synthesis_evidence.is_empty());
+                    let analyzed = get_analyzed_document(&conn, &run_id).unwrap().unwrap();
+                    let chunked = get_chunked_document(&conn, &run_id).unwrap().unwrap();
+                    let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
+                    coherent::validate_content(&saved, &analyzed, &chunked, &normalized).unwrap();
+                    for mutation in [
+                        "message",
+                        "stage",
+                        "duplicate",
+                        "code",
+                        "version",
+                        "presentation",
+                    ] {
+                        let mut invalid = saved.clone();
+                        let index = invalid
+                            .warnings
+                            .iter()
+                            .position(|w| w.code == "COHERENT_SUMMARY_MODEL_OUTPUT_INVALID")
+                            .unwrap();
+                        match mutation {
+                            "message" => invalid.warnings[index].message.push('!'),
+                            "stage" => invalid.warnings[index].stage = Some(PipelineStage::Analyze),
+                            "duplicate" => invalid.warnings.push(invalid.warnings[index].clone()),
+                            "code" => {
+                                invalid.warnings[index].code =
+                                    coherent::FALLBACK_WARNING_CODE.into()
+                            }
+                            "version" => {
+                                invalid.synthesis_version = PRE_CONTEXT_SYNTHESIS_VERSION.into()
+                            }
+                            "presentation" => {
+                                invalid.presentation_mode = SummaryPresentationMode::Coherent
+                            }
+                            _ => unreachable!(),
+                        }
+                        assert!(
+                            coherent::validate_content(&invalid, &analyzed, &chunked, &normalized)
+                                .is_err(),
+                            "warning boundary: {mutation}"
+                        );
+                    }
+                    for profile in [SummaryProfile::Story, SummaryProfile::Contract] {
+                        assert!(
+                            coherent::validate_model_output_fallback_boundary(profile, &saved)
+                                .is_err()
+                        );
+                    }
+                }
+                let requests = runtime.inner.requests.lock().unwrap();
+                if kind == "selected" {
+                    assert!(requests.iter().any(|r| matches!(&r.output_format, ModelOutputFormat::JsonSchema {name, ..} if name == coherent::SOURCE_SELECTION_SCHEMA_NAME)));
+                }
+                assert_eq!(requests.iter().filter(|r| matches!(&r.output_format, ModelOutputFormat::JsonSchema {name, ..} if name == coherent::SCHEMA_NAME)).count(), 1);
+                assert!(requests.iter().any(|r| matches!(&r.output_format, ModelOutputFormat::JsonSchema {name, ..} if name == VERIFICATION_SCHEMA_NAME)), "fallback claims must reach independent verification");
+            }
+        }
+    }
+
+    #[test]
+    fn general_rejected_prose_does_not_mask_operational_failures() {
+        for kind in ["transport", "identity"] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run(&database);
+            let runtime = rejected_general_runtime(kind, false);
+            assert!(summarize_chunked_document(&mut conn, &runtime, &run_id).is_err());
+            assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+            assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+            assert!(!runtime.inner.requests.lock().unwrap().iter().any(|r| matches!(&r.output_format, ModelOutputFormat::JsonSchema {name, ..} if name == VERIFICATION_SCHEMA_NAME)));
+        }
+    }
+
+    #[test]
+    fn rejected_prose_keeps_story_failure_behavior() {
+        {
+            let profile = SummaryProfile::Story;
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
+            let runtime = rejected_general_runtime("malformed", false);
+            assert_eq!(
+                summarize_chunked_document(&mut conn, &runtime, &run_id)
+                    .unwrap_err()
+                    .code(),
+                "MODEL_SUMMARY_RESPONSE_INVALID"
+            );
+            assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn general_coverage_repairs_omitted_pages_without_retrying_good_output() {
+        for good_initial in [false, true] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run(&database);
+            let runtime = GeneralCoverageRuntime {
+                requests: Mutex::new(vec![]),
+                good_initial,
+                corrects: true,
+                withhold_ledger: false,
+                bad_repair: None,
+            };
+            let completed = summarize_chunked_document(&mut conn, &runtime, &run_id).unwrap();
+            assert_eq!(
+                completed.citations.presentation_mode,
+                SummaryPresentationMode::Coherent
+            );
+            assert_eq!(
+                summary_cited_pages(&completed.citations).unwrap().len(),
+                3,
+                "General must repair a one-page draft when three pages are available"
+            );
+            let requests = runtime.requests.lock().unwrap();
+            let synthesis=requests.iter().filter(|r|matches!(&r.output_format, ModelOutputFormat::JsonSchema {name,..} if name == coherent::SCHEMA_NAME)).collect::<Vec<_>>();
+            assert_eq!(synthesis.len(), if good_initial { 1 } else { 2 });
+            if !good_initial {
+                assert_eq!(synthesis[0].system_prompt, synthesis[1].system_prompt);
+                assert_eq!(synthesis[0].output_format, synthesis[1].output_format);
+                assert_eq!(synthesis[0].seed, synthesis[1].seed);
+                // This fixture's preflight has no input-token charge. Repair
+                // can consume the initial 512-token feedback headroom while
+                // preserving the schema, seed and single repair limit.
+                assert_eq!(
+                    synthesis[0].max_output_tokens + 512,
+                    synthesis[1].max_output_tokens
+                );
+                assert_eq!(synthesis[1].ordinal, synthesis[0].ordinal + 1);
+                assert!(synthesis[1].user_prompt.contains("validation_feedback"));
+            }
+        }
+    }
+
+    #[test]
+    fn general_coverage_exhaustion_uses_only_adequate_verified_fallback() {
+        for withhold_ledger in [false, true] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run(&database);
+            let runtime = GeneralCoverageRuntime {
+                requests: Mutex::new(vec![]),
+                good_initial: false,
+                corrects: false,
+                withhold_ledger,
+                bad_repair: None,
+            };
+            let result = summarize_chunked_document(&mut conn, &runtime, &run_id);
+            if withhold_ledger {
+                assert!(
+                    result.is_err(),
+                    "insufficient supported fallback must not complete"
+                );
+                assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+                assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+            } else {
+                let completed = result.unwrap();
+                assert_eq!(
+                    completed.citations.presentation_mode,
+                    SummaryPresentationMode::ClaimLedgerFallback,
+                    "repeatedly undercovered prose must use disclosed verified fallback"
+                );
+                assert_eq!(summary_cited_pages(&completed.citations).unwrap().len(), 5);
+                assert!(completed
+                    .summary
+                    .warnings
+                    .iter()
+                    .any(|w| w.code == SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE));
+            }
+            assert_eq!(runtime.requests.lock().unwrap().iter().filter(|r|matches!(&r.output_format,ModelOutputFormat::JsonSchema{name,..} if name == coherent::SCHEMA_NAME)).count(),2);
+        }
+    }
+
+    #[test]
+    fn general_coverage_invalid_correction_preserves_only_the_prior_valid_draft() {
+        for kind in ["clipped", "foreign", "malformed", "transport"] {
+            assert_general_coverage_retains_initial_draft(kind);
+        }
+    }
+
+    #[test]
+    fn general_coverage_parsed_undercovered_correction_preserves_initial_draft() {
+        assert_general_coverage_retains_initial_draft("undercovered");
+    }
+
+    #[test]
+    fn general_coverage_parsed_modal_correction_preserves_initial_draft() {
+        assert_general_coverage_retains_initial_draft("modal");
+    }
+
+    fn assert_general_coverage_retains_initial_draft(kind: &'static str) {
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let runtime = GeneralCoverageRuntime {
+            requests: Mutex::new(vec![]),
+            good_initial: false,
+            corrects: false,
+            withhold_ledger: false,
+            bad_repair: Some(kind),
+        };
+        let result = summarize_chunked_document(&mut conn, &runtime, &run_id);
+        if kind == "transport" {
+            assert!(result.is_err());
+            assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
+            assert!(get_citation_artifact(&conn, &run_id).unwrap().is_none());
+        } else {
+            let completed =
+                result.expect("unusable correction must retain the valid draft for verification");
+            assert_eq!(
+                completed.citations.presentation_mode,
+                SummaryPresentationMode::ClaimLedgerFallback
+            );
+            assert_eq!(summary_cited_pages(&completed.citations).unwrap().len(), 5);
+            let synthesis = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
+            assert_eq!(synthesis.summary_claims.len(), 1);
+            assert_eq!(
+                synthesis.summary_claims[0].text,
+                "The document presents its central information, supporting details, and material qualifications.",
+                "the first valid draft must survive an unusable {kind} correction"
+            );
+            assert!(!completed
+                .summary
+                .text
+                .contains("Unsupported repair content"));
+            assert!(completed
+                .citations
+                .evidence
+                .iter()
+                .all(|e| e.evidence_id != "foreign-source"));
+        }
+        assert_eq!(runtime.requests.lock().unwrap().iter().filter(|r|matches!(&r.output_format,ModelOutputFormat::JsonSchema{name,..} if name == coherent::SCHEMA_NAME)).count(),2);
+    }
+
     #[test]
     fn connect_completion_accepts_coherent_summary_with_distributed_supported_coverage() {
         let database = TestDatabase::new();
@@ -10395,85 +12318,125 @@ mod tests {
     }
 
     #[test]
-    fn connect_verification_falls_back_when_supported_coherent_coverage_is_too_low() {
-        let database = TestDatabase::new();
-        let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Story);
-        let runtime =
-            VerificationFixtureRuntime::new(VerificationFixtureMode::SummaryCoverageShortfall);
-        let delivery = Some(SummaryDeliveryPolicy::connect());
+    fn general_and_connect_verification_fall_back_when_supported_coverage_is_too_low() {
+        for (profile, delivery) in [
+            (SummaryProfile::General, None),
+            (
+                SummaryProfile::Story,
+                Some(SummaryDeliveryPolicy::connect()),
+            ),
+        ] {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run_with_profile(&database, profile);
+            let runtime =
+                VerificationFixtureRuntime::new(VerificationFixtureMode::SummaryCoverageShortfall);
 
-        analyze_chunked_document_controlled_with_delivery(
-            &mut conn,
-            &runtime,
-            &run_id,
-            &UNCONTROLLED_EXECUTION,
-            delivery,
-        )
-        .unwrap();
-        let synthesized = synthesize_analyzed_document_controlled_with_delivery(
-            &mut conn,
-            &runtime,
-            &run_id,
-            &UNCONTROLLED_EXECUTION,
-            delivery,
-        )
-        .unwrap();
-        assert_eq!(
-            synthesized.presentation_mode,
-            SummaryPresentationMode::Coherent
-        );
+            analyze_chunked_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            let synthesized = synthesize_analyzed_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            assert_eq!(
+                synthesized.presentation_mode,
+                SummaryPresentationMode::Coherent
+            );
 
-        let verified = verify_synthesized_document_controlled_with_delivery(
-            &mut conn,
-            &runtime,
-            &run_id,
-            &UNCONTROLLED_EXECUTION,
-            delivery,
-        )
-        .unwrap();
-        let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
-        let supported_coherent_claims = synthesized
-            .summary_claims
-            .iter()
-            .zip(&verified.summary_claim_verifications)
-            .filter(|(_, verification)| verification.verdict == ClaimVerdict::Supported)
-            .map(|(claim, _)| claim);
-        let cited_pages = supported_coherent_claims
-            .flat_map(|claim| &claim.evidence_ids)
-            .filter_map(|evidence_id| {
-                synthesized
-                    .synthesis_evidence
-                    .iter()
-                    .find(|evidence| evidence.evidence_id == *evidence_id)
-                    .map(|evidence| evidence.source_span.page_start)
-            })
-            .collect::<HashSet<_>>();
-        assert!(!delivery_page_coverage_satisfied(
-            &cited_pages,
-            &[],
-            &normalized,
-        ));
-        assert_eq!(
-            verified.presentation_mode,
-            SummaryPresentationMode::ClaimLedgerFallback
-        );
-        assert!(verified.warnings.iter().any(|warning| {
-            warning.code == SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE
-                && warning.stage == Some(PipelineStage::Verify)
-        }));
+            let verified = verify_synthesized_document_controlled_with_delivery(
+                &mut conn,
+                &runtime,
+                &run_id,
+                &UNCONTROLLED_EXECUTION,
+                delivery,
+            )
+            .unwrap();
+            let fallback_warning = verified
+                .warnings
+                .iter()
+                .find(|warning| warning.code == SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE)
+                .unwrap();
+            assert_eq!(
+                fallback_warning.message,
+                if delivery.is_some() {
+                    "Semantic verification reduced coherent page coverage; showing the verified source claims instead"
+                } else {
+                    "The supported coherent summary does not satisfy page coverage; showing verified source claims instead"
+                },
+                "Connect must preserve its existing public warning"
+            );
+            let mut legacy = verified.clone();
+            legacy.warnings.last_mut().unwrap().message = "Semantic verification reduced coherent page coverage; showing the verified source claims instead".into();
+            validate_verified_document(
+                &legacy,
+                &synthesized,
+                &get_analyzed_document(&conn, &run_id).unwrap().unwrap(),
+                &get_chunked_document(&conn, &run_id).unwrap().unwrap(),
+                &get_normalized_document(&conn, &run_id).unwrap().unwrap(),
+            )
+            .expect("historical coverage-fallback warning must remain readable");
+            legacy.warnings.last_mut().unwrap().message = "unrecognized fallback reason".into();
+            assert!(validate_verified_document(
+                &legacy,
+                &synthesized,
+                &get_analyzed_document(&conn, &run_id).unwrap().unwrap(),
+                &get_chunked_document(&conn, &run_id).unwrap().unwrap(),
+                &get_normalized_document(&conn, &run_id).unwrap().unwrap(),
+            )
+            .is_err());
+            let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
+            let supported_coherent_claims = synthesized
+                .summary_claims
+                .iter()
+                .zip(&verified.summary_claim_verifications)
+                .filter(|(_, verification)| verification.verdict == ClaimVerdict::Supported)
+                .map(|(claim, _)| claim);
+            let cited_pages = supported_coherent_claims
+                .flat_map(|claim| &claim.evidence_ids)
+                .filter_map(|evidence_id| {
+                    synthesized
+                        .synthesis_evidence
+                        .iter()
+                        .find(|evidence| evidence.evidence_id == *evidence_id)
+                        .map(|evidence| evidence.source_span.page_start)
+                })
+                .collect::<HashSet<_>>();
+            assert!(!delivery_page_coverage_satisfied(
+                &cited_pages,
+                &[],
+                &normalized,
+            ));
+            assert_eq!(
+                verified.presentation_mode,
+                SummaryPresentationMode::ClaimLedgerFallback
+            );
+            assert!(verified.warnings.iter().any(|warning| {
+                warning.code == SUMMARY_DELIVERY_COVERAGE_FALLBACK_WARNING_CODE
+                    && warning.stage == Some(PipelineStage::Verify)
+            }));
 
-        let completed = complete_verified_document_with_delivery(
-            &mut conn,
-            &run_id,
-            Some(SummaryDeliveryPolicy::connect()),
-        )
-        .expect("the already verified ledger should replace undercovered coherent prose");
-        assert_eq!(
-            completed.citations.presentation_mode,
-            SummaryPresentationMode::ClaimLedgerFallback
-        );
-        assert!(completed.citations.summary_claims.is_empty());
-        assert!(!completed.citations.claims.is_empty());
+            let completed = complete_verified_document_with_delivery(
+                &mut conn,
+                &run_id,
+                Some(SummaryDeliveryPolicy::connect()),
+            )
+            .expect("the already verified ledger should replace undercovered coherent prose");
+            assert_eq!(
+                completed.citations.presentation_mode,
+                SummaryPresentationMode::ClaimLedgerFallback
+            );
+            assert!(completed.citations.summary_claims.is_empty());
+            assert!(!completed.citations.claims.is_empty());
+        }
     }
 
     #[test]
@@ -10540,6 +12503,7 @@ mod tests {
     #[test]
     fn verification_preserves_analysis_shortfall_and_replaces_only_verification_warnings() {
         let synthesized = SynthesizedDocument {
+            contract_extraction: None,
             document_id: "warning-fixture".into(),
             synthesis_version: SYNTHESIS_VERSION.into(),
             runtime_id: "fixture-runtime".into(),
@@ -10576,7 +12540,10 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "9.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "13.0.0");
+        assert_eq!(PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION, "12.0.0");
+        assert_eq!(PRE_FURNITURE_SYNTHESIS_VERSION, "10.0.0");
+        assert_eq!(PRE_BALANCED_SYNTHESIS_VERSION, "9.0.0");
         assert_eq!(PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION, "8.0.0");
         assert_eq!(PRE_CONTEXT_SYNTHESIS_VERSION, "7.0.0");
         assert_eq!(PRE_DISCLOSURE_SYNTHESIS_VERSION, "6.0.0");
@@ -10616,6 +12583,7 @@ mod tests {
         );
 
         let mut checkpoint = SynthesizedDocument {
+            contract_extraction: None,
             document_id: "document".into(),
             synthesis_version: SYNTHESIS_VERSION.into(),
             runtime_id: "runtime".into(),
@@ -12878,6 +14846,11 @@ mod tests {
     fn form_materiality_and_ocr_structure_risk_reach_delivered_warnings() {
         let text = "National Archives job NC1-330-78-7; see the attached memo dated May 28, 2008.";
         let (mut normalized, mut chunked) = materiality_fixture(&[text.into()]);
+        normalized.pages[0].content[0].source.source_type =
+            crate::pipeline::contracts::SourceType::OcrText;
+        for source in &mut chunked.chunks[0].source_spans {
+            source.source_type = crate::pipeline::contracts::SourceType::OcrText;
+        }
         normalized.pages[0].content[0].text.push('�');
         chunked.chunks[0].text = normalized.pages[0].content[0].text.clone();
         let runtime = ParaphraseRepairRuntime {
@@ -13334,6 +15307,7 @@ mod tests {
             let document_id = run.document_id.clone();
             let now = Utc::now();
             let mut summary = SummaryArtifact {
+                contract_extraction: None,
                 document_id: document_id.clone(),
                 summary_version: SUMMARY_VERSION.to_string(),
                 text: expected_text.clone(),
@@ -13343,6 +15317,7 @@ mod tests {
             };
             summary.integrity_hash = summary.calculate_integrity_hash().unwrap();
             let mut citations = CitationArtifact {
+                contract_extraction: None,
                 document_id,
                 citation_version: CITATION_VERSION.to_string(),
                 summary_integrity_hash: summary.integrity_hash.clone(),

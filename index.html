@@ -189,6 +189,15 @@
                 <p id="retry-hint" class="action-hint" hidden></p>
               </div>
             </div>
+            <details id="ocr-review" class="ocr-review" hidden>
+              <summary>Review and correct OCR text</summary>
+              <p>Compare the text with the source PDF. Saving creates a separate local run; use Continue processing to generate its summary. The original and previously delivered results stay unchanged.</p>
+              <button id="ocr-open-source" class="quiet-button" type="button">Open source PDF</button>
+              <div id="ocr-lineage"></div>
+              <div id="ocr-pages"></div>
+              <button id="ocr-save" class="primary-button" type="button">Save corrected run</button>
+              <p id="ocr-review-status" role="status"></p>
+            </details>
           </section>
         </section>
 

@@ -416,6 +416,7 @@ fn technical_omission(
 }
 
 fn quote_boundary_omission(
+    analysis_version: &str,
     page_number: u32,
     chunk: &DocumentChunk,
     normalized: &NormalizedDocument,
@@ -430,7 +431,7 @@ fn quote_boundary_omission(
         chunk_id: chunk.chunk_id.clone(),
         reason: AnalysisOmissionReason::QuoteBoundaryUnusable,
         origin: AnalysisOmissionOrigin::QuoteBoundaryUnusable,
-        filter_version: ANALYSIS_VERSION.to_string(),
+        filter_version: analysis_version.to_string(),
         source_fingerprint: fingerprint(&page.content)?,
         catalog_fingerprint: None,
     })
@@ -438,18 +439,16 @@ fn quote_boundary_omission(
 
 fn ocr_text_layer_structure_risk(normalized: &NormalizedDocument) -> bool {
     normalized.pages.iter().any(|page| {
-        let native_text = page
+        let textual_content = page
             .content
             .iter()
-            .filter(|block| {
-                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
-            })
+            .filter(|block| block.source.source_type.is_textual())
             .map(|block| block.text.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
-        native_text.contains('\u{fffd}')
+        textual_content.contains('\u{fffd}')
             || matches!(
-                eligibility::classify(&native_text),
+                eligibility::classify(&textual_content),
                 Some(eligibility::Omission::ScanNoise)
             )
     })
@@ -486,10 +485,9 @@ fn versioned_plan(
         .pages
         .iter()
         .filter(|page| {
-            page.content.iter().any(|block| {
-                block.source.source_type == crate::pipeline::contracts::SourceType::NativeText
-                    && !block.text.trim().is_empty()
-            })
+            page.content
+                .iter()
+                .any(|block| block.source.source_type.is_textual() && !block.text.trim().is_empty())
         })
         .map(|page| page.page_number)
         .collect::<Vec<_>>();
@@ -597,10 +595,18 @@ pub(super) fn versioned_page_scope(
         )?
     };
     let omission = if omission.is_none()
-        && analysis_version == ANALYSIS_VERSION
+        && matches!(
+            analysis_version,
+            ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION
+        )
         && catalog.candidates.is_empty()
     {
-        Some(quote_boundary_omission(page_number, chunk, normalized)?)
+        Some(quote_boundary_omission(
+            analysis_version,
+            page_number,
+            chunk,
+            normalized,
+        )?)
     } else {
         omission
     };
@@ -1136,7 +1142,7 @@ pub(super) fn validate_plan(
             (Some(actual), None)
                 if matches!(
                     analyzed.analysis_version.as_str(),
-                    ANALYSIS_VERSION | QUOTE_BOUNDARY_ANALYSIS_VERSION
+                    ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION | QUOTE_BOUNDARY_ANALYSIS_VERSION
                 ) && scope
                     .quote_candidates
                     .iter()
@@ -1164,6 +1170,7 @@ pub(super) fn validate_plan(
                 if matches!(
                     analyzed.analysis_version.as_str(),
                     ANALYSIS_VERSION
+                        | SENTENCE_ANALYSIS_VERSION
                         | QUOTE_BOUNDARY_ANALYSIS_VERSION
                         | PUNCTUATION_ANALYSIS_VERSION
                         | TOLERANT_ANALYSIS_VERSION
@@ -1236,7 +1243,10 @@ pub(super) fn validate_plan(
     }
     let mut boundary_affected_pages = 0usize;
     let mut boundary_omitted_units = 0usize;
-    if analyzed.analysis_version == ANALYSIS_VERSION {
+    if matches!(
+        analyzed.analysis_version.as_str(),
+        ANALYSIS_VERSION | SENTENCE_ANALYSIS_VERSION
+    ) {
         for page in &analyzed.inspected_pages {
             let (_, _, _, _, omitted_source_units) =
                 versioned_page_scope(&analyzed.analysis_version, *page, chunked, normalized)?;
@@ -1269,6 +1279,7 @@ pub(super) fn validate_plan(
     if matches!(
         analyzed.analysis_version.as_str(),
         ANALYSIS_VERSION
+            | SENTENCE_ANALYSIS_VERSION
             | QUOTE_BOUNDARY_ANALYSIS_VERSION
             | PUNCTUATION_ANALYSIS_VERSION
             | TOLERANT_ANALYSIS_VERSION

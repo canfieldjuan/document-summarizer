@@ -1168,3 +1168,21 @@ h1 {
     transition-duration: 1ms !important;
   }
 }
+/* OCR review uses plain page text; operator edits create a separate local run. */
+.ocr-review {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px solid #c8d0ce;
+  border-radius: 0.75rem;
+}
+.ocr-review summary { cursor: pointer; font-weight: 600; }
+.ocr-review label { display: block; margin: 1rem 0; }
+.ocr-review textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  font: inherit;
+  resize: vertical;
+}

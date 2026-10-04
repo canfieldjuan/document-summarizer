@@ -15,6 +15,7 @@ use pipeline::contracts::{
     ModelRuntimeFailure, NormalizedDocument, ParsedDocument, PipelineFailure, PipelineRun,
     StructureInterpreter, StructuredDocument, SummaryProfile,
 };
+use pipeline::corrections::{self, CorrectionError, OcrReview, SaveCorrection};
 use pipeline::db::{get_or_create_profile_suggestion_owner, init_db, StoreError};
 use pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion, IngestError};
 use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
@@ -28,6 +29,7 @@ use pipeline::normalize::{
 };
 use pipeline::parser::{
     parse_document as parse_pipeline_document, ParsePipelineError, PdfExtractParser,
+    SourceParserSet,
 };
 use pipeline::profile_suggestion::{
     suggest_summary_profile as suggest_profile_from_document, SummaryProfileSuggestion,
@@ -165,6 +167,12 @@ impl From<WorkspaceError> for CommandError {
     }
 }
 
+impl From<CorrectionError> for CommandError {
+    fn from(error: CorrectionError) -> Self {
+        Self::new(error.code(), error.to_string())
+    }
+}
+
 impl From<StoreError> for CommandError {
     fn from(error: StoreError) -> Self {
         Self::new("PIPELINE_STORE_ERROR", error.to_string())
@@ -203,7 +211,14 @@ fn parse_document(
     run_id: String,
 ) -> Result<ParsedDocument, CommandError> {
     let mut conn = open_database(&state)?;
-    parse_pipeline_document(&mut conn, &PdfExtractParser::new(), &run_id)
+    let run = pipeline::db::get_pipeline_run(&conn, &run_id)
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::from(StoreError::RunNotFound(run_id.clone())))?;
+    let document = pipeline::db::get_document(&conn, &run.document_id)
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::from(StoreError::DocumentNotFound(run.document_id)))?;
+    let parsers = SourceParserSet::new();
+    parse_pipeline_document(&mut conn, parsers.select(document.source_type), &run_id)
         .map_err(CommandError::from)
 }
 
@@ -512,11 +527,14 @@ fn get_run_status(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<RunHistoryItem, CommandError> {
-    let active = state.jobs.is_active(&run_id).map_err(CommandError::from)?;
     let conn = open_database(&state)?;
     let mut run = load_run(&conn, &run_id).map_err(CommandError::from)?;
-    run.background_active = active;
-    run.can_cancel = run.state.can_request_cancellation() && active;
+    let (background_active, projected_active) = state
+        .jobs
+        .status_activity(&run_id, &run.run_id)
+        .map_err(CommandError::from)?;
+    run.background_active = background_active;
+    run.can_cancel = run.state.can_request_cancellation() && projected_active;
     Ok(run)
 }
 
@@ -527,6 +545,48 @@ fn get_persisted_summary(
 ) -> Result<PersistedSummary, CommandError> {
     let conn = open_database(&state)?;
     load_persisted_summary(&conn, &run_id).map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn get_ocr_review(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<Option<OcrReview>, CommandError> {
+    let conn = open_database(&state)?;
+    let review = corrections::get_review(&conn, &run_id)?;
+    if let Some(review) = &review {
+        if state.jobs.status_activity(&run_id, &review.run_id)?.0 {
+            return Ok(None);
+        }
+    }
+    Ok(review)
+}
+
+#[tauri::command]
+fn save_ocr_correction(
+    state: State<'_, AppState>,
+    request: SaveCorrection,
+) -> Result<RunHistoryItem, CommandError> {
+    if state.jobs.is_active(&request.run_id)? {
+        return Err(CorrectionError::NotAllowed.into());
+    }
+    let mut conn = open_database(&state)?;
+    let run = corrections::save(&mut conn, &request)?;
+    load_run(&conn, &run.run_id).map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn open_ocr_source(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<(), CommandError> {
+    use tauri_plugin_opener::OpenerExt;
+    let conn = open_database(&state)?;
+    let path = corrections::verified_source_path(&conn, &run_id)?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|_| CorrectionError::SourceUnavailable.into())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -556,8 +616,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     None
                 }
             };
+            let jobs = DesktopJobManager::new(db_path.clone(), settings_path.clone());
+            if let Err(error) = jobs.start_ocr_recovery(app_data_dir.clone()) {
+                eprintln!("OCR restart recovery worker could not start: {error}");
+            }
             app.manage(AppState {
-                jobs: DesktopJobManager::new(db_path.clone(), settings_path.clone()),
+                jobs,
                 model_settings_path: settings_path,
                 entitlement,
             });
@@ -609,7 +673,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             install_connect_entitlement,
             list_recent_runs,
             get_run_status,
-            get_persisted_summary
+            get_persisted_summary,
+            get_ocr_review,
+            save_ocr_correction,
+            open_ocr_source
         ])
         .build(tauri::generate_context!())?;
     app.run(|app_handle, event| {

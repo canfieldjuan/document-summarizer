@@ -784,6 +784,13 @@ impl ModelRuntime for LlamaCppRuntime {
                     true,
                 ));
             }
+            if matches!(completed.stop_type, CompletionStopType::Limit) {
+                return Err(failure(
+                    "MODEL_OUTPUT_LIMIT_REACHED",
+                    "Direct GGUF generation exhausted its output allowance before completion",
+                    true,
+                ));
+            }
             if !matches!(
                 completed.stop_type,
                 CompletionStopType::Eos | CompletionStopType::Word
@@ -3286,6 +3293,21 @@ mod tests {
     }
 
     #[test]
+    fn output_limit_is_distinct_and_retains_usage() {
+        let escaped = serde_json::json!({"units":[{"text":"\u{0001}\\\"\n界\u{10ffff}".repeat(200),"source_ids":["s1"]}]}).to_string();
+        for content in ["{}", escaped.as_str()] {
+            let body = serde_json::json!({"content":content,"tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"limit"}).to_string();
+            let error = generation_error_for_completion(&body);
+            assert_eq!(error.code, "MODEL_OUTPUT_LIMIT_REACHED");
+            assert_eq!(
+                error.request_attempts[0].provider_usage.completion_tokens,
+                Some(1)
+            );
+            assert!(!error.request_attempts[0].succeeded);
+        }
+    }
+
+    #[test]
     fn direct_response_requires_a_qualified_completion_stop() {
         for stop_type in ["eos", "word"] {
             let body = format!(
@@ -3298,15 +3320,12 @@ mod tests {
                 "ok"
             );
         }
-        for stop_type in ["limit", "none"] {
-            let body = format!(
-                r#"{{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"{stop_type}"}}"#
-            );
-            assert_eq!(
-                generation_error_for_completion(&body).code,
-                "MODEL_EXECUTION_UNVERIFIED"
-            );
-        }
+        assert_eq!(
+            generation_error_for_completion(
+                r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"none"}"#
+            ).code,
+            "MODEL_EXECUTION_UNVERIFIED"
+        );
         for body in [
             r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false}"#,
             r#"{"content":"ok","tokens_predicted":1,"tokens_evaluated":2,"truncated":false,"stop_type":"future"}"#,

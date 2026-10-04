@@ -7,6 +7,7 @@ use crate::pipeline::control::ExecutionControl;
 use crate::pipeline::db;
 use crate::pipeline::gateway_client::{
     GatewayClient, GatewayClientConfig, GatewayClientError, GatewayHealth, GatewayResult,
+    MAX_OUTPUT_TOKENS,
 };
 use crate::pipeline::gateway_store::GatewayRequestKey;
 use chrono::Utc;
@@ -158,6 +159,14 @@ impl ModelRuntime for GatewayRuntime {
     }
 
     fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        if request.max_output_tokens > MAX_OUTPUT_TOKENS {
+            return Err(failure(
+                "MODEL_OUTPUT_BUDGET_EXCEEDED",
+                "The requested output allowance exceeds the gateway task capacity",
+                false,
+                Vec::new(),
+            ));
+        }
         self.executor.preflight(request).map_err(map_client_failure)
     }
 
@@ -397,6 +406,22 @@ mod tests {
                 available,
             }),
         )
+    }
+
+    #[test]
+    fn output_capacity_rejection_is_distinct_from_protocol_failure() {
+        let root = TestDirectory::new();
+        let state = Arc::new(Mutex::new(ExecutorState::default()));
+        let runtime = runtime(&root, Arc::clone(&state), false, true);
+        let mut request = request();
+        request.max_output_tokens = MAX_OUTPUT_TOKENS;
+        runtime.preflight_request(&request).unwrap();
+        request.max_output_tokens += 1;
+        assert_eq!(
+            runtime.preflight_request(&request).unwrap_err().code,
+            "MODEL_OUTPUT_BUDGET_EXCEEDED"
+        );
+        assert!(state.lock().unwrap().keys.is_empty());
     }
 
     #[test]

@@ -1,0 +1,366 @@
+# OCR streamed retrieval consumer
+
+## Root cause
+
+At `6941c60`, the OCR consumer discovers only v2/profile 1.0, decodes inline
+base64, and limits the derived PDF to 2 MiB. The durable handoff already owns
+the exact request, provider instance, source bytes, completed status, paired
+output bytes and one child. These are the owners for v3 recovery too.
+
+Authority: merged connect-contracts ADR-0010 and v3 schemas at
+`5e74cf650df07df22d1cff60d35f678601c7cfc1`; document-ocr provider PR17 merged as
+`48ba7458e64a51037e6ab335f5c312d6ac137f87`.
+
+## Required change surface
+
+1. Prefer a conforming v3/profile 1.1 registration for a new handoff, with v2
+   permitted when only v2 is available. Two registrations for the same instance
+   are one provider. Pin protocol in the existing saved request. Recovery must
+   select that same app, instance and protocol, with no automatic downgrade.
+2. Share the existing strict job envelope across output representations while
+   keeping the v2 output type/default and wire behavior unchanged. V3 has only
+   closed descriptors, never an inline/stream union. Bound JSON before parsing
+   and reject duplicate members, non-finite numbers and depth above 16.
+3. Validate status identity, terminal shape and both descriptors before any
+   output GET. Persist completed metadata in the existing running handoff before
+   retrieval. A saved completed descriptor cannot change on reconciliation.
+4. Fetch each output sequentially from the validated registration origin and
+   canonical IDs. No proxies, redirects, decompression or supplied URL/path.
+   Require exact HTTP 200/octet-stream/no-store/one decimal Content-Length and
+   forbid transfer/content encoding and filename headers. Count and hash chunks
+   of at most 64 KiB into an owner-private temporary file. Reject malformed,
+   short, excess or corrupt bodies before parsing or publishing either sibling.
+5. Keep ADR-0010's 60-second transfer deadline and stricter parent deadline.
+   At most three attempts per artifact/cycle; one-second transient backoff.
+   Retries reuse descriptors from byte zero; discard partial files. Restart or
+   stale-token recovery validates the same instance's manifest/status and exact
+   descriptors before retrieval. Never rerun OCR to recover a completed output.
+6. Apply profile 1.1's 36 MiB PDF and unchanged 256 KiB text caps. Feed only
+   verified bytes through the existing canonical tagged-PDF/text pair validator,
+   atomic paired storage, private materialization and single child admission.
+   Source kind stays OcrText. Existing warnings, corrections and summary checks
+   remain authoritative. The direct child path has no lower configurable input
+   cap; generic Connect input admission is a different path and stays unchanged.
+7. Reuse the current cancellation, phase ownership and restart coordinator.
+   A malformed retrieval terminalizes only the consumer handoff with a visible
+   error; transient exhaustion keeps it recoverable. No partial child or extra
+   summary can be admitted. No network I/O holds a database write transaction.
+
+## Explicit non-scope
+
+No provider changes, new service/queue, model selection,
+prompt, summary scoring, OCR engine, correction UI, native PDF admission,
+Windows discovery enablement, dependency version updates or invoice consumer changes.
+The existing Unix-only direct OCR discovery boundary is preserved, including
+Windows compilation and current v1/v2 provider behavior.
+
+## Assumptions and blockers
+
+The provider is merged. The protocol already lives in the saved request;
+the existing running status column can retain completed descriptors until both
+verified outputs are atomically stored, so no new persisted phase is needed. The existing PDF-size CHECK does require a schema migration.
+Temporary downloads are anonymous private files and do not survive process
+exit. The bounded parser/storage may allocate verified bytes up to the declared
+cap; this is not a streaming PDF parser or model qualification claim.
+
+## Verification plan
+
+- Fail-first v3 discovery/profile and a real HTTP output above 2 MiB through the
+  coordinator; existing v2 fixture/recovery paths remain unchanged.
+- Pin canonical v3 fixtures. Reject malformed descriptors, wrong provenance,
+  aliases, malformed metadata and mixed pairs before retrieval/admission.
+- Actual HTTP framing/integrity boundaries: absent/duplicate/conflicting length,
+  short/excess body, wrong hash, encoding, redirects, exact caps and cap+1.
+- Lost transfer, busy, restart, token rotation and changed descriptors retain
+  the same remote job, with no partial child or duplicate summary. Verify
+  cancellation and no network under a write transaction.
+- Focused Rust tests, formatting and clippy; CI owns broad duplicated Linux and
+  native Windows suites. Build frontend assets required by the Rust target.
+- Follow the provider's frozen fresh-corpus outcomes through the production
+  consumer, keeping failed attempts in the denominator. Report input admission,
+  retrieval, child processing and summary quality separately. Reuse unchanged
+  source-pinned OCR evidence; do not silently replace its two failed attempts.
+
+## Implementation summary
+
+Implemented at `79201fccab4e8d81377d1c08f9b4e8a5d309a477`, following
+contract-only commits `ff78091`, `702d099`, and `99f26a5`.
+
+- Discovery prefers v3/profile 1.1 for new work. Saved requests retain their
+  protocol and provider instance. Existing v2 inline handling remains available.
+- Completed descriptors are retained before retrieval. Sequential private
+  downloads validate framing, length, digest, canonical pairing and provenance
+  before the existing atomic output store and child admission.
+- Cancellation interrupts stalled reads. Three-attempt transient retries restart
+  at byte zero. Bad framing, malformed status and integrity failures become a
+  visible failed consumer handoff; provider completion is not rewritten.
+- Schema 22 changes only the saved-profile PDF cap, preserving v2's 2 MiB cap,
+  paired data, foreign keys and immutable lineage. No installed user database
+  was opened or migrated by this work.
+- The HTTP parser is the existing hyper dependency, now named directly for its
+  typed parse-error classifier. Cargo.lock adds only that dependency edge.
+
+## Verification and effect trace
+
+At the implementation commit:
+
+- `cargo test --locked --lib connect:: -- --test-threads=2`: 83 passed,
+  4 ignored, 14.50s. Includes both-direction framing/cap probes, malformed
+  metadata, cancellation, total deadline under continuing progress, lost
+  transfer, busy exhaustion, token rotation, restart and concurrent retrieval.
+- Schema migration checks: 14 passed, including populated v21 preservation,
+  rollback/FK restoration and existing older migrations. Profile-specific
+  storage boundaries are also exercised in the consumer tests.
+- Pinned v3 fixtures: 38 status/error cases passed at the canonical revision.
+  Entitlement fixtures also passed. The separate v2 conformance check FAILED
+  at v2.rs:716 because its older pinned manifest omits OCR media. It fails in
+  the same place on unchanged main `6941c60ac94c000942bd6956604a82a98b51caf7`.
+  This PR does not change that manifest or pin; the operator placed those
+  cross-app corrections after the streamed-retrieval and model-preset work.
+- A test-only follow-up transfers the exact 36 MiB PDF and 256 KiB text caps
+  through actual HTTP (passed). Production code remains identical to the
+  corpus-tested implementation.
+- Formatting and all-targets/all-features clippy passed. Frontend assets built
+  successfully before Rust validation. Broad Linux and native Windows suites
+  remain CI gates, not locally claimed results.
+- Fail-first evidence: v3 profile initially rejected; large paired storage
+  initially failed the old SQLite cap; stalled cancellation took 3.023752393s;
+  malformed status left the consumer running; conflicting Content-Length was
+  transient. The corresponding final regressions pass.
+
+Boundary-probe: valid and invalid HTTP framing, identity, descriptors and paired
+bytes; exact profile caps and cap+1; mixed pair corruption; unknown/duplicate
+metadata; restart and cancellation. A corrupt second output stores neither
+sibling and admits no child. Concurrent downloads produce one child/lineage;
+a second database connection can acquire a write transaction during network I/O.
+
+Effect-trace: a previously oversized OCR PDF reaches an OcrText child | v3
+selection, verified download, SQLite profile cap and existing admission own the
+result | actual HTTP coordinator test above 2 MiB plus the frozen corpus proof.
+
+## Frozen real-corpus proof
+
+The final replay used consumer `79201fccab4e8d81377d1c08f9b4e8a5d309a477`
+and production provider `3f101d74b7d9dce2aaf9defb4f9326009da30941`, with source
+hashes unchanged for the entire run. It replayed the earlier source-pinned OCR
+outcomes through the real provider store, registration, authenticated HTTP
+routes and production consumer. It used fixture entitlement and an isolated
+state directory. OCR recognition was replaced only by the exact hash-verified
+recorded pair or the original recorded failure.
+
+All 15 source documents took the native scan-to-OCR route. The 13 successful
+pairs were retrieved and persisted byte-identically, then parsed, normalized,
+structured and chunked as OcrText children. Their PDFs ranged from 2,165,528 to
+7,360,291 bytes. Reopening after moving the original input reused each child
+and retained its single lineage. The two original OCR_ENGINE_FAILED outcomes
+remain in the denominator and admit no child.
+
+This is delivery/child-processing proof using frozen OCR outcomes, not new
+OCR recognition, new model inference, summary quality, installed GUI operation
+or model qualification. The proof stops before model analysis. Private source
+paths, content, requests, output hashes and receipts are retained locally and
+are not published in this PR.
+
+## Cold diff audit
+
+| File and line | Actual change and contract trace | Verification |
+|---|---|---|
+| connect/ocr_consumer.rs:349, 428, 844, 1027, 1111 | Protocol-aware request/recovery, terminal failure, shared pair validation, retained output validation, discovery | Legacy tests, new HTTP/restart/concurrency tests, corpus |
+| connect/ocr_consumer/streamed.rs:34, 185, 315, 443, 520, 557 | Strict bounded metadata, paired descriptors, saved completion, retrieval, typed framing failure, interruptible I/O | 38 canonical fixtures and boundary/integrity/recovery probes |
+| connect/ocr_consumer/streamed/tests.rs:159, 403, 791, 1032 | Large pair, old database, opt-in real corpus, simultaneous recovery | Focused tests and final corpus run |
+| connect/v2.rs:98, 116 | Shared envelope generic over output type with v2 default; no wire/schema/manifest change | Existing Connect tests; old conformance failure reproduced on main |
+| pipeline/schema.rs:1152, 2876 | Transactional v22 table rebuild and rollback proof | Schema suite and populated v21 consumer test |
+| pipeline/db.rs:1 | Test-only export of old-schema fixture owner | Migration tests |
+| Cargo.toml:47, Cargo.lock:1083 | Direct edge to existing hyper for typed errors, no version churn | Framing regression and clippy |
+| docs/PR-OCR-STREAMED-RETRIEVAL.md | Contract, code-driven revisions, evidence, boundaries | Diff checked against the contract |
+
+All Rust paths above are relative to src-tauri/src, except Cargo files which
+are relative to src-tauri. No model settings, summary prompts, scoring, OCR
+engine, native-input limit or Invoice Processor implementation changed.
+
+## Gap audit
+
+DONE: implementation and declared local retrieval/child-processing proof.
+
+NOT DONE for merge: current-head CI and independent review. The existing v2
+conformance mismatch remains disclosed, not fixed or waived silently. Summary
+quality and installed operation are outside this proof. Invoice Processor is
+next in the same streamed-retrieval lane; model setup and other work stay queued.
+
+## Contract revision: persisted output cap
+
+The real large-pair regression reached paired storage and failed SQLite's
+`ocr_pdf_byte_size <= 2097152` CHECK in schema.rs. The first contract incorrectly
+excluded a database migration. Version 22 must rebuild only ocr_handoffs in one
+transaction, preserving every row, index, foreign-key relationship and lineage
+trigger. Its PDF CHECK selects 36 MiB only for a saved protocol 3/profile 1.1
+request; all other rows retain the 2 MiB bound. The application still validates
+the saved request, pair and actual bytes. No new columns or phases are needed.
+
+Use the existing migration owner, restore foreign-key enforcement on every
+outcome, and check foreign-key integrity before commit. Test migration from a
+populated version-21 database, unchanged v2 records/lineage, idempotent reopen,
+rollback on invalid input, and both profile boundaries. Only temporary test
+databases are exercised here; do not open or migrate installed user data.
+
+## Contract revision: typed HTTP framing refusal
+
+The conflicting-Content-Length regression failed: reqwest rejects the headers
+before exposing a Response, and the generic send-error mapping called that a
+transient transport loss. ADR-0010 requires bad framing to fail retrieval.
+Declare the already-locked hyper 1 dependency directly (no version update or
+new package) to inspect its typed `is_parse()` error through reqwest's cause
+chain. Parse failures become Invalid; timeouts and connection loss retain
+Uncertain. Do not match error prose or replace the HTTP stack. The existing
+framing matrix and interrupted-transfer recovery test cover both directions.
+
+## Review follow-up at 9bac68c
+The reviewer identified two missing regression cases, with no production-code
+change required. Added an input-aliased output status through the actual HTTP
+coordinator (terminal failure before any output GET or child), and a 200
+application/json body in the framing matrix. Removing the two guards makes
+exactly these tests fail; restoring them yields 18 streamed tests passed,
+2 intentionally ignored, in 4.98s. Only tests and this evidence note changed.
+
+## Review correction: local I/O and concurrent status saves
+
+Root cause: download creation/write errors were labeled provider-invalid,
+while saved-completion comparison read a stale caller snapshot before a
+phase-only update. Valid outputs could become permanently failed or the first
+completion could be overwritten by a concurrent poll.
+
+Required surface: the internal OcrTransport file-creation boundary supplies
+an anonymous file by default and permits fault injection without global temp
+settings. Typed local I/O maps to recoverable OcrConsumerError::Io for create,
+write, seek and read. Framing, length and digest remain Invalid.
+The streamed save_status owner reloads, compares and saves inside one short
+IMMEDIATE transaction. The first saved completion is immutable even for stale
+callers; a conflicting completion fails visibly without replacing it. An
+already-advanced phase is never regressed. No network I/O runs in this
+transaction. No schema, protocol, v2, model or provider changes.
+
+Verification: deterministic two-poller stale snapshots with differing and
+identical completions, stale processing/error replies, and advanced phases;
+creation/write failures through real HTTP leave no pair/child and recover
+the same job once local I/O works. Run the failing-before regressions, adjacent
+consumer tests, format and clippy. Existing CI owns broad platform suites.
+
+### Review correction evidence
+
+The three failing-before probes reproduced both defects: stale completion save
+returned Ok, and temp creation/write returned InvalidOutput. After the fix,
+all three passed. The adjacent consumer suite passed 33 tests with 2 opt-in
+ignores (13.75s); formatting, all-targets/all-features clippy and diff checks
+passed. A new stale-status test initially dropped its temporary directory;
+that test lifetime was corrected before the successful adjacent run.
+
+Cold diff: ocr_consumer.rs:95,110,1004 defines the typed local-I/O conversion
+and default anonymous-file seam; streamed.rs:322 reloads/compares/saves under
+one IMMEDIATE lock; :559,688,700 propagate runtime/create/write I/O. Existing
+seek/read already returns the same recoverable I/O variant. Tests exercise
+actual HTTP and two database connections with pre-completion snapshots,
+identical/conflicting completion, stale nonterminal status and advanced phase.
+No database schema or v2 behavior changed. No network call moved under a lock.
+
+Boundary-probe: invalid framing still fails, valid output survives local I/O
+failure and resumes the same job into one child; conflicting completion fails
+without replacing the first descriptors, identical completion succeeds.
+Effect-trace: preserve recoverability and immutable completion | typed I/O
+and serialized save_status | the exact three failing-before cases pass.
+
+DONE locally for both review defects; NOT DONE for merge until the new head
+passes CI and review. The frozen corpus receipt above remains at its recorded
+commit; it is not relabeled as a run of this follow-up.
+
+## Contract correction: monotonic completion and retryable refusals
+
+The prior race correction wrongly classified a late Accepted/Processing reply
+as a conflicting completion. In save_status, after validating identity/shape
+and reloading under the existing IMMEDIATE transaction, a saved completion
+dominates nonterminal replies: ignore them without a write. A different
+completed result or Failed reply remains a visible conflict. Retrieval still
+reconciles against the provider before GET. Correct the test that asserted the
+wrong failure, and prove a late nonterminal response still reaches one child.
+
+The validated HTTP refusal policy owns retryability. Output retrieval honors
+its retryable flag inside the existing three-attempt/parent-deadline budget,
+including OUTPUT_NOT_READY. OUTPUT_BUSY still requires Retry-After: 1; wrong
+status/flag/framing and nonretryable refusals remain terminal. Test immediate
+recovery, exhausted attempts retaining the same completion, later resume, and
+malformed/nonretryable controls. No new queue, schema, retry budget or model
+change. The shared status/error owners must decide these rules once.
+
+This corrects one runtime regression introduced by the preceding race fix;
+further bookkeeping does not justify another implementation round.
+
+### Monotonic/retry correction evidence
+
+Before the fix: late-nonterminal and not-ready HTTP regressions both failed
+with InvalidOutput (22 other streamed tests passed, 2 ignored). Afterward the
+adjacent consumer suite passed 35, with 2 opt-in ignores (16.87s); formatting,
+clippy (all targets/features), and diff checks passed.
+
+Cold diff: streamed.rs:329 validates before deciding whether a late nonterminal
+reply can be ignored under the existing lock; :654 consumes the validated
+refusal's retryable flag while retaining the busy-header requirement. Tests
+at streamed/tests.rs:1405,1485,1571 cover Accepted/Processing after completion
+through one child, Failed/different completion conflicts, retry exhaustion
+with preserved completion, later successful retry, and malformed/nonretryable
+controls. No other production file changed.
+
+Boundary-probe: late nonterminal is ignored; failed/different completion is
+rejected; retryable refusal recovers, malformed/nonretryable refusal fails.
+Effect-trace: avoid permanently losing a valid document to an old poll or
+retryable refusal | atomic status owner and typed HTTP policy | failing-before
+cases now pass through actual retrieval/child admission.
+
+DONE for these runtime corrections locally. NOT DONE for merge until new-head
+review and required CI. Prior corpus receipts keep their original commit;
+this follow-up claims the focused production-coordinator evidence above.
+
+## Contract correction: retrieval failure phase ownership
+
+The outer v3 coordinator reloads the handoff after InvalidOutput. Its current
+exclusion list lets a stale retrieval failure terminalize output_ready, even
+when another coordinator has verified and atomically saved the pair.
+
+Only prepared, submission_uncertain and running are owned by remote submission
+and retrieval. The outer failure handler must explicitly allow only those
+phases, retaining the existing phase compare-and-set so a concurrent advance
+after the read also wins. Once output_ready is durable, retrieval cannot fail
+it or any later phase. Cancellation keeps its separate existing ownership.
+No new phases, schema, retries, protocol or provider changes.
+
+Regression: interleave two coordinators through the existing transport seam
+and separate SQLite connections. The winning retrieval verifies and stores
+the pair; the losing output GET returns nonretryable OUTPUT_UNAVAILABLE.
+The wrapper must preserve output_ready and both exact bytes, then recovery
+admits one child without another request. Retain the malformed-status and
+nonretryable-error controls that fail before a pair exists. Run this probe
+failing first, adjacent consumer tests, formatting and clippy.
+
+### Retrieval phase ownership evidence
+
+The fail-first stale_retrieval_failure_preserves_verified_pair_and_one_child
+probe failed with actual phase failed, expected output_ready, after the peer
+completed verified retrieval and the losing GET returned a validated
+OUTPUT_UNAVAILABLE. The final adjacent consumer suite passed 36, with 2
+opt-in ignores (16.58s). Formatting and diff checks passed.
+
+Cold diff: ocr_consumer.rs:454-456 now explicitly admits only prepared,
+submission_uncertain and running to the outer InvalidOutput failure handler.
+The existing db.rs:506-508 phase-conditioned UPDATE also prevents a subsequent
+advance from being overwritten. The desktop finalizer at desktop.rs:652-656
+already leaves nonfailed OCR handoffs resumable; it needs no change.
+
+Boundary-probe: a genuine invalid response before verified storage still
+fails in the existing malformed-status/nonretryable-error cases; the new
+deterministic interleaving uses separate connections and actual HTTP, retains
+the exact pair, and resumes twice into the same single lineage with its HTTP
+server stopped. Cancellation retains its separate existing phase policy.
+Effect-trace: stale retrieval cannot discard a verified pair | explicit
+retrieval phase ownership plus existing compare-and-set | fail-first case
+now preserves output_ready and reaches one child.
+
+DONE locally for this runtime correction; NOT DONE for merge until new-head
+CI and independent review. No additional hardening is included.

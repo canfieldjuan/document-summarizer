@@ -186,6 +186,7 @@ fn synthesize(
     ensure_claim_catalog_is_verifiable(&claims, &evidence, claim_budget)?;
     let summary_text = render_cited_summary(&claims, analyzed)?;
     let synthesized = SynthesizedDocument {
+        contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: HIERARCHICAL_SYNTHESIS_VERSION.to_string(),
         runtime_id: runtime.runtime_id().to_string(),

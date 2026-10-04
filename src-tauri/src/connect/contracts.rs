@@ -241,14 +241,15 @@ impl AppManifest {
 
 impl JobRequest {
     pub fn validate(&self, max_input_bytes: u64) -> Result<(), JobError> {
-        self.validate_input(max_input_bytes, false, true)
+        self.validate_input(max_input_bytes, false, true, &[INPUT_MEDIA_TYPE])
     }
 
     pub(crate) fn validate_v2_input_descriptor(
         &self,
         max_input_bytes: u64,
+        accepted_media_types: &[&str],
     ) -> Result<(), JobError> {
-        self.validate_input(max_input_bytes, true, false)
+        self.validate_input(max_input_bytes, true, false, accepted_media_types)
     }
 
     fn validate_input(
@@ -256,6 +257,7 @@ impl JobRequest {
         max_input_bytes: u64,
         allow_empty_input: bool,
         require_pdf_extension: bool,
+        accepted_media_types: &[&str],
     ) -> Result<(), JobError> {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(job_error(
@@ -287,7 +289,7 @@ impl JobRequest {
         }
         let input = &self.inputs[0];
         if !valid_uuid_v4(&input.artifact_id)
-            || input.media_type != INPUT_MEDIA_TYPE
+            || !accepted_media_types.contains(&input.media_type.as_str())
             || (!allow_empty_input && input.byte_size == 0)
             || input.byte_size > max_input_bytes
             || !valid_sha256(&input.sha256)
@@ -582,6 +584,7 @@ mod tests {
     fn summary_output_enforces_both_valid_and_oversized_boundaries() {
         let request = valid_request();
         let mut summary = SummaryArtifact {
+            contract_extraction: None,
             document_id: Uuid::new_v4().to_string(),
             summary_version: "1.0.0".to_string(),
             text: "Grounded summary.".to_string(),
@@ -609,6 +612,7 @@ mod tests {
     fn summary_text_limit_is_utf8_bytes_and_never_splits_a_scalar() {
         let request = valid_request();
         let mut summary = SummaryArtifact {
+            contract_extraction: None,
             document_id: Uuid::new_v4().to_string(),
             summary_version: "5.0.0".to_string(),
             text: "😀".repeat(MAX_SUMMARY_TEXT_BYTES / 4),
@@ -654,6 +658,7 @@ mod tests {
         let request = valid_request();
         let lines = vec!["\"".repeat(524_280), "\"".repeat(524_280)];
         let summary = SummaryArtifact {
+            contract_extraction: None,
             document_id: Uuid::new_v4().to_string(),
             summary_version: "5.0.0".to_string(),
             text: lines.join("\n\n"),
