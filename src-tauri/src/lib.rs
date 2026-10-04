@@ -567,7 +567,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 Err(error) => {
                     eprintln!("Connect provider unavailable; standalone mode continues: {error}");
-                    #[cfg(any(target_os = "linux", windows))]
+                    #[cfg(any(unix, windows))]
                     match connect::provider::reconcile_standalone_state_if_unowned(
                         &db_path,
                         &app_data_dir,

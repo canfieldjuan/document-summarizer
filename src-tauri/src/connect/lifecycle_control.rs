@@ -269,11 +269,17 @@ impl TransitionStore {
     ) -> Result<(), LifecycleControlError> {
         let _control = self.control_lock()?;
         let mut transition = match self.current()? {
-            Some(existing) => {
+            Some(mut existing) => {
                 validate_transition(&existing, state_path)?;
                 if requested.is_some_and(|kind| kind != existing.kind) {
                     return Err(LifecycleControlError::ConflictingTransition);
                 }
+                // The record owns the transition identity, not the lifetime of a
+                // later recovery attempt. Renew once, under the control lock,
+                // and persist before any effect can use the attempt's budget.
+                existing.set_attempt_deadlines(unix_ms()?);
+                self.persist_exact(&existing)?;
+                probe.after_persist(&existing)?;
                 existing
             }
             None => {
@@ -428,7 +434,7 @@ fn new_transition(
         .map_err(|_| LifecycleControlError::Storage)?;
     let metadata = fs::metadata(&state_path).map_err(|_| LifecycleControlError::Storage)?;
     let created_unix_ms = unix_ms()?;
-    Ok(BackgroundTransition {
+    let mut transition = BackgroundTransition {
         format_version: FORMAT_VERSION,
         package_id: PACKAGE_ID.to_string(),
         package_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -446,10 +452,20 @@ fn new_transition(
         },
         expected_v2_instance_id,
         created_unix_ms,
-        graceful_deadline_unix_ms: created_unix_ms.saturating_add(35_000),
-        force_deadline_unix_ms: created_unix_ms.saturating_add(40_000),
-        control_deadline_unix_ms: created_unix_ms.saturating_add(45_000),
-    })
+        graceful_deadline_unix_ms: 0,
+        force_deadline_unix_ms: 0,
+        control_deadline_unix_ms: 0,
+    };
+    transition.set_attempt_deadlines(created_unix_ms);
+    Ok(transition)
+}
+
+impl BackgroundTransition {
+    fn set_attempt_deadlines(&mut self, started_unix_ms: u64) {
+        self.graceful_deadline_unix_ms = started_unix_ms.saturating_add(35_000);
+        self.force_deadline_unix_ms = started_unix_ms.saturating_add(40_000);
+        self.control_deadline_unix_ms = started_unix_ms.saturating_add(45_000);
+    }
 }
 
 fn validate_transition(
@@ -1130,6 +1146,8 @@ mod tests {
         enabled: bool,
         ready: bool,
         calls: Arc<Mutex<Vec<&'static str>>>,
+        cleanup_paths: Option<(PathBuf, PathBuf)>,
+        observed: Vec<BackgroundTransition>,
     }
 
     impl TransitionEffects for MockEffects {
@@ -1139,9 +1157,18 @@ mod tests {
 
         fn stop_publishers(
             &mut self,
-            _transition: &BackgroundTransition,
+            transition: &BackgroundTransition,
         ) -> Result<(), LifecycleControlError> {
             self.calls.lock().unwrap().push("stop");
+            self.observed.push(transition.clone());
+            if let Some((app_data, runtime)) = &self.cleanup_paths {
+                crate::connect::provider::stop_and_cleanup_registered_provider(
+                    app_data,
+                    runtime,
+                    instant_for_unix_deadline(transition.control_deadline_unix_ms)?,
+                )
+                .map_err(|_| LifecycleControlError::Manager)?;
+            }
             Ok(())
         }
 
@@ -1156,9 +1183,10 @@ mod tests {
 
         fn wait_until_ready(
             &mut self,
-            _transition: &BackgroundTransition,
+            transition: &BackgroundTransition,
         ) -> Result<(), LifecycleControlError> {
             self.calls.lock().unwrap().push("ready");
+            self.observed.push(transition.clone());
             self.ready
                 .then_some(())
                 .ok_or(LifecycleControlError::Readiness)
@@ -1206,6 +1234,124 @@ mod tests {
             self.remaining -= 1;
             Ok(())
         }
+    }
+
+    #[test]
+    fn expired_transition_recovery_uses_fresh_bounded_attempt_deadlines() {
+        for deadline in [0, 1, u64::MAX] {
+            for (kind, phase, disposition) in [
+                (
+                    TransitionKind::Enable,
+                    TransitionPhase::IntentRecorded,
+                    TransitionDisposition::Forward,
+                ),
+                (
+                    TransitionKind::Disable,
+                    TransitionPhase::IntentRecorded,
+                    TransitionDisposition::Forward,
+                ),
+                (
+                    TransitionKind::Enable,
+                    TransitionPhase::ManagerEnabled,
+                    TransitionDisposition::Forward,
+                ),
+                (
+                    TransitionKind::Enable,
+                    TransitionPhase::ManagerEnabled,
+                    TransitionDisposition::Rollback,
+                ),
+            ] {
+                let root = TestDirectory::new("doc-sum-expired-transition");
+                let state = root.0.join("state");
+                let runtime = root.0.join("runtime");
+                fs::create_dir(&state).unwrap();
+                fs::create_dir(&runtime).unwrap();
+                let store = TransitionStore::new(root.0.join("control")).unwrap();
+                let mut original = new_transition(kind, false, &state, None).unwrap();
+                original.phase = phase;
+                original.disposition = disposition;
+                original.graceful_deadline_unix_ms = deadline;
+                original.force_deadline_unix_ms = deadline;
+                original.control_deadline_unix_ms = deadline;
+                store.persist_new(&original).unwrap();
+                let mut effects = MockEffects {
+                    enabled: kind == TransitionKind::Disable
+                        || phase == TransitionPhase::ManagerEnabled,
+                    ready: true,
+                    cleanup_paths: Some((state.clone(), runtime)),
+                    ..MockEffects::default()
+                };
+                let started = unix_ms().unwrap();
+                let result = store.run(None, &state, None, &mut effects);
+                if disposition == TransitionDisposition::Rollback {
+                    assert!(
+                        matches!(result, Err(LifecycleControlError::Readiness)),
+                        "{result:?}"
+                    );
+                } else {
+                    result.expect("recovery must not reuse the expired control deadline");
+                }
+                let finished = unix_ms().unwrap();
+                assert!(!effects.observed.is_empty());
+                for observed in &effects.observed {
+                    assert_eq!(observed.generation, original.generation);
+                    assert_eq!(observed.state, original.state);
+                    assert_eq!(observed.created_unix_ms, original.created_unix_ms);
+                    assert!((started + 35_000..=finished + 35_000)
+                        .contains(&observed.graceful_deadline_unix_ms));
+                    assert_eq!(
+                        observed.force_deadline_unix_ms,
+                        observed.graceful_deadline_unix_ms + 5_000
+                    );
+                    assert_eq!(
+                        observed.control_deadline_unix_ms,
+                        observed.force_deadline_unix_ms + 5_000
+                    );
+                }
+                assert!(store.current().unwrap().is_none());
+                assert!(store.enter_job_admission().is_ok());
+                assert_eq!(
+                    effects.enabled,
+                    kind == TransitionKind::Enable && disposition == TransitionDisposition::Forward
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_persists_attempt_budget_before_effects_without_replacing_identity() {
+        let root = TestDirectory::new("doc-sum-recovery-budget-persist");
+        let state = root.0.join("state");
+        fs::create_dir(&state).unwrap();
+        let store = TransitionStore::new(root.0.join("control")).unwrap();
+        let mut original = new_transition(TransitionKind::Enable, false, &state, None).unwrap();
+        original.graceful_deadline_unix_ms = 0;
+        original.force_deadline_unix_ms = 0;
+        original.control_deadline_unix_ms = 0;
+        store.persist_new(&original).unwrap();
+        let mut effects = MockEffects::default();
+        let result = store.run_with_probe(
+            None,
+            &state,
+            None,
+            &mut effects,
+            &mut CrashAfter { remaining: 0 },
+        );
+        assert!(matches!(result, Err(LifecycleControlError::Interrupted)));
+        assert!(effects.calls.lock().unwrap().is_empty());
+        let current = store.current().unwrap().unwrap();
+        let mut expected = original;
+        expected.graceful_deadline_unix_ms = current.graceful_deadline_unix_ms;
+        expected.force_deadline_unix_ms = current.force_deadline_unix_ms;
+        expected.control_deadline_unix_ms = current.control_deadline_unix_ms;
+        assert_eq!(current, expected);
+        assert!(current.graceful_deadline_unix_ms > unix_ms().unwrap());
+        assert!(store.enter_job_admission().is_err());
+        assert!(matches!(
+            store.run(Some(TransitionKind::Disable), &state, None, &mut effects),
+            Err(LifecycleControlError::ConflictingTransition)
+        ));
+        assert_eq!(store.current().unwrap().unwrap(), current);
     }
 
     #[test]
