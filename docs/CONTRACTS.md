@@ -2110,15 +2110,21 @@ the record blocks job creation through commit while a transition is incomplete.
 Each explicit recovery attempt refreshes the 35/40/45-second transition deadlines
 once under the control lock and persists them before effects. It preserves the
 generation, creation time, phase, disposition, prior choice, and state identity;
-an expired earlier attempt does not permanently prevent recovery. Effects within
-one attempt share that budget rather than extending it as they run.
+an expired earlier attempt does not permanently prevent recovery. Provider
+cleanup and readiness consume those attempt deadlines. Each systemd command
+has its own ten-second timeout; the code does not enforce one total budget
+across all manager commands.
 The controller atomically writes an owner-only launch receipt and environment
 file at the fixed, non-XDG-dependent
 `$HOME/.local/state/document-summarizer/` path before systemd start. The unit
 loads that exact file. The child validates its owner, mode, link count,
 generation, byte-exact environment content, XDG configuration, data, and
-runtime paths, plus the opened application-data, lifecycle-control, and runtime
-directory identities before provider startup. The existing transition checks
+runtime paths, plus the application-data and lifecycle-control directory
+identities before provider startup. A changed runtime directory identity may
+be renewed under the control lock only when the other receipt fields and exact
+environment bytes still match, logind and the user manager both attest the same
+runtime path, and its private owner and identity remain stable through those
+queries. Renewal changes only the ephemeral runtime identity. The existing transition checks
 still revalidate the admitted generation immediately before each registration
 publication.
 
@@ -2205,18 +2211,29 @@ fresh process credentials.
 Debian maintainer scripts call the app-owned `--connect-package` controller.
 The production package authority is the fixed root-owned
 `/var/lib/document-summarizer` tree and cannot be redirected by an environment
-variable. Provider startup and each final artifact promotion plus accepted-job
-commit hold its shared lock. Authenticated multipart bodies stream into a
+variable. Startup captures whether the running executable belongs to the
+installed package, including a hard-link alias or deleted installed pathname.
+That decision is retained for job admission. Unbundled foreground executables
+do not create or require Debian package authority. Package-owned provider
+startup and each final artifact promotion plus accepted-job commit hold its
+shared lock; missing or unsafe installed-package state fails closed.
+Authenticated multipart bodies stream into a
 private bounded staging file without package or per-user authority; cancellation
 and the absolute request timeout remove that file. The controller first holds a
 separate quiesce authority, persists a generation-bound SHA-256 intent, and
 stops all recorded publishers. It then waits for the package lock exclusively
 before package mutation and takes recorded per-user control and admission locks
-in ascending UID order. Enable and disable record an
+in ascending UID order. Packaged foreground and ordinary background startup
+record their participant before registration publication, while package and
+per-user admission are held. This includes users who never invoke background
+controls. A successor inside an explicit enable transition uses that controller's
+acknowledgement. Enable and disable record an
 owner-authenticated 0600 participant acknowledgement before manager mutation
 and update it after settlement while the per-user barrier is still held. That acknowledgement carries the exact runtime,
 application data, lifecycle control, and systemd enablement paths, so package
-discovery does not enumerate `/etc/passwd` or guess XDG locations.
+discovery does not enumerate `/etc/passwd` or guess XDG locations. Public package
+records and removal/install receipts establish mode 0644 before atomic
+publication, independently of the controller's process umask.
 
 Upgrade, removal, and reinstall suppress every recorded manager, stop and clean
 each exact provider, and keep the package record as an admission barrier while
