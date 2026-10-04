@@ -1157,6 +1157,24 @@ fn purge_participant_uid(name: &str) -> Option<u32> {
     (parsed.to_string() == uid).then_some(parsed)
 }
 
+fn authenticated_participant_entry(
+    entry: &fs::DirEntry,
+    include_temporary: bool,
+) -> Option<(u32, fs::Metadata)> {
+    let name = entry.file_name();
+    let name = name.to_str()?;
+    if !include_temporary && !name.ends_with(".json") {
+        return None;
+    }
+    let uid = purge_participant_uid(name)?;
+    let metadata = fs::symlink_metadata(entry.path()).ok()?;
+    (metadata.file_type().is_file()
+        && metadata.uid() == uid
+        && metadata.nlink() == 1
+        && metadata.mode() & 0o7777 == 0o600)
+        .then_some((uid, metadata))
+}
+
 fn purge_settled_state(
     store: &PackageStore,
     record: Option<&PackageRecord>,
@@ -1175,12 +1193,9 @@ fn purge_settled_state(
     let mut acknowledgements = Vec::new();
     for entry in fs::read_dir(&participants).map_err(|_| PackageControlError::Storage)? {
         let entry = entry.map_err(|_| PackageControlError::Storage)?;
-        let name = entry.file_name();
-        let uid = name
-            .to_str()
-            .and_then(purge_participant_uid)
-            .ok_or(PackageControlError::Conflict)?;
-        validate_purge_file(&entry.path(), uid, 0o600)?;
+        if authenticated_participant_entry(&entry, true).is_none() {
+            continue;
+        }
         acknowledgements.push(entry.path());
     }
     let mut receipts = Vec::new();
@@ -1844,14 +1859,8 @@ fn cleanup_participant_temporaries(directory: &Path, uid: u32) -> Result<(), Pac
         if !name.starts_with(&prefix) || !name.ends_with(".tmp") {
             continue;
         }
-        let metadata =
-            fs::symlink_metadata(entry.path()).map_err(|_| PackageControlError::Storage)?;
-        if !metadata.file_type().is_file()
-            || metadata.uid() != uid
-            || metadata.nlink() != 1
-            || metadata.mode() & 0o777 != 0o600
-        {
-            return Err(PackageControlError::Conflict);
+        if authenticated_participant_entry(&entry, true).is_none() {
+            continue;
         }
         fs::remove_file(entry.path()).map_err(|_| PackageControlError::Storage)?;
     }
@@ -2250,23 +2259,18 @@ impl PackageEffects for SystemEffects {
         }
         for entry in fs::read_dir(directory).map_err(|_| PackageControlError::Storage)? {
             let entry = entry.map_err(|_| PackageControlError::Storage)?;
-            let name = entry.file_name();
-            let name = name.to_str().ok_or(PackageControlError::Conflict)?;
-            let uid = name
-                .strip_suffix(".json")
-                .and_then(|value| value.parse::<u32>().ok())
-                .ok_or(PackageControlError::Conflict)?;
-            let metadata =
-                fs::symlink_metadata(entry.path()).map_err(|_| PackageControlError::Storage)?;
-            if !metadata.file_type().is_file()
-                || metadata.uid() != uid
-                || metadata.nlink() != 1
-                || metadata.mode() & 0o777 != 0o600
-            {
-                return Err(PackageControlError::Conflict);
+            let Some((uid, metadata)) = authenticated_participant_entry(&entry, false) else {
+                continue;
+            };
+            // The shared directory is an inbox, not trusted package state. A
+            // rejected submission has no authority over other participants.
+            let Ok(acknowledgement) = read_participant_acknowledgement(&entry.path(), &metadata)
+            else {
+                continue;
+            };
+            if validate_participant_acknowledgement(&acknowledgement, uid).is_err() {
+                continue;
             }
-            let acknowledgement = read_participant_acknowledgement(&entry.path(), &metadata)?;
-            validate_participant_acknowledgement(&acknowledgement, uid)?;
             validate_acknowledged_directories(&acknowledgement)?;
             let runtime_present = Path::new(&acknowledgement.runtime_root).is_dir();
             if Path::new(&acknowledgement.control_root)
@@ -2855,7 +2859,7 @@ fn read_participant_acknowledgement(
     let mut options = OpenOptions::new();
     options
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     let file = options
         .open(path)
         .map_err(|_| PackageControlError::Storage)?;
@@ -3604,6 +3608,14 @@ mod tests {
         let mut effects = SystemEffects {
             package_root: root.clone(),
         };
+        let inbox = root.join(PARTICIPANTS_DIRECTORY);
+        // This public inbox also contains untrusted files and in-flight writes.
+        fs::write(inbox.join("junk"), b"{}").unwrap();
+        fs::write(inbox.join(format!("0{uid}.json")), b"{}").unwrap();
+        fs::write(inbox.join(format!("{}.json", uid + 1)), b"{}").unwrap();
+        fs::write(inbox.join(format!(".{uid}.interrupted.tmp")), b"partial").unwrap();
+        fs::create_dir(inbox.join("directory")).unwrap();
+        std::os::unix::fs::symlink(&path, inbox.join("linked.json")).unwrap();
         let participants = effects.discover().unwrap();
         assert_eq!(participants.len(), 1);
         assert_eq!(participants[0].runtime_root, runtime.to_string_lossy());
@@ -3619,6 +3631,69 @@ mod tests {
         ));
         drop(store);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unauthenticated_participant_record_is_not_a_package_participant() {
+        let (_store, root) = store("doc-sum-untrusted-participant");
+        let path = root
+            .join(PARTICIPANTS_DIRECTORY)
+            .join(format!("{}.json", unsafe { libc::geteuid() }));
+        let mut effects = SystemEffects {
+            package_root: root.clone(),
+        };
+        for bytes in [b"".as_slice(), b"{", b"{}", b"null"] {
+            fs::write(&path, bytes).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(effects.discover().unwrap().is_empty());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn participant_temporary_cleanup_preserves_untrusted_entries() {
+        let (_store, root) = store("doc-sum-participant-temporaries");
+        let directory = root.join(PARTICIPANTS_DIRECTORY);
+        let uid = unsafe { libc::geteuid() };
+        let valid = directory.join(format!(".{uid}.{}.tmp", Uuid::new_v4()));
+        fs::write(&valid, b"partial").unwrap();
+        fs::set_permissions(&valid, fs::Permissions::from_mode(0o600)).unwrap();
+        let invalid = directory.join(format!(".{uid}.{}.tmp", Uuid::new_v4()));
+        std::os::unix::fs::symlink(&valid, &invalid).unwrap();
+        cleanup_participant_temporaries(&directory, uid).unwrap();
+        assert!(!valid.exists());
+        assert!(fs::symlink_metadata(&invalid)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn participant_read_cannot_block_on_a_replaced_fifo() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("candidate");
+        fs::write(&path, b"{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = fs::metadata(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let cpath = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+        let candidate = path.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            tx.send(read_participant_acknowledgement(&candidate, &expected).is_err())
+                .unwrap();
+        });
+        let result = rx.recv_timeout(Duration::from_secs(1));
+        // Release a regressed blocking open so failure never leaks a test thread.
+        let _release = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        reader.join().unwrap();
+        assert!(result.unwrap());
     }
 
     #[test]
@@ -4285,7 +4360,7 @@ mod tests {
     }
 
     #[test]
-    fn purge_rejects_unsafe_mixed_state_before_deleting_choices() {
+    fn purge_ignores_untrusted_inbox_entries_but_rejects_unknown_root_state() {
         for invalid in [
             "symlink",
             "hardlink",
@@ -4325,19 +4400,25 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert!(
-                finish_purge(&store, "0.1.0", &mut effects).is_err(),
-                "{invalid}"
-            );
-            assert!(store.removal_receipt_path().exists(), "{invalid}");
-            assert!(store.install_receipt_path().exists(), "{invalid}");
+            let result = finish_purge(&store, "0.1.0", &mut effects);
+            if invalid == "unknown" {
+                assert!(result.is_err());
+                assert!(store.removal_receipt_path().exists());
+                assert!(store.install_receipt_path().exists());
+            } else {
+                result.unwrap();
+                assert!(!store.removal_receipt_path().exists());
+                assert!(!store.install_receipt_path().exists());
+                assert_eq!(
+                    fs::read_dir(root.join(PARTICIPANTS_DIRECTORY))
+                        .unwrap()
+                        .count(),
+                    1
+                );
+                // An untrusted entry also cannot block an idempotent purge retry.
+                finish_purge(&store, "0.1.0", &mut effects).unwrap();
+            }
             assert_eq!(fs::read(&sentinel).unwrap(), b"must remain");
-            assert_eq!(
-                fs::read_dir(root.join(PARTICIPANTS_DIRECTORY))
-                    .unwrap()
-                    .count(),
-                2
-            );
             fs::remove_dir_all(root).unwrap();
         }
     }

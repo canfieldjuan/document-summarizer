@@ -545,6 +545,142 @@ fn preinst_quiesces_live_legacy_owner_without_executing_it() {
     assert_eq!(std::fs::read(bootstrap).unwrap(), first_bootstrap);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn preinst_signals_pinned_process_instead_of_recycled_numeric_identity() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let installed = root.path().join("document-summarizer");
+    std::fs::copy("/bin/sleep", &installed).unwrap();
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut legacy = Command::new(&installed).arg("30").spawn().unwrap();
+    let mut unrelated = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let normal = preinst_for_test(
+        &root.path().join("package"),
+        &installed,
+        &root.path().join("runtime"),
+    );
+    // Model the kernel's numeric PID lookup after the checked process exits.
+    // The numeric-signal double maps its recycled slot to a real unrelated child.
+    // Descriptor signaling never consults this recycled numeric slot.
+    let numeric_signal_lookup = format!(
+        r#"
+  kill() {{
+    if [ "$2" = "{}" ]; then
+      /bin/kill -KILL "$2" 2>/dev/null || true
+      /bin/kill "$1" "{}"
+    else
+      /bin/kill "$@"
+    fi
+  }}
+"#,
+        legacy.id(),
+        unrelated.id()
+    );
+    let script = root.path().join("preinst");
+    std::fs::write(
+        &script,
+        normal.replace(
+            "  terminate_legacy_processes() {",
+            &format!("{numeric_signal_lookup}  terminate_legacy_processes() {{"),
+        ),
+    )
+    .unwrap();
+    let status = Command::new("sh")
+        .arg(&script)
+        .args(["upgrade", "0.0.9"])
+        .status()
+        .unwrap();
+    let foreign_status = unrelated.try_wait().unwrap();
+    let _ = legacy.kill();
+    legacy.wait().unwrap();
+    let _ = unrelated.kill();
+    unrelated.wait().unwrap();
+    eprintln!("upgrade={status} unrelated_exit={foreign_status:?}");
+    assert!(status.success());
+    assert!(
+        foreign_status.is_none(),
+        "numeric PID reuse signaled an unrelated process"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn preinst_handles_exit_after_capture_and_escalates_on_the_same_process_handle() {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    for exited_after_capture in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("document-summarizer");
+        std::fs::copy("/bin/sleep", &installed).unwrap();
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = Command::new(&installed);
+        command.arg("30");
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let mut normal = preinst_for_test(
+            &root.path().join("package"),
+            &installed,
+            &root.path().join("runtime"),
+        );
+        if exited_after_capture {
+            let marker = "# bootstrap-process-handles-captured";
+            assert_eq!(normal.matches(marker).count(), 1);
+            normal = normal.replace(
+                marker,
+                "signal_process($_, SIGKILL) for @handles;\nselect(undef, undef, undef, 0.1);",
+            );
+        }
+        let script = root.path().join("preinst");
+        std::fs::write(&script, normal).unwrap();
+        let status = Command::new("sh")
+            .arg(&script)
+            .args(["upgrade", "0.0.9"])
+            .status()
+            .unwrap();
+        let stopped = child.try_wait().unwrap().is_some();
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(
+            status.success(),
+            "exit after capture: {exited_after_capture}"
+        );
+        assert!(stopped);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn preinst_rejects_unavailable_process_handles_before_package_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let package = root.path().join("package");
+    let script = root.path().join("preinst");
+    let normal = preinst_for_test(
+        &package,
+        &root.path().join("binary"),
+        &root.path().join("runtime"),
+    );
+    let probe = "my $machine = (uname())[4];";
+    assert_eq!(normal.matches(probe).count(), 1);
+    std::fs::write(
+        &script,
+        normal.replace(probe, "my $machine = 'unsupported';"),
+    )
+    .unwrap();
+    let output = Command::new("sh")
+        .arg(script)
+        .args(["upgrade", "0.0.9"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported pidfd ABI"));
+    assert!(!package.exists());
+}
+
 #[test]
 fn authenticated_request_body_is_consumed_before_lifecycle_admission() {
     let provider = include_str!("../src/connect/provider.rs");

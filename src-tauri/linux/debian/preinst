@@ -124,11 +124,6 @@ if [ "${1:-}" = "upgrade" ]; then
     trap - EXIT HUP INT TERM
     validate_wrapper
   }
-  process_is_legacy() {
-    process_pid=$1
-    [ -d "/proc/$process_pid" ] || return 1
-    [ "$(stat -Lc '%d:%i' "/proc/$process_pid/exe" 2>/dev/null)" = "$legacy_device:$legacy_inode" ]
-  }
   validate_registrations() {
     registration_action=$1
     for runtime_root in "$runtime_base"/[0-9]*; do
@@ -171,42 +166,88 @@ if [ "${1:-}" = "upgrade" ]; then
       done
     done
   }
-  terminate_legacy_processes() {
-    legacy_pids=
-    for process_root in /proc/[0-9]*; do
-      process_pid=${process_root##*/}
-      if process_is_legacy "$process_pid"; then
-        legacy_pids="$legacy_pids $process_pid"
-      fi
-    done
-    for process_pid in $legacy_pids; do
-      process_is_legacy "$process_pid" && kill -TERM "$process_pid" 2>/dev/null || true
-    done
-    remaining=50
-    while [ "$remaining" -gt 0 ]; do
-      legacy_live=false
-      for process_pid in $legacy_pids; do
-        process_is_legacy "$process_pid" && legacy_live=true
-      done
-      [ "$legacy_live" = false ] && break
-      sleep 0.1
-      remaining=$((remaining - 1))
-    done
-    for process_pid in $legacy_pids; do
-      process_is_legacy "$process_pid" && kill -KILL "$process_pid" 2>/dev/null || true
-    done
-    remaining=50
-    while [ "$remaining" -gt 0 ]; do
-      legacy_live=false
-      for process_pid in $legacy_pids; do
-        process_is_legacy "$process_pid" && legacy_live=true
-      done
-      [ "$legacy_live" = false ] && return 0
-      sleep 0.1
-      remaining=$((remaining - 1))
-    done
-    return 1
+  legacy_process_handles() {
+    # perl-base is Essential on Debian. Taint mode excludes injected Perl paths
+    # and startup options; this helper never executes an input-derived program.
+    /usr/bin/perl -T - "$1" "$2" "$3" <<'PERL'
+use strict;
+use warnings;
+use POSIX qw(uname close SIGTERM SIGKILL);
+my ($mode, $device, $inode) = @ARGV;
+$device =~ /\A([0-9]+)\z/ or die "invalid device\n";
+$device = 0 + $1;
+$inode =~ /\A([0-9]+)\z/ or die "invalid inode\n";
+$inode = 0 + $1;
+# Linux x86-64 and asm-generic arm64 ABI numbers. Reject other ABIs before
+# package mutation; never fall back to a numeric kill when pidfd is unavailable.
+my $machine = (uname())[4];
+$machine =~ /\A(?:x86_64|aarch64)\z/ && length(pack("J", 0)) == 8
+    or die "unsupported pidfd ABI\n";
+sub open_process {
+    my ($pid) = @_;
+    my $fd = syscall(434, 0 + $pid, 0); # pidfd_open
+    return undef if $fd < 0 && $!{ESRCH};
+    $fd >= 0 or die "pidfd_open: $!\n";
+    return $fd;
+}
+sub signal_process {
+    my ($fd, $signal) = @_;
+    my $result = syscall(424, 0 + $fd, 0 + $signal, 0, 0); # pidfd_send_signal
+    $result == 0 || $!{ESRCH} or die "pidfd_send_signal: $!\n";
+}
+if ($mode eq "probe") {
+    my $fd = open_process(0 + $$);
+    defined($fd) or die "missing current process\n";
+    signal_process($fd, 0);
+    close($fd);
+    exit 0;
+}
+$mode eq "terminate" or die "invalid operation\n";
+opendir(my $proc, "/proc") or die "open proc: $!\n";
+my @handles;
+while (my $entry = readdir($proc)) {
+    $entry =~ /\A([1-9][0-9]*)\z/ or next;
+    my $pid = 0 + $1;
+    my @candidate = stat("/proc/$pid/exe");
+    next unless @candidate && $candidate[0] == $device && $candidate[1] == $inode;
+    my $fd = open_process($pid);
+    next unless defined($fd);
+    # Pin first, then authenticate. A later recycled PID cannot redirect this fd.
+    my @identity = stat("/proc/$pid/exe");
+    if (@identity && $identity[0] == $device && $identity[1] == $inode) {
+        push @handles, $fd;
+    } else {
+        close($fd);
+    }
+}
+closedir($proc);
+# bootstrap-process-handles-captured
+my @live = @handles;
+sub wait_for_exit {
+    for (1..50) {
+        return 1 unless @live;
+        my $readable = "";
+        vec($readable, $_, 1) = 1 for @live;
+        my $ready = select($readable, undef, undef, 0.1);
+        next if $ready < 0 && $!{EINTR};
+        $ready >= 0 or die "pidfd wait: $!\n";
+        @live = grep { !vec($readable, $_, 1) } @live;
+    }
+    return !@live;
+}
+signal_process($_, SIGTERM) for @live;
+unless (wait_for_exit()) {
+    signal_process($_, SIGKILL) for @live;
+    wait_for_exit() or die "legacy process did not exit\n";
+}
+close($_) for @handles;
+PERL
   }
+  terminate_legacy_processes() {
+    legacy_process_handles terminate "$legacy_device" "$legacy_inode"
+  }
+
+  legacy_process_handles probe 0 0 || bootstrap_fail
 
   if [ -e "$package_root" ] || [ -L "$package_root" ]; then
     [ ! -L "$package_root" ] && [ -d "$package_root" ] || bootstrap_fail

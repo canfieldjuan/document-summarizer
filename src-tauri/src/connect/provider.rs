@@ -19,7 +19,7 @@ use crate::pipeline::contracts::{
 };
 #[cfg(test)]
 use crate::pipeline::contracts::{ModelProfileSnapshot, ModelStageProfileSnapshot};
-use crate::pipeline::control::CancellationToken;
+use crate::pipeline::control::{CancellationToken, ExecutionControl};
 use crate::pipeline::db;
 #[cfg(test)]
 use crate::pipeline::ingest::prepare_pdf_ingestion;
@@ -306,6 +306,7 @@ struct ProviderState {
     max_input_bytes: u64,
     runtime_factory: RuntimeFactory,
     entitlement: EntitlementGate,
+    admission_slot: Arc<tokio::sync::Semaphore>,
     workers: ProviderWorkerOwner,
     admission_authority: Arc<ProviderAdmissionAuthority>,
     #[cfg(target_os = "linux")]
@@ -842,6 +843,7 @@ impl ConnectProvider {
             max_input_bytes,
             runtime_factory,
             entitlement,
+            admission_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             workers: workers.clone(),
             admission_authority: Arc::clone(&admission_authority),
             #[cfg(target_os = "linux")]
@@ -1596,18 +1598,69 @@ async fn create_job_for_request(
             true,
         ));
     }
-    tokio::time::timeout(CONNECT_JOB_REQUEST_TIMEOUT, async {
+    let deadline = Instant::now() + CONNECT_JOB_REQUEST_TIMEOUT;
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
         let multipart = Multipart::from_request(request, &state)
             .await
             .map_err(ProviderHttpError::multipart)?;
-        create_job_for(version, state, multipart).await
+        create_job_for(version, state, multipart, deadline).await
     })
     .await
-    .map_err(|_| {
+    .map_err(|_| request_timeout_error())?
+}
+
+fn request_timeout_error() -> ProviderHttpError {
+    ProviderHttpError::new(
+        StatusCode::REQUEST_TIMEOUT,
+        "REQUEST_TIMEOUT",
+        "The provider request could not be admitted within the allowed time.",
+        true,
+    )
+}
+
+async fn admission_work<T: Send + 'static>(
+    state: &ProviderState,
+    deadline: Instant,
+    work: impl FnOnce(&dyn Fn() -> bool) -> Result<T, ProviderHttpError> + Send + 'static,
+) -> Result<T, ProviderHttpError> {
+    // Retain the permit in the worker, including after an HTTP timeout. A cold
+    // runtime cannot accumulate another unbounded initialization on each retry.
+    let permit = state
+        .admission_slot
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| request_timeout_error())?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    state
+        .workers
+        .spawn("connect-admission".to_string(), move |cancellation| {
+            let _permit = permit;
+            let live = || {
+                Instant::now() < deadline
+                    && !sender.is_closed()
+                    && !cancellation.cancellation_requested()
+            };
+            let result = if live() {
+                work(&live)
+            } else {
+                Err(request_timeout_error())
+            };
+            let _ = sender.send(result);
+        })
+        .map_err(|_| {
+            ProviderHttpError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "PROVIDER_WORKER_UNAVAILABLE",
+                "The provider could not start the admission worker.",
+                true,
+            )
+        })?;
+    receiver.await.map_err(|_| {
         ProviderHttpError::new(
-            StatusCode::REQUEST_TIMEOUT,
-            "REQUEST_TIMEOUT",
-            "The provider request body did not arrive within the allowed time.",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PROVIDER_WORKER_UNAVAILABLE",
+            "The provider admission worker stopped.",
             true,
         )
     })?
@@ -1617,6 +1670,7 @@ async fn create_job_for(
     version: WireVersion,
     state: ProviderState,
     mut multipart: Multipart,
+    deadline: Instant,
 ) -> Result<Response, ProviderHttpError> {
     let request_field = multipart
         .next_field()
@@ -1635,13 +1689,15 @@ async fn create_job_for(
     let (request, request_hash, summary_profile) =
         parse_job_request(&request_bytes, version, state.max_input_bytes)?;
 
-    {
-        let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
-        if let Some(existing) =
-            store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
-        {
-            return idempotent_response(existing, &request_hash, version);
-        }
+    let lookup_state = state.clone();
+    let job_id = request.job_id.clone();
+    let existing = admission_work(&state, deadline, move |_| {
+        let conn = db::init_db(&lookup_state.db_path).map_err(ProviderHttpError::store)?;
+        store::get_job(&conn, &job_id).map_err(ProviderHttpError::store)
+    })
+    .await?;
+    if let Some(existing) = existing {
+        return idempotent_response(existing, &request_hash, version);
     }
 
     let artifact_field = multipart
@@ -1661,8 +1717,7 @@ async fn create_job_for(
             "The artifact content type must match its admitted input descriptor.",
         ));
     }
-    let mut pending_import =
-        receive_artifact(&state, &request.job_id, &input, artifact_field).await?;
+    let pending_import = receive_artifact(&state, &request.job_id, &input, artifact_field).await?;
     if multipart
         .next_field()
         .await
@@ -1675,6 +1730,31 @@ async fn create_job_for(
         ));
     }
 
+    let worker_state = state.clone();
+    admission_work(&state, deadline, move |live| {
+        admit_received_job(
+            version,
+            worker_state,
+            request,
+            request_hash,
+            summary_profile,
+            pending_import,
+            live,
+        )
+    })
+    .await
+}
+
+fn admit_received_job(
+    version: WireVersion,
+    state: ProviderState,
+    request: JobRequest,
+    request_hash: String,
+    summary_profile: SummaryProfile,
+    mut pending_import: PendingImport,
+    admission_live: &dyn Fn() -> bool,
+) -> Result<Response, ProviderHttpError> {
+    let input = request.inputs[0].clone();
     let staging_path_text = match pending_import.staging().to_str() {
         Some(path) => path,
         None => {
@@ -1723,9 +1803,7 @@ async fn create_job_for(
                 &request_hash,
                 version,
                 pending_import.staging(),
-            )
-            .await?
-            {
+            )? {
                 return Ok(response);
             }
             return Err(ProviderHttpError::runtime(error));
@@ -1740,9 +1818,7 @@ async fn create_job_for(
                 &request_hash,
                 version,
                 pending_import.staging(),
-            )
-            .await?
-            {
+            )? {
                 return Ok(response);
             }
             return Err(ProviderHttpError::runtime(ModelRuntimeFailure {
@@ -1753,6 +1829,9 @@ async fn create_job_for(
             }));
         }
     };
+    if !admission_live() {
+        return Err(request_timeout_error());
+    }
     let provider_instance_id = match version {
         WireVersion::V1 => &state.instance_id_v1,
         WireVersion::V2 => &state.instance_id_v2,
@@ -1834,12 +1913,15 @@ async fn create_job_for(
         &run,
         summary_profile,
         Some(&profile_snapshot),
-        || state.entitlement.decision().is_active(),
+        || admission_live() && state.entitlement.decision().is_active(),
     );
     drop(_provider_admission);
     let accepted = match accepted_result {
         Ok(Some((_, accepted))) => accepted,
         Ok(None) => {
+            if !admission_live() {
+                return Err(request_timeout_error());
+            }
             return Err(entitlement_required_error());
         }
         Err(error) => {
@@ -1848,9 +1930,7 @@ async fn create_job_for(
                 &request_hash,
                 version,
                 &import_path,
-            )
-            .await?
-            {
+            )? {
                 return Ok(response);
             }
             if store::has_active_job(&conn).map_err(ProviderHttpError::store)? {
@@ -2285,7 +2365,7 @@ fn existing_job_owns_import_path(existing_import_path: &str, candidate: &Path) -
     Path::new(existing_import_path) == candidate
 }
 
-async fn idempotent_response_after_admission_race(
+fn idempotent_response_after_admission_race(
     existing: Result<Option<StoredConnectJob>, ConnectStoreError>,
     request_hash: &str,
     version: WireVersion,
@@ -2294,7 +2374,7 @@ async fn idempotent_response_after_admission_race(
     let existing = match existing {
         Ok(existing) => existing,
         Err(error) => {
-            remove_file_quietly(candidate_import_path).await;
+            let _ = fs::remove_file(candidate_import_path);
             return Err(ProviderHttpError::store(error));
         }
     };
@@ -2302,7 +2382,7 @@ async fn idempotent_response_after_admission_race(
         return Ok(None);
     };
     if !existing_job_owns_import_path(&existing.import_path, candidate_import_path) {
-        remove_file_quietly(candidate_import_path).await;
+        let _ = fs::remove_file(candidate_import_path);
     }
     idempotent_response(existing, request_hash, version).map(Some)
 }
@@ -3461,14 +3541,6 @@ async fn set_private_file_permissions(_path: &Path) -> Result<(), io::Error> {
         tokio::fs::set_permissions(_path, fs::Permissions::from_mode(0o600)).await?;
     }
     Ok(())
-}
-
-async fn remove_file_quietly(path: &Path) {
-    if let Err(error) = tokio::fs::remove_file(path).await {
-        if error.kind() != io::ErrorKind::NotFound {
-            eprintln!("Connect temporary artifact cleanup failed: {error}");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -6161,6 +6233,86 @@ mod tests {
             assert_eq!(error.code, code);
             assert_eq!(error.retryable, recoverable);
         }
+    }
+
+    #[test]
+    fn blocking_admission_obeys_deadline_without_stalling_manifest_or_accepting_late() {
+        let root = TestDirectory::new("doc-sum-connect-blocking-admission");
+        let runtime_root = root.0.join("runtime");
+        let app_data = root.0.join("app-data");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(&app_data).unwrap();
+        let db_path = app_data.join("summarizer.db");
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data.clone(),
+            runtime_root,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(move || {
+                entered_tx.send(()).unwrap();
+                thread::sleep(CONNECT_JOB_REQUEST_TIMEOUT + Duration::from_millis(300));
+                Ok(Box::new(FixtureRuntime))
+            }),
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let bytes = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf"),
+        )
+        .unwrap();
+        let request = fixture_request(&bytes);
+        let posted = request.clone();
+        let base_url = provider.base_url().to_string();
+        let token = registration.auth.token.clone();
+        let started = Instant::now();
+        let submission = thread::spawn(move || {
+            Client::builder()
+                .no_proxy()
+                .timeout(CONNECT_JOB_REQUEST_TIMEOUT + Duration::from_secs(5))
+                .build()
+                .unwrap()
+                .post(format!("{base_url}v1/jobs"))
+                .bearer_auth(token)
+                .multipart(form(&posted, bytes))
+                .send()
+                .unwrap()
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let manifest = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(500))
+            .build()
+            .unwrap()
+            .get(format!("{}v1/manifest", provider.base_url()))
+            .bearer_auth(&registration.auth.token)
+            .send();
+        let responsive = manifest.is_ok_and(|response| response.status() == StatusCode::OK);
+        let response = submission.join().unwrap();
+        let elapsed = started.elapsed();
+        let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+        while provider.workers.retained_worker_count() != 0 && Instant::now() < cleanup_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(provider.workers.retained_worker_count(), 0);
+        let conn = db::init_db(&db_path).unwrap();
+        let accepted = store::get_job(&conn, &request.job_id).unwrap().is_some();
+        eprintln!(
+            "manifest_responsive={responsive} status={} accepted={accepted} elapsed={elapsed:?}",
+            response.status()
+        );
+        assert!(
+            responsive,
+            "blocking admission starved the manifest endpoint"
+        );
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(elapsed < CONNECT_JOB_REQUEST_TIMEOUT + Duration::from_secs(2));
+        assert!(!accepted, "expired admission committed a job");
+        assert!(fs::read_dir(app_data.join("connect-imports"))
+            .unwrap()
+            .next()
+            .is_none());
     }
 
     #[test]
