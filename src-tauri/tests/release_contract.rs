@@ -682,3 +682,221 @@ fn installed_windows_cited_summary_release_proof_is_recorded() {
         "Other operating-system bundle formats are deferred until they can be built and exercised on their target platforms"
     ));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn abort_upgrade_restores_bootstrap_at_every_preinstall_boundary() {
+    use std::os::unix::fs::PermissionsExt;
+    let boundaries = [
+        "      install_wrapper\n",
+        "    write_bootstrap quarantining\n",
+        "        chmod 0600 \"$installed_binary\"\n",
+        "          sync -f \"$quarantine_temporary\"\n",
+        "        mv -T \"$quarantine_temporary\" \"$quarantine\"\n",
+        "        rm -f \"$installed_binary\"\n        sync -f \"$(dirname \"$installed_binary\")\"\n",
+        "      # bootstrap-crash-boundary-after-terminate\n",
+        "      # bootstrap-crash-boundary-after-registration-cleanup\n",
+        "      write_bootstrap quiesced\n",
+    ];
+    for (index, boundary) in boundaries.into_iter().enumerate() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        let installed = root.path().join("document-summarizer");
+        let runtime = root.path().join("run-user");
+        std::fs::copy("/bin/true", &installed).unwrap();
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original = std::fs::read(&installed).unwrap();
+        let normal = preinst_for_test(&package, &installed, &runtime);
+        assert_eq!(normal.matches(boundary).count(), 1);
+        let preinst = root.path().join("preinst");
+        std::fs::write(
+            &preinst,
+            normal.replacen(boundary, &format!("{boundary}      exit 86\n"), 1),
+        )
+        .unwrap();
+        assert_eq!(
+            std::process::Command::new("sh")
+                .arg(&preinst)
+                .args(["upgrade", "0.0.9"])
+                .status()
+                .unwrap()
+                .code(),
+            Some(86)
+        );
+        let postrm = root.path().join("postrm");
+        let script = include_str!("../linux/debian/postrm")
+            .replace("/var/lib/document-summarizer", package.to_str().unwrap())
+            .replace("/usr/bin/document-summarizer", installed.to_str().unwrap())
+            .replace(
+                "expected_root_uid=0",
+                &format!("expected_root_uid={}", unsafe { libc::geteuid() }),
+            );
+        std::fs::write(&postrm, script).unwrap();
+        for _ in 0..2 {
+            assert!(std::process::Command::new("sh")
+                .arg(&postrm)
+                .args(["abort-upgrade", "0.0.9", "0.1.0"])
+                .status()
+                .unwrap()
+                .success());
+            assert!(
+                std::fs::read(&installed).unwrap() == original,
+                "abort-upgrade left the exit-75 wrapper at boundary {index}"
+            );
+            assert_eq!(
+                std::fs::metadata(&installed).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            assert!(
+                !package.join("package-quiesce-v1.record").exists(),
+                "rollback must clear only its settled barrier"
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn abort_remove_dispatches_to_the_installed_transaction_controller() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let calls = root.path().join("calls");
+    let installed = root.path().join("document-summarizer");
+    std::fs::write(
+        &installed,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let postinst = root.path().join("postinst");
+    std::fs::write(
+        &postinst,
+        include_str!("../linux/debian/postinst")
+            .replace("/usr/bin/document-summarizer", installed.to_str().unwrap()),
+    )
+    .unwrap();
+    assert!(std::process::Command::new("sh")
+        .arg(&postinst)
+        .arg("abort-remove")
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        std::fs::read_to_string(calls).unwrap_or_default(),
+        "--connect-package abort-remove 0.1.0\n",
+        "abort-remove returned success without invoking rollback"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn abort_upgrade_replays_rollback_crashes_and_rejects_tampered_state() {
+    use std::os::unix::fs::PermissionsExt;
+    for case in [
+        "after-restore",
+        "before-clear",
+        "receipt",
+        "source-version",
+        "foreign-launcher",
+        "symlink",
+        "hardlink",
+        "mode",
+        "operation",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        let installed = root.path().join("document-summarizer");
+        let runtime = root.path().join("run-user");
+        std::fs::copy("/bin/true", &installed).unwrap();
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original = std::fs::read(&installed).unwrap();
+        let preinst = root.path().join("preinst");
+        std::fs::write(&preinst, preinst_for_test(&package, &installed, &runtime)).unwrap();
+        assert!(std::process::Command::new("sh")
+            .arg(&preinst)
+            .args(["upgrade", "0.0.9"])
+            .status()
+            .unwrap()
+            .success());
+        let receipt = package.join("package-quiesce-v1.record");
+        let text = std::fs::read_to_string(&receipt).unwrap();
+        let generation = text
+            .lines()
+            .find_map(|line| line.strip_prefix("generation="))
+            .unwrap();
+        let quarantine = package.join(format!("legacy-executable-{generation}"));
+        match case {
+            "receipt" => {
+                std::fs::write(&receipt, text.replace("legacy_sha256=", "invalid_sha256=")).unwrap()
+            }
+            "foreign-launcher" => std::fs::write(&installed, b"foreign executable").unwrap(),
+            "symlink" => {
+                let target = root.path().join("foreign");
+                std::fs::rename(&quarantine, &target).unwrap();
+                std::os::unix::fs::symlink(target, &quarantine).unwrap();
+            }
+            "hardlink" => std::fs::hard_link(&quarantine, root.path().join("linked")).unwrap(),
+            "mode" => std::fs::set_permissions(&quarantine, std::fs::Permissions::from_mode(0o644))
+                .unwrap(),
+            "operation" => {
+                std::fs::write(package.join("package-operation-v1.json"), b"unsettled").unwrap()
+            }
+            _ => {}
+        }
+        let postrm = root.path().join("postrm");
+        let normal = include_str!("../linux/debian/postrm")
+            .replace("/var/lib/document-summarizer", package.to_str().unwrap())
+            .replace("/usr/bin/document-summarizer", installed.to_str().unwrap())
+            .replace(
+                "expected_root_uid=0",
+                &format!("expected_root_uid={}", unsafe { libc::geteuid() }),
+            );
+        let script = match case {
+            "after-restore" => normal.replace(
+                "  # bootstrap-rollback-crash-boundary-after-restore",
+                "  exit 87",
+            ),
+            "before-clear" => normal.replace(
+                "  # bootstrap-rollback-crash-boundary-before-clear",
+                "  exit 87",
+            ),
+            _ => normal.clone(),
+        };
+        std::fs::write(&postrm, script).unwrap();
+        let before = std::fs::read(&receipt).unwrap();
+        let launcher_before = std::fs::read(&installed).unwrap();
+        let source = if case == "source-version" {
+            "9.9.9"
+        } else {
+            "0.0.9"
+        };
+        let status = std::process::Command::new("sh")
+            .arg(&postrm)
+            .args(["abort-upgrade", source, "0.1.0"])
+            .status()
+            .unwrap();
+        assert!(!status.success(), "{case}");
+        assert_eq!(std::fs::read(&receipt).unwrap(), before, "{case}");
+        if matches!(case, "after-restore" | "before-clear") {
+            assert_eq!(status.code(), Some(87));
+            assert!(std::fs::read(&installed).unwrap() == original);
+            std::fs::write(&postrm, normal).unwrap();
+            assert!(std::process::Command::new("sh")
+                .arg(&postrm)
+                .args(["abort-upgrade", "0.0.9", "0.1.0"])
+                .status()
+                .unwrap()
+                .success());
+            assert!(!receipt.exists());
+        } else {
+            assert_eq!(
+                std::fs::read(&installed).unwrap(),
+                launcher_before,
+                "{case}"
+            );
+        }
+    }
+}

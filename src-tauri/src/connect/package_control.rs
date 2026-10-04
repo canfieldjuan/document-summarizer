@@ -50,6 +50,20 @@ enum PackageKind {
     Reinstall,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PackageDisposition {
+    #[default]
+    Forward,
+    Rollback,
+}
+
+impl PackageDisposition {
+    fn is_forward(&self) -> bool {
+        *self == Self::Forward
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PackagePhase {
@@ -100,6 +114,8 @@ struct Participant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PackageRecord {
+    #[serde(default, skip_serializing_if = "PackageDisposition::is_forward")]
+    disposition: PackageDisposition,
     format_version: u32,
     package_id: String,
     generation: String,
@@ -183,6 +199,7 @@ pub(crate) enum PackageAction<'a> {
     Initialize,
     PrepareUpgrade { source: &'a str, target: &'a str },
     FinishUpgrade { target: &'a str },
+    AbortRemove { target: &'a str },
     PrepareRemove { target: &'a str },
     FinishRemove { target: &'a str },
     FinishPurge { target: &'a str },
@@ -612,6 +629,9 @@ fn prepare_from_intent(
     let (mut record, is_new) = match store.read()? {
         Some(record) => {
             validate(&record, intent.kind, &intent.target_version)?;
+            if record.disposition != PackageDisposition::Forward {
+                return Err(PackageControlError::Conflict);
+            }
             if record.generation != intent.generation
                 || record.source_version != intent.source_version
             {
@@ -621,6 +641,7 @@ fn prepare_from_intent(
         }
         None => (
             PackageRecord {
+                disposition: PackageDisposition::Forward,
                 format_version: FORMAT_VERSION,
                 package_id: PACKAGE_ID.to_string(),
                 generation: intent.generation.clone(),
@@ -684,14 +705,25 @@ fn run_with(
             quiesce_lock,
             package_lock,
         ),
-        PackageAction::FinishRemove { target } => finish(
-            store,
-            PackageKind::Remove,
-            target,
-            effects,
-            quiesce_lock,
-            package_lock,
-        ),
+        PackageAction::AbortRemove { target } => {
+            abort_remove(store, target, effects, quiesce_lock, package_lock)
+        }
+        PackageAction::FinishRemove { target } => {
+            if store
+                .read()?
+                .is_some_and(|record| record.disposition == PackageDisposition::Rollback)
+            {
+                return Err(PackageControlError::Conflict);
+            }
+            finish(
+                store,
+                PackageKind::Remove,
+                target,
+                effects,
+                quiesce_lock,
+                package_lock,
+            )
+        }
         PackageAction::FinishPurge { target } => finish_purge(store, target, effects),
         PackageAction::RecoverInstall { target } => {
             let record = store.read()?.ok_or(PackageControlError::Conflict)?;
@@ -747,6 +779,69 @@ fn run_with(
     }
 }
 
+fn abort_remove(
+    store: &PackageStore,
+    target: &str,
+    effects: &mut dyn PackageEffects,
+    quiesce_lock: Option<&File>,
+    package_lock: Option<&File>,
+) -> Result<(), PackageControlError> {
+    validate_version(target)?;
+    let intent = store.read_quiesce()?;
+    if intent.as_ref().is_some_and(|intent| {
+        intent.kind != PackageKind::Remove
+            || intent.source_version != target
+            || intent.target_version != target
+            || intent.bootstrap.is_some()
+    }) {
+        return Err(PackageControlError::Conflict);
+    }
+    let Some(mut record) = store.read()? else {
+        // Preparation persists the participant list before any participant effect.
+        if let Some(intent) = intent {
+            store.clear_quiesce(&intent.generation)?;
+        }
+        return Ok(());
+    };
+    validate(&record, PackageKind::Remove, target)?;
+    if record.source_version != target
+        || intent
+            .as_ref()
+            .is_some_and(|intent| intent.generation != record.generation)
+        || store
+            .read_removal_receipt()?
+            .is_some_and(|receipt| receipt.producer_generation == record.generation)
+    {
+        return Err(PackageControlError::Conflict);
+    }
+    if record.disposition == PackageDisposition::Forward {
+        if !matches!(
+            record.phase,
+            PackagePhase::IntentRecorded | PackagePhase::PublishersStopped
+        ) {
+            return Err(PackageControlError::Conflict);
+        }
+        let _participants = lock_participant_authorities(
+            &record.participants,
+            store.root == Path::new(PACKAGE_ROOT),
+        )?;
+        record.disposition = PackageDisposition::Rollback;
+        record.phase = PackagePhase::Settling;
+        store.write(&record)?;
+    }
+    if let Some(intent) = intent {
+        store.clear_quiesce(&intent.generation)?;
+    }
+    finish(
+        store,
+        PackageKind::Remove,
+        target,
+        effects,
+        quiesce_lock,
+        package_lock,
+    )
+}
+
 fn prepare(
     store: &PackageStore,
     kind: PackageKind,
@@ -757,10 +852,14 @@ fn prepare(
     let (mut record, is_new) = match store.read()? {
         Some(record) => {
             validate(&record, kind, target)?;
+            if record.disposition != PackageDisposition::Forward {
+                return Err(PackageControlError::Conflict);
+            }
             (record, false)
         }
         None => {
             let record = PackageRecord {
+                disposition: PackageDisposition::Forward,
                 format_version: FORMAT_VERSION,
                 package_id: PACKAGE_ID.to_string(),
                 generation: Uuid::new_v4().to_string(),
@@ -802,6 +901,8 @@ fn finish(
 ) -> Result<(), PackageControlError> {
     let mut record = store.read()?.ok_or(PackageControlError::Conflict)?;
     validate(&record, kind, target)?;
+    let restoring =
+        kind != PackageKind::Remove || record.disposition == PackageDisposition::Rollback;
     let mut participant_authorities =
         lock_participant_authorities(&record.participants, store.root == Path::new(PACKAGE_ROOT))?;
     if !matches!(
@@ -829,7 +930,7 @@ fn finish(
                 }
             }
             let participant = record.participants[index].clone();
-            if matches!(kind, PackageKind::Upgrade | PackageKind::Reinstall) {
+            if restoring {
                 match effects.recover_pending_restore(&participant, &record.generation)? {
                     PendingRestoreRecovery::Absent => {}
                     PendingRestoreRecovery::StopAndRetry => effects.stop(&participant)?,
@@ -842,7 +943,7 @@ fn finish(
                 }
             }
             effects.cleanup(&participant)?;
-            if matches!(kind, PackageKind::Upgrade | PackageKind::Reinstall) {
+            if restoring {
                 drop(participant_authorities);
                 if let Some(lock) = package_lock {
                     File::unlock(lock).map_err(|_| PackageControlError::Storage)?;
@@ -864,6 +965,7 @@ fn finish(
                 let current = store.read()?.ok_or(PackageControlError::Conflict)?;
                 if current.generation != record.generation
                     || current.kind != record.kind
+                    || current.disposition != record.disposition
                     || current.phase != PackagePhase::Settling
                     || current.participants != record.participants
                 {
@@ -877,7 +979,7 @@ fn finish(
             }
             store.write(&record)?;
         }
-        if kind == PackageKind::Remove {
+        if kind == PackageKind::Remove && !restoring {
             write_removal_receipt(store, &record)?;
         } else if kind == PackageKind::Reinstall {
             write_install_receipt(store, &record)?;
@@ -890,12 +992,12 @@ fn finish(
         .any(|participant| participant.settlement == ParticipantSettlement::Pending)
     {
         return Err(PackageControlError::Conflict);
-    } else if kind == PackageKind::Remove {
+    } else if kind == PackageKind::Remove && !restoring {
         validate_exact_removal_receipt(store, &record)?;
     } else if kind == PackageKind::Reinstall {
         validate_exact_install_receipt(store, &record)?;
     }
-    if kind != PackageKind::Remove {
+    if restoring {
         effects.retire_controller(&record)?;
     }
     if kind == PackageKind::Reinstall {
@@ -933,7 +1035,9 @@ fn finish_purge(
     }
     let record = match store.read()? {
         Some(record) => {
-            if !matches!(record.kind, PackageKind::Remove | PackageKind::Purge) {
+            if record.disposition != PackageDisposition::Forward
+                || !matches!(record.kind, PackageKind::Remove | PackageKind::Purge)
+            {
                 return Err(PackageControlError::Conflict);
             }
             validate(&record, record.kind, target)?;
@@ -946,6 +1050,7 @@ fn finish_purge(
             Some(record)
         }
         None => receipt.map(|receipt| PackageRecord {
+            disposition: PackageDisposition::Forward,
             format_version: FORMAT_VERSION,
             package_id: PACKAGE_ID.to_string(),
             generation: receipt.producer_generation,
@@ -967,6 +1072,7 @@ fn finish_purge(
             Some(record)
         }
         (None, Some(intent)) => Some(PackageRecord {
+            disposition: PackageDisposition::Forward,
             format_version: FORMAT_VERSION,
             package_id: PACKAGE_ID.to_string(),
             generation: intent.generation.clone(),
@@ -1162,6 +1268,7 @@ fn prepare_reinstall(store: &PackageStore, target: &str) -> Result<(), PackageCo
         }
         None => (
             PackageRecord {
+                disposition: PackageDisposition::Forward,
                 format_version: FORMAT_VERSION,
                 package_id: PACKAGE_ID.to_string(),
                 generation: Uuid::new_v4().to_string(),
@@ -1393,6 +1500,12 @@ fn validate(
         || record.package_id != PACKAGE_ID
         || record.kind != kind
         || record.target_version != target
+        || (record.disposition == PackageDisposition::Rollback
+            && (record.kind != PackageKind::Remove
+                || !matches!(
+                    record.phase,
+                    PackagePhase::Settling | PackagePhase::Finalizing
+                )))
         || Uuid::parse_str(&record.generation).is_err()
         || (record.kind == PackageKind::Reinstall)
             != record.predecessor_removal_generation.is_some()
@@ -1553,6 +1666,7 @@ pub(crate) fn begin_quiesce_at(root: &Path) -> Result<(), PackageControlError> {
     let intent = ensure_quiesce_intent(&store, PackageKind::Upgrade, "0.0.9", "0.1.0", None)?;
     if store.read()?.is_none() {
         store.write(&PackageRecord {
+            disposition: PackageDisposition::Forward,
             format_version: FORMAT_VERSION,
             package_id: PACKAGE_ID.to_string(),
             generation: intent.generation.clone(),
@@ -1606,7 +1720,9 @@ fn enter_startup_admission_store(
     validate(&record, record.kind, &record.target_version)?;
     let app_data_root = absolute_path_text(app_data_root)?;
     let runtime_root = absolute_path_text(runtime_root)?;
-    let admitted = matches!(record.kind, PackageKind::Upgrade | PackageKind::Reinstall)
+    let admitted = (matches!(record.kind, PackageKind::Upgrade | PackageKind::Reinstall)
+        || record.kind == PackageKind::Remove
+            && record.disposition == PackageDisposition::Rollback)
         && record.phase == PackagePhase::Settling
         && record.participants.iter().any(|participant| {
             participant.uid == uid
@@ -2982,6 +3098,152 @@ mod tests {
             "retained package authority cannot become unbundled after removal"
         );
     }
+    #[test]
+    fn abort_remove_restores_partial_prepare_and_resumes_failed_rollback() {
+        let (store, root) = store("doc-sum-abort-remove");
+        let intent =
+            ensure_quiesce_intent(&store, PackageKind::Remove, "0.1.0", "0.1.0", None).unwrap();
+        let mut effects = MockEffects {
+            participants: vec![
+                participant(1000, true),
+                participant(1001, false),
+                participant(1002, true),
+            ],
+            fail_stop_uid: Some(1001),
+            ..MockEffects::default()
+        };
+        assert!(matches!(
+            prepare_from_intent(&store, &intent, &mut effects),
+            Err(PackageControlError::Manager)
+        ));
+        assert!(effects
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"suppress:1000".to_string()));
+        assert!(!effects
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"suppress:1001".to_string()));
+        let before = store.read().unwrap().unwrap();
+        effects.fail_stop_uid = None;
+        effects.fail_restore_once = true;
+        assert!(matches!(
+            run_with(
+                &store,
+                PackageAction::AbortRemove { target: "0.1.0" },
+                &mut effects,
+                None,
+                None
+            ),
+            Err(PackageControlError::Manager)
+        ));
+        let rollback = store.read().unwrap().unwrap();
+        assert_eq!(rollback.disposition, PackageDisposition::Rollback);
+        assert_eq!(rollback.generation, before.generation);
+        assert_eq!(rollback.participants, before.participants);
+        assert!(store.read_quiesce().unwrap().is_none());
+        assert!(enter_admission_store(&store).is_err());
+        assert!(run_with(
+            &store,
+            PackageAction::FinishRemove { target: "0.1.0" },
+            &mut effects,
+            None,
+            None
+        )
+        .is_err());
+        assert!(run_with(
+            &store,
+            PackageAction::FinishPurge { target: "0.1.0" },
+            &mut effects,
+            None,
+            None
+        )
+        .is_err());
+        let quiesce = store.quiesce_lock(true).unwrap();
+        let package = store.lock().unwrap();
+        effects.restore_flock_paths = Some((root.join(QUIESCE_LOCK_FILE), root.join(LOCK_FILE)));
+        run_with(
+            &store,
+            PackageAction::AbortRemove { target: "0.1.0" },
+            &mut effects,
+            Some(&quiesce),
+            Some(&package),
+        )
+        .unwrap();
+        drop(package);
+        drop(quiesce);
+        assert!(store.read().unwrap().is_none());
+        assert!(store.read_removal_receipt().unwrap().is_none());
+        assert!(enter_admission_store(&store).is_ok());
+        let calls = effects.calls.lock().unwrap().clone();
+        for expected in [
+            "restore:1000:true",
+            "restore:1001:false",
+            "restore:1002:true",
+        ] {
+            assert!(calls.iter().any(|call| call == expected), "{expected}");
+        }
+        run_with(
+            &store,
+            PackageAction::AbortRemove { target: "0.1.0" },
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(*effects.calls.lock().unwrap(), calls);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn abort_remove_handles_intent_only_and_rejects_mismatched_or_completed_operations() {
+        for case in [
+            "intent-only",
+            "generation",
+            "version",
+            "upgrade",
+            "finalizing",
+        ] {
+            let (store, root) = store("doc-sum-abort-remove-boundary");
+            let intent =
+                ensure_quiesce_intent(&store, PackageKind::Remove, "0.1.0", "0.1.0", None).unwrap();
+            let mut effects = MockEffects::default();
+            if case != "intent-only" {
+                prepare_from_intent(&store, &intent, &mut effects).unwrap();
+                let mut record = store.read().unwrap().unwrap();
+                match case {
+                    "generation" => record.generation = Uuid::new_v4().to_string(),
+                    "version" => record.target_version = "0.2.0".into(),
+                    "upgrade" => record.kind = PackageKind::Upgrade,
+                    "finalizing" => record.phase = PackagePhase::Finalizing,
+                    _ => unreachable!(),
+                }
+                store.write(&record).unwrap();
+            }
+            effects.calls.lock().unwrap().clear();
+            let before = store.read().unwrap();
+            let result = run_with(
+                &store,
+                PackageAction::AbortRemove { target: "0.1.0" },
+                &mut effects,
+                None,
+                None,
+            );
+            if case == "intent-only" {
+                result.unwrap();
+                assert!(store.read_quiesce().unwrap().is_none());
+            } else {
+                assert!(result.is_err(), "{case}");
+                assert_eq!(store.read().unwrap(), before);
+                assert_eq!(store.read_quiesce().unwrap(), Some(intent));
+            }
+            assert!(effects.calls.lock().unwrap().is_empty());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -2990,6 +3252,7 @@ mod tests {
         calls: Arc<Mutex<Vec<String>>>,
         defer_enabled: bool,
         fail_restore_once: bool,
+        fail_stop_uid: Option<u32>,
         fail_cleanup_once: bool,
         publish_late_on_restore_timeout: bool,
         late_registration_present: bool,
@@ -3009,6 +3272,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("stop:{}", participant.uid));
+            if self.fail_stop_uid == Some(participant.uid) {
+                return Err(PackageControlError::Manager);
+            }
             self.late_registration_present = false;
             Ok(())
         }
@@ -3478,6 +3744,7 @@ mod tests {
         recorded.manager_parent_device = manager_metadata.dev();
         recorded.manager_parent_inode = manager_metadata.ino();
         let record = PackageRecord {
+            disposition: PackageDisposition::Forward,
             format_version: FORMAT_VERSION,
             package_id: PACKAGE_ID.to_string(),
             generation: Uuid::new_v4().to_string(),
@@ -3501,6 +3768,42 @@ mod tests {
             &runtime,
         )
         .is_err());
+        let mut rollback = record;
+        rollback.kind = PackageKind::Remove;
+        rollback.disposition = PackageDisposition::Rollback;
+        store.write(&rollback).unwrap();
+        assert!(enter_startup_admission_store(
+            &store,
+            unsafe { libc::geteuid() },
+            &app_data,
+            &runtime
+        )
+        .is_ok());
+        assert!(enter_admission_store(&store).is_err());
+        for case in ["forward", "disabled", "settled", "uid", "data"] {
+            let mut invalid = rollback.clone();
+            match case {
+                "forward" => invalid.disposition = PackageDisposition::Forward,
+                "disabled" => invalid.participants[0].enabled = false,
+                "settled" => {
+                    invalid.participants[0].settlement = ParticipantSettlement::SuccessorReady
+                }
+                "uid" => invalid.participants[0].uid += 1,
+                "data" => invalid.participants[0].app_data_root.push_str("-wrong"),
+                _ => unreachable!(),
+            }
+            store.write(&invalid).unwrap();
+            assert!(
+                enter_startup_admission_store(
+                    &store,
+                    unsafe { libc::geteuid() },
+                    &app_data,
+                    &runtime
+                )
+                .is_err(),
+                "{case}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4160,6 +4463,7 @@ mod tests {
 
         let receipt = store.read_removal_receipt().unwrap().unwrap();
         let interrupted = PackageRecord {
+            disposition: PackageDisposition::Forward,
             format_version: FORMAT_VERSION,
             package_id: PACKAGE_ID.to_string(),
             generation: Uuid::new_v4().to_string(),

@@ -1,6 +1,129 @@
 #!/bin/sh
 set -eu
 
+if [ "${1:-}" = "abort-upgrade" ]; then
+  expected_root_uid=0
+  package_root=/var/lib/document-summarizer
+  installed_binary=/usr/bin/document-summarizer
+  source_version=${2:-}
+  target_version=0.1.0
+  [ "${3:-$target_version}" = "$target_version" ] || exit 1
+  bootstrap_fail() {
+    exit 1
+  }
+  safe_regular() {
+    safe_path=$1
+    safe_mode=$2
+    [ ! -L "$safe_path" ] && [ -f "$safe_path" ] &&
+      [ "$(stat -Lc '%u:%a:%h' "$safe_path" 2>/dev/null)" = "$expected_root_uid:$safe_mode:1" ]
+  }
+  valid_uuid() {
+    uuid_value=$1
+    [ "${#uuid_value}" -eq 36 ] &&
+      [ "$(printf '%s' "$uuid_value" | cut -c 9,14,19,24)" = "----" ] &&
+      [ "$(printf '%s' "$uuid_value" | tr -cd '-' | wc -c | tr -d ' ')" = 4 ] &&
+      [ -z "$(printf '%s' "$uuid_value" | tr -d '0123456789abcdef-')" ]
+  }
+  valid_sha256() {
+    sha_value=$1
+    [ "${#sha_value}" -eq 64 ] &&
+      [ -z "$(printf '%s' "$sha_value" | tr -d '0123456789abcdef')" ]
+  }
+  read_bootstrap() {
+    safe_regular "$quiesce" 600 || bootstrap_fail
+    [ "$(wc -l <"$quiesce" | tr -d ' ')" = 12 ] || bootstrap_fail
+    [ "$(sed -n '1p' "$quiesce")" = 'format_version=2' ] || bootstrap_fail
+    [ "$(sed -n '2p' "$quiesce")" = 'package_id=document-summarizer' ] || bootstrap_fail
+    [ "$(sed -n '3p' "$quiesce")" = 'artifact_scope=shared-debian' ] || bootstrap_fail
+    generation=$(sed -n '4s/^generation=//p' "$quiesce")
+    [ "$(sed -n '4p' "$quiesce")" = "generation=$generation" ] && valid_uuid "$generation" || bootstrap_fail
+    [ "$(sed -n '5p' "$quiesce")" = 'kind=upgrade' ] || bootstrap_fail
+    bootstrap_phase=$(sed -n '6s/^phase=//p' "$quiesce")
+    case "$bootstrap_phase" in quarantining|quiesced) ;; *) bootstrap_fail ;; esac
+    [ "$(sed -n '7p' "$quiesce")" = "source_version=$source_version" ] || bootstrap_fail
+    [ "$(sed -n '8p' "$quiesce")" = "target_version=$target_version" ] || bootstrap_fail
+    legacy_device=$(sed -n '9s/^legacy_device=//p' "$quiesce")
+    legacy_inode=$(sed -n '10s/^legacy_inode=//p' "$quiesce")
+    legacy_sha256=$(sed -n '11s/^legacy_sha256=//p' "$quiesce")
+    case "$legacy_device" in ''|*[!0-9]*|0|0[0-9]*) bootstrap_fail ;; esac
+    case "$legacy_inode" in ''|*[!0-9]*|0|0[0-9]*) bootstrap_fail ;; esac
+    valid_sha256 "$legacy_sha256" || bootstrap_fail
+    [ "$(sed -n '9p' "$quiesce")" = "legacy_device=$legacy_device" ] || bootstrap_fail
+    [ "$(sed -n '10p' "$quiesce")" = "legacy_inode=$legacy_inode" ] || bootstrap_fail
+    [ "$(sed -n '11p' "$quiesce")" = "legacy_sha256=$legacy_sha256" ] || bootstrap_fail
+    bootstrap_sha=$(sed -n '12s/^sha256=//p' "$quiesce")
+    valid_sha256 "$bootstrap_sha" || bootstrap_fail
+    [ "$(sed -n '12p' "$quiesce")" = "sha256=$bootstrap_sha" ] || bootstrap_fail
+    [ "$(head -n 11 "$quiesce" | sha256sum | cut -d ' ' -f 1)" = "$bootstrap_sha" ] || bootstrap_fail
+  }
+  validate_quarantine() {
+    safe_regular "$quarantine" 600 || bootstrap_fail
+    [ -s "$quarantine" ] || bootstrap_fail
+    [ "$(sha256sum "$quarantine" | cut -d ' ' -f 1)" = "$legacy_sha256" ] || bootstrap_fail
+  }
+
+  [ ! -L "$package_root" ] || bootstrap_fail
+  [ -e "$package_root" ] || exit 0
+  [ -d "$package_root" ] && [ "$(stat -Lc '%u:%a' "$package_root")" = "$expected_root_uid:755" ] || bootstrap_fail
+  quiesce="$package_root/package-quiesce-v1.record"
+  [ -e "$quiesce" ] || [ -L "$quiesce" ] || exit 0
+  controller_lock="$package_root/.package-controller-v1.lock"
+  quiesce_lock="$package_root/.package-quiesce-v1.lock"
+  safe_regular "$controller_lock" 600 && safe_regular "$quiesce_lock" 644 || bootstrap_fail
+  exec 9<>"$controller_lock"
+  flock -x 9
+  exec 8<>"$quiesce_lock"
+  flock -x 8
+  safe_regular "$controller_lock" 600 && safe_regular "$quiesce_lock" 644 || bootstrap_fail
+  [ -e "$quiesce" ] || [ -L "$quiesce" ] || exit 0
+  read_bootstrap
+  # An adopted transaction belongs to the new controller, not this preinstall unwind.
+  [ ! -e "$package_root/package-operation-v1.json" ] && [ ! -L "$package_root/package-operation-v1.json" ] || bootstrap_fail
+  quarantine="$package_root/legacy-executable-$generation"
+  partial="$package_root/.legacy-executable-$generation.tmp"
+  if [ -e "$partial" ] || [ -L "$partial" ]; then
+    safe_regular "$partial" 600 || bootstrap_fail
+  fi
+  original_present=false
+  if [ -e "$installed_binary" ] || [ -L "$installed_binary" ]; then
+    { safe_regular "$installed_binary" 755 || safe_regular "$installed_binary" 600; } || bootstrap_fail
+    installed_sha=$(sha256sum "$installed_binary" | cut -d ' ' -f 1)
+    wrapper_sha=$(printf '%s\n' '#!/bin/sh' 'exit 75' | sha256sum | cut -d ' ' -f 1)
+    if [ "$installed_sha" = "$legacy_sha256" ]; then
+      original_present=true
+    else
+      [ "$installed_sha" = "$wrapper_sha" ] || bootstrap_fail
+    fi
+  fi
+  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+    validate_quarantine
+  else
+    [ "$original_present" = true ] || bootstrap_fail
+  fi
+  if [ "$original_present" = false ]; then
+    restored=$(mktemp "$(dirname "$installed_binary")/.document-summarizer-restore.XXXXXX")
+    trap 'rm -f "${restored:-}"' EXIT HUP INT TERM
+    cat "$quarantine" > "$restored"
+    chmod 0755 "$restored"
+    safe_regular "$restored" 755 && [ "$(sha256sum "$restored" | cut -d ' ' -f 1)" = "$legacy_sha256" ] || bootstrap_fail
+    sync -f "$restored"
+    mv -T "$restored" "$installed_binary"
+    restored=
+    trap - EXIT HUP INT TERM
+  else
+    chmod 0755 "$installed_binary"
+    sync -f "$installed_binary"
+  fi
+  sync -f "$(dirname "$installed_binary")"
+  # bootstrap-rollback-crash-boundary-after-restore
+  rm -f "$quarantine" "$partial"
+  sync -f "$package_root"
+  # bootstrap-rollback-crash-boundary-before-clear
+  rm -f "$quiesce"
+  sync -f "$package_root"
+  exit 0
+fi
+
 case "${1:-}" in
   remove)
     [ -f /var/lib/document-summarizer/package-operation-v1.json ] || exit 0

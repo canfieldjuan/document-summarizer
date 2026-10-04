@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 
-if [ "${1:-}" = "configure" ]; then
+if [ "${1:-}" = "abort-remove" ]; then
+  /usr/bin/document-summarizer --connect-package abort-remove "0.1.0"
+elif [ "${1:-}" = "configure" ]; then
   if [ -f /var/lib/document-summarizer/package-quiesce-v1.record ]; then
     /usr/bin/document-summarizer --connect-package adopt-bootstrap
   fi
