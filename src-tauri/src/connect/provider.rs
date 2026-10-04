@@ -3852,12 +3852,8 @@ mod tests {
         )
         .unwrap();
         assert!(provider.registration_path().is_file());
-        let receipt = fs::read_dir(package_root.join("participants-v1"))
-            .unwrap()
-            .map(Result::unwrap)
-            .map(|entry| entry.path())
-            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-            .unwrap();
+        let receipt =
+            package_control::participant_receipt_path_at(&package_root, unsafe { libc::geteuid() });
         assert!(
             receipt.is_file(),
             "foreground publication must register its package participant first"
