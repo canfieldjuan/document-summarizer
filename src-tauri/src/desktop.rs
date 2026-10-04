@@ -351,7 +351,7 @@ impl DesktopJobManager {
         drop(conn);
         let manager = self.clone();
         let db_path = self.db_path.clone();
-        self.start_ocr_recovery_task(root_run_ids, move || {
+        self.start_ocr_recovery_task(root_run_ids, move |controls| {
             let mut conn = match db::init_db(&db_path) {
                 Ok(conn) => conn,
                 Err(error) => {
@@ -359,7 +359,7 @@ impl DesktopJobManager {
                     return;
                 }
             };
-            let recovery = match recover_ocr_handoffs(&mut conn, &app_data_dir) {
+            let recovery = match recover_ocr_handoffs(&mut conn, &app_data_dir, &controls) {
                 Ok(recovery) => recovery,
                 Err(error) => {
                     eprintln!("OCR restart recovery failed: {error}");
@@ -381,10 +381,11 @@ impl DesktopJobManager {
     fn start_ocr_recovery_task(
         &self,
         mut root_run_ids: Vec<String>,
-        task: impl FnOnce() + Send + 'static,
+        task: impl FnOnce(HashMap<String, CancellationToken>) + Send + 'static,
     ) -> Result<(), DesktopJobError> {
         root_run_ids.sort();
         root_run_ids.dedup();
+        let mut controls = HashMap::with_capacity(root_run_ids.len());
         {
             let mut active = self
                 .active
@@ -397,7 +398,9 @@ impl DesktopJobManager {
                 return Err(DesktopJobError::AlreadyRunning(run_id.clone()));
             }
             for run_id in &root_run_ids {
-                active.insert(run_id.clone(), CancellationToken::new());
+                let token = CancellationToken::new();
+                active.insert(run_id.clone(), token.clone());
+                controls.insert(run_id.clone(), token);
             }
         }
         let reservations = ActiveRecoveryReservations {
@@ -406,7 +409,7 @@ impl DesktopJobManager {
         };
         Self::spawn_ocr_recovery_task(move || {
             let _reservations = reservations;
-            task();
+            task(controls);
         })
         .map_err(DesktopJobError::WorkerStart)
     }
@@ -1188,7 +1191,7 @@ mod tests {
         let task_gate = Arc::clone(&gate);
 
         manager
-            .start_ocr_recovery_task(vec![root_run_id.clone()], move || {
+            .start_ocr_recovery_task(vec![root_run_id.clone()], move |_controls| {
                 task_gate.entered.store(true, Ordering::Release);
                 let mut released = task_gate.released.lock().unwrap();
                 while !*released {

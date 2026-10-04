@@ -201,6 +201,17 @@ fn streamed_large_pair_reopens_and_admits_only_one_child() {
     .unwrap();
     assert_eq!(child, handoff.child_run_id);
     assert_eq!(worker.join().unwrap().len(), 3);
+    // Already admitted children belong to their child worker, not a root reservation.
+    let recovered = recover_ocr_handoffs_with(
+        &mut conn,
+        directory.path(),
+        &[],
+        &HttpOcrTransport,
+        &HashMap::new(),
+    )
+    .unwrap();
+    assert_eq!(recovered.child_run_ids, vec![child.clone()]);
+    assert!(recovered.warnings.is_empty());
     let saved = reload(&conn, &handoff.handoff_id).unwrap();
     assert_eq!(saved.ocr_pdf_bytes.as_ref().unwrap(), &pdf);
     assert_eq!(saved.text_bytes.as_ref().unwrap(), &text);
@@ -384,6 +395,325 @@ fn download_notices_cancellation_while_body_stalls() {
         elapsed < Duration::from_secs(1),
         "cancel waited for the transfer deadline: {elapsed:?}"
     );
+}
+
+#[test]
+fn recovery_does_not_consume_unreserved_roots() {
+    struct NoNetwork;
+    impl OcrTransport for NoNetwork {
+        fn submit(
+            &self,
+            _: &LiveOcrProvider,
+            _: &JobRequest,
+            _: &[u8],
+            _: Instant,
+        ) -> Result<ReceivedStatus, TransportError> {
+            panic!("unreserved root reached submission")
+        }
+        fn status(
+            &self,
+            _: &LiveOcrProvider,
+            _: &str,
+            _: Instant,
+        ) -> Result<ReceivedStatus, TransportError> {
+            panic!("unreserved root reached retrieval")
+        }
+    }
+    let (dir, mut conn, provider, handoff, status, _, _) = fixture();
+    save_status(&conn, &handoff, &status).unwrap();
+    let before = reload(&conn, &handoff.handoff_id).unwrap();
+    for controls in [
+        HashMap::new(),
+        HashMap::from([("another-root".into(), CancellationToken::new())]),
+    ] {
+        let result = recover_ocr_handoffs_with(
+            &mut conn,
+            dir.path(),
+            std::slice::from_ref(&provider),
+            &NoNetwork,
+            &controls,
+        )
+        .unwrap();
+        assert!(result.child_run_ids.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(reload(&conn, &handoff.handoff_id).unwrap(), before);
+        assert!(db::get_pipeline_run(&conn, &handoff.child_run_id)
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[test]
+fn recovery_completes_durable_root_cancellation() {
+    let (dir, mut conn, _provider, handoff, _status, _pdf, _text) = fixture();
+    let root = db::get_pipeline_run(&conn, &handoff.root_run_id)
+        .unwrap()
+        .unwrap();
+    db::request_cancellation(&mut conn, &root.run_id, root.state_version).unwrap();
+    let recovery =
+        recover_ocr_handoffs_for_test(&mut conn, dir.path(), &[], &HttpOcrTransport).unwrap();
+    assert!(recovery.child_run_ids.is_empty());
+    assert!(recovery.warnings.is_empty());
+    assert!(db::get_pipeline_run(&conn, &handoff.child_run_id)
+        .unwrap()
+        .is_none());
+    let root = db::get_pipeline_run(&conn, &handoff.root_run_id)
+        .unwrap()
+        .unwrap();
+    println!("recovered cancelled root state={:?}", root.state);
+    assert_eq!(root.state, PipelineState::Cancelled);
+}
+
+#[test]
+fn startup_recovery_cancellation_interrupts_stalled_body_and_releases_roots() {
+    // Discovery reads process environment; isolate it from parallel tests.
+    const HELPER: &str = "DOC_SUM_STARTUP_OCR_CANCELLATION_HELPER";
+    if std::env::var_os(HELPER).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "connect::ocr_consumer::streamed::tests::startup_recovery_cancellation_interrupts_stalled_body_and_releases_roots", "--nocapture"])
+            .env(HELPER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated startup recovery probe failed");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+
+    let (dir, mut conn, mut provider, first, first_status, pdf, text) = fixture();
+    save_status(&conn, &first, &first_status).unwrap();
+    let (document, received) =
+        prepare_pdf_ingestion(dir.path().join("scan.pdf").to_str().unwrap(), None).unwrap();
+    let ingested = db::persist_ingestion_with_profiles(
+        &mut conn,
+        &document,
+        &received,
+        Some(&snapshot()),
+        SummaryProfile::General,
+    )
+    .unwrap();
+    let (parsing, document) =
+        db::start_parsing(&mut conn, &ingested.run_id, ingested.state_version).unwrap();
+    parse_started_document(
+        &mut conn,
+        &PdfExtractParser::new(),
+        &parsing.run_id,
+        parsing.state_version,
+        &document,
+    )
+    .unwrap();
+    let second = prepare_handoff(&mut conn, &parsing.run_id, dir.path(), &provider).unwrap();
+    let mut second_status = first_status.clone();
+    second_status.job_id = second.provider_job_id.clone();
+    second_status.input_artifacts[0].artifact_id = second.source_artifact_id.clone();
+    save_status(&conn, &second, &second_status).unwrap();
+    let roots = db::list_recoverable_ocr_handoffs(&conn).unwrap();
+    assert_eq!(
+        roots.iter().map(|h| &h.root_run_id).collect::<Vec<_>>(),
+        vec![&first.root_run_id, &second.root_run_id]
+    );
+    drop(conn);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    provider.base_url = format!("http://{}/", listener.local_addr().unwrap());
+    let runtime = dir.path().join("runtime");
+    let providers = runtime.join("local-connect/v3/providers");
+    fs::create_dir_all(&providers).unwrap();
+    for path in [&runtime, &providers] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let registration = serde_json::json!({
+        "protocol_version":3,"instance_id":provider.instance_id,"app_id":OCR_APP_ID,
+        "pid":std::process::id(),"started_at":Utc::now(),
+        "transport":{"kind":"http-loopback-v3","base_url":provider.base_url},
+        "auth":{"scheme":"bearer","token":provider.token}
+    });
+    let path = providers.join("ocr.json");
+    fs::write(&path, serde_json::to_vec(&registration).unwrap()).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    let manifest = serde_json::json!({
+        "protocol_version":3,"instance_id":provider.instance_id,
+        "app":{"id":OCR_APP_ID,"name":"Fixture OCR","version":"1.0"},
+        "capabilities":[{"id":OCR_CAPABILITY_ID,"version":"1.1",
+            "action":{"label":"Recognize","description":"OCR"},
+            "accepts":[{"media_type":PDF_MEDIA_TYPE,"max_bytes":MAX_INPUT_BYTES}],
+            "produces":[OCR_INPUT_MEDIA_TYPE,TEXT_MEDIA_TYPE],"parameters":[],
+            "effects":{"external":false,"confirmation_required":false}}]
+    });
+    let json_reply = |path, value: &Value| {
+        let bytes = serde_json::to_vec(value).unwrap();
+        Reply {
+            path,
+            headers: format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            ),
+            body: bytes,
+        }
+    };
+    let (first_pdf, _) = pair(&first_status).unwrap();
+    let (second_pdf, second_text) = pair(&second_status).unwrap();
+    let replies = vec![
+        (json_reply("/v3/manifest".into(), &manifest), false),
+        (
+            json_reply(
+                format!("/v3/jobs/{}", first.provider_job_id),
+                &serde_json::to_value(&first_status).unwrap(),
+            ),
+            false,
+        ),
+        (
+            artifact(
+                format!(
+                    "/v3/jobs/{}/outputs/{}",
+                    first.provider_job_id, first_pdf.artifact_id
+                ),
+                &pdf,
+            ),
+            true,
+        ),
+        (
+            json_reply(
+                format!("/v3/jobs/{}", second.provider_job_id),
+                &serde_json::to_value(&second_status).unwrap(),
+            ),
+            false,
+        ),
+        (
+            artifact(
+                format!(
+                    "/v3/jobs/{}/outputs/{}",
+                    second.provider_job_id, second_pdf.artifact_id
+                ),
+                &pdf,
+            ),
+            false,
+        ),
+        (
+            artifact(
+                format!(
+                    "/v3/jobs/{}/outputs/{}",
+                    second.provider_job_id, second_text.artifact_id
+                ),
+                &text,
+            ),
+            false,
+        ),
+    ];
+    let (stalled, stall_ready) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut paths = Vec::new();
+        for (reply, stall) in replies {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("startup request missing: {error}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 65536);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert_eq!(
+                request
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap(),
+                reply.path
+            );
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer fixture-token"));
+            paths.push(reply.path);
+            socket.write_all(reply.headers.as_bytes()).unwrap();
+            if stall {
+                stalled.send(()).unwrap();
+                // Correct cancellation closes this socket without waiting for the timeout.
+                let _ = socket.read(&mut [0]);
+            } else {
+                socket.write_all(&reply.body).unwrap();
+            }
+        }
+        paths
+    });
+    let database = dir.path().join("summarizer.db");
+    let manager =
+        crate::desktop::DesktopJobManager::new(database.clone(), dir.path().join("settings.json"));
+    manager
+        .start_ocr_recovery(dir.path().to_path_buf())
+        .unwrap();
+    stall_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(manager.is_active(&first.root_run_id).unwrap());
+    assert!(manager.is_active(&second.root_run_id).unwrap());
+    let conn = db::init_db(&database).unwrap();
+    let root = db::get_pipeline_run(&conn, &first.root_run_id)
+        .unwrap()
+        .unwrap();
+    drop(conn);
+    let start = Instant::now();
+    manager
+        .request_cancellation(&first.root_run_id, root.state_version)
+        .unwrap();
+    while (manager.is_active(&first.root_run_id).unwrap()
+        || manager.is_active(&second.root_run_id).unwrap())
+        && start.elapsed() < Duration::from_secs(6)
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let elapsed = start.elapsed();
+    assert_eq!(server.join().unwrap().len(), 6);
+    println!("startup cancellation and next-root recovery elapsed={elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "recovery cancellation waited for the stalled body: {elapsed:?}"
+    );
+    assert!(!manager.is_active(&first.root_run_id).unwrap());
+    assert!(!manager.is_active(&second.root_run_id).unwrap());
+    let conn = db::init_db(&database).unwrap();
+    let cancelled = db::get_pipeline_run(&conn, &first.root_run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.state, PipelineState::Cancelled);
+    assert_eq!(
+        reload(&conn, &first.handoff_id)
+            .unwrap()
+            .error_code
+            .as_deref(),
+        Some("OCR_CANCELLED")
+    );
+    assert!(db::get_pipeline_run(&conn, &first.child_run_id)
+        .unwrap()
+        .is_none());
+    assert!(db::get_pipeline_run(&conn, &second.child_run_id)
+        .unwrap()
+        .is_some());
+    let count: u32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ocr_lineage WHERE handoff_id = ?1",
+            [&second.handoff_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 #[test]
@@ -926,7 +1256,7 @@ fn production_streamed_corpus_reaches_child_processing() {
                 fs::rename(&path, directory.join("archived-original.pdf")).unwrap();
                 drop(conn);
                 let mut conn = db::init_db(directory.join("summarizer.db")).unwrap();
-                let report = recover_ocr_handoffs(&mut conn, &directory).unwrap();
+                let report = recover_ocr_handoffs(&mut conn, &directory, &HashMap::new()).unwrap();
                 assert_eq!(report.child_run_ids, vec![child]);
                 assert!(report.warnings.is_empty());
                 assert_eq!(
