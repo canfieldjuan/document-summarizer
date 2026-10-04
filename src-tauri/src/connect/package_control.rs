@@ -46,6 +46,7 @@ pub(crate) enum PackageControlError {
 enum PackageKind {
     Upgrade,
     Remove,
+    Purge,
     Reinstall,
 }
 
@@ -184,6 +185,7 @@ pub(crate) enum PackageAction<'a> {
     FinishUpgrade { target: &'a str },
     PrepareRemove { target: &'a str },
     FinishRemove { target: &'a str },
+    FinishPurge { target: &'a str },
     RecoverInstall { target: &'a str },
     PrepareReinstall { target: &'a str },
     AdoptBootstrap,
@@ -688,6 +690,7 @@ fn run_with(
             quiesce_lock,
             package_lock,
         ),
+        PackageAction::FinishPurge { target } => finish_purge(store, target, effects),
         PackageAction::RecoverInstall { target } => {
             let record = store.read()?.ok_or(PackageControlError::Conflict)?;
             match record.kind {
@@ -707,7 +710,7 @@ fn run_with(
                     quiesce_lock,
                     package_lock,
                 ),
-                PackageKind::Remove => Err(PackageControlError::Conflict),
+                PackageKind::Remove | PackageKind::Purge => Err(PackageControlError::Conflict),
             }
         }
         PackageAction::PrepareReinstall { target } => {
@@ -731,7 +734,9 @@ fn run_with(
                         )?;
                     }
                     PackageKind::Reinstall => {}
-                    PackageKind::Upgrade => return Err(PackageControlError::Conflict),
+                    PackageKind::Upgrade | PackageKind::Purge => {
+                        return Err(PackageControlError::Conflict)
+                    }
                 }
             }
             prepare_reinstall(store, target)
@@ -897,6 +902,233 @@ fn finish(
     store.clear(&record.generation)?;
     drop(participant_authorities);
     Ok(())
+}
+
+fn finish_purge(
+    store: &PackageStore,
+    target: &str,
+    effects: &mut dyn PackageEffects,
+) -> Result<(), PackageControlError> {
+    validate_version(target)?;
+    let intent = store.read_quiesce()?;
+    if intent
+        .as_ref()
+        .is_some_and(|intent| intent.kind != PackageKind::Remove || intent.target_version != target)
+    {
+        return Err(PackageControlError::Conflict);
+    }
+    let receipt = store.read_removal_receipt()?;
+    if let Some(receipt) = &receipt {
+        validate_removal_receipt(receipt)?;
+        if receipt.removed_version != target
+            || receipt
+                .participants
+                .iter()
+                .any(|participant| participant.settlement != ParticipantSettlement::Disabled)
+        {
+            return Err(PackageControlError::Conflict);
+        }
+    }
+    let record = match store.read()? {
+        Some(record) => {
+            if !matches!(record.kind, PackageKind::Remove | PackageKind::Purge) {
+                return Err(PackageControlError::Conflict);
+            }
+            validate(&record, record.kind, target)?;
+            if receipt.as_ref().is_some_and(|receipt| {
+                receipt.producer_generation != record.generation
+                    || receipt.participants != record.participants
+            }) {
+                return Err(PackageControlError::Conflict);
+            }
+            Some(record)
+        }
+        None => receipt.map(|receipt| PackageRecord {
+            format_version: FORMAT_VERSION,
+            package_id: PACKAGE_ID.to_string(),
+            generation: receipt.producer_generation,
+            kind: PackageKind::Remove,
+            phase: PackagePhase::Finalizing,
+            source_version: receipt.removed_version.clone(),
+            target_version: receipt.removed_version,
+            predecessor_removal_generation: None,
+            participants: receipt.participants,
+        }),
+    };
+    let record = match (record, &intent) {
+        (Some(record), Some(intent)) => {
+            if record.generation != intent.generation
+                || record.source_version != intent.source_version
+            {
+                return Err(PackageControlError::Conflict);
+            }
+            Some(record)
+        }
+        (None, Some(intent)) => Some(PackageRecord {
+            format_version: FORMAT_VERSION,
+            package_id: PACKAGE_ID.to_string(),
+            generation: intent.generation.clone(),
+            kind: PackageKind::Remove,
+            phase: PackagePhase::IntentRecorded,
+            source_version: intent.source_version.clone(),
+            target_version: intent.target_version.clone(),
+            predecessor_removal_generation: None,
+            participants: effects.discover()?,
+        }),
+        (record, None) => record,
+    };
+    if let Some(mut record) = record {
+        // Keep the existing generation, but durably forbid reinstall before effects.
+        record.kind = PackageKind::Purge;
+        store.write(&record)?;
+        prepare_from_intent(
+            store,
+            &QuiesceIntent {
+                generation: record.generation.clone(),
+                kind: PackageKind::Purge,
+                source_version: record.source_version.clone(),
+                target_version: record.target_version.clone(),
+                bootstrap: None,
+            },
+            effects,
+        )?;
+        if let Some(intent) = intent {
+            store.clear_quiesce(&intent.generation)?;
+        }
+        let mut record = store.read()?.ok_or(PackageControlError::Conflict)?;
+        let _participants = lock_participant_authorities(
+            &record.participants,
+            store.root == Path::new(PACKAGE_ROOT),
+        )?;
+        if record.phase != PackagePhase::Finalizing {
+            for participant in &mut record.participants {
+                effects.cleanup(participant)?;
+                participant.settlement = ParticipantSettlement::Disabled;
+            }
+            record.phase = PackagePhase::Finalizing;
+            store.write(&record)?;
+        }
+        if record
+            .participants
+            .iter()
+            .any(|participant| participant.settlement != ParticipantSettlement::Disabled)
+        {
+            return Err(PackageControlError::Conflict);
+        }
+        purge_settled_state(store, Some(&record))
+    } else {
+        // A retry after the record was cleared may only have the controller left.
+        purge_settled_state(store, None)
+    }
+}
+
+fn validate_purge_file(path: &Path, uid: u32, mode: u32) -> Result<(), PackageControlError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| PackageControlError::Storage)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != uid
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != mode
+    {
+        return Err(PackageControlError::Conflict);
+    }
+    Ok(())
+}
+
+fn purge_participant_uid(name: &str) -> Option<u32> {
+    let uid = if let Some(uid) = name.strip_suffix(".json") {
+        uid
+    } else {
+        let (uid, generation) = name
+            .strip_prefix('.')?
+            .strip_suffix(".tmp")?
+            .split_once('.')?;
+        Uuid::parse_str(generation).ok()?;
+        uid
+    };
+    let parsed: u32 = uid.parse().ok()?;
+    (parsed.to_string() == uid).then_some(parsed)
+}
+
+fn purge_settled_state(
+    store: &PackageStore,
+    record: Option<&PackageRecord>,
+) -> Result<(), PackageControlError> {
+    let owner = fs::symlink_metadata(&store.root)
+        .map_err(|_| PackageControlError::Storage)?
+        .uid();
+    let participants = store.root.join(PARTICIPANTS_DIRECTORY);
+    let metadata = fs::symlink_metadata(&participants).map_err(|_| PackageControlError::Storage)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o7777 != 0o1777
+    {
+        return Err(PackageControlError::Conflict);
+    }
+    let mut acknowledgements = Vec::new();
+    for entry in fs::read_dir(&participants).map_err(|_| PackageControlError::Storage)? {
+        let entry = entry.map_err(|_| PackageControlError::Storage)?;
+        let name = entry.file_name();
+        let uid = name
+            .to_str()
+            .and_then(purge_participant_uid)
+            .ok_or(PackageControlError::Conflict)?;
+        validate_purge_file(&entry.path(), uid, 0o600)?;
+        acknowledgements.push(entry.path());
+    }
+    let mut receipts = Vec::new();
+    let mut controllers = Vec::new();
+    for entry in fs::read_dir(&store.root).map_err(|_| PackageControlError::Storage)? {
+        let entry = entry.map_err(|_| PackageControlError::Storage)?;
+        let name = entry.file_name();
+        match name.to_str().ok_or(PackageControlError::Conflict)? {
+            LOCK_FILE | CONTROLLER_LOCK_FILE | QUIESCE_LOCK_FILE | PARTICIPANTS_DIRECTORY => {}
+            RECORD_FILE if record.is_some() => {}
+            REMOVAL_RECEIPT_FILE | INSTALL_RECEIPT_FILE if record.is_some() => {
+                validate_purge_file(&entry.path(), owner, 0o644)?;
+                if name == INSTALL_RECEIPT_FILE {
+                    let receipt: InstallReceipt =
+                        read_json_record(&entry.path())?.ok_or(PackageControlError::Conflict)?;
+                    validate_install_receipt(&receipt)?;
+                }
+                receipts.push(entry.path());
+            }
+            name if name
+                .strip_prefix("package-controller-")
+                .is_some_and(|generation| {
+                    Uuid::parse_str(generation).is_ok()
+                        && record.is_none_or(|record| record.generation == generation)
+                }) =>
+            {
+                validate_purge_file(&entry.path(), owner, 0o700)?;
+                controllers.push(entry.path());
+            }
+            _ => return Err(PackageControlError::Conflict),
+        }
+    }
+    if controllers.len() > 1 || (record.is_none() && !acknowledgements.is_empty()) {
+        return Err(PackageControlError::Conflict);
+    }
+    // Validate the entire set before deleting anything. Unlinking fixed leaf names
+    // never follows a participant-supplied link or traverses a user data directory.
+    acknowledgements.sort();
+    receipts.sort();
+    for path in acknowledgements {
+        fs::remove_file(path).map_err(|_| PackageControlError::Storage)?;
+    }
+    sync_directory(&participants)?;
+    for path in receipts {
+        fs::remove_file(path).map_err(|_| PackageControlError::Storage)?;
+    }
+    sync_directory(&store.root)?;
+    if let Some(record) = record {
+        store.clear(&record.generation)?;
+    }
+    // Retain the running controller until every choice and the operation record
+    // are durably gone. Keep lock inodes in place across cleanup and retries.
+    for path in controllers {
+        fs::remove_file(path).map_err(|_| PackageControlError::Storage)?;
+    }
+    sync_directory(&store.root)
 }
 
 fn prepare_reinstall(store: &PackageStore, target: &str) -> Result<(), PackageControlError> {
@@ -1438,6 +1670,7 @@ fn package_kind_text(kind: PackageKind) -> &'static str {
     match kind {
         PackageKind::Upgrade => "upgrade",
         PackageKind::Remove => "remove",
+        PackageKind::Purge => "purge",
         PackageKind::Reinstall => "reinstall",
     }
 }
@@ -2561,6 +2794,7 @@ mod tests {
         calls: Arc<Mutex<Vec<String>>>,
         defer_enabled: bool,
         fail_restore_once: bool,
+        fail_cleanup_once: bool,
         publish_late_on_restore_timeout: bool,
         late_registration_present: bool,
         late_registration_ready: bool,
@@ -2667,6 +2901,10 @@ mod tests {
             Ok(())
         }
         fn cleanup(&mut self, participant: &Participant) -> Result<(), PackageControlError> {
+            if self.fail_cleanup_once {
+                self.fail_cleanup_once = false;
+                return Err(PackageControlError::Manager);
+            }
             self.calls
                 .lock()
                 .unwrap()
@@ -3372,6 +3610,278 @@ mod tests {
         assert_eq!(store_three.read_quiesce().unwrap(), Some(intent));
         assert!(quarantine.exists());
         fs::remove_dir_all(root_three).unwrap();
+    }
+
+    fn purge_fixture() -> (PackageStore, PathBuf, MockEffects, PackageRecord) {
+        let (store, root) = store("doc-sum-purge");
+        let mut effects = MockEffects {
+            participants: vec![participant(1000, true), participant(1001, false)],
+            ..Default::default()
+        };
+        prepare(&store, PackageKind::Remove, "0.1.0", "0.1.0", &mut effects).unwrap();
+        let mut record = store.read().unwrap().unwrap();
+        let controller = root.join(format!("package-controller-{}", record.generation));
+        fs::write(&controller, b"controller").unwrap();
+        fs::set_permissions(&controller, fs::Permissions::from_mode(0o700)).unwrap();
+        finish(
+            &store,
+            PackageKind::Remove,
+            "0.1.0",
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
+        record.participants = store.read_removal_receipt().unwrap().unwrap().participants;
+        record.phase = PackagePhase::Finalizing;
+        let install = InstallReceipt {
+            format_version: FORMAT_VERSION,
+            package_id: PACKAGE_ID.to_string(),
+            install_generation: Uuid::new_v4().to_string(),
+            predecessor_removal_generation: Uuid::new_v4().to_string(),
+            installed_version: "0.1.0".to_string(),
+            participants: record.participants.clone(),
+        };
+        store
+            .write_value(INSTALL_RECEIPT_FILE, &install.install_generation, &install)
+            .unwrap();
+        for name in [
+            format!("{}.json", unsafe { libc::geteuid() }),
+            format!(".{}.{}.tmp", unsafe { libc::geteuid() }, Uuid::new_v4()),
+        ] {
+            let path = root.join(PARTICIPANTS_DIRECTORY).join(name);
+            fs::write(&path, b"private participant choice").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        effects.calls.lock().unwrap().clear();
+        (store, root, effects, record)
+    }
+
+    fn assert_purge_empty(store: &PackageStore, effects: &MockEffects) {
+        assert!(store.read().unwrap().is_none());
+        assert!(store.read_removal_receipt().unwrap().is_none());
+        assert!(!store.install_receipt_path().exists());
+        assert_eq!(
+            fs::read_dir(store.root.join(PARTICIPANTS_DIRECTORY))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(!fs::read_dir(&store.root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .unwrap()
+                .starts_with("package-controller-")
+        }));
+        assert!(!effects
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("restore:")));
+    }
+
+    #[test]
+    fn purge_completed_removal_forgets_choices_and_cannot_seed_reinstall() {
+        let (store, root, mut effects, _) = purge_fixture();
+        run_with(
+            &store,
+            PackageAction::FinishPurge { target: "0.1.0" },
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_purge_empty(&store, &effects);
+        assert!(prepare_reinstall(&store, "0.2.0").is_err());
+        run_with(
+            &store,
+            PackageAction::FinishPurge { target: "0.1.0" },
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_purge_empty(&store, &effects);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn purge_pending_removal_settles_each_phase_without_restore() {
+        for phase in [
+            PackagePhase::IntentRecorded,
+            PackagePhase::PublishersStopped,
+            PackagePhase::Settling,
+            PackagePhase::Finalizing,
+        ] {
+            let (store, root, mut effects, mut record) = purge_fixture();
+            fs::remove_file(store.removal_receipt_path()).unwrap();
+            record.phase = phase;
+            if phase != PackagePhase::Finalizing {
+                for participant in &mut record.participants {
+                    participant.settlement = ParticipantSettlement::Pending;
+                }
+            }
+            store.write(&record).unwrap();
+            if phase == PackagePhase::IntentRecorded {
+                store
+                    .write_quiesce(&QuiesceIntent {
+                        generation: record.generation.clone(),
+                        kind: PackageKind::Remove,
+                        source_version: "0.1.0".to_string(),
+                        target_version: "0.1.0".to_string(),
+                        bootstrap: None,
+                    })
+                    .unwrap();
+                effects.fail_cleanup_once = true;
+                assert!(matches!(
+                    finish_purge(&store, "0.1.0", &mut effects),
+                    Err(PackageControlError::Manager)
+                ));
+                assert_eq!(store.read().unwrap().unwrap().kind, PackageKind::Purge);
+                assert!(run_with(
+                    &store,
+                    PackageAction::PrepareReinstall { target: "0.2.0" },
+                    &mut effects,
+                    None,
+                    None
+                )
+                .is_err());
+            }
+            finish_purge(&store, "0.1.0", &mut effects).unwrap();
+            assert!(store.read_quiesce().unwrap().is_none());
+            assert_purge_empty(&store, &effects);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn purge_resumes_after_every_cleanup_boundary() {
+        // Reconstruct each durable prefix of cleanup, including loss of the receipt
+        // and the final window after the operation record but before the controller.
+        for deleted in 0..=6 {
+            let (store, root, mut effects, mut record) = purge_fixture();
+            record.kind = PackageKind::Purge;
+            store.write(&record).unwrap();
+            let mut paths = fs::read_dir(root.join(PARTICIPANTS_DIRECTORY))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths.extend([
+                store.install_receipt_path(),
+                store.removal_receipt_path(),
+                store.record_path(),
+                root.join(format!("package-controller-{}", record.generation)),
+            ]);
+            for path in paths.iter().take(deleted) {
+                fs::remove_file(path).unwrap();
+            }
+            finish_purge(&store, "0.1.0", &mut effects).unwrap();
+            assert_purge_empty(&store, &effects);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn purge_rejects_unsafe_mixed_state_before_deleting_choices() {
+        for invalid in [
+            "symlink",
+            "hardlink",
+            "mode",
+            "owner",
+            "unknown",
+            "directory",
+        ] {
+            let (store, root, mut effects, _) = purge_fixture();
+            let outside = tempfile::tempdir().unwrap();
+            let sentinel = outside.path().join("untouched");
+            fs::write(&sentinel, b"must remain").unwrap();
+            let path = root
+                .join(PARTICIPANTS_DIRECTORY)
+                .join(format!("{}.json", unsafe { libc::geteuid() }));
+            match invalid {
+                "symlink" => {
+                    fs::remove_file(&path).unwrap();
+                    std::os::unix::fs::symlink(&sentinel, &path).unwrap();
+                }
+                "hardlink" => {
+                    fs::remove_file(&path).unwrap();
+                    fs::hard_link(&sentinel, &path).unwrap();
+                }
+                "mode" => fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap(),
+                "owner" => {
+                    fs::rename(
+                        &path,
+                        path.with_file_name(format!("{}.json", unsafe { libc::geteuid() } + 1)),
+                    )
+                    .unwrap();
+                }
+                "unknown" => fs::write(root.join("unrelated"), b"preserve").unwrap(),
+                "directory" => {
+                    fs::remove_file(&path).unwrap();
+                    fs::create_dir(&path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                finish_purge(&store, "0.1.0", &mut effects).is_err(),
+                "{invalid}"
+            );
+            assert!(store.removal_receipt_path().exists(), "{invalid}");
+            assert!(store.install_receipt_path().exists(), "{invalid}");
+            assert_eq!(fs::read(&sentinel).unwrap(), b"must remain");
+            assert_eq!(
+                fs::read_dir(root.join(PARTICIPANTS_DIRECTORY))
+                    .unwrap()
+                    .count(),
+                2
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn purge_rejects_conflicting_operation_and_preserves_lock_authority() {
+        let (store, root, mut effects, mut record) = purge_fixture();
+        record.kind = PackageKind::Upgrade;
+        store.write(&record).unwrap();
+        assert!(finish_purge(&store, "0.1.0", &mut effects).is_err());
+        assert_eq!(store.read().unwrap().unwrap(), record);
+        record.kind = PackageKind::Remove;
+        store.write(&record).unwrap();
+        assert!(finish_purge(&store, "0.2.0", &mut effects).is_err());
+        let controller = store.controller_lock().unwrap();
+        let quiesce = store.quiesce_lock(true).unwrap();
+        let package = store.lock().unwrap();
+        let before = [
+            controller.metadata().unwrap().ino(),
+            quiesce.metadata().unwrap().ino(),
+            package.metadata().unwrap().ino(),
+        ];
+        run_with(
+            &store,
+            PackageAction::FinishPurge { target: "0.1.0" },
+            &mut effects,
+            Some(&quiesce),
+            Some(&package),
+        )
+        .unwrap();
+        for (name, inode) in [CONTROLLER_LOCK_FILE, QUIESCE_LOCK_FILE, LOCK_FILE]
+            .into_iter()
+            .zip(before)
+        {
+            assert_eq!(fs::metadata(root.join(name)).unwrap().ino(), inode);
+            let another = File::open(root.join(name)).unwrap();
+            assert!(
+                another.try_lock_shared().is_err(),
+                "purge must not release {name}"
+            );
+        }
+        assert_purge_empty(&store, &effects);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

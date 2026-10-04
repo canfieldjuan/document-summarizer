@@ -729,6 +729,7 @@ pub fn run_package_control(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         [command, target] if command == "finish-upgrade" => PackageAction::FinishUpgrade { target },
         [command, target] if command == "prepare-remove" => PackageAction::PrepareRemove { target },
         [command, target] if command == "finish-remove" => PackageAction::FinishRemove { target },
+        [command, target] if command == "finish-purge" => PackageAction::FinishPurge { target },
         [command, target] if command == "recover-install" => {
             PackageAction::RecoverInstall { target }
         }

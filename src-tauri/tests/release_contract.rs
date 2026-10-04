@@ -103,10 +103,123 @@ fn debian_package_hooks_coordinate_provider_ownership() {
     assert!(postinst.contains("--connect-package initialize"));
     assert!(postinst.contains("--connect-package recover-install"));
     assert!(prerm.contains("--connect-package prepare-remove"));
-    assert!(postrm.contains("--connect-package finish-remove"));
+    assert!(postrm.contains("action=finish-remove"));
+    assert!(postrm.contains("action=finish-purge"));
+    assert!(postrm.contains("--connect-package \"$action\""));
     for script in [preinst, postinst, prerm, postrm] {
         assert!(script.contains(env!("CARGO_PKG_VERSION")));
         assert!(!script.contains("systemctl"));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn debian_purge_dispatches_after_completed_removal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("package-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(root.join("package-removal-receipt-v1.json"), b"{}").unwrap();
+    let invoked = temporary.path().join("invoked");
+    let controller = root.join("package-controller-test");
+    std::fs::write(
+        &controller,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            invoked.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&controller, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let hook = include_str!("../linux/debian/postrm")
+        .replace("/var/lib/document-summarizer", root.to_str().unwrap())
+        .replace(
+            "-user root",
+            &format!("-user {}", unsafe { libc::geteuid() }),
+        );
+    let script = temporary.path().join("postrm");
+    std::fs::write(&script, hook).unwrap();
+    assert!(Command::new("sh")
+        .arg(&script)
+        .arg("remove")
+        .status()
+        .unwrap()
+        .success());
+    assert!(
+        !invoked.exists(),
+        "completed ordinary removal keeps its reinstall receipt"
+    );
+    assert!(Command::new("sh")
+        .arg(&script)
+        .arg("purge")
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        std::fs::read_to_string(&invoked).unwrap_or_default(),
+        "--connect-package\nfinish-purge\n0.1.0\n",
+        "purge must reach the controller after the removal operation record is gone"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn debian_purge_retry_accepts_only_empty_validated_state_without_a_controller() {
+    use std::os::unix::fs::PermissionsExt;
+    for case in [
+        "empty",
+        "receipt",
+        "unknown",
+        "participant-link",
+        "root-link",
+        "unsafe-lock",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("package-root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let participants = root.join("participants-v1");
+        std::fs::create_dir(&participants).unwrap();
+        std::fs::set_permissions(&participants, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        match case {
+            "empty" => {}
+            "receipt" => {
+                std::fs::write(root.join("package-removal-receipt-v1.json"), b"{}").unwrap()
+            }
+            "unknown" => std::fs::write(root.join("unrelated"), b"preserve").unwrap(),
+            "participant-link" => {
+                std::fs::remove_dir(&participants).unwrap();
+                std::os::unix::fs::symlink(temporary.path(), &participants).unwrap();
+            }
+            "root-link" => {
+                std::fs::rename(&root, temporary.path().join("saved")).unwrap();
+                std::os::unix::fs::symlink(temporary.path().join("saved"), &root).unwrap();
+            }
+            "unsafe-lock" => std::fs::create_dir(root.join(".package-operation-v1.lock")).unwrap(),
+            _ => unreachable!(),
+        }
+        let hook = include_str!("../linux/debian/postrm")
+            .replace("/var/lib/document-summarizer", root.to_str().unwrap())
+            .replace(
+                "-user root",
+                &format!("-user {}", unsafe { libc::geteuid() }),
+            );
+        let script = temporary.path().join("postrm");
+        std::fs::write(&script, hook).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                Command::new("sh")
+                    .arg(&script)
+                    .arg("purge")
+                    .status()
+                    .unwrap()
+                    .success(),
+                case == "empty",
+                "{case}"
+            );
+        }
     }
 }
 
