@@ -2252,24 +2252,39 @@ per-user admission are held. This includes users who never invoke background
 controls. A successor inside an explicit enable transition uses that controller's
 acknowledgement. Enable and disable record an
 owner-authenticated 0600 participant acknowledgement before manager mutation
-and update it after settlement while the per-user barrier is still held. That acknowledgement carries the exact runtime,
-application data, lifecycle control, and systemd enablement paths, so package
-discovery does not enumerate `/etc/passwd` or guess XDG locations. Public package
-records and removal/install receipts establish mode 0644 before atomic
-publication, independently of the controller's process umask. The shared
-participant directory is an untrusted inbox. Publication exclusively creates a
-random `UID.UUID.json` slot, then reuses that owned slot for atomic updates;
-another UID cannot reserve its destination. Slot selection and publication hold
-the inbox directory inode exclusively; discovery holds it shared and purge
-holds it exclusively. Operations use the held inode, and only the first valid
-slot in filename order is authoritative for a UID. Interrupted empty slots are
-ignored by discovery and reused by their owner. Acknowledgement temporaries
-establish exact mode 0600 before publication, independently of umask. Discovery
-requires matching owner-private regular files and valid owner-bound record
-contents. Fixed UID names, temporary, malformed, foreign-owned and unsafe entries have no
-package-wide authority. File reads cannot block on a substituted FIFO. Once a
-participant is accepted, its directory identities and pending transitions remain
-strict lifecycle checks; root-owned package records still fail closed.
+and update it after settlement while the per-user barrier is still held. It
+carries the exact runtime, application data, lifecycle control, and systemd
+enablement paths; those paths are not inferred from account homes or XDG defaults.
+Public package records and removal/install receipts establish mode 0644 before
+atomic publication, independently of the controller's process umask.
+
+The candidate namespace is the trusted NSS account enumeration, canonicalized
+and deduplicated by UID. Each account has one fixed acknowledgement at its NSS
+home's `.local/state/document-summarizer/package-participant-v2.json`, independent
+of XDG environment overrides. Publication selects from that same enumeration;
+lookup-only or otherwise non-enumerable accounts fail before package-owned
+provider registration. This package integration requires NSS-enumerable accounts;
+standalone startup is unchanged. Remote directory-service integration is not
+qualified by the local account tests.
+
+The home and each directory below it are opened without following a final
+symlink and authenticated for the account owner and absence of group/other write
+permission. The final directory must have exact mode 0700. First creation
+prepares private sibling directories and publishes each with an atomic
+no-replace rename before it can be used. Receipt updates hold the private final
+directory's lock, recover the fixed `.package-participant-v2.tmp` only when it is
+an owner-private regular file with one link, establish exact mode 0600 regardless
+of umask, then fsync and atomically replace the fixed receipt. The directory is
+synced before releasing the lock.
+
+Root discovery visits only that fixed receipt for each enumerated account. It
+never enumerates user-controlled filenames. Reads are bounded and nonblocking,
+reject links and unsafe owners or modes, and authenticate the owner-bound record
+contents. A retired `participants-v1` shared inbox, if present, is ignored and
+preserved; its unpublished intermediate entries are not migrated into authority.
+Once a participant is accepted, its exact directory identities and pending
+transitions remain strict lifecycle checks; root-owned package records still
+fail closed.
 
 Upgrade, removal, and reinstall suppress every recorded manager, stop and clean
 each exact provider, and keep the package record as an admission barrier while
@@ -2297,15 +2312,17 @@ The controller persists a distinct `purge` operation before settling any pending
 removal, so an interrupted purge cannot resume as reinstall. Once publishers
 are settled, it validates the complete package-owned cleanup set before removing
 participant acknowledgement files and temporaries, removal/install receipts,
-and the operation record. The copied controller is retired only after that
-choice state is durably gone. Fixed lock files and the participant directory
-remain, preserving the lock authority across retries. Without a controller,
-the shell retry checks only the trusted package root entries and validates the
-inbox directory itself without traversing its contents. Unauthenticated inbox
-entries are left untouched and cannot block cleanup or retry. Unknown files or
-unsafe file types/ownership/modes in the root-owned package state, conflicting
-operations and unsettled state fail closed. Cleanup never traverses participant
-application-data paths.
+and the operation record. Account cleanup visits only the fixed receipt and
+fixed temporary through authenticated directory descriptors for NSS-enumerated
+accounts. Unrelated user files and unsafe receipt leaves are preserved. The
+copied controller is retired only after that choice state is durably gone. Fixed
+package lock files remain, preserving the lock authority across retries. A
+retired shared inbox is left untouched and never traversed. Without a controller,
+the shell retry checks only trusted package root entries and validates any
+retired inbox directory itself without traversing its contents. Unknown files or
+unsafe file types/ownership/modes in root-owned package state, conflicting
+operations and unsettled state fail closed. Cleanup never traverses the
+application-data paths recorded inside participant acknowledgements.
 Ordinary removal continues to preserve its reinstall receipt and controller.
 
 If removal preparation fails, `postinst abort-remove` invokes the installed
