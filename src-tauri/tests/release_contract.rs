@@ -166,10 +166,13 @@ fn debian_purge_dispatches_after_completed_removal() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn debian_purge_retry_accepts_only_empty_validated_state_without_a_controller() {
+fn debian_purge_retry_ignores_untrusted_inbox_but_validates_root_state() {
     use std::os::unix::fs::PermissionsExt;
     for case in [
         "empty",
+        "inbox-file",
+        "inbox-directory",
+        "inbox-symlink",
         "receipt",
         "unknown",
         "participant-link",
@@ -183,8 +186,19 @@ fn debian_purge_retry_accepts_only_empty_validated_state_without_a_controller() 
         let participants = root.join("participants-v1");
         std::fs::create_dir(&participants).unwrap();
         std::fs::set_permissions(&participants, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let sentinel = temporary.path().join("sentinel");
+        std::fs::write(&sentinel, b"preserve").unwrap();
         match case {
             "empty" => {}
+            "inbox-file" => std::fs::write(participants.join("untrusted"), b"junk").unwrap(),
+            "inbox-directory" => {
+                let nested = participants.join("untrusted");
+                std::fs::create_dir(&nested).unwrap();
+                std::fs::write(nested.join("junk"), b"junk").unwrap();
+            }
+            "inbox-symlink" => {
+                std::os::unix::fs::symlink(&sentinel, participants.join("untrusted")).unwrap();
+            }
             "receipt" => {
                 std::fs::write(root.join("package-removal-receipt-v1.json"), b"{}").unwrap()
             }
@@ -216,9 +230,13 @@ fn debian_purge_retry_accepts_only_empty_validated_state_without_a_controller() 
                     .status()
                     .unwrap()
                     .success(),
-                case == "empty",
+                case == "empty" || case.starts_with("inbox-"),
                 "{case}"
             );
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+            if case.starts_with("inbox-") {
+                assert!(std::fs::symlink_metadata(participants.join("untrusted")).is_ok());
+            }
         }
     }
 }

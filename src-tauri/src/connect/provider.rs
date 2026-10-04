@@ -5712,18 +5712,49 @@ int kill(pid_t pid, int sig) {
     fn registered_process_guard_rejects_process_exit_after_identity_capture() {
         let root = TestDirectory::new("doc-sum-connect-process-exit-race");
         let executable = root.0.join("provider-process");
-        fs::copy("/usr/bin/sleep", &executable).unwrap();
+        fs::copy("/usr/bin/cat", &executable).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut child = std::process::Command::new(&executable)
-            .arg("30")
+        // Hold the child before exec to make the launch/identity race deterministic.
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "read -r start; exec \"$1\"", "provider-fixture"])
+            .arg(&executable)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         let expected = expected_provider_process(unsafe { libc::geteuid() }, &executable).unwrap();
-        let guard = RegisteredProcessGuard::open(child.id(), expected).unwrap();
+        let pre_exec_rejected = RegisteredProcessGuard::open(child.id(), expected).is_err();
+        // An echo proves the intended executable has run, without retrying or
+        // relaxing the process guard to compensate for a pre-exec identity.
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"start\nready\n")
+            .unwrap();
+        let mut ready = libc::pollfd {
+            fd: child.stdout.as_ref().unwrap().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let mut echo = [0; 6];
+        let echoed = unsafe { libc::poll(&mut ready, 1, 5_000) } == 1
+            && ready.revents & libc::POLLIN != 0
+            && child.stdout.as_mut().unwrap().read_exact(&mut echo).is_ok()
+            && &echo == b"ready\n";
+        let guard = RegisteredProcessGuard::open(child.id(), expected);
+        let live = guard.as_ref().is_ok_and(RegisteredProcessGuard::revalidate);
 
         child.kill().unwrap();
         child.wait().unwrap();
 
+        println!(
+            "pre-exec rejected={pre_exec_rejected}; executable echo={echoed}; live guard={live}"
+        );
+        assert!(pre_exec_rejected);
+        assert!(echoed);
+        assert!(live);
+        let guard = guard.unwrap();
         assert!(!guard.revalidate());
         guard.terminate().unwrap();
     }

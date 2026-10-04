@@ -140,8 +140,8 @@ esac
 controllers=$(find /var/lib/document-summarizer -maxdepth 1 -type f -name 'package-controller-*' -perm 0700 -user root -links 1 -print)
 set -- $controllers
 if [ "$#" -eq 0 ] && [ "$action" = finish-purge ]; then
-  # A completed purge retains only its stable locks and empty participant directory.
-  remaining=$(find /var/lib/document-summarizer -mindepth 1 ! \( \
+  # Only trusted root state determines completion; inbox contents are untrusted.
+  remaining=$(find /var/lib/document-summarizer -mindepth 1 -maxdepth 1 ! \( \
     \( -path /var/lib/document-summarizer/participants-v1 -type d -perm 1777 -user root \) -o \
     \( -path /var/lib/document-summarizer/.package-controller-v1.lock -type f -perm 0600 -user root -links 1 \) -o \
     \( \( -path /var/lib/document-summarizer/.package-operation-v1.lock -o -path /var/lib/document-summarizer/.package-quiesce-v1.lock \) -type f -perm 0644 -user root -links 1 \) \) -print)

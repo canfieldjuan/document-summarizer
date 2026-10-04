@@ -229,11 +229,11 @@ impl TransitionStore {
         self.root.join(TRANSITION_FILE)
     }
 
-    fn control_lock(&self) -> Result<File, LifecycleControlError> {
+    fn control_lock(&self) -> Result<PrivateLock, LifecycleControlError> {
         open_private_lock(&self.root.join(CONTROL_LOCK_FILE), true, true)
     }
 
-    fn admission_lock(&self, exclusive: bool) -> Result<File, LifecycleControlError> {
+    fn admission_lock(&self, exclusive: bool) -> Result<PrivateLock, LifecycleControlError> {
         open_private_lock(&self.root.join(ADMISSION_LOCK_FILE), exclusive, true)
     }
 
@@ -467,7 +467,7 @@ impl TransitionStore {
 }
 
 pub(crate) struct JobAdmissionGuard {
-    _gate: File,
+    _gate: PrivateLock,
 }
 
 fn new_transition(
@@ -810,11 +810,20 @@ fn remove_launch_environment(launch_root: &Path) -> Result<(), LifecycleControlE
     sync_directory(launch_root)
 }
 
+struct PrivateLock(File);
+
+impl Drop for PrivateLock {
+    fn drop(&mut self) {
+        // close alone leaves flock held by descriptors inherited during fork.
+        let _ = self.0.unlock();
+    }
+}
+
 fn open_private_lock(
     path: &Path,
     exclusive: bool,
     nonblocking: bool,
-) -> Result<File, LifecycleControlError> {
+) -> Result<PrivateLock, LifecycleControlError> {
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -856,7 +865,7 @@ fn open_private_lock(
         file.lock_shared()
             .map_err(|_| LifecycleControlError::Storage)?;
     }
-    Ok(file)
+    Ok(PrivateLock(file))
 }
 
 fn read_transition(path: &Path) -> Result<Option<BackgroundTransition>, LifecycleControlError> {
@@ -1562,6 +1571,56 @@ esac
             "active",
             "rollback restored enablement but left the service stopped"
         );
+    }
+
+    #[test]
+    fn transition_lock_release_is_not_delayed_by_unrelated_fork() {
+        for exclusive in [false, true] {
+            let root = TestDirectory::new("doc-sum-lock-fork");
+            let store = TransitionStore::new(root.0.join("control")).unwrap();
+            let transition = new_transition(TransitionKind::Enable, true, &root.0, None).unwrap();
+            store.persist_new(&transition).unwrap();
+            let gate = store.admission_lock(exclusive).unwrap();
+            assert!(matches!(
+                store.clear_exact(&transition.generation),
+                Err(LifecycleControlError::ConflictingTransition)
+            ));
+            let peer = (!exclusive).then(|| store.admission_lock(false).unwrap());
+            // A concurrent Command spawn can inherit this descriptor until exec.
+            // The child uses only async-signal-safe calls in the fork window.
+            let child = unsafe { libc::fork() };
+            assert!(child >= 0);
+            if child == 0 {
+                unsafe {
+                    libc::raise(libc::SIGSTOP);
+                    libc::_exit(0);
+                }
+            }
+            let mut status = 0;
+            assert_eq!(
+                unsafe { libc::waitpid(child, &mut status, libc::WUNTRACED) },
+                child
+            );
+            assert!(libc::WIFSTOPPED(status));
+            drop(gate);
+            if peer.is_some() {
+                assert!(matches!(
+                    store.clear_exact(&transition.generation),
+                    Err(LifecycleControlError::ConflictingTransition)
+                ));
+            }
+            drop(peer);
+            let same_generation =
+                store.current().unwrap().unwrap().generation == transition.generation;
+            let result = store.clear_exact(&transition.generation);
+            unsafe {
+                libc::kill(child, libc::SIGKILL);
+                libc::waitpid(child, &mut status, 0);
+            }
+            println!("exclusive={exclusive}; same generation={same_generation}; clear={result:?}");
+            assert!(same_generation);
+            result.expect("an unrelated fork must not extend the parent's lock lifetime");
+        }
     }
 
     #[test]
