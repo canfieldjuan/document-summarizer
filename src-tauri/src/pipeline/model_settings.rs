@@ -891,16 +891,18 @@ pub fn connect_proof_runtime_from_environment() -> Result<QwenProfileRuntime, Mo
     prepare_for_ollama_runtime()?;
     Ok(QwenProfileRuntime {
         preset_id: snapshot.preset_id.clone(),
-        analysis: StageRuntime::Ollama(OllamaRuntime::from_connect_proof_environment(
+        analysis: StageRuntime::Ollama(Box::new(OllamaRuntime::from_connect_proof_environment(
             &snapshot.analysis.model_name,
             &snapshot.analysis.model_digest,
             snapshot.analysis.context_tokens,
-        )?),
-        verification: StageRuntime::Ollama(OllamaRuntime::from_connect_proof_environment(
-            &snapshot.verification.model_name,
-            &snapshot.verification.model_digest,
-            snapshot.verification.context_tokens,
-        )?),
+        )?)),
+        verification: StageRuntime::Ollama(Box::new(
+            OllamaRuntime::from_connect_proof_environment(
+                &snapshot.verification.model_name,
+                &snapshot.verification.model_digest,
+                snapshot.verification.context_tokens,
+            )?,
+        )),
         snapshot,
         _profile_lease: None,
     })
@@ -1094,7 +1096,7 @@ impl Drop for RuntimeProfileLease {
 }
 
 enum StageRuntime {
-    Ollama(OllamaRuntime),
+    Ollama(Box<OllamaRuntime>),
     LlamaCpp(Arc<LlamaCppRuntime>),
 }
 
@@ -1269,18 +1271,18 @@ impl QwenProfileRuntime {
     ) -> Result<Self, ModelRuntimeFailure> {
         Ok(Self {
             preset_id: snapshot.preset_id.clone(),
-            analysis: StageRuntime::Ollama(OllamaRuntime::from_environment_profile(
+            analysis: StageRuntime::Ollama(Box::new(OllamaRuntime::from_environment_profile(
                 &snapshot.analysis.model_name,
                 Some(&snapshot.analysis.model_digest),
                 Some(analysis_family),
                 snapshot.analysis.context_tokens,
-            )?),
-            verification: StageRuntime::Ollama(OllamaRuntime::from_environment_profile(
+            )?)),
+            verification: StageRuntime::Ollama(Box::new(OllamaRuntime::from_environment_profile(
                 &snapshot.verification.model_name,
                 Some(&snapshot.verification.model_digest),
                 Some(verification_family),
                 snapshot.verification.context_tokens,
-            )?),
+            )?)),
             snapshot,
             _profile_lease: None,
         })
@@ -1330,14 +1332,14 @@ fn stage_runtime(
     match profile.runtime_kind {
         ModelRuntimeKind::OllamaNative => {
             prepare_for_ollama_runtime()?;
-            Ok(StageRuntime::Ollama(
+            Ok(StageRuntime::Ollama(Box::new(
                 OllamaRuntime::from_environment_profile(
                     &snapshot.model_name,
                     Some(&snapshot.model_digest),
                     Some(profile.tokenizer_family),
                     snapshot.context_tokens,
                 )?,
-            ))
+            )))
         }
         ModelRuntimeKind::LlamaCppGguf => {
             let ollama = OllamaRuntime::discovery_from_environment()?;
@@ -2307,7 +2309,7 @@ mod tests {
                     tokenizer_version: QWEN3_TOKENIZER_VERSION.to_string(),
                 },
             },
-            analysis: StageRuntime::Ollama(
+            analysis: StageRuntime::Ollama(Box::new(
                 OllamaRuntime::new_with_context(
                     "http://127.0.0.1:11434/",
                     "analysis-model",
@@ -2316,8 +2318,8 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            ),
-            verification: StageRuntime::Ollama(
+            )),
+            verification: StageRuntime::Ollama(Box::new(
                 OllamaRuntime::new_with_context(
                     "http://127.0.0.1:11434/",
                     "verification-model",
@@ -2326,7 +2328,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            ),
+            )),
             _profile_lease: None,
         };
         assert_eq!(
