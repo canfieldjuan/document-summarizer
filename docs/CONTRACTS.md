@@ -2193,8 +2193,14 @@ held.
 
 Provider shutdown first closes new-job admission and requests cooperative
 cancellation from every retained Connect worker. The 30-second timeout bounds
-the HTTP job-creation request, including receipt of its body. Admitted workers
-have no additional absolute job deadline: model transports retain their normal
+the HTTP job-creation request, including receipt of its body. Database lookup,
+PDF/OCR validation, runtime construction and acceptance run on owned admission
+workers, leaving the endpoint loop responsive. A single admission permit stays
+with a worker after a request expires, so retries cannot accumulate cold runtime
+initializations. The absolute request deadline, receiver lifetime and shutdown
+cancellation are checked before work and by the database admission predicate.
+An expired request cannot later admit a job; its staging owner cleans up when
+blocking work returns. Admitted workers have no additional absolute job deadline: model transports retain their normal
 configured request budgets and cooperative cancellation. Shutdown reaps
 finished worker handles during
 steady admission and drains remaining handles through the 35-second graceful
@@ -2233,7 +2239,13 @@ and update it after settlement while the per-user barrier is still held. That ac
 application data, lifecycle control, and systemd enablement paths, so package
 discovery does not enumerate `/etc/passwd` or guess XDG locations. Public package
 records and removal/install receipts establish mode 0644 before atomic
-publication, independently of the controller's process umask.
+publication, independently of the controller's process umask. The shared
+participant directory is an untrusted inbox: discovery admits only canonical UID
+filenames, matching owner-private regular files and valid owner-bound record
+contents. Temporary, malformed, foreign-owned and unsafe entries have no
+package-wide authority. File reads cannot block on a substituted FIFO. Once a
+participant is accepted, its directory identities and pending transitions remain
+strict lifecycle checks; root-owned package records still fail closed.
 
 Upgrade, removal, and reinstall suppress every recorded manager, stop and clean
 each exact provider, and keep the package record as an admission barrier while
@@ -2262,10 +2274,12 @@ removal, so an interrupted purge cannot resume as reinstall. Once publishers
 are settled, it validates the complete package-owned cleanup set before removing
 participant acknowledgement files and temporaries, removal/install receipts,
 and the operation record. The copied controller is retired only after that
-choice state is durably gone. Fixed lock files and the empty participant
-directory remain, preserving the lock authority across retries. Unknown files,
-unsafe file types/ownership/modes, conflicting operations and unsettled state
-fail closed. Cleanup never traverses participant application-data paths.
+choice state is durably gone. Fixed lock files and the participant directory
+remain, preserving the lock authority across retries. Unauthenticated inbox
+entries are left untouched and cannot block cleanup or retry. Unknown files or
+unsafe file types/ownership/modes in the root-owned package state, conflicting
+operations and unsettled state fail closed. Cleanup never traverses participant
+application-data paths.
 Ordinary removal continues to preserve its reinstall receipt and controller.
 
 If removal preparation fails, `postinst abort-remove` invokes the installed
@@ -2293,8 +2307,13 @@ matching SHA-256 digest. The record binds the legacy executable device, inode,
 and digest. Preinstall copies that exact executable into a private fixed
 generation quarantine, removes the exact installed pathname, atomically
 installs a launcher that exits closed, validates published registrations, and
-stops every process
-still executing the bound inode with bounded TERM and KILL waits. The wrapper
+stops every process still executing the bound inode with bounded TERM and KILL
+waits. Preinstall uses Debian's essential perl-base runtime in taint mode to open
+Linux process descriptors before authenticating executable identity; both signals
+and exit waits retain those descriptors, so PID reuse cannot redirect a signal.
+The x86-64 and arm64 syscall ABIs and kernel support are checked before package
+mutation. Unsupported process handles fail closed with no numeric-PID fallback.
+The wrapper
 blocks legacy restarts before unpack; after unpack, the quiesce record blocks the
 new binary until adoption. Every mutation is replayable from `quarantining` or
 `quiesced` without executing the old binary. Postinstall's new controller
