@@ -32,7 +32,7 @@ const MAX_TOKENIZE_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_MODEL_RECORDS: usize = 8;
 #[cfg(unix)]
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const RUNTIME_ROOT_DIRECTORY: &str = "llama-runtime";
 
 #[derive(Debug, Clone)]
@@ -162,10 +162,10 @@ static RUNTIMES: OnceLock<Mutex<HashMap<String, Arc<LlamaCppRuntime>>>> = OnceLo
 type RuntimeSupervisorTask = Box<dyn FnOnce() + Send + 'static>;
 static RUNTIME_SUPERVISOR: OnceLock<mpsc::Sender<RuntimeSupervisorTask>> = OnceLock::new();
 static MODEL_LEASE_BREAK_REQUESTED: AtomicBool = AtomicBool::new(false);
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 static MODEL_LEASE_HANDLER_INSTALLED: OnceLock<bool> = OnceLock::new();
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 extern "C" fn record_model_lease_break(_signal: libc::c_int) {
     MODEL_LEASE_BREAK_REQUESTED.store(true, Ordering::SeqCst);
 }
@@ -268,7 +268,7 @@ impl LlamaCppRuntime {
                 false,
             )
         })?;
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let inherited_fds = {
             use std::os::fd::AsRawFd;
             let mut descriptors = Vec::with_capacity(runtime_libraries.len() + 2);
@@ -281,15 +281,15 @@ impl LlamaCppRuntime {
             );
             descriptors
         };
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let model_descriptor = {
             use std::os::fd::AsRawFd;
             model_file.as_raw_fd()
         };
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let expected_parent_process = unsafe { libc::getpid() };
         let mut command = Command::new(&executable_argument);
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             use std::os::unix::process::CommandExt;
             // SAFETY: the callback invokes only async-signal-safe process/signal/fcntl
@@ -522,21 +522,23 @@ impl LlamaCppRuntime {
         user: &str,
         control: &dyn ExecutionControl,
     ) -> Result<Vec<u32>, ModelRuntimeFailure> {
+        check_cancellation(control)?;
         let system = tokenize_text(
             &self.client,
             &self.base_url,
             &self.api_token,
             system,
             false,
-            remaining_effect_timeout(control)?,
+            HEALTH_TIMEOUT,
         )?;
+        check_cancellation(control)?;
         let user = tokenize_text(
             &self.client,
             &self.base_url,
             &self.api_token,
             user,
             false,
-            remaining_effect_timeout(control)?,
+            HEALTH_TIMEOUT,
         )?;
         let capacity = self
             .prompt_framing
@@ -659,20 +661,11 @@ fn cancelled_model_request() -> ModelRuntimeFailure {
     )
 }
 
-fn remaining_effect_timeout(
-    control: &dyn ExecutionControl,
-) -> Result<Duration, ModelRuntimeFailure> {
+fn check_cancellation(control: &dyn ExecutionControl) -> Result<(), ModelRuntimeFailure> {
     if control.cancellation_requested() {
         return Err(cancelled_model_request());
     }
-    let remaining = control
-        .request_timeout()
-        .unwrap_or(REQUEST_TIMEOUT)
-        .min(REQUEST_TIMEOUT);
-    if remaining.is_zero() {
-        return Err(cancelled_model_request());
-    }
-    Ok(remaining)
+    Ok(())
 }
 
 impl LlamaCppRuntime {
@@ -680,11 +673,7 @@ impl LlamaCppRuntime {
         &self,
         control: &dyn ExecutionControl,
     ) -> Result<MutexGuard<'_, ()>, ModelRuntimeFailure> {
-        let deadline = Instant::now()
-            + control
-                .request_timeout()
-                .unwrap_or(REQUEST_TIMEOUT)
-                .min(REQUEST_TIMEOUT);
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
             if control.cancellation_requested() {
                 return Err(cancelled_model_request());
@@ -769,8 +758,8 @@ impl ModelRuntime for LlamaCppRuntime {
                     false,
                 ));
             }
-            let completed =
-                self.completion(request, &prompt, schema, remaining_effect_timeout(control)?)?;
+            check_cancellation(control)?;
+            let completed = self.completion(request, &prompt, schema, REQUEST_TIMEOUT)?;
             observed_usage.prompt_tokens = completed.tokens_evaluated;
             observed_usage.completion_tokens = completed.tokens_predicted;
             observed_usage.total_tokens = completed
@@ -1078,7 +1067,7 @@ fn open_qualified_runtime_bundle(
     Ok((server_file, libraries))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn sealed_verified_runtime_file(
     mut source: File,
     expected_digest: &str,
@@ -1182,7 +1171,7 @@ fn sealed_verified_runtime_file(
     Ok(sealed)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn sealed_verified_runtime_file(
     _source: File,
     _expected_digest: &str,
@@ -1211,7 +1200,7 @@ fn validate_runtime_file_name(file_name: &str) -> Result<(), ModelRuntimeFailure
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn prepare_private_runtime_root(runtime_parent: &Path) -> Result<PathBuf, ModelRuntimeFailure> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 
@@ -1261,12 +1250,12 @@ fn prepare_private_runtime_root(runtime_parent: &Path) -> Result<PathBuf, ModelR
     Ok(runtime_root)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn runtime_ancestor_is_trusted(mode: u32, owner: u32, effective_user: u32) -> bool {
     (owner == 0 || owner == effective_user) && (mode & 0o022 == 0 || mode & libc::S_ISVTX != 0)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn prepare_private_runtime_root(_runtime_parent: &Path) -> Result<PathBuf, ModelRuntimeFailure> {
     Err(failure(
         "MODEL_RUNTIME_UNAVAILABLE",
@@ -1641,14 +1630,6 @@ fn set_model_lease_owner_to_current_thread(descriptor: libc::c_int) -> std::io::
     }
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-fn set_model_lease_owner_to_current_thread(_descriptor: libc::c_int) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "thread-directed file lease signals require Linux",
-    ))
-}
-
 #[cfg(target_os = "linux")]
 fn parent_model_lease_is_intact(file: &File) -> bool {
     use std::os::fd::AsRawFd;
@@ -1656,12 +1637,7 @@ fn parent_model_lease_is_intact(file: &File) -> bool {
     unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLEASE) == libc::F_RDLCK }
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-fn parent_model_lease_is_intact(_file: &File) -> bool {
-    false
-}
-
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn verify_parent_model_lease_before_spawn(
     file: &File,
     expected_size_bytes: u64,
@@ -1677,7 +1653,7 @@ fn verify_parent_model_lease_before_spawn(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn verify_parent_model_lease_before_spawn(
     _file: &File,
     _expected_size_bytes: u64,
@@ -1690,7 +1666,7 @@ fn verify_parent_model_lease_before_spawn(
     ))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn unblock_model_lease_signal() -> std::io::Result<()> {
     let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
     if unsafe { libc::sigemptyset(&mut signals) } != 0
@@ -1702,7 +1678,7 @@ fn unblock_model_lease_signal() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn install_parent_death_signal(expected_parent: libc::pid_t) -> std::io::Result<()> {
     let mut default_action: libc::sigaction = unsafe { std::mem::zeroed() };
     default_action.sa_sigaction = libc::SIG_DFL;
@@ -1719,7 +1695,7 @@ fn install_parent_death_signal(expected_parent: libc::pid_t) -> std::io::Result<
     verify_expected_parent(expected_parent)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn verify_expected_parent(expected_parent: libc::pid_t) -> std::io::Result<()> {
     if unsafe { libc::getppid() } != expected_parent {
         return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
@@ -1727,7 +1703,7 @@ fn verify_expected_parent(expected_parent: libc::pid_t) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn acquire_model_read_lease(file: &File) -> Result<(), ModelRuntimeFailure> {
     use std::os::fd::AsRawFd;
 
@@ -1775,7 +1751,7 @@ fn acquire_model_read_lease(file: &File) -> Result<(), ModelRuntimeFailure> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn acquire_model_read_lease(_file: &File) -> Result<(), ModelRuntimeFailure> {
     Err(failure(
         "MODEL_RUNTIME_UNAVAILABLE",
@@ -1784,7 +1760,7 @@ fn acquire_model_read_lease(_file: &File) -> Result<(), ModelRuntimeFailure> {
     ))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn release_model_read_lease(file: &File) {
     use std::os::fd::AsRawFd;
     unsafe {
@@ -1792,7 +1768,7 @@ fn release_model_read_lease(file: &File) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn release_model_read_lease(_file: &File) {}
 
 fn open_regular_nofollow(path: &Path) -> Result<File, ModelRuntimeFailure> {
@@ -1921,13 +1897,13 @@ fn resolve_server_path() -> Result<PathBuf, ModelRuntimeFailure> {
     ))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn inherited_fd_path(file: &File) -> Result<String, ModelRuntimeFailure> {
     use std::os::fd::AsRawFd;
     Ok(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn inherited_fd_path(_file: &File) -> Result<String, ModelRuntimeFailure> {
     Err(failure(
         "MODEL_RUNTIME_UNAVAILABLE",
@@ -2148,14 +2124,79 @@ mod tests {
     use std::io::{Read, Write};
 
     #[test]
-    fn llama_tokenize_and_completion_effects_share_one_deadline() {
-        let control = CancellationToken::with_request_timeout(Duration::from_millis(80));
-        let first = remaining_effect_timeout(&control).unwrap();
-        thread::sleep(Duration::from_millis(25));
-        let second = remaining_effect_timeout(&control).unwrap();
-        assert!(second < first.saturating_sub(Duration::from_millis(10)));
+    fn tokenizer_preserves_short_timeout_for_uncontrolled_and_worker_requests() {
+        let worker = CancellationToken::new();
+        let mut elapsed = Vec::new();
+        for control in [&UNCONTROLLED_EXECUTION as &dyn ExecutionControl, &worker] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let count = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..count]).starts_with("POST /tokenize "));
+                let _ = release_rx.recv_timeout(Duration::from_secs(4));
+            });
+            let runtime = LlamaCppRuntime::for_test(format!("http://{address}"), "secret".into());
+            let started = Instant::now();
+            let result = runtime.prompt_tokens("system", "user", control);
+            elapsed.push(started.elapsed());
+            let _ = release_tx.send(());
+            server.join().unwrap();
+            assert!(result.is_err());
+        }
+        assert!(
+            elapsed
+                .iter()
+                .all(|duration| *duration < Duration::from_secs(3)),
+            "tokenizer must keep its own short bound for both controls: {elapsed:?}"
+        );
     }
 
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unsupported_direct_gguf_platform_fails_before_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let error = prepare_private_runtime_root(root.path()).unwrap_err();
+        assert_eq!(error.code, "MODEL_RUNTIME_UNAVAILABLE");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        let file = tempfile::tempfile().unwrap();
+        assert_eq!(
+            acquire_model_read_lease(&file).unwrap_err().code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+        assert_eq!(
+            sealed_verified_runtime_file(file, &"a".repeat(64), false)
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn cancelled_tokenization_sends_no_request() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let runtime = LlamaCppRuntime::for_test(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "secret".into(),
+        );
+        let control = CancellationToken::new();
+        control.request();
+        assert_eq!(
+            runtime
+                .prompt_tokens("system", "user", &control)
+                .unwrap_err()
+                .code,
+            "MODEL_REQUEST_CANCELLED"
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     static LEASE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[cfg(target_os = "linux")]
@@ -2416,6 +2457,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn model_read_lease_accepts_idle_file_rejects_open_writer_and_releases() {
         let _lease_test = LEASE_TEST_LOCK.lock().unwrap();
@@ -2532,7 +2574,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn registered_identity_is_verified_while_the_read_lease_is_held() {
         let _lease_test = LEASE_TEST_LOCK.lock().unwrap();
@@ -2613,7 +2655,7 @@ mod tests {
         child.wait().unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn parent_death_handoff_accepts_only_the_captured_parent() {
         let parent = unsafe { libc::getppid() };
@@ -2717,7 +2759,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn child_handoff_unblocks_only_the_lease_break_signal() {
         let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -2767,7 +2809,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn runtime_socket_directory_and_path_boundaries_are_private_and_exact() {
         use std::os::unix::ffi::OsStrExt;
@@ -2799,7 +2841,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn runtime_root_accepts_safe_ancestry_and_rejects_both_trust_boundaries() {
         use std::os::unix::fs::PermissionsExt;
@@ -2977,6 +3019,7 @@ mod tests {
         assert!(runtimes.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn runtime_manifest_accepts_exact_descriptors_and_rejects_drift() {
         let directory = tempfile::tempdir().unwrap();

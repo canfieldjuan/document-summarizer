@@ -153,9 +153,7 @@ impl ModelRuntime for GatewayRuntime {
                 Vec::new(),
             ));
         }
-        crate::pipeline::gateway_client::with_request_timeout(control.request_timeout(), || {
-            self.generate(request)
-        })
+        self.generate(request)
     }
 
     fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {

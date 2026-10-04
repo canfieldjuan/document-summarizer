@@ -56,9 +56,11 @@ use std::fs::TryLockError;
 use std::fs::{self, File, OpenOptions};
 #[cfg(windows)]
 use std::future::IntoFuture;
-use std::io::{self, Write};
 #[cfg(unix)]
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
+use std::io::{self, Write};
+#[cfg(target_os = "linux")]
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -308,8 +310,8 @@ struct ProviderState {
     admission_authority: Arc<ProviderAdmissionAuthority>,
     #[cfg(target_os = "linux")]
     transition_store: Arc<TransitionStore>,
-    #[cfg(all(target_os = "linux", test))]
-    package_control_root: PathBuf,
+    #[cfg(target_os = "linux")]
+    package_installation: package_control::PackageInstallation,
 }
 
 #[derive(Default)]
@@ -438,7 +440,7 @@ struct RegistrationIdentity {
     protocol_version: u32,
     instance_id: String,
     app_id: String,
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pid: u32,
     transport: RegistrationTransportIdentity,
     auth: RegistrationAuthIdentity,
@@ -447,8 +449,11 @@ struct RegistrationIdentity {
 #[cfg(unix)]
 #[derive(Clone, Copy)]
 pub(crate) struct ExpectedProviderProcess {
+    #[cfg(target_os = "linux")]
     uid: u32,
+    #[cfg(target_os = "linux")]
     executable_device: u64,
+    #[cfg(target_os = "linux")]
     executable_inode: u64,
 }
 
@@ -670,7 +675,11 @@ impl ConnectProvider {
         }
         ensure_private_directory(&app_data_dir)?;
         #[cfg(target_os = "linux")]
-        let _package_admission = package_admission_for_start(&app_data_dir, &runtime_root)?;
+        let package_installation = package_installation_for_start(&app_data_dir)?;
+        #[cfg(target_os = "linux")]
+        let _package_admission = package_installation
+            .enter_startup(&app_data_dir, &runtime_root)
+            .map_err(|_| ProviderStartError::LifecycleTransitionActive)?;
         #[cfg(target_os = "linux")]
         let transition_store = transition_store_for_start(&app_data_dir)?;
         #[cfg(target_os = "linux")]
@@ -695,6 +704,12 @@ impl ConnectProvider {
         #[cfg(target_os = "linux")]
         if (startup.stop_requested)() {
             return Err(ProviderStartError::StartupCancelled);
+        }
+        #[cfg(target_os = "linux")]
+        if package_installation.is_installed() && transition_generation.is_none() {
+            transition_store
+                .record_package_participant(&package_installation, &app_data_dir, &runtime_root)
+                .map_err(map_lifecycle_control_error)?;
         }
         let imports_dir = app_data_dir.join("connect-imports");
         ensure_private_directory(&imports_dir)?;
@@ -831,8 +846,8 @@ impl ConnectProvider {
             admission_authority: Arc::clone(&admission_authority),
             #[cfg(target_os = "linux")]
             transition_store: Arc::clone(&transition_store),
-            #[cfg(all(target_os = "linux", test))]
-            package_control_root: app_data_dir.join("test-package-control"),
+            #[cfg(target_os = "linux")]
+            package_installation,
         };
         let body_limit = usize::try_from(max_input_bytes)
             .unwrap_or(usize::MAX)
@@ -1351,31 +1366,24 @@ fn transition_store_for_start(
 }
 
 #[cfg(target_os = "linux")]
-fn package_admission_for_start(
+fn package_installation_for_start(
     app_data_dir: &Path,
-    runtime_root: &Path,
-) -> Result<package_control::PackageAdmissionGuard, ProviderStartError> {
+) -> Result<package_control::PackageInstallation, ProviderStartError> {
     #[cfg(test)]
-    let guard = package_control::enter_startup_admission_at(
-        &app_data_dir.join("test-package-control"),
-        app_data_dir,
-        runtime_root,
-    );
-    #[cfg(not(test))]
-    let guard = { package_control::enter_startup_admission(app_data_dir, runtime_root) };
-    guard.map_err(|_| ProviderStartError::LifecycleTransitionActive)
-}
-
-#[cfg(target_os = "linux")]
-fn package_admission_for_job(
-    state: &ProviderState,
-) -> Result<package_control::PackageAdmissionGuard, package_control::PackageControlError> {
-    #[cfg(test)]
-    return package_control::enter_admission_at(&state.package_control_root);
+    {
+        let root = app_data_dir.join("test-package-control");
+        match fs::symlink_metadata(&root) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Ok(package_control::PackageInstallation::Unbundled)
+            }
+            _ => Ok(package_control::PackageInstallation::Installed(root)),
+        }
+    }
     #[cfg(not(test))]
     {
-        let _ = state;
-        package_control::enter_admission()
+        let _ = app_data_dir;
+        package_control::PackageInstallation::current()
+            .map_err(|_| ProviderStartError::LifecycleTransitionActive)
     }
 }
 
@@ -1750,7 +1758,7 @@ async fn create_job_for(
         WireVersion::V2 => &state.instance_id_v2,
     };
     #[cfg(target_os = "linux")]
-    let _package_admission = package_admission_for_job(&state).map_err(|_| {
+    let _package_admission = state.package_installation.enter_job().map_err(|_| {
         ProviderHttpError::new(
             StatusCode::CONFLICT,
             "PROVIDER_BUSY",
@@ -3645,6 +3653,64 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_scope_unbundled_startup_does_not_create_package_authority() {
+        let root = TestDirectory::new("doc-sum-unbundled-startup");
+        let app_data = root.0.join("app-data");
+        let runtime = root.0.join("runtime");
+        fs::create_dir(&runtime).unwrap();
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data.clone(),
+            runtime,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        assert!(provider.registration_path().is_file());
+        assert!(
+            !app_data.join("test-package-control").exists(),
+            "unbundled startup must not create or require Debian package authority"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_scope_foreground_owner_is_discoverable_without_background_control() {
+        let root = TestDirectory::new("doc-sum-package-foreground-owner");
+        let app_data = root.0.join("app-data");
+        let runtime = root.0.join("runtime");
+        fs::create_dir(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let package_root = app_data.join("test-package-control");
+        drop(package_control::enter_admission_at(&package_root).unwrap());
+        let provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data.clone(),
+            runtime,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        assert!(provider.registration_path().is_file());
+        let receipt = package_root
+            .join("participants-v1")
+            .join(format!("{}.json", unsafe { libc::geteuid() }));
+        assert!(
+            receipt.is_file(),
+            "foreground publication must register its package participant first"
+        );
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+        assert_eq!(record["enabled"], false);
+        assert_eq!(record["app_data_root"], app_data.to_str().unwrap());
+        assert_eq!(
+            package_control::discovered_participant_choices_at(&package_root),
+            vec![(unsafe { libc::geteuid() }, false)]
+        );
+    }
+
     #[test]
     fn provider_workers_preserve_normal_job_budget_and_shutdown_is_bounded() {
         let workers = ProviderWorkerOwner::new();
@@ -3652,11 +3718,11 @@ mod tests {
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         workers
             .spawn("blocked-provider-worker".to_string(), move |control| {
-                observed_tx.send(control.request_timeout()).unwrap();
+                observed_tx.send(control.cancellation_requested()).unwrap();
                 let _ = release_rx.recv();
             })
             .unwrap();
-        assert_eq!(observed_rx.recv().unwrap(), None);
+        assert!(!observed_rx.recv().unwrap());
 
         let started = Instant::now();
         workers.shutdown_until(Instant::now() + Duration::from_millis(25));
@@ -3673,6 +3739,8 @@ mod tests {
         let app_data = root.0.join("app-data");
         fs::create_dir_all(&runtime_root).unwrap();
         fs::create_dir_all(&app_data).unwrap();
+        drop(package_control::enter_admission_at(&app_data.join("test-package-control")).unwrap());
+        fs::set_permissions(&runtime_root, fs::Permissions::from_mode(0o700)).unwrap();
         let db_path = app_data.join("summarizer.db");
         let provider = ConnectProvider::start_at(
             db_path.clone(),

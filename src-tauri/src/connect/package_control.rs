@@ -466,6 +466,8 @@ impl PackageStore {
                 .map_err(|_| PackageControlError::Storage)?;
             file.write_all(&bytes)
                 .map_err(|_| PackageControlError::Storage)?;
+            file.set_permissions(fs::Permissions::from_mode(0o644))
+                .map_err(|_| PackageControlError::Storage)?;
             file.sync_all().map_err(|_| PackageControlError::Storage)?;
             fs::rename(&temporary, self.root.join(name))
                 .map_err(|_| PackageControlError::Storage)?;
@@ -1409,6 +1411,103 @@ fn invalid_runtime_identity(participant: &Participant) -> bool {
     participant.runtime_device.is_some() != participant.runtime_inode.is_some()
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum PackageInstallation {
+    Unbundled,
+    Installed(PathBuf),
+}
+
+impl PackageInstallation {
+    #[cfg(not(test))]
+    pub(crate) fn current() -> Result<Self, PackageControlError> {
+        Self::for_executable(
+            &env::current_exe().map_err(|_| PackageControlError::Storage)?,
+            Path::new("/usr/bin/document-summarizer"),
+            Path::new(PACKAGE_ROOT),
+        )
+    }
+
+    fn for_executable(
+        executable: &Path,
+        installed: &Path,
+        root: &Path,
+    ) -> Result<Self, PackageControlError> {
+        // Capture applicability once. Missing package state is never permission
+        // for an installed executable (including an already unlinked owner).
+        let deleted = PathBuf::from(format!("{} (deleted)", installed.display()));
+        let same_path = executable == installed || executable == deleted;
+        let same_inode = if same_path {
+            false
+        } else {
+            match fs::metadata(installed) {
+                Ok(package) => {
+                    let running =
+                        fs::metadata(executable).map_err(|_| PackageControlError::Storage)?;
+                    running.dev() == package.dev() && running.ino() == package.ino()
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(_) => return Err(PackageControlError::Storage),
+            }
+        };
+        Ok(if same_path || same_inode {
+            Self::Installed(root.to_path_buf())
+        } else {
+            Self::Unbundled
+        })
+    }
+
+    pub(crate) fn is_installed(&self) -> bool {
+        matches!(self, Self::Installed(_))
+    }
+
+    pub(crate) fn enter_startup(
+        &self,
+        app_data: &Path,
+        runtime: &Path,
+    ) -> Result<Option<PackageAdmissionGuard>, PackageControlError> {
+        match self {
+            Self::Unbundled => Ok(None),
+            Self::Installed(root) => enter_startup_admission_store(
+                &PackageStore { root: root.clone() },
+                unsafe { libc::geteuid() },
+                app_data,
+                runtime,
+            )
+            .map(Some),
+        }
+    }
+
+    pub(crate) fn enter_job(&self) -> Result<Option<PackageAdmissionGuard>, PackageControlError> {
+        match self {
+            Self::Unbundled => Ok(None),
+            Self::Installed(root) => {
+                enter_admission_store(&PackageStore { root: root.clone() }).map(Some)
+            }
+        }
+    }
+
+    pub(crate) fn record_participant(
+        &self,
+        enabled: bool,
+        runtime: &Path,
+        app_data: &Path,
+        control: &Path,
+        manager_link: &Path,
+    ) -> Result<(), PackageControlError> {
+        match self {
+            Self::Unbundled => Ok(()),
+            Self::Installed(root) => record_participant_acknowledgement_store(
+                &PackageStore { root: root.clone() },
+                enabled,
+                runtime,
+                app_data,
+                control,
+                manager_link,
+            ),
+        }
+    }
+}
+
 pub(crate) struct PackageAdmissionGuard {
     _quiesce: File,
     _lock: File,
@@ -1416,19 +1515,6 @@ pub(crate) struct PackageAdmissionGuard {
 
 pub(crate) fn enter_admission() -> Result<PackageAdmissionGuard, PackageControlError> {
     enter_admission_store(&PackageStore::production())
-}
-
-#[cfg(not(test))]
-pub(crate) fn enter_startup_admission(
-    app_data_root: &Path,
-    runtime_root: &Path,
-) -> Result<PackageAdmissionGuard, PackageControlError> {
-    enter_startup_admission_store(
-        &PackageStore::production(),
-        unsafe { libc::geteuid() },
-        app_data_root,
-        runtime_root,
-    )
 }
 
 #[cfg(test)]
@@ -1445,23 +1531,15 @@ pub(crate) fn enter_admission_at(
 }
 
 #[cfg(test)]
-pub(crate) fn enter_startup_admission_at(
-    root: &Path,
-    app_data_root: &Path,
-    runtime_root: &Path,
-) -> Result<PackageAdmissionGuard, PackageControlError> {
-    let store = PackageStore::for_test(root.to_path_buf());
-    if !store.root.exists() {
-        store.prepare_root()?;
-        drop(store.quiesce_lock(true)?);
-        drop(store.lock()?);
+pub(crate) fn discovered_participant_choices_at(root: &Path) -> Vec<(u32, bool)> {
+    SystemEffects {
+        package_root: root.to_path_buf(),
     }
-    enter_startup_admission_store(
-        &store,
-        unsafe { libc::geteuid() },
-        app_data_root,
-        runtime_root,
-    )
+    .discover()
+    .unwrap()
+    .into_iter()
+    .map(|participant| (participant.uid, participant.enabled))
+    .collect()
 }
 
 #[cfg(test)]
@@ -1569,6 +1647,24 @@ pub(crate) fn record_participant_acknowledgement(
     control_root: &Path,
     manager_link: &Path,
 ) -> Result<(), PackageControlError> {
+    record_participant_acknowledgement_store(
+        &PackageStore::production(),
+        enabled,
+        runtime_root,
+        app_data_root,
+        control_root,
+        manager_link,
+    )
+}
+
+fn record_participant_acknowledgement_store(
+    store: &PackageStore,
+    enabled: bool,
+    runtime_root: &Path,
+    app_data_root: &Path,
+    control_root: &Path,
+    manager_link: &Path,
+) -> Result<(), PackageControlError> {
     let uid = unsafe { libc::geteuid() };
     let user = nss_user_name(uid).ok_or(PackageControlError::Conflict)?;
     let runtime_identity = safe_directory_identity(runtime_root, uid, true)?;
@@ -1596,7 +1692,6 @@ pub(crate) fn record_participant_acknowledgement(
         manager_parent_inode: manager_identity.ino(),
         enabled,
     };
-    let store = PackageStore::production();
     let directory = store.root.join(PARTICIPANTS_DIRECTORY);
     cleanup_participant_temporaries(&directory, uid)?;
     let path = directory.join(format!("{uid}.json"));
@@ -2283,26 +2378,7 @@ impl PackageEffects for SystemEffects {
         if nss_user_name(participant.uid).as_deref() != Some(participant.user.as_str()) {
             return Err(PackageControlError::Conflict);
         }
-        let runtime = safe_directory_identity(runtime_path, participant.uid, true)?;
-        let loginctl = bounded_stdout(
-            Command::new("loginctl")
-                .arg("show-user")
-                .arg(participant.uid.to_string())
-                .arg("--property=RuntimePath")
-                .arg("--value"),
-            Duration::from_secs(10),
-        )?;
-        let manager = bounded_stdout(
-            Command::new("systemctl")
-                .arg("--user")
-                .arg(format!("--machine={}@", participant.user))
-                .arg("show-environment"),
-            Duration::from_secs(10),
-        )?;
-        if !runtime_session_proof_matches(participant, &loginctl, &manager) {
-            return Err(PackageControlError::Conflict);
-        }
-        Ok(Some((runtime.dev(), runtime.ino())))
+        runtime_identity_for_session(runtime_path, participant.uid).map(Some)
     }
 
     fn prepare_controller(&mut self, record: &PackageRecord) -> Result<(), PackageControlError> {
@@ -2378,20 +2454,51 @@ impl PackageEffects for SystemEffects {
     }
 }
 
-fn runtime_session_proof_matches(
-    participant: &Participant,
-    loginctl: &[u8],
-    manager: &[u8],
-) -> bool {
+pub(crate) fn runtime_identity_for_session(
+    runtime: &Path,
+    uid: u32,
+) -> Result<(u64, u64), PackageControlError> {
+    let user = nss_user_name(uid).ok_or(PackageControlError::Conflict)?;
+    let before = safe_directory_identity(runtime, uid, true)?;
+    let loginctl = bounded_stdout(
+        Command::new("loginctl")
+            .arg("show-user")
+            .arg(uid.to_string())
+            .arg("--property=RuntimePath")
+            .arg("--value"),
+        Duration::from_secs(10),
+    )?;
+    let manager = bounded_stdout(
+        Command::new("systemctl")
+            .arg("--user")
+            .arg(format!("--machine={user}@"))
+            .arg("show-environment"),
+        Duration::from_secs(10),
+    )?;
+    if !runtime_session_proof_matches(&runtime.to_string_lossy(), &loginctl, &manager) {
+        return Err(PackageControlError::Conflict);
+    }
+    let after = safe_directory_identity(runtime, uid, true)?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+        return Err(PackageControlError::Conflict);
+    }
+    Ok((after.dev(), after.ino()))
+}
+
+fn runtime_session_proof_matches(runtime: &str, loginctl: &[u8], manager: &[u8]) -> bool {
     let Ok(runtime_text) = std::str::from_utf8(loginctl) else {
         return false;
     };
     let Ok(manager_text) = std::str::from_utf8(manager) else {
         return false;
     };
-    let expected = format!("XDG_RUNTIME_DIR={}", participant.runtime_root);
-    runtime_text.trim() == participant.runtime_root
-        && manager_text.lines().any(|line| line == expected)
+    let expected = format!("XDG_RUNTIME_DIR={runtime}");
+    runtime_text.trim() == runtime
+        && manager_text
+            .lines()
+            .filter(|line| line.starts_with("XDG_RUNTIME_DIR="))
+            .collect::<Vec<_>>()
+            == [expected.as_str()]
 }
 
 fn validate_participant_directories(participant: &Participant) -> Result<(), PackageControlError> {
@@ -2786,6 +2893,95 @@ fn bounded_stdout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_receipt_permissions_are_independent_of_process_umask() {
+        if env::var_os("DOC_SUM_RECEIPT_UMASK_TEST").is_none() {
+            let status = Command::new(env::current_exe().unwrap())
+                .args(["--exact", "connect::package_control::tests::package_receipt_permissions_are_independent_of_process_umask", "--nocapture"])
+                .env("DOC_SUM_RECEIPT_UMASK_TEST", "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        // This branch runs in an isolated test process, never beside other tests.
+        unsafe {
+            libc::umask(0o077);
+        }
+        let (store, root, mut effects, _) = purge_fixture();
+        for path in [store.removal_receipt_path(), store.install_receipt_path()] {
+            assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o644);
+        }
+        run_with(
+            &store,
+            PackageAction::FinishPurge { target: "0.1.0" },
+            &mut effects,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_purge_empty(&store, &effects);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_scope_is_captured_from_executable_and_installed_state_stays_fail_closed() {
+        let fixture = tempfile::tempdir().unwrap();
+        let installed = fixture.path().join("installed");
+        let unbundled = fixture.path().join("unbundled");
+        let root = fixture.path().join("package");
+        fs::write(&unbundled, b"source build").unwrap();
+        let source = PackageInstallation::for_executable(&unbundled, &installed, &root).unwrap();
+        assert!(!source.is_installed());
+        assert!(source
+            .enter_startup(fixture.path(), fixture.path())
+            .unwrap()
+            .is_none());
+        assert!(source.enter_job().unwrap().is_none());
+        assert!(!root.exists());
+
+        let package = PackageInstallation::for_executable(&installed, &installed, &root).unwrap();
+        assert!(package.is_installed());
+        assert!(package
+            .enter_startup(fixture.path(), fixture.path())
+            .is_err());
+        assert!(package.enter_job().is_err());
+        let deleted = PathBuf::from(format!("{} (deleted)", installed.display()));
+        assert!(
+            PackageInstallation::for_executable(&deleted, &installed, &root)
+                .unwrap()
+                .is_installed()
+        );
+        fs::write(&installed, b"package build").unwrap();
+        let alias = fixture.path().join("hardlink");
+        fs::hard_link(&installed, &alias).unwrap();
+        assert!(
+            PackageInstallation::for_executable(&alias, &installed, &root)
+                .unwrap()
+                .is_installed()
+        );
+        drop(enter_admission_at(&root).unwrap());
+        assert!(package
+            .enter_startup(fixture.path(), fixture.path())
+            .is_ok());
+        assert!(package.enter_job().is_ok());
+        fs::set_permissions(root.join(LOCK_FILE), fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(package
+            .enter_startup(fixture.path(), fixture.path())
+            .is_err());
+        assert!(package.enter_job().is_err());
+        fs::set_permissions(root.join(LOCK_FILE), fs::Permissions::from_mode(0o644)).unwrap();
+        begin_quiesce_at(&root).unwrap();
+        assert!(package
+            .enter_startup(fixture.path(), fixture.path())
+            .is_err());
+        assert!(package.enter_job().is_err());
+        assert!(source.enter_job().unwrap().is_none());
+        fs::remove_file(&installed).unwrap();
+        assert!(
+            package.enter_job().is_err(),
+            "retained package authority cannot become unbundled after removal"
+        );
+    }
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -4176,19 +4372,37 @@ mod tests {
         let loginctl = format!("{}\n", recorded.runtime_root);
         let manager = format!("LANG=C\nXDG_RUNTIME_DIR={}\n", recorded.runtime_root);
         assert!(runtime_session_proof_matches(
-            &recorded,
+            &recorded.runtime_root,
             loginctl.as_bytes(),
             manager.as_bytes(),
         ));
         assert!(!runtime_session_proof_matches(
-            &recorded,
+            &recorded.runtime_root,
             b"/run/user/9999\n",
             manager.as_bytes(),
         ));
         assert!(!runtime_session_proof_matches(
-            &recorded,
+            &recorded.runtime_root,
             loginctl.as_bytes(),
             b"XDG_RUNTIME_DIR=/run/user/9999\n",
+        ));
+        for rejected in [
+            Vec::new(),
+            b"LANG=C\n".to_vec(),
+            format!("{manager}XDG_RUNTIME_DIR=/run/user/9999\n").into_bytes(),
+            format!("{manager}XDG_RUNTIME_DIR={}\n", recorded.runtime_root).into_bytes(),
+            vec![0xff],
+        ] {
+            assert!(!runtime_session_proof_matches(
+                &recorded.runtime_root,
+                loginctl.as_bytes(),
+                &rejected,
+            ));
+        }
+        assert!(!runtime_session_proof_matches(
+            &recorded.runtime_root,
+            &[0xff],
+            manager.as_bytes(),
         ));
     }
 

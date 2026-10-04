@@ -556,7 +556,7 @@ fn authenticated_request_body_is_consumed_before_lifecycle_admission() {
         .find("Multipart::from_request")
         .expect("request body must be authenticated before streaming");
     let package = request_path
-        .find("package_admission_for_job")
+        .find("state.package_installation.enter_job()")
         .expect("job commit must acquire package admission");
     assert!(
         stream < package,

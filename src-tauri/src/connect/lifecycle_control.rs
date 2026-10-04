@@ -7,7 +7,7 @@ use std::fs::TryLockError;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
@@ -192,6 +192,37 @@ impl TransitionStore {
 
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(crate) fn record_package_participant(
+        &self,
+        installation: &crate::connect::package_control::PackageInstallation,
+        app_data: &Path,
+        runtime: &Path,
+    ) -> Result<(), LifecycleControlError> {
+        let _control = self.control_lock()?;
+        let _admission = self.enter_job_admission()?;
+        let config = self.root.parent().ok_or(LifecycleControlError::Storage)?;
+        let manager_parent = config.join("systemd/user/default.target.wants");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(&manager_parent)
+            .map_err(|_| LifecycleControlError::Storage)?;
+        let manager_link = manager_parent.join(service_unit());
+        let enabled = match fs::read_link(&manager_link) {
+            Ok(target)
+                if target
+                    == Path::new("/usr/lib/systemd/user/document-summarizer-connect.service") =>
+            {
+                true
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            _ => return Err(LifecycleControlError::InvalidRecord),
+        };
+        installation
+            .record_participant(enabled, runtime, app_data, &self.root, &manager_link)
+            .map_err(|_| LifecycleControlError::Storage)
     }
 
     fn transition_path(&self) -> PathBuf {
@@ -651,14 +682,15 @@ fn read_launch_record(launch_root: &Path) -> Result<LaunchRecord, LifecycleContr
     serde_json::from_slice(&bytes).map_err(|_| LifecycleControlError::InvalidRecord)
 }
 
-fn validate_launch_record(
+fn validated_launch_context(
     launch_root: &Path,
     generation: &str,
     app_data: &Path,
     runtime: &Path,
     control: &Path,
-) -> Result<(), LifecycleControlError> {
+) -> Result<(LaunchRecord, LaunchIdentity), LifecycleControlError> {
     let record = read_launch_record(launch_root)?;
+    let current_runtime = launch_identity(runtime)?;
     let config_home = control.parent().ok_or(LifecycleControlError::Storage)?;
     let data_home = app_data.parent().ok_or(LifecycleControlError::Storage)?;
     if record.format_version != FORMAT_VERSION
@@ -668,17 +700,60 @@ fn validate_launch_record(
         || record.uid != unsafe { libc::geteuid() }
         || record.config_home != config_home.to_string_lossy()
         || record.data_home != data_home.to_string_lossy()
-        || record.runtime != launch_identity(runtime)?
+        || record.runtime.path != current_runtime.path
         || record.control != launch_identity(control)?
         || record.app_data != launch_identity(app_data)?
+        || read_private_bytes(&launch_root.join(LAUNCH_ENVIRONMENT_FILE))?
+            != render_launch_environment(&record)?
     {
         return Err(LifecycleControlError::InvalidRecord);
     }
-    let environment = read_private_bytes(&launch_root.join(LAUNCH_ENVIRONMENT_FILE))?;
-    if environment != render_launch_environment(&record)? {
+    Ok((record, current_runtime))
+}
+
+fn validate_launch_record(
+    launch_root: &Path,
+    generation: &str,
+    app_data: &Path,
+    runtime: &Path,
+    control: &Path,
+) -> Result<(), LifecycleControlError> {
+    let (record, current) =
+        validated_launch_context(launch_root, generation, app_data, runtime, control)?;
+    if record.runtime != current {
         return Err(LifecycleControlError::InvalidRecord);
     }
     Ok(())
+}
+
+fn renew_launch_runtime_with(
+    launch_root: &Path,
+    generation: &str,
+    app_data: &Path,
+    runtime: &Path,
+    control: &Path,
+    session_proof: impl FnOnce(&Path) -> Result<(), LifecycleControlError>,
+) -> Result<(), LifecycleControlError> {
+    let (record, current_runtime) =
+        validated_launch_context(launch_root, generation, app_data, runtime, control)?;
+    if record.runtime == current_runtime {
+        return Ok(());
+    }
+    let _authority = open_private_lock(&control.join(CONTROL_LOCK_FILE), true, true)?;
+    let (mut record, current_runtime) =
+        validated_launch_context(launch_root, generation, app_data, runtime, control)?;
+    if record.runtime == current_runtime {
+        return Ok(());
+    }
+    session_proof(runtime)?;
+    let (observed_record, observed_runtime) =
+        validated_launch_context(launch_root, generation, app_data, runtime, control)?;
+    if observed_record != record || observed_runtime != current_runtime {
+        return Err(LifecycleControlError::InvalidRecord);
+    }
+    record.runtime = current_runtime;
+    let bytes = serde_json::to_vec(&record).map_err(|_| LifecycleControlError::Storage)?;
+    atomic_write_private(&launch_root.join(LAUNCH_RECORD_FILE), &bytes)
 }
 
 pub(crate) fn validate_background_launch_environment() -> Result<(), LifecycleControlError> {
@@ -692,12 +767,19 @@ pub(crate) fn validate_background_launch_environment() -> Result<(), LifecycleCo
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or(LifecycleControlError::Storage)?;
-    validate_launch_record(
+    renew_launch_runtime_with(
         &fixed_launch_root()?,
         &generation,
         &app_data,
         &runtime,
         store.root(),
+        |path| {
+            crate::connect::package_control::runtime_identity_for_session(path, unsafe {
+                libc::geteuid()
+            })
+            .map(|_| ())
+            .map_err(|_| LifecycleControlError::InvalidRecord)
+        },
     )
 }
 
@@ -1493,5 +1575,152 @@ mod tests {
         assert!(
             validate_launch_record(&launch, &generation, &app_data, &runtime, &control).is_err()
         );
+    }
+
+    #[test]
+    fn unchanged_launch_receipt_admits_enable_child_while_controller_holds_lock() {
+        let root = TestDirectory::new("doc-sum-enable-child-validation");
+        let launch = root.0.join("launch");
+        let control = root.0.join("config/control");
+        let app_data = root.0.join("data/app");
+        let runtime = root.0.join("runtime");
+        for path in [&control, &app_data, &runtime] {
+            ensure_private_directory(path).unwrap();
+        }
+        let generation = Uuid::new_v4().to_string();
+        persist_launch_environment(&launch, &generation, &app_data, &runtime, &control).unwrap();
+        let before = fs::read(launch.join(LAUNCH_RECORD_FILE)).unwrap();
+        let _controller = open_private_lock(&control.join(CONTROL_LOCK_FILE), true, true).unwrap();
+        renew_launch_runtime_with(&launch, &generation, &app_data, &runtime, &control, |_| {
+            panic!("unchanged identity needs no session renewal")
+        })
+        .expect("enable child must validate while its controller owns the control lock");
+        assert_eq!(fs::read(launch.join(LAUNCH_RECORD_FILE)).unwrap(), before);
+    }
+
+    #[test]
+    fn authenticated_new_login_renews_only_the_ephemeral_runtime_identity() {
+        let root = TestDirectory::new("doc-sum-new-login");
+        let launch = root.0.join("launch");
+        let control = root.0.join("config/control");
+        let app_data = root.0.join("data/app");
+        let runtime = root.0.join("runtime");
+        for path in [&control, &app_data, &runtime] {
+            ensure_private_directory(path).unwrap();
+        }
+        let generation = Uuid::new_v4().to_string();
+        persist_launch_environment(&launch, &generation, &app_data, &runtime, &control).unwrap();
+        let before = read_launch_record(&launch).unwrap();
+        let environment = fs::read(launch.join(LAUNCH_ENVIRONMENT_FILE)).unwrap();
+        fs::rename(&runtime, root.0.join("old-runtime")).unwrap();
+        ensure_private_directory(&runtime).unwrap();
+        assert!(
+            validate_launch_record(&launch, &generation, &app_data, &runtime, &control).is_err()
+        );
+        renew_launch_runtime_with(
+            &launch,
+            &generation,
+            &app_data,
+            &runtime,
+            &control,
+            |path| {
+                assert_eq!(path, runtime);
+                Ok(())
+            },
+        )
+        .unwrap();
+        let after = read_launch_record(&launch).unwrap();
+        assert_ne!(before.runtime, after.runtime);
+        assert_eq!(after.runtime, launch_identity(&runtime).unwrap());
+        let mut expected = before;
+        expected.runtime = after.runtime.clone();
+        assert_eq!(after, expected);
+        assert_eq!(
+            fs::read(launch.join(LAUNCH_ENVIRONMENT_FILE)).unwrap(),
+            environment
+        );
+        validate_launch_record(&launch, &generation, &app_data, &runtime, &control).unwrap();
+    }
+
+    #[test]
+    fn runtime_renewal_rejects_unproven_tampered_and_racing_state_without_rewriting_receipt() {
+        for case in [
+            "unproven",
+            "generation",
+            "data",
+            "mode",
+            "symlink",
+            "race",
+            "environment",
+            "locked",
+        ] {
+            let root = TestDirectory::new("doc-sum-login-rejection");
+            let launch = root.0.join("launch");
+            let control = root.0.join("config/control");
+            let app_data = root.0.join("data/app");
+            let runtime = root.0.join("runtime");
+            for path in [&control, &app_data, &runtime] {
+                ensure_private_directory(path).unwrap();
+            }
+            let mut generation = Uuid::new_v4().to_string();
+            persist_launch_environment(&launch, &generation, &app_data, &runtime, &control)
+                .unwrap();
+            let receipt = fs::read(launch.join(LAUNCH_RECORD_FILE)).unwrap();
+            fs::rename(&runtime, root.0.join("old-runtime")).unwrap();
+            ensure_private_directory(&runtime).unwrap();
+            let _lock = if case == "locked" {
+                Some(open_private_lock(&control.join(CONTROL_LOCK_FILE), true, true).unwrap())
+            } else {
+                None
+            };
+            match case {
+                "generation" => generation = Uuid::new_v4().to_string(),
+                "data" => {
+                    fs::rename(&app_data, root.0.join("old-data")).unwrap();
+                    ensure_private_directory(&app_data).unwrap();
+                }
+                "mode" => fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap(),
+                "symlink" => {
+                    fs::rename(&runtime, root.0.join("replacement-runtime")).unwrap();
+                    std::os::unix::fs::symlink(root.0.join("replacement-runtime"), &runtime)
+                        .unwrap();
+                }
+                "environment" => fs::write(
+                    launch.join(LAUNCH_ENVIRONMENT_FILE),
+                    b"XDG_RUNTIME_DIR=/tmp/spoof\n",
+                )
+                .unwrap(),
+                _ => {}
+            }
+            let proof_called = std::cell::Cell::new(false);
+            let result = renew_launch_runtime_with(
+                &launch,
+                &generation,
+                &app_data,
+                &runtime,
+                &control,
+                |_| {
+                    proof_called.set(true);
+                    if case == "race" {
+                        fs::rename(&runtime, root.0.join("racing-runtime")).unwrap();
+                        ensure_private_directory(&runtime).unwrap();
+                        Ok(())
+                    } else {
+                        Err(LifecycleControlError::InvalidRecord)
+                    }
+                },
+            );
+            assert!(result.is_err(), "{case}");
+            assert_eq!(
+                proof_called.get(),
+                matches!(case, "unproven" | "race"),
+                "{case}"
+            );
+            assert_eq!(
+                fs::read(launch.join(LAUNCH_RECORD_FILE)).unwrap(),
+                receipt,
+                "{case}"
+            );
+        }
     }
 }
