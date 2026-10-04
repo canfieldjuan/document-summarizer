@@ -2239,6 +2239,18 @@ Malformed, wrong-kind, wrong-target, changed
 generation, unowned participant receipt, or incomplete per-user transition
 fails closed.
 
+Purge uses `finish-purge`, including after an ordinary removal has completed.
+The controller persists a distinct `purge` operation before settling any pending
+removal, so an interrupted purge cannot resume as reinstall. Once publishers
+are settled, it validates the complete package-owned cleanup set before removing
+participant acknowledgement files and temporaries, removal/install receipts,
+and the operation record. The copied controller is retired only after that
+choice state is durably gone. Fixed lock files and the empty participant
+directory remain, preserving the lock authority across retries. Unknown files,
+unsafe file types/ownership/modes, conflicting operations and unsettled state
+fail closed. Cleanup never traverses participant application-data paths.
+Ordinary removal continues to preserve its reinstall receipt and controller.
+
 When a package participant was captured with no runtime directory, a runtime
 created by a later login remains untrusted until the system manager reports the
 exact runtime path, the named user manager reports the same
