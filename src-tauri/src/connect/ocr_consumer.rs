@@ -9,7 +9,7 @@ use crate::connect::v2::{
 use crate::pipeline::contracts::{
     IngestedDocument, ParsedDocument, PipelineRun, PipelineState, SourceType,
 };
-use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
+use crate::pipeline::control::{CancellationToken, ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, NewOcrHandoff, OcrHandoff, OcrOutput, StoreError};
 use crate::pipeline::ingest::prepare_received_run;
 use crate::pipeline::parser::canonical_tagged_ocr_text;
@@ -19,7 +19,7 @@ use reqwest::blocking::{multipart, Client, Response};
 use reqwest::{StatusCode, Url};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 #[cfg(unix)]
 use std::fs::{File, OpenOptions};
@@ -940,9 +940,10 @@ fn admit_child(
 pub(crate) fn recover_ocr_handoffs(
     conn: &mut Connection,
     app_data_dir: &Path,
+    controls: &HashMap<String, CancellationToken>,
 ) -> Result<OcrRecoveryReport, StoreError> {
     let providers = discover_providers().unwrap_or_default();
-    recover_ocr_handoffs_with(conn, app_data_dir, &providers, &HttpOcrTransport)
+    recover_ocr_handoffs_with(conn, app_data_dir, &providers, &HttpOcrTransport, controls)
 }
 
 fn recover_ocr_handoffs_with(
@@ -950,38 +951,58 @@ fn recover_ocr_handoffs_with(
     app_data_dir: &Path,
     providers: &[LiveOcrProvider],
     transport: &dyn OcrTransport,
+    controls: &HashMap<String, CancellationToken>,
 ) -> Result<OcrRecoveryReport, StoreError> {
     let handoffs = db::list_recoverable_ocr_handoffs(conn)?;
     let mut child_run_ids = Vec::new();
     let mut warnings = Vec::new();
     for handoff in handoffs {
-        let result =
-            cancellation_checkpoint(conn, &handoff, &UNCONTROLLED_EXECUTION).and_then(|()| {
-                if matches!(handoff.phase.as_str(), "child_admitted" | "completed") {
-                    materialize_derived(app_data_dir, &handoff)
-                        .map(|_| handoff.child_run_id.clone())
-                } else if let Some(provider) = providers.iter().find(|provider| {
-                    provider.app_id == handoff.provider_app_id
-                        && provider.instance_id == handoff.provider_instance_id
-                        && saved_protocol(&handoff).ok() == Some(provider.protocol_version)
-                }) {
-                    run_handoff(
-                        conn,
-                        handoff.clone(),
-                        app_data_dir,
-                        provider,
-                        transport,
-                        &UNCONTROLLED_EXECUTION,
-                    )
-                } else {
-                    Err(OcrConsumerError::ProviderUnavailable(
-                        handoff.provider_instance_id.clone(),
-                    ))
-                }
-            });
+        // New roots discovered after the desktop reservation snapshot belong to a
+        // later recovery task. Never replace their missing ownership with no control.
+        let control: &dyn ExecutionControl = match controls.get(&handoff.root_run_id) {
+            Some(control) => control,
+            None if matches!(handoff.phase.as_str(), "child_admitted" | "completed") => {
+                &UNCONTROLLED_EXECUTION
+            }
+            None => {
+                warnings.push(format!(
+                    "{}: OCR root is not reserved for recovery",
+                    handoff.handoff_id
+                ));
+                continue;
+            }
+        };
+        let result = cancellation_checkpoint(conn, &handoff, control).and_then(|()| {
+            if matches!(handoff.phase.as_str(), "child_admitted" | "completed") {
+                materialize_derived(app_data_dir, &handoff).map(|_| handoff.child_run_id.clone())
+            } else if let Some(provider) = providers.iter().find(|provider| {
+                provider.app_id == handoff.provider_app_id
+                    && provider.instance_id == handoff.provider_instance_id
+                    && saved_protocol(&handoff).ok() == Some(provider.protocol_version)
+            }) {
+                run_handoff(
+                    conn,
+                    handoff.clone(),
+                    app_data_dir,
+                    provider,
+                    transport,
+                    control,
+                )
+            } else {
+                Err(OcrConsumerError::ProviderUnavailable(
+                    handoff.provider_instance_id.clone(),
+                ))
+            }
+        });
         match result {
             Ok(child_run_id) => child_run_ids.push(child_run_id),
-            Err(OcrConsumerError::Cancelled) => {}
+            Err(OcrConsumerError::Cancelled) => {
+                let root = db::get_pipeline_run(conn, &handoff.root_run_id)?
+                    .ok_or_else(|| StoreError::RunNotFound(handoff.root_run_id.clone()))?;
+                if root.state == PipelineState::Cancelling {
+                    db::complete_cancellation(conn, &root.run_id, root.state_version)?;
+                }
+            }
             Err(error) => warnings.push(format!("{}: {error}", handoff.handoff_id)),
         }
     }
@@ -991,6 +1012,20 @@ fn recover_ocr_handoffs_with(
         child_run_ids,
         warnings,
     })
+}
+
+#[cfg(test)]
+fn recover_ocr_handoffs_for_test(
+    conn: &mut Connection,
+    app_data_dir: &Path,
+    providers: &[LiveOcrProvider],
+    transport: &dyn OcrTransport,
+) -> Result<OcrRecoveryReport, StoreError> {
+    let controls = db::list_recoverable_ocr_handoffs(conn)?
+        .into_iter()
+        .map(|handoff| (handoff.root_run_id, CancellationToken::new()))
+        .collect();
+    recover_ocr_handoffs_with(conn, app_data_dir, providers, transport, &controls)
 }
 
 fn reload(conn: &Connection, handoff_id: &str) -> Result<OcrHandoff, OcrConsumerError> {
@@ -2112,7 +2147,7 @@ mod tests {
 
         let transport = LostAckTransport::default();
         let recovery =
-            recover_ocr_handoffs_with(&mut conn, directory.path(), &[], &transport).unwrap();
+            recover_ocr_handoffs_for_test(&mut conn, directory.path(), &[], &transport).unwrap();
 
         assert!(recovery.warnings.is_empty());
         assert!(recovery.child_run_ids.is_empty());
@@ -2236,7 +2271,7 @@ mod tests {
             .is_none());
         conn.execute_batch("DROP TRIGGER block_ocr_lineage;")
             .unwrap();
-        let recovery = recover_ocr_handoffs_with(
+        let recovery = recover_ocr_handoffs_for_test(
             &mut conn,
             directory.path(),
             std::slice::from_ref(&provider),
@@ -2390,8 +2425,9 @@ mod tests {
                 .phase,
             "submission_uncertain"
         );
-        let unavailable = recover_ocr_handoffs_with(&mut conn, directory.path(), &[], &transport)
-            .expect("unavailable provider should leave a recoverable handoff");
+        let unavailable =
+            recover_ocr_handoffs_for_test(&mut conn, directory.path(), &[], &transport)
+                .expect("unavailable provider should leave a recoverable handoff");
         assert_eq!(unavailable.warnings.len(), 1);
         let root = db::get_pipeline_run(&conn, &parsing.run_id)
             .unwrap()
@@ -2443,7 +2479,7 @@ mod tests {
 
         drop(conn);
         let mut reopened = db::init_db(&database).unwrap();
-        let recovery = recover_ocr_handoffs_with(
+        let recovery = recover_ocr_handoffs_for_test(
             &mut reopened,
             directory.path(),
             std::slice::from_ref(&provider),
