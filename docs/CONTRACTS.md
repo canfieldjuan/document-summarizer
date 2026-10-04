@@ -2226,6 +2226,11 @@ force-terminates the complete service control group at 40 seconds. The next
 owner uses stale-registration and interrupted-job recovery before publishing
 fresh process credentials.
 
+Per-user lifecycle control and job-admission guards explicitly unlock when
+released. A descriptor inherited by an unrelated fork cannot prolong that
+guard's lock lifetime; independently acquired shared guards still block an
+exclusive operation until each has released.
+
 Debian maintainer scripts call the app-owned `--connect-package` controller.
 The production package authority is the fixed root-owned
 `/var/lib/document-summarizer` tree and cannot be redirected by an environment
@@ -2294,7 +2299,9 @@ are settled, it validates the complete package-owned cleanup set before removing
 participant acknowledgement files and temporaries, removal/install receipts,
 and the operation record. The copied controller is retired only after that
 choice state is durably gone. Fixed lock files and the participant directory
-remain, preserving the lock authority across retries. Unauthenticated inbox
+remain, preserving the lock authority across retries. Without a controller,
+the shell retry checks only the trusted package root entries and validates the
+inbox directory itself without traversing its contents. Unauthenticated inbox
 entries are left untouched and cannot block cleanup or retry. Unknown files or
 unsafe file types/ownership/modes in the root-owned package state, conflicting
 operations and unsettled state fail closed. Cleanup never traverses participant
