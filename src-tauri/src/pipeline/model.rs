@@ -606,15 +606,14 @@ impl OllamaRuntime {
         format: Option<serde_json::Value>,
     ) -> Result<Response, ModelRuntimeFailure> {
         let payload = self.chat_payload(request, format);
-        self.authorize(self.client.post(self.endpoint("api/chat")?).json(&payload))
-            .send()
-            .map_err(|_| {
-                runtime_failure(
-                    "MODEL_RUNTIME_UNAVAILABLE",
-                    "Local model request failed",
-                    true,
-                )
-            })
+        let request = self.authorize(self.client.post(self.endpoint("api/chat")?).json(&payload));
+        request.send().map_err(|_| {
+            runtime_failure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                "Local model request failed",
+                true,
+            )
+        })
     }
 
     fn send_chat_attempt(
@@ -745,12 +744,9 @@ impl OllamaRuntime {
         let Some(expected) = self.expected_digest.as_ref() else {
             return Ok(());
         };
+        let timeout = Duration::from_secs(HEALTH_TIMEOUT_SECONDS);
         let response = self
-            .authorize(
-                self.client
-                    .get(self.endpoint("api/ps")?)
-                    .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECONDS)),
-            )
+            .authorize(self.client.get(self.endpoint("api/ps")?).timeout(timeout))
             .send()
             .map_err(|_| {
                 runtime_failure(
@@ -1678,6 +1674,7 @@ fn qwen_tokenizer_family_for_architecture(architecture: &str) -> Option<QwenToke
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::control::CancellationToken;
     use std::io::{Cursor, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
@@ -2113,6 +2110,35 @@ mod tests {
             max_output_tokens: 64,
             output_format: ModelOutputFormat::Text,
         }
+    }
+
+    #[test]
+    fn controlled_ollama_request_preserves_configured_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server should bind");
+        let base_url = format!(
+            "http://{}/",
+            listener
+                .local_addr()
+                .expect("loopback address should resolve")
+        );
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("model request should arrive");
+            let _ = read_json_request(&mut stream);
+            let _ = release_rx.recv();
+        });
+        let runtime =
+            OllamaRuntime::new(&base_url, "fixture-model", Duration::from_millis(50), None)
+                .expect("loopback runtime should configure");
+        let control = CancellationToken::new();
+        let started = Instant::now();
+        let error = runtime
+            .generate_with_control(&digest_guard_request(), &control)
+            .expect_err("blocked transport must honor the configured timeout");
+        assert_eq!(error.code, "MODEL_RUNTIME_UNAVAILABLE");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
     }
 
     #[test]

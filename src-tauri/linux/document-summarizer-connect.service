@@ -1,0 +1,19 @@
+[Unit]
+Description=Document Summarizer Local Connect provider
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.local/state/document-summarizer/connect-provider.env
+ExecStart=/usr/bin/document-summarizer --connect-provider
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=40s
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

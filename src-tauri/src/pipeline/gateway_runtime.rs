@@ -3,6 +3,7 @@ use crate::pipeline::contracts::{
     ModelRuntimeFailure, ModelRuntimeKind, ModelStageProfileSnapshot, ModelTokenUsage,
     ModelTransportAttempt, PipelineStage,
 };
+use crate::pipeline::control::ExecutionControl;
 use crate::pipeline::db;
 use crate::pipeline::gateway_client::{
     GatewayClient, GatewayClientConfig, GatewayClientError, GatewayHealth, GatewayResult,
@@ -137,6 +138,22 @@ impl ModelRuntime for GatewayRuntime {
                 Err(mapped)
             }
         }
+    }
+
+    fn generate_with_control(
+        &self,
+        request: &ModelRequest,
+        control: &dyn ExecutionControl,
+    ) -> Result<ModelResponse, ModelRuntimeFailure> {
+        if control.cancellation_requested() {
+            return Err(failure(
+                "MODEL_REQUEST_CANCELLED",
+                "Inference gateway request was cancelled before transport",
+                true,
+                Vec::new(),
+            ));
+        }
+        self.generate(request)
     }
 
     fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
