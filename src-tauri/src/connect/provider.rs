@@ -2824,6 +2824,7 @@ fn loopback_listener_inode(base_url: &str, version: WireVersion, deadline: Insta
 
 #[cfg(target_os = "linux")]
 struct RegisteredProcessGuard {
+    process_handle: File,
     process_directory: File,
     process_path: PathBuf,
     process_device: u64,
@@ -2835,30 +2836,51 @@ struct RegisteredProcessGuard {
 
 #[cfg(target_os = "linux")]
 impl RegisteredProcessGuard {
-    fn open(pid: u32, expected: ExpectedProviderProcess) -> Option<Self> {
-        if pid == 0 {
-            return None;
+    fn open(pid: u32, expected: ExpectedProviderProcess) -> io::Result<Self> {
+        let pid_number = i32::try_from(pid)
+            .ok()
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| io::Error::other("invalid provider pid"))?;
+        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid_number, 0) };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
         }
+        let process_handle = unsafe { File::from_raw_fd(descriptor as i32) };
         let process_path = PathBuf::from(format!("/proc/{pid}"));
         let mut options = OpenOptions::new();
         options
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        let process_directory = options.open(&process_path).ok()?;
-        let opened = process_directory.metadata().ok()?;
-        let current = fs::symlink_metadata(&process_path).ok()?;
+        let process_directory = options.open(&process_path)?;
+        let opened = process_directory.metadata()?;
+        let current = fs::symlink_metadata(&process_path)?;
         if !opened.file_type().is_dir()
             || opened.uid() != expected.uid
             || opened.dev() != current.dev()
             || opened.ino() != current.ino()
         {
-            return None;
+            return Err(io::Error::other(format!(
+                "provider process directory identity mismatch: uid {} expected {}, inode {} current {}",
+                opened.uid(), expected.uid, opened.ino(), current.ino())));
         }
-        let (network_device, network_inode) = network_namespace_identity(&process_directory)?;
-        if current_network_namespace_identity()? != (network_device, network_inode) {
-            return None;
+        let (network_device, network_inode) = network_namespace_identity(&process_directory)
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "provider network namespace: {}",
+                    io::Error::last_os_error()
+                ))
+            })?;
+        let current_network = current_network_namespace_identity().ok_or_else(|| {
+            io::Error::other(format!(
+                "current network namespace: {}",
+                io::Error::last_os_error()
+            ))
+        })?;
+        if current_network != (network_device, network_inode) {
+            return Err(io::Error::other("provider network namespace mismatch"));
         }
         let guard = Self {
+            process_handle,
             process_directory,
             process_path,
             process_device: opened.dev(),
@@ -2867,7 +2889,56 @@ impl RegisteredProcessGuard {
             network_inode,
             expected,
         };
-        guard.executable_matches().then_some(guard)
+        if !guard.handle_is_live() {
+            return Err(io::Error::other("provider exited during identity capture"));
+        }
+        if !guard.executable_matches() {
+            return Err(io::Error::other(format!(
+                "provider executable identity mismatch: expected device {} inode {}; observed {:?}",
+                expected.executable_device,
+                expected.executable_inode,
+                fs::metadata(guard.process_path.join("exe")).map(|m| (m.dev(), m.ino()))
+            )));
+        }
+        Ok(guard)
+    }
+
+    fn handle_is_live(&self) -> bool {
+        let mut descriptor = libc::pollfd {
+            fd: self.process_handle.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe { libc::poll(&mut descriptor, 1, 0) == 0 }
+    }
+
+    fn terminate(&self) -> io::Result<()> {
+        if !self.handle_is_live() {
+            return Ok(());
+        }
+        if !self.revalidate() {
+            return Err(io::Error::other(
+                "provider identity changed before signaling",
+            ));
+        }
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.process_handle.as_raw_fd(),
+                libc::SIGTERM,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(error)
+        }
     }
 
     fn executable_matches(&self) -> bool {
@@ -2917,17 +2988,27 @@ impl RegisteredProcessGuard {
     }
 
     fn revalidate(&self) -> bool {
-        fs::symlink_metadata(&self.process_path).is_ok_and(|current| {
-            current.file_type().is_dir()
-                && current.uid() == self.expected.uid
-                && current.dev() == self.process_device
-                && current.ino() == self.process_inode
-        }) && self.executable_matches()
+        self.handle_is_live()
+            && fs::symlink_metadata(&self.process_path).is_ok_and(|current| {
+                current.file_type().is_dir()
+                    && current.uid() == self.expected.uid
+                    && current.dev() == self.process_device
+                    && current.ino() == self.process_inode
+            })
+            && self.executable_matches()
             && network_namespace_identity(&self.process_directory)
                 == Some((self.network_device, self.network_inode))
             && current_network_namespace_identity()
                 == Some((self.network_device, self.network_inode))
     }
+}
+
+#[cfg(unix)]
+struct LiveRegistration {
+    #[cfg(target_os = "linux")]
+    pid: u32,
+    #[cfg(target_os = "linux")]
+    process_guard: Option<RegisteredProcessGuard>,
 }
 
 #[cfg(unix)]
@@ -2940,55 +3021,68 @@ fn registration_proves_live(
     expected_process: Option<&ExpectedProviderProcess>,
     deadline: Instant,
 ) -> bool {
+    authenticate_registration(
+        client,
+        path,
+        version,
+        expected_instance_id,
+        private_root,
+        expected_process,
+        deadline,
+    )
+    .is_some()
+}
+
+#[cfg(unix)]
+fn authenticate_registration(
+    client: &reqwest::blocking::Client,
+    path: &Path,
+    version: WireVersion,
+    expected_instance_id: &str,
+    private_root: Option<&Path>,
+    expected_process: Option<&ExpectedProviderProcess>,
+    deadline: Instant,
+) -> Option<LiveRegistration> {
     #[cfg(target_os = "linux")]
-    if probe_time_remaining(deadline).is_none() {
-        return false;
-    }
-    let Some(bytes) = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES, private_root) else {
-        return false;
-    };
+    probe_time_remaining(deadline)?;
+    let bytes = read_bounded_regular_file(path, MAX_REGISTRATION_BYTES, private_root)?;
     let Ok(registration) = serde_json::from_slice::<RegistrationIdentity>(&bytes) else {
-        return false;
+        return None;
     };
     if !registration_matches_candidate(&registration, version, expected_instance_id) {
-        return false;
+        return None;
     }
     #[cfg(target_os = "linux")]
     let process_guard = match expected_process {
         Some(expected) => match RegisteredProcessGuard::open(registration.pid, *expected) {
-            Some(guard) => Some(guard),
-            None => return false,
+            Ok(guard) => Some(guard),
+            Err(_) => return None,
         },
         None => None,
     };
     #[cfg(not(target_os = "linux"))]
     if expected_process.is_some() {
-        return false;
+        return None;
     }
     #[cfg(target_os = "linux")]
     let listener_inode = match process_guard.as_ref() {
         Some(guard) => {
-            let Some(inode) =
-                loopback_listener_inode(&registration.transport.base_url, version, deadline)
-            else {
-                return false;
-            };
+            let inode =
+                loopback_listener_inode(&registration.transport.base_url, version, deadline)?;
             if !guard.owns_socket(inode, deadline) {
-                return false;
+                return None;
             }
             Some(inode)
         }
         None => None,
     };
-    let Some(probe) = probe_manifest(
+    let probe = probe_manifest(
         client,
         &registration.transport.base_url,
         &registration.auth.token,
         version,
         deadline,
-    ) else {
-        return false;
-    };
+    )?;
     let manifest_matches = match probe {
         ManifestProbe::Manifest(manifest) => {
             manifest.protocol_version == version.protocol_version()
@@ -2998,7 +3092,7 @@ fn registration_proves_live(
         ManifestProbe::EntitlementRequired => true,
     };
     #[cfg(target_os = "linux")]
-    return manifest_matches
+    let manifest_matches = manifest_matches
         && process_guard.as_ref().is_none_or(|guard| {
             guard.revalidate()
                 && listener_inode.is_some_and(|inode| {
@@ -3007,8 +3101,12 @@ fn registration_proves_live(
                         && guard.owns_socket(inode, deadline)
                 })
         });
-    #[cfg(not(target_os = "linux"))]
-    manifest_matches
+    manifest_matches.then_some(LiveRegistration {
+        #[cfg(target_os = "linux")]
+        pid: registration.pid,
+        #[cfg(target_os = "linux")]
+        process_guard,
+    })
 }
 
 fn registration_matches_candidate(
@@ -3060,33 +3158,21 @@ pub(crate) fn stop_and_cleanup_registered_provider(
             let Some(instance_id) = owned_registration_instance_id(&path) else {
                 continue;
             };
-            let Some(bytes) = read_bounded_regular_file(&path, MAX_REGISTRATION_BYTES, None) else {
-                continue;
-            };
-            let Ok(registration) = serde_json::from_slice::<RegistrationIdentity>(&bytes) else {
-                continue;
-            };
-            if registration_matches_candidate(&registration, version, &instance_id)
-                && registration_proves_live(
-                    &client,
-                    &path,
-                    version,
-                    &instance_id,
-                    None,
-                    Some(&expected_process),
-                    deadline,
-                )
-                && signaled.insert(registration.pid)
-            {
-                probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
-                let pid = i32::try_from(registration.pid).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "provider pid is invalid")
-                })?;
-                if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-                    let error = io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(ProviderStartError::Io(error));
-                    }
+            if let Some(proof) = authenticate_registration(
+                &client,
+                &path,
+                version,
+                &instance_id,
+                None,
+                Some(&expected_process),
+                deadline,
+            ) {
+                if signaled.insert(proof.pid) {
+                    probe_time_remaining(deadline).ok_or_else(readiness_deadline_error)?;
+                    let guard = proof.process_guard.ok_or_else(|| {
+                        io::Error::other("provider shutdown requires process authority")
+                    })?;
+                    guard.terminate()?;
                 }
             }
         }
@@ -3766,9 +3852,12 @@ mod tests {
         )
         .unwrap();
         assert!(provider.registration_path().is_file());
-        let receipt = package_root
-            .join("participants-v1")
-            .join(format!("{}.json", unsafe { libc::geteuid() }));
+        let receipt = fs::read_dir(package_root.join("participants-v1"))
+            .unwrap()
+            .map(Result::unwrap)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
         assert!(
             receipt.is_file(),
             "foreground publication must register its package participant first"
@@ -5463,6 +5552,163 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn provider_signal_helper_process() {
+        let Some(root) = env::var_os("DOC_SUM_SIGNAL_PROVIDER_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let app_data = root.join("app-data");
+        let runtime = root.join("runtime");
+        ensure_private_directory(&app_data).unwrap();
+        ensure_private_directory(&runtime).unwrap();
+        let _provider = ConnectProvider::start_at(
+            app_data.join("summarizer.db"),
+            app_data,
+            runtime,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        fs::write(root.join("ready"), b"ready").unwrap();
+        thread::sleep(Duration::from_secs(60));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provider_stop_does_not_signal_a_recycled_numeric_pid() {
+        if env::var_os("DOC_SUM_SIGNAL_RACE_HELPER").is_none() {
+            let root = TestDirectory::new("doc-sum-provider-signal-race");
+            let source = root.0.join("pid-race.c");
+            let library = root.0.join("pid-race.so");
+            // Deterministically substitute the later numeric lookup after the
+            // real provider passed authentication. This does not claim natural
+            // kernel PID reuse: it exercises the same unstable kill boundary.
+            fs::write(
+                &source,
+                r#"
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+int kill(pid_t pid, int sig) {
+    int (*real_kill)(pid_t,int) = dlsym(RTLD_NEXT, "kill");
+    const char *path = getenv("DOC_SUM_SIGNAL_RACE_MAP");
+    if (sig == SIGTERM && path) {
+        FILE *file = fopen(path, "r");
+        int original, replacement;
+        if (file) {
+            int count = fscanf(file, "%d %d", &original, &replacement);
+            fclose(file);
+            if (count == 2 && pid == original) {
+                real_kill(original, SIGKILL);
+                waitpid(original, NULL, 0);
+                pid = replacement;
+            }
+        }
+    }
+    return real_kill(pid, sig);
+}
+"#,
+            )
+            .unwrap();
+            assert!(Command::new("cc")
+                .args(["-shared", "-fPIC", "-o"])
+                .arg(&library)
+                .arg(&source)
+                .arg("-ldl")
+                .status()
+                .unwrap()
+                .success());
+            let status = Command::new(env::current_exe().unwrap())
+                .args(["--exact", "connect::provider::tests::provider_stop_does_not_signal_a_recycled_numeric_pid", "--nocapture"])
+                .env("DOC_SUM_SIGNAL_RACE_HELPER", &root.0)
+                .env("DOC_SUM_SIGNAL_RACE_MAP", root.0.join("pid-map"))
+                .env("LD_PRELOAD", &library).status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = PathBuf::from(env::var_os("DOC_SUM_SIGNAL_RACE_HELPER").unwrap());
+        let mut provider = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "connect::provider::tests::provider_signal_helper_process",
+                "--nocapture",
+            ])
+            .env("DOC_SUM_SIGNAL_PROVIDER_ROOT", &root)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.join("ready").is_file() && Instant::now() < deadline {
+            assert!(
+                provider.try_wait().unwrap().is_none(),
+                "provider fixture exited before ready"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !root.join("ready").is_file() {
+            let _ = provider.kill();
+            let _ = provider.wait();
+            panic!("provider fixture readiness deadline");
+        }
+        let mut replacement = Command::new("/usr/bin/sleep").arg("30").spawn().unwrap();
+        fs::write(
+            root.join("pid-map"),
+            format!("{} {}", provider.id(), replacement.id()),
+        )
+        .unwrap();
+        let stopped = stop_and_cleanup_registered_provider(
+            &root.join("app-data"),
+            &root.join("runtime"),
+            Instant::now() + Duration::from_secs(5),
+        );
+        // Let a delivered SIGTERM become waitable before checking the survivor.
+        thread::sleep(Duration::from_millis(50));
+        let replacement_alive = replacement.try_wait().unwrap().is_none();
+        let _ = provider.kill();
+        let _ = provider.wait();
+        let _ = replacement.kill();
+        let _ = replacement.wait();
+        println!("numeric lookup replacement alive={replacement_alive}; provider stop={stopped:?}");
+        assert!(stopped.is_ok());
+        assert!(
+            replacement_alive,
+            "provider stop signaled the unrelated numeric-PID replacement"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_process_guard_rejects_invalid_pid_owner_and_executable() {
+        let expected =
+            expected_provider_process(unsafe { libc::geteuid() }, &env::current_exe().unwrap())
+                .unwrap();
+        for pid in [0, u32::MAX] {
+            assert!(RegisteredProcessGuard::open(pid, expected).is_err());
+        }
+        assert!(RegisteredProcessGuard::open(
+            std::process::id(),
+            ExpectedProviderProcess {
+                uid: expected.uid + 1,
+                ..expected
+            }
+        )
+        .is_err());
+        assert!(RegisteredProcessGuard::open(
+            std::process::id(),
+            ExpectedProviderProcess {
+                executable_inode: expected.executable_inode.wrapping_add(1),
+                ..expected
+            }
+        )
+        .is_err());
+        let guard = RegisteredProcessGuard::open(std::process::id(), expected).unwrap();
+        assert!(guard.revalidate());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn registered_process_guard_rejects_process_exit_after_identity_capture() {
         let root = TestDirectory::new("doc-sum-connect-process-exit-race");
         let executable = root.0.join("provider-process");
@@ -5479,6 +5725,7 @@ mod tests {
         child.wait().unwrap();
 
         assert!(!guard.revalidate());
+        guard.terminate().unwrap();
     }
 
     #[cfg(target_os = "linux")]

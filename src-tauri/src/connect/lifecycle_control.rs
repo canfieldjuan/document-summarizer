@@ -257,13 +257,22 @@ impl TransitionStore {
         };
         Ok(generation == Some(record.generation.as_str())
             && record.kind == TransitionKind::Enable
-            && record.disposition == TransitionDisposition::Forward
-            && matches!(
-                record.phase,
-                TransitionPhase::SourceStopped
-                    | TransitionPhase::ManagerEnabled
-                    | TransitionPhase::SuccessorReady
-            ))
+            && match record.disposition {
+                TransitionDisposition::Forward => matches!(
+                    record.phase,
+                    TransitionPhase::SourceStopped
+                        | TransitionPhase::ManagerEnabled
+                        | TransitionPhase::SuccessorReady
+                ),
+                TransitionDisposition::Rollback => {
+                    record.prior_enabled
+                        && matches!(
+                            record.phase,
+                            TransitionPhase::RollbackTargetStopped
+                                | TransitionPhase::PriorChoiceRestored
+                        )
+                }
+            })
     }
 
     pub(crate) fn enter_job_admission(&self) -> Result<JobAdmissionGuard, LifecycleControlError> {
@@ -344,6 +353,7 @@ impl TransitionStore {
                 (TransitionKind::Enable, TransitionPhase::ManagerEnabled) => {
                     if effects.wait_until_ready(&transition).is_err() {
                         transition.disposition = TransitionDisposition::Rollback;
+                        transition.set_attempt_deadlines(unix_ms()?);
                         self.persist_exact(&transition)?;
                         probe.after_persist(&transition)?;
                         continue;
@@ -397,6 +407,9 @@ impl TransitionStore {
             }
             TransitionPhase::RollbackTargetStopped => {}
             TransitionPhase::PriorChoiceRestored => {
+                if transition.prior_enabled {
+                    effects.wait_until_ready(transition)?;
+                }
                 effects.before_clear(transition)?;
                 self.clear_exact(&transition.generation)?;
                 return Err(LifecycleControlError::Readiness);
@@ -407,6 +420,9 @@ impl TransitionStore {
         transition.phase = TransitionPhase::PriorChoiceRestored;
         self.persist_exact(transition)?;
         probe.after_persist(transition)?;
+        if transition.prior_enabled {
+            effects.wait_until_ready(transition)?;
+        }
         effects.before_clear(transition)?;
         self.clear_exact(&transition.generation)?;
         Err(LifecycleControlError::Readiness)
@@ -1106,7 +1122,7 @@ impl TransitionEffects for SystemdUserEffects {
         transition: &BackgroundTransition,
     ) -> Result<(), LifecycleControlError> {
         if transition.prior_enabled {
-            require_success(systemctl(&["enable", service_unit()])?)
+            require_success(systemctl(&["enable", "--now", service_unit()])?)
         } else {
             require_success(systemctl(&["disable", "--now", service_unit()])?)?;
             remove_launch_environment(&self.launch_root)
@@ -1227,6 +1243,7 @@ mod tests {
     struct MockEffects {
         enabled: bool,
         ready: bool,
+        ready_after_restore: bool,
         calls: Arc<Mutex<Vec<&'static str>>>,
         cleanup_paths: Option<(PathBuf, PathBuf)>,
         observed: Vec<BackgroundTransition>,
@@ -1289,6 +1306,7 @@ mod tests {
         ) -> Result<(), LifecycleControlError> {
             self.calls.lock().unwrap().push("restore");
             self.enabled = transition.prior_enabled;
+            self.ready = self.ready_after_restore;
             Ok(())
         }
 
@@ -1498,6 +1516,137 @@ mod tests {
             store.run(Some(TransitionKind::Disable), &state, None, &mut effects),
             Err(LifecycleControlError::ConflictingTransition)
         ));
+    }
+
+    #[test]
+    fn rollback_restores_enabled_service_with_start() {
+        if env::var_os("DOC_SUM_ROLLBACK_MANAGER_HELPER").is_none() {
+            let root = TestDirectory::new("doc-sum-rollback-manager");
+            let manager = root.0.join("systemctl");
+            fs::write(
+                &manager,
+                r#"#!/bin/sh
+case "$*" in
+  "--user enable --now document-summarizer-connect.service")
+    printf active > "$DOC_SUM_TEST_MANAGER_STATE" ;;
+  "--user enable document-summarizer-connect.service")
+    printf inactive > "$DOC_SUM_TEST_MANAGER_STATE" ;;
+  *) exit 1 ;;
+esac
+"#,
+            )
+            .unwrap();
+            fs::set_permissions(&manager, fs::Permissions::from_mode(0o700)).unwrap();
+            let status = Command::new(env::current_exe().unwrap())
+                .args(["--exact", "connect::lifecycle_control::tests::rollback_restores_enabled_service_with_start", "--nocapture"])
+                .env("DOC_SUM_ROLLBACK_MANAGER_HELPER", &root.0)
+                .env("DOC_SUM_TEST_MANAGER_STATE", root.0.join("manager-state"))
+                .env("PATH", &root.0).status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = PathBuf::from(env::var_os("DOC_SUM_ROLLBACK_MANAGER_HELPER").unwrap());
+        let mut effects = SystemdUserEffects {
+            app_data_dir: root.clone(),
+            runtime_root: root.clone(),
+            control_root: root.clone(),
+            manager_link: root.join("unit"),
+            launch_root: root.join("launch"),
+        };
+        let mut transition = new_transition(TransitionKind::Enable, true, &root, None).unwrap();
+        transition.disposition = TransitionDisposition::Rollback;
+        transition.phase = TransitionPhase::RollbackTargetStopped;
+        effects.restore_prior_choice(&transition).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("manager-state")).unwrap(),
+            "active",
+            "rollback restored enablement but left the service stopped"
+        );
+    }
+
+    #[test]
+    fn rollback_admits_only_the_restored_generation_while_jobs_stay_blocked() {
+        let root = TestDirectory::new("doc-sum-rollback-admission");
+        let store = TransitionStore::new(root.0.join("control")).unwrap();
+        let mut transition = new_transition(TransitionKind::Enable, true, &root.0, None).unwrap();
+        transition.disposition = TransitionDisposition::Rollback;
+        transition.phase = TransitionPhase::RollbackTargetStopped;
+        store.persist_new(&transition).unwrap();
+        for prior_enabled in [false, true] {
+            for kind in [TransitionKind::Enable, TransitionKind::Disable] {
+                for phase in [
+                    TransitionPhase::IntentRecorded,
+                    TransitionPhase::SourceStopped,
+                    TransitionPhase::ManagerEnabled,
+                    TransitionPhase::SuccessorReady,
+                    TransitionPhase::PublisherStopped,
+                    TransitionPhase::ManagerDisabled,
+                    TransitionPhase::RollbackTargetStopped,
+                    TransitionPhase::PriorChoiceRestored,
+                ] {
+                    store.clear_exact(&transition.generation).unwrap();
+                    transition.prior_enabled = prior_enabled;
+                    transition.kind = kind;
+                    transition.target_enabled = kind == TransitionKind::Enable;
+                    transition.phase = phase;
+                    store.persist_new(&transition).unwrap();
+                    let admitted = kind == TransitionKind::Enable
+                        && prior_enabled
+                        && matches!(
+                            phase,
+                            TransitionPhase::RollbackTargetStopped
+                                | TransitionPhase::PriorChoiceRestored
+                        );
+                    assert_eq!(
+                        store
+                            .admitted_transition_child(Some(&transition.generation))
+                            .unwrap(),
+                        admitted
+                    );
+                    assert!(!store.admitted_transition_child(None).unwrap());
+                    assert!(!store
+                        .admitted_transition_child(Some(&Uuid::new_v4().to_string()))
+                        .unwrap());
+                    assert!(store.enter_job_admission().is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_enabled_replacement_keeps_barrier_until_restored_provider_is_ready() {
+        for restored_ready in [false, true] {
+            let root = TestDirectory::new("doc-sum-rollback-restored-readiness");
+            let store = TransitionStore::new(root.0.join("control")).unwrap();
+            let mut effects = MockEffects {
+                enabled: true,
+                ready_after_restore: restored_ready,
+                ..Default::default()
+            };
+            assert!(matches!(
+                store.run(Some(TransitionKind::Enable), &root.0, None, &mut effects),
+                Err(LifecycleControlError::Readiness)
+            ));
+            assert!(effects.enabled);
+            if !restored_ready {
+                let pending = store.current().unwrap().unwrap();
+                assert_eq!(pending.phase, TransitionPhase::PriorChoiceRestored);
+                assert!(store.enter_job_admission().is_err());
+                assert!(store
+                    .admitted_transition_child(Some(&pending.generation))
+                    .unwrap());
+                effects.ready = true;
+                assert!(matches!(
+                    store.run(None, &root.0, None, &mut effects),
+                    Err(LifecycleControlError::Readiness)
+                ));
+            }
+            assert!(store.current().unwrap().is_none());
+            assert!(store.enter_job_admission().is_ok());
+            let calls = effects.calls.lock().unwrap();
+            assert_eq!(calls.iter().filter(|call| **call == "restore").count(), 1);
+            assert_eq!(calls.last(), Some(&"clear"));
+        }
     }
 
     #[test]

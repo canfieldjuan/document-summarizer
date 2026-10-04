@@ -1143,18 +1143,75 @@ fn validate_purge_file(path: &Path, uid: u32, mode: u32) -> Result<(), PackageCo
 }
 
 fn purge_participant_uid(name: &str) -> Option<u32> {
-    let uid = if let Some(uid) = name.strip_suffix(".json") {
-        uid
+    let stem = if let Some(stem) = name.strip_suffix(".json") {
+        stem
     } else {
-        let (uid, generation) = name
-            .strip_prefix('.')?
-            .strip_suffix(".tmp")?
-            .split_once('.')?;
-        Uuid::parse_str(generation).ok()?;
-        uid
+        name.strip_prefix('.')?.strip_suffix(".tmp")?
     };
+    let (uid, generation) = stem.split_once('.')?;
     let parsed: u32 = uid.parse().ok()?;
-    (parsed.to_string() == uid).then_some(parsed)
+    let generation_id = Uuid::parse_str(generation).ok()?;
+    (parsed.to_string() == uid && generation_id.to_string() == generation).then_some(parsed)
+}
+
+fn participant_inbox(root: &Path, exclusive: bool) -> Result<File, PackageControlError> {
+    let owner = fs::symlink_metadata(root)
+        .map_err(|_| PackageControlError::Storage)?
+        .uid();
+    let inbox = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root.join(PARTICIPANTS_DIRECTORY))
+        .map_err(|_| PackageControlError::Storage)?;
+    let metadata = inbox.metadata().map_err(|_| PackageControlError::Storage)?;
+    if metadata.uid() != owner || metadata.mode() & 0o7777 != 0o1777 {
+        return Err(PackageControlError::Conflict);
+    }
+    if exclusive {
+        inbox.lock()
+    } else {
+        inbox.lock_shared()
+    }
+    .map_err(|_| PackageControlError::Storage)?;
+    Ok(inbox)
+}
+
+fn participant_inbox_path(inbox: &File) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", inbox.as_raw_fd()))
+}
+
+// Caller holds the inbox exclusively through the completed atomic publication.
+fn claim_participant_slot(directory: &Path, uid: u32) -> Result<PathBuf, PackageControlError> {
+    let mut owned = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|_| PackageControlError::Storage)? {
+        let entry = entry.map_err(|_| PackageControlError::Storage)?;
+        if authenticated_participant_entry(&entry, false).is_some_and(|(owner, _)| owner == uid) {
+            owned.push(entry.path());
+        }
+    }
+    owned.sort();
+    if let Some(path) = owned.into_iter().next() {
+        return Ok(path);
+    }
+    for _ in 0..8 {
+        let path = directory.join(format!("{uid}.{}.json", Uuid::new_v4()));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+        {
+            Ok(file) => {
+                file.set_permissions(fs::Permissions::from_mode(0o600))
+                    .map_err(|_| PackageControlError::Storage)?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(PackageControlError::Storage),
+        }
+    }
+    Err(PackageControlError::Storage)
 }
 
 fn authenticated_participant_entry(
@@ -1182,14 +1239,8 @@ fn purge_settled_state(
     let owner = fs::symlink_metadata(&store.root)
         .map_err(|_| PackageControlError::Storage)?
         .uid();
-    let participants = store.root.join(PARTICIPANTS_DIRECTORY);
-    let metadata = fs::symlink_metadata(&participants).map_err(|_| PackageControlError::Storage)?;
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != owner
-        || metadata.mode() & 0o7777 != 0o1777
-    {
-        return Err(PackageControlError::Conflict);
-    }
+    let inbox = participant_inbox(&store.root, true)?;
+    let participants = participant_inbox_path(&inbox);
     let mut acknowledgements = Vec::new();
     for entry in fs::read_dir(&participants).map_err(|_| PackageControlError::Storage)? {
         let entry = entry.map_err(|_| PackageControlError::Storage)?;
@@ -1823,9 +1874,10 @@ fn record_participant_acknowledgement_store(
         manager_parent_inode: manager_identity.ino(),
         enabled,
     };
-    let directory = store.root.join(PARTICIPANTS_DIRECTORY);
+    let inbox = participant_inbox(&store.root, true)?;
+    let directory = participant_inbox_path(&inbox);
     cleanup_participant_temporaries(&directory, uid)?;
-    let path = directory.join(format!("{uid}.json"));
+    let path = claim_participant_slot(&directory, uid)?;
     let temporary = directory.join(format!(".{uid}.{}.tmp", acknowledgement.generation));
     let bytes = serde_json::to_vec(&acknowledgement).map_err(|_| PackageControlError::Storage)?;
     let mut options = OpenOptions::new();
@@ -1837,6 +1889,8 @@ fn record_participant_acknowledgement_store(
     let result = (|| {
         let mut file = options
             .open(&temporary)
+            .map_err(|_| PackageControlError::Storage)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|_| PackageControlError::Storage)?;
         file.write_all(&bytes)
             .map_err(|_| PackageControlError::Storage)?;
@@ -2246,19 +2300,15 @@ fn controller_path(record: &PackageRecord) -> PathBuf {
 impl PackageEffects for SystemEffects {
     fn discover(&mut self) -> Result<Vec<Participant>, PackageControlError> {
         let mut participants = Vec::new();
-        let directory = self.package_root.join(PARTICIPANTS_DIRECTORY);
-        let package_root =
-            fs::symlink_metadata(&self.package_root).map_err(|_| PackageControlError::Storage)?;
-        let directory_metadata =
-            fs::symlink_metadata(&directory).map_err(|_| PackageControlError::Storage)?;
-        if !directory_metadata.file_type().is_dir()
-            || directory_metadata.uid() != package_root.uid()
-            || directory_metadata.mode() & 0o7777 != 0o1777
-        {
-            return Err(PackageControlError::Conflict);
-        }
-        for entry in fs::read_dir(directory).map_err(|_| PackageControlError::Storage)? {
-            let entry = entry.map_err(|_| PackageControlError::Storage)?;
+        let inbox = participant_inbox(&self.package_root, false)?;
+        let directory = participant_inbox_path(&inbox);
+        let mut entries = fs::read_dir(directory)
+            .map_err(|_| PackageControlError::Storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| PackageControlError::Storage)?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in entries {
             let Some((uid, metadata)) = authenticated_participant_entry(&entry, false) else {
                 continue;
             };
@@ -2269,6 +2319,9 @@ impl PackageEffects for SystemEffects {
                 continue;
             };
             if validate_participant_acknowledgement(&acknowledgement, uid).is_err() {
+                continue;
+            }
+            if !seen.insert(uid) {
                 continue;
             }
             validate_acknowledged_directories(&acknowledgement)?;
@@ -3602,7 +3655,7 @@ mod tests {
         };
         let path = root
             .join(PARTICIPANTS_DIRECTORY)
-            .join(format!("{uid}.json"));
+            .join(format!("{uid}.{}.json", Uuid::new_v4()));
         fs::write(&path, serde_json::to_vec(&acknowledgement).unwrap()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let mut effects = SystemEffects {
@@ -3636,9 +3689,11 @@ mod tests {
     #[test]
     fn unauthenticated_participant_record_is_not_a_package_participant() {
         let (_store, root) = store("doc-sum-untrusted-participant");
-        let path = root
-            .join(PARTICIPANTS_DIRECTORY)
-            .join(format!("{}.json", unsafe { libc::geteuid() }));
+        let path = root.join(PARTICIPANTS_DIRECTORY).join(format!(
+            "{}.{}.json",
+            unsafe { libc::geteuid() },
+            Uuid::new_v4()
+        ));
         let mut effects = SystemEffects {
             package_root: root.clone(),
         };
@@ -3647,6 +3702,174 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
             assert!(effects.discover().unwrap().is_empty());
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn participant_publication_survives_preclaimed_fixed_name() {
+        let (store, root) = store("doc-sum-participant-preclaim");
+        let uid = unsafe { libc::geteuid() };
+        let blocked = root
+            .join(PARTICIPANTS_DIRECTORY)
+            .join(format!("{uid}.json"));
+        fs::create_dir(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = root.join("runtime");
+        let data = root.join("data");
+        let control = root.join("control");
+        let manager = root.join("manager");
+        for path in [&runtime, &data, &control, &manager] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let result = record_participant_acknowledgement_store(
+            &store,
+            true,
+            &runtime,
+            &data,
+            &control,
+            &manager.join("document-summarizer-connect.service"),
+        );
+        assert!(
+            result.is_ok(),
+            "preclaimed fixed name blocked publication: {result:?}"
+        );
+        let mut effects = SystemEffects {
+            package_root: root.clone(),
+        };
+        let participants = effects.discover().unwrap();
+        assert_eq!(participants.len(), 1);
+        assert!(participants[0].enabled);
+        assert!(blocked.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn participant_publication_preserves_private_mode_under_restrictive_umask() {
+        if env::var_os("DOC_SUM_PARTICIPANT_UMASK_HELPER").is_none() {
+            let status = Command::new(env::current_exe().unwrap())
+                .args(["--exact", "connect::package_control::tests::participant_publication_preserves_private_mode_under_restrictive_umask", "--nocapture"])
+                .env("DOC_SUM_PARTICIPANT_UMASK_HELPER", "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        unsafe {
+            libc::umask(0o777);
+        }
+        participant_publication_survives_preclaimed_fixed_name();
+    }
+
+    #[test]
+    fn participant_slot_resumes_interrupted_publication_and_serializes_writers() {
+        let (_store, root) = store("doc-sum-participant-slot-recovery");
+        let uid = unsafe { libc::geteuid() };
+        let inbox = root.join(PARTICIPANTS_DIRECTORY);
+        let slot = inbox.join(format!("{uid}.{}.json", Uuid::new_v4()));
+        fs::write(&slot, b"partial").unwrap();
+        fs::set_permissions(&slot, fs::Permissions::from_mode(0o600)).unwrap();
+        for name in ["runtime", "data", "control", "manager"] {
+            let path = root.join(name);
+            fs::create_dir(&path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let writers = [false, true].map(|enabled| {
+            let root = root.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                record_participant_acknowledgement_store(
+                    &PackageStore::for_test(root.clone()),
+                    enabled,
+                    &root.join("runtime"),
+                    &root.join("data"),
+                    &root.join("control"),
+                    &root.join("manager/document-summarizer-connect.service"),
+                )
+                .unwrap();
+            })
+        });
+        barrier.wait();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert!(slot.is_file());
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 1);
+        assert_eq!(
+            SystemEffects {
+                package_root: root.clone()
+            }
+            .discover()
+            .unwrap()
+            .len(),
+            1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires root and DOC_SUM_TEST_PARTICIPANT_UID for an isolated two-user fixture"]
+    fn participant_publication_rejects_foreign_preclaims_under_sticky_rules() {
+        use std::os::unix::process::CommandExt;
+        if let Some(root) = env::var_os("DOC_SUM_TEST_PARTICIPANT_ROOT") {
+            let root = PathBuf::from(root);
+            let store = PackageStore::for_test(root.clone());
+            for enabled in [true, false] {
+                record_participant_acknowledgement_store(
+                    &store,
+                    enabled,
+                    &root.join("runtime"),
+                    &root.join("data"),
+                    &root.join("control"),
+                    &root.join("manager/document-summarizer-connect.service"),
+                )
+                .unwrap();
+            }
+            return;
+        }
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let uid: u32 = env::var("DOC_SUM_TEST_PARTICIPANT_UID")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_ne!(uid, 0);
+        let (store, root) = store("doc-sum-participant-sticky");
+        let inbox = root.join(PARTICIPANTS_DIRECTORY);
+        let blocked = inbox.join(format!("{uid}.json"));
+        fs::write(&blocked, b"foreign preclaim").unwrap();
+        let random_preclaim = inbox.join(format!("{uid}.{}.json", Uuid::new_v4()));
+        fs::write(&random_preclaim, b"foreign random preclaim").unwrap();
+        for path in [&blocked, &random_preclaim] {
+            // Root is foreign to the victim and owns the sticky parent.
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        for name in ["runtime", "data", "control", "manager"] {
+            let path = root.join(name);
+            fs::create_dir(&path).unwrap();
+            let cpath = CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::chown(cpath.as_ptr(), uid, uid) }, 0);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let status = Command::new(env::current_exe().unwrap())
+            .args(["--exact", "connect::package_control::tests::participant_publication_rejects_foreign_preclaims_under_sticky_rules", "--ignored", "--nocapture"])
+            .env("DOC_SUM_TEST_PARTICIPANT_ROOT", &root)
+            .uid(uid).gid(uid).status().unwrap();
+        assert!(status.success());
+        assert_eq!(fs::read(&blocked).unwrap(), b"foreign preclaim");
+        assert_eq!(
+            fs::read(&random_preclaim).unwrap(),
+            b"foreign random preclaim"
+        );
+        let mut effects = SystemEffects {
+            package_root: root.clone(),
+        };
+        let participants = effects.discover().unwrap();
+        assert_eq!(participants.len(), 1);
+        assert_eq!(participants[0].uid, uid);
+        assert!(!participants[0].enabled);
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 3);
+        println!("foreign preclaims preserved; victim published twice in one owned slot; latest choice discovered");
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4220,7 +4443,7 @@ mod tests {
             .write_value(INSTALL_RECEIPT_FILE, &install.install_generation, &install)
             .unwrap();
         for name in [
-            format!("{}.json", unsafe { libc::geteuid() }),
+            format!("{}.{}.json", unsafe { libc::geteuid() }, Uuid::new_v4()),
             format!(".{}.{}.tmp", unsafe { libc::geteuid() }, Uuid::new_v4()),
         ] {
             let path = root.join(PARTICIPANTS_DIRECTORY).join(name);
@@ -4373,9 +4596,15 @@ mod tests {
             let outside = tempfile::tempdir().unwrap();
             let sentinel = outside.path().join("untouched");
             fs::write(&sentinel, b"must remain").unwrap();
-            let path = root
-                .join(PARTICIPANTS_DIRECTORY)
-                .join(format!("{}.json", unsafe { libc::geteuid() }));
+            let path = fs::read_dir(root.join(PARTICIPANTS_DIRECTORY))
+                .unwrap()
+                .map(Result::unwrap)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "json")
+                })
+                .unwrap();
             match invalid {
                 "symlink" => {
                     fs::remove_file(&path).unwrap();
@@ -4389,7 +4618,11 @@ mod tests {
                 "owner" => {
                     fs::rename(
                         &path,
-                        path.with_file_name(format!("{}.json", unsafe { libc::geteuid() } + 1)),
+                        path.with_file_name(format!(
+                            "{}.{}.json",
+                            unsafe { libc::geteuid() } + 1,
+                            Uuid::new_v4()
+                        )),
                     )
                     .unwrap();
                 }
