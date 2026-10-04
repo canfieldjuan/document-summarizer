@@ -1910,6 +1910,11 @@ enable phases are `intent_recorded`, `source_stopped`, `manager_enabled`, and
 restores the recorded prior choice. `status` reports an incomplete generation
 and `recover` resumes only that exact generation. A shared admission lock plus
 the record blocks job creation through commit while a transition is incomplete.
+Each explicit recovery attempt refreshes the 35/40/45-second transition deadlines
+once under the control lock and persists them before effects. It preserves the
+generation, creation time, phase, disposition, prior choice, and state identity;
+an expired earlier attempt does not permanently prevent recovery. Effects within
+one attempt share that budget rather than extending it as they run.
 The controller atomically writes an owner-only launch receipt and environment
 file at the fixed, non-XDG-dependent
 `$HOME/.local/state/document-summarizer/` path before systemd start. The unit
@@ -1984,12 +1989,10 @@ safe stale fixed registration may be replaced only after its ownership lock is
 held.
 
 Provider shutdown first closes new-job admission and requests cooperative
-cancellation from every retained Connect worker. Each admitted Connect job gets
-one absolute 30-second deadline; Ollama, llama.cpp completion, and
-inference-gateway transports receive only its remaining time. Ollama recomputes
-before primary and fallback chat calls, llama.cpp recomputes before each
-tokenizer call and completion, and the gateway recomputes before inference and
-acknowledgement. Shutdown reaps
+cancellation from every retained Connect worker. The 30-second timeout bounds
+the HTTP job-creation request, including receipt of its body. Admitted workers
+have no additional absolute job deadline: model transports retain their normal
+configured request budgets and cooperative cancellation. Shutdown reaps
 finished worker handles during
 steady admission and drains remaining handles through the 35-second graceful
 deadline. It then requests endpoint shutdown, joins the server thread, and
