@@ -277,6 +277,29 @@ This test proves the app worker and saved-view boundary. Visual UI interaction,
 blind semantic review and the unseen batch remain separately reported gates.
 No installed settings, existing database, model preset or source documents change.
 
+## Contract revision: gateway protocol capability
+
+The installed-gateway app proof at `3e16b95` failed both small synthetic
+whole documents with `MODEL_GATEWAY_REJECTED` after drafting. The installed
+server's schema validator forbids `$defs`/`$ref` and caps enums at 100 values.
+C9 requires these definitions and larger exact-passage catalogs. My production
+port exposed only its byte cap, so local admission incorrectly allowed a request
+that the task protocol cannot represent. This is an integration defect I introduced.
+
+Correct the runtime capability declaration at the gateway boundary. One named
+schema capability must be consumed by both gateway request construction and the
+comparison planner. General synthesis on an incompatible runtime must select the
+existing claim-ledger path, with a distinct truthful verification-unavailable
+warning before drafting. Retain legacy modes and completed artifacts. Do not
+expand gateway limits, inline/truncate passage catalogs, switch the installed
+model, retry with a weaker verifier, or count fallback as C9 qualification.
+Remove the previous test's claim that serialized C9 order proves gateway support;
+replace it with admission rejection and supported legacy controls. Keep byte caps
+as independent limits. Test fail-before/pass-after at gateway admission, planner
+capability consumption, saved fallback validation and live small-document fallback.
+Native C9 semantics remain unchanged. Gateway C9 support is a separate protocol
+and deployment task; no gateway repository or installed service is changed here.
+
 ## Gap audit
 
 NOT DONE for release. Production integration and local structural regressions
