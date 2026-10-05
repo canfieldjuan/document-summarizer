@@ -4,7 +4,7 @@ use crate::pipeline::gateway_store::{
     reserve_request_after_lock, GatewayCompletion, GatewayRequestKey, GatewayRequestRecord,
     GatewayRequestState, GatewayStoreError,
 };
-use crate::pipeline::model::decoder_compatible_schema;
+use crate::pipeline::model::DecoderSchema;
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE};
@@ -561,7 +561,7 @@ struct Generation<'a> {
     messages: [GenerationMessage<'a>; 2],
     temperature: f64,
     seed: u64,
-    response_schema: Value,
+    response_schema: DecoderSchema,
 }
 
 #[derive(Serialize)]
@@ -667,8 +667,8 @@ fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClient
             "model request is outside task bounds",
         ));
     }
-    let schema = match &request.output_format {
-        ModelOutputFormat::JsonSchema { schema, .. } => schema,
+    let (name, schema) = match &request.output_format {
+        ModelOutputFormat::JsonSchema { name, schema } => (name, schema),
         ModelOutputFormat::Text => {
             return Err(GatewayClientError::Protocol(
                 "document gateway task requires structured output",
@@ -704,7 +704,7 @@ fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClient
             ],
             temperature: 0.0,
             seed: request.seed,
-            response_schema: decoder_compatible_schema(schema),
+            response_schema: DecoderSchema::new(name, schema),
         },
     })
 }
@@ -1212,6 +1212,19 @@ mod tests {
     }
 
     #[test]
+    fn c9_gateway_wire_keeps_declared_property_order() {
+        let mut request = request();
+        request.output_format = ModelOutputFormat::JsonSchema {
+            name: crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME.into(),
+            schema: serde_json::json!({"properties":{"a":{},"z":{}},"required":["z","a"]}),
+        };
+        let core = request_core(&request).unwrap();
+        preflight_request_size(&core).unwrap();
+        let wire = String::from_utf8(encode_json(&core).unwrap()).unwrap();
+        assert!(wire.find("\"z\":{").unwrap() < wire.find("\"a\":{").unwrap());
+    }
+
+    #[test]
     fn request_core_projects_decoder_schema_without_mutating_contract() {
         let mut model_request = request();
         let canonical = {
@@ -1231,11 +1244,13 @@ mod tests {
 
         let core = request_core(&model_request).expect("gateway request should project");
 
-        assert!(core.generation.response_schema["properties"]["ids"]
-            .get("uniqueItems")
-            .is_none());
         assert!(
-            core.generation.response_schema["properties"]["ids"]["items"]
+            core.generation.response_schema.as_value()["properties"]["ids"]
+                .get("uniqueItems")
+                .is_none()
+        );
+        assert!(
+            core.generation.response_schema.as_value()["properties"]["ids"]["items"]
                 .get("maxLength")
                 .is_none()
         );

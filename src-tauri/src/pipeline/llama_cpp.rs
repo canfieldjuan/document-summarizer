@@ -3,7 +3,7 @@ use crate::pipeline::contracts::{
     ModelTokenUsage, ModelTransportAttempt, PipelineStage,
 };
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
-use crate::pipeline::model::response_format;
+use crate::pipeline::model::{response_format, DecoderSchema};
 use crate::pipeline::qwen_tokenizer::{request_fits_context, TOKENIZER_FRAMING_RESERVE_TOKENS};
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
@@ -577,7 +577,7 @@ impl LlamaCppRuntime {
         &self,
         request: &ModelRequest,
         prompt: &[u32],
-        schema: Option<serde_json::Value>,
+        schema: Option<DecoderSchema>,
         timeout: Duration,
     ) -> Result<CompletionResponse, ModelRuntimeFailure> {
         let response = self
@@ -2078,7 +2078,7 @@ struct CompletionRequest<'a> {
     stop: [&'a str; 1],
     cache_prompt: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    json_schema: Option<serde_json::Value>,
+    json_schema: Option<DecoderSchema>,
 }
 
 #[derive(Deserialize)]
@@ -2122,6 +2122,25 @@ mod tests {
     use super::*;
     use crate::pipeline::control::CancellationToken;
     use std::io::{Read, Write};
+
+    #[test]
+    fn c9_completion_wire_keeps_declared_property_order() {
+        let output = crate::pipeline::contracts::ModelOutputFormat::JsonSchema {
+            name: crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME.into(),
+            schema: serde_json::json!({"properties":{"a":{},"z":{}},"required":["z","a"]}),
+        };
+        let request = CompletionRequest {
+            prompt: &[1],
+            n_predict: 4096,
+            temperature: 0.0,
+            seed: 7,
+            stop: ["<|im_end|>"],
+            cache_prompt: true,
+            json_schema: response_format(&output).unwrap(),
+        };
+        let wire = serde_json::to_string(&request).unwrap();
+        assert!(wire.find("\"z\":{").unwrap() < wire.find("\"a\":{").unwrap());
+    }
 
     #[test]
     fn tokenizer_preserves_short_timeout_for_uncontrolled_and_worker_requests() {

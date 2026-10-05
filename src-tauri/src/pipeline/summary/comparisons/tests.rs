@@ -128,11 +128,37 @@ fn c9_recorded_public_responses_match_production_schema_prompt_and_verdict() {
         assert_eq!(
             crate::pipeline::model::response_format(&request.output_format)
                 .unwrap()
-                .unwrap(),
-            prepared.schema
+                .unwrap()
+                .as_value(),
+            &prepared.schema
         );
     }
     assert_eq!(approved, 4);
+}
+
+#[test]
+fn c9_decoder_wire_preserves_frozen_comparison_order() {
+    let f = fixture();
+    let (prompt, claims) = input(&f["records"][0]);
+    let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+    let request = verification_request(&batches[0], 0, 7);
+    let schema = crate::pipeline::model::response_format(&request.output_format)
+        .unwrap()
+        .unwrap();
+    let wire = serde_json::to_string(&schema).unwrap();
+    for names in [
+        vec!["stage", "conditions", "qualifiers", "scope"],
+        vec!["source_spans", "claim_spans", "relation"],
+    ] {
+        let offsets = names
+            .iter()
+            .map(|name| wire.find(&format!("\"{name}\":{{")).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            offsets.windows(2).all(|pair| pair[0] < pair[1]),
+            "decoder property order drifted: {names:?} at {offsets:?}"
+        );
+    }
 }
 
 #[test]
@@ -541,7 +567,8 @@ fn c9_live_approved_controls_use_production_runtime() {
             &format!("request-{ordinal}.json"),
             &json!({"system_prompt":request.system_prompt,
             "user_prompt":request.user_prompt,"seed":request.seed,"max_output_tokens":request.max_output_tokens,
-            "schema_name":name,"schema":schema}),
+            "schema_name":name,"schema":schema,
+            "decoder_schema_json":serde_json::to_string(&crate::pipeline::model::response_format(&request.output_format).unwrap().unwrap()).unwrap()}),
         );
         runtime.preflight_request(&request).unwrap();
         let started = std::time::Instant::now();

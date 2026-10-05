@@ -542,7 +542,7 @@ impl OllamaRuntime {
     fn admit_request(
         &self,
         request: &ModelRequest,
-        format: Option<serde_json::Value>,
+        format: Option<DecoderSchema>,
     ) -> Result<(), ModelRuntimeFailure> {
         if !self.require_token_admission {
             return Ok(());
@@ -574,7 +574,7 @@ impl OllamaRuntime {
     fn chat_payload<'a>(
         &'a self,
         request: &'a ModelRequest,
-        format: Option<serde_json::Value>,
+        format: Option<DecoderSchema>,
     ) -> ChatRequest<'a> {
         ChatRequest {
             model: &self.model_id,
@@ -604,7 +604,7 @@ impl OllamaRuntime {
     fn send_chat(
         &self,
         request: &ModelRequest,
-        format: Option<serde_json::Value>,
+        format: Option<DecoderSchema>,
     ) -> Result<Response, ModelRuntimeFailure> {
         let payload = self.chat_payload(request, format);
         let request = self.authorize(self.client.post(self.endpoint("api/chat")?).json(&payload));
@@ -620,7 +620,7 @@ impl OllamaRuntime {
     fn send_chat_attempt(
         &self,
         request: &ModelRequest,
-        format: Option<serde_json::Value>,
+        format: Option<DecoderSchema>,
     ) -> Result<(StatusCode, Vec<u8>, Duration), (ModelRuntimeFailure, Duration)> {
         let started = Instant::now();
         let result = self.send_chat(request, format).and_then(|response| {
@@ -1403,7 +1403,7 @@ fn provider_usage(body: &[u8]) -> ModelTokenUsage {
 
 pub(crate) fn response_format(
     output_format: &ModelOutputFormat,
-) -> Result<Option<serde_json::Value>, ModelRuntimeFailure> {
+) -> Result<Option<DecoderSchema>, ModelRuntimeFailure> {
     let ModelOutputFormat::JsonSchema { name, schema } = output_format else {
         return Ok(None);
     };
@@ -1430,7 +1430,92 @@ pub(crate) fn response_format(
             false,
         ));
     }
-    Ok(Some(decoder_compatible_schema(schema)))
+    Ok(Some(DecoderSchema::new(name, schema)))
+}
+
+/// A schema must retain its decoder sequence until the final transport write.
+/// C9 declares this order in `required`; converting this wrapper back into a
+/// JSON Value before transmission would lose it to sorted object maps again.
+#[derive(Debug, Clone)]
+pub(crate) struct DecoderSchema {
+    value: serde_json::Value,
+    ordered: bool,
+}
+
+impl DecoderSchema {
+    pub(super) fn new(name: &str, schema: &serde_json::Value) -> Self {
+        Self {
+            value: decoder_compatible_schema(schema),
+            ordered: name == crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn as_value(&self) -> &serde_json::Value {
+        &self.value
+    }
+}
+
+impl Serialize for DecoderSchema {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.ordered {
+            OrderedSchema {
+                value: &self.value,
+                order: &[],
+            }
+            .serialize(serializer)
+        } else {
+            self.value.serialize(serializer)
+        }
+    }
+}
+
+struct OrderedSchema<'a> {
+    value: &'a serde_json::Value,
+    order: &'a [serde_json::Value],
+}
+
+impl Serialize for OrderedSchema<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self.value {
+            serde_json::Value::Object(fields) => {
+                let mut map = serializer.serialize_map(Some(fields.len()))?;
+                let mut seen = std::collections::HashSet::new();
+                let keys = self
+                    .order
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .chain(fields.keys().map(String::as_str));
+                for key in keys {
+                    if let Some(value) = fields.get(key) {
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        let order = if key == "properties" {
+                            fields
+                                .get("required")
+                                .and_then(serde_json::Value::as_array)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[])
+                        } else {
+                            &[]
+                        };
+                        map.serialize_entry(key, &OrderedSchema { value, order })?;
+                    }
+                }
+                map.end()
+            }
+            serde_json::Value::Array(values) => {
+                let mut seq = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    seq.serialize_element(&OrderedSchema { value, order: &[] })?;
+                }
+                seq.end()
+            }
+            value => value.serialize(serializer),
+        }
+    }
 }
 
 pub(crate) fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_json::Value {
@@ -1494,8 +1579,11 @@ pub(crate) fn decoder_compatible_schema(schema: &serde_json::Value) -> serde_jso
     serde_json::Value::Object(projected)
 }
 
-fn json_object_response_format() -> serde_json::Value {
-    serde_json::json!("json")
+fn json_object_response_format() -> DecoderSchema {
+    DecoderSchema {
+        value: serde_json::json!("json"),
+        ordered: false,
+    }
 }
 
 #[derive(Serialize)]
@@ -1506,7 +1594,7 @@ struct ChatRequest<'a> {
     think: bool,
     keep_alive: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<serde_json::Value>,
+    format: Option<DecoderSchema>,
     options: ChatOptions,
 }
 
@@ -3057,7 +3145,7 @@ mod tests {
         })
         .expect("bounded schema should be accepted")
         .expect("structured format should be present");
-        assert_eq!(actual, schema);
+        assert_eq!(actual.as_value(), &schema);
 
         for (name, schema) in [
             (
@@ -3122,6 +3210,73 @@ mod tests {
     }
 
     #[test]
+    fn c9_schema_serialization_preserves_order_without_dropping_fields() {
+        use crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME;
+        for required in [
+            serde_json::json!(["z", "a"]),
+            serde_json::json!(["z", "z", "absent", 0, false, ""]),
+            serde_json::json!([]),
+            serde_json::json!(null),
+            serde_json::json!(false),
+        ] {
+            let schema = serde_json::json!({"type":"object", "properties": {
+                "a":{"type":"array", "items":{"type":"object", "properties":{
+                    "y":{"type":"string"}, "b":{"type":"string"}}, "required":["y","b"]}},
+                "z":{"type":"string"}}, "required":required});
+            for name in [
+                CLAIM_COMPARISON_SCHEMA_NAME,
+                "document_claim_verdicts_v1",
+                "",
+            ] {
+                let wire = serde_json::to_string(&DecoderSchema::new(name, &schema)).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&wire).unwrap(),
+                    schema
+                );
+                if name != CLAIM_COMPARISON_SCHEMA_NAME {
+                    assert_eq!(wire, serde_json::to_string(&schema).unwrap());
+                    continue;
+                }
+                let offset = |key: &str| wire.find(&format!("\"{key}\":{{")).unwrap();
+                assert!(offset("y") < offset("b"));
+                assert_eq!(
+                    offset("z") < offset("a"),
+                    required.as_array().is_some_and(|v| !v.is_empty())
+                );
+                assert_eq!(wire.matches("\"z\":{").count(), 1);
+            }
+        }
+        let payload = ChatRequest {
+            model: "fixture",
+            messages: [
+                ChatMessage {
+                    role: "system",
+                    content: "system",
+                },
+                ChatMessage {
+                    role: "user",
+                    content: "user",
+                },
+            ],
+            stream: true,
+            think: false,
+            keep_alive: CHAT_RUNNER_KEEP_ALIVE,
+            format: Some(DecoderSchema::new(
+                CLAIM_COMPARISON_SCHEMA_NAME,
+                &serde_json::json!({"properties":{"a":{},"z":{}},"required":["z","a"]}),
+            )),
+            options: ChatOptions {
+                num_ctx: 32768,
+                num_predict: 4096,
+                temperature: 0.0,
+                seed: 7,
+            },
+        };
+        let wire = serde_json::to_string(&payload).unwrap();
+        assert!(wire.find("\"z\":{").unwrap() < wire.find("\"a\":{").unwrap());
+    }
+
+    #[test]
     fn structured_response_format_projects_only_unsupported_decoder_keywords() {
         let contract_schema = serde_json::json!({
             "type": "object",
@@ -3160,7 +3315,7 @@ mod tests {
         })
         .expect("canonical schema should be accepted")
         .expect("structured format should be present");
-        let projected = &actual;
+        let projected = actual.as_value();
 
         assert_eq!(
             projected["description"],
@@ -3227,7 +3382,7 @@ mod tests {
             })
             .expect("bounded schema should project")
             .expect("schema transport should remain enabled");
-            let projected = &format;
+            let projected = format.as_value();
             let actual = &projected["properties"]["evidence"]["items"]["properties"]["claim_text"];
             if maximum <= MAX_DECODER_STRING_LENGTH {
                 assert_eq!(actual["maxLength"], maximum, "small bound must survive");
@@ -3247,7 +3402,10 @@ mod tests {
 
     #[test]
     fn chat_request_disables_thinking_and_sets_native_context_and_output_options() {
-        assert_eq!(json_object_response_format(), serde_json::json!("json"));
+        assert_eq!(
+            json_object_response_format().as_value(),
+            &serde_json::json!("json")
+        );
         let payload = ChatRequest {
             model: "fixture-model",
             messages: [
