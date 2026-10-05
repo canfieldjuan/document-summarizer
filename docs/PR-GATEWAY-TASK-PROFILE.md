@@ -19,10 +19,20 @@ Stacked on PR116 at977eca739637e610f83d394a1ef1c67aed854f54; review independentl
 Run gateway-client/runtime and model-settings callers plus context/planning tests and strict lint/format. CI owns repeated broad suites. Frozen server-side9B controls already pass the source capacity boundary. Full-app qualification follows reviewed deployment, with the original settings/documents/labels.
 
 ## Implementation summary
-Pending.
+Implemented at 40024d4e735825a9b572e99a9ac796868aa0fda4. gateway_client.rs owns the selected typed profile and passes it to both preflight and execution. Credential-scoped health chooses whether to fetch v2's strict profile. Missing v2 retains legacy; advertised-invalid v2 fails. gateway_runtime.rs consumes that profile for C9 capability, model identity, context and snapshot digest; saved runs reconstruct the stored profile without network negotiation. The old universal C9 rejection, fixed task-version builder and independent runtime context constant were replaced by the selected profile, not supplemented with another downstream override.
+
+Checks:52 gateway tests,20 model-settings tests,7 coherent-budget tests,21 C9 tests passed (1 opt-in ignored); all-target/all-feature strict Clippy and format passed. Final test cleanup removed a redundant self-comparison; the remaining legacy/v2 identity-collision test passed independently. The only failures in this client implementation were two new fixture timestamps containing fractional seconds; production ledger rejection was correct and fixtures were corrected. No runtime failure was patched downstream.
+
+Evidence alias gateway-task-profile-20261005/summary.json SHA256 7f3858de61b135aecde99acfcad61a2b41d1eb00e28090062ed2b41f4d3ff2fb. Logs and source hashes are retained privately outside worktrees. No broad local duplicate of required CI was run; no installed full-app or unseen inference was attempted.
 
 ## Cold diff audit
-Pending.
+- gateway_client.rs::GatewayTaskProfile, negotiate_profile, ProfileEnvelope::validate: profile is validated once and carried into request construction; boundary/default/missing-field/duplicate-task tests cover both acceptance and refusal.
+- gateway_client.rs::request_core_for_profile and health: selected version reaches outgoing task, semantic request hash and capability; wire/replay tests and drift/unavailability checks pass. No ledger, credential, retry or ACK implementation changed.
+- gateway_runtime.rs::new/from_snapshot/canonical_snapshot: new runs negotiate; old runs restore. Task, context and capabilities share the same profile. Legacy canonical text is unchanged. New/old SQLite snapshots round-trip; mutation fails.
+- docs/CONTRACTS.md and this contract: scope the previous C9 rejection to v1 and describe v2 without claiming qualification.
+
+boundary-probe: valid context8192..1048576 accepted; adjacent out-of-range/zero/false/empty/missing/mixed profile fields rejected; invalid advertised v2 does not downgrade; changed profile health fails; restored task1 cannot reuse task2 ledger state.
+effect-trace: let gateway capacity and capability reach production planning | runtime profile -> context_tokens/supports_response_schema plus shared request builder |32768 runtime snapshot, C9 preflight, task2 wire and durable replay tests pass; actual full-document qualification remains pending.
 
 ## Gap audit
-NOT DONE: negotiation, requests, snapshots, tests and full-app proof remain.
+NOT DONE for qualification. Client implementation and local checks are complete. Independent review/CI, gatewayPR30 review/deployment/task grant, basePR116 fidelity gate, full-app and unseen qualification remain. No release or deployment is claimed.

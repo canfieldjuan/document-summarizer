@@ -707,11 +707,19 @@ passage, and four passages per side per dimension. The serialized schema has a
 1 MiB bound measured using the actual compact Rust JSON encoding. Runtime
 admission can impose a tighter bound: the gateway's existing 250,000-byte schema
 limit remains authoritative. Protocol support is checked independently of size.
-The current gateway task does not support C9's shared definitions and passage
-catalogs. Its capability declaration is consumed by both request construction and
-comparison planning. Current General synthesis selects the claim-ledger fallback
-before drafting, with `COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE`; this cannot
-count as C9 qualification. Native runtimes retain comparison verification. The named comparison schema has the larger native
+Gateway task version 1 does not support C9's shared definitions and passage
+catalogs. New gateway runs discover credential-scoped task version 2 and validate
+its authenticated capacity profile before selecting it; version 1 is retained
+only when version 2 is absent. An advertised but invalid or unavailable version 2
+cannot silently downgrade. Profile version 1 fixes the output and schema limits
+above and declares `bounded_source_passages_v1`; its bounded context allocation
+comes from the server. The selected task, context and profile fingerprint persist
+in the run snapshot. Resumed runs keep that original profile and request identity.
+Both request construction and comparison planning consume the selected capability.
+Version-1 General synthesis selects the claim-ledger fallback before drafting,
+with `COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE`; this cannot count as C9
+qualification. Version-2 support alone is also not qualification: full-app and
+fidelity gates remain. Native runtimes retain comparison verification. The named comparison schema has the larger native
 allowance; other native schemas retain 64 KiB. Prompt/context admission and the
 4,096-token response allowance also apply. The same prepared request plan serves
 admission and execution. A complete input that cannot fit, including an input with no
