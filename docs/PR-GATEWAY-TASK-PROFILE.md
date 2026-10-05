@@ -36,3 +36,33 @@ effect-trace: let gateway capacity and capability reach production planning | ru
 
 ## Gap audit
 NOT DONE for qualification. Client implementation and local checks are complete. Independent review/CI, gatewayPR30 review/deployment/task grant, basePR116 fidelity gate, full-app and unseen qualification remain. No release or deployment is claimed.
+
+## Review correction: suggestion identity
+
+Root cause: my implementation at40024d4 made the request semantic hash depend on
+the negotiated task while lib.rs::bind_profile_suggestion_request_owner still
+allocated a single owner for all runtime profiles. Unlike run owners, suggestion
+owners have no saved runtime. The store correctly refuses a different semantic
+request under the old owner. This is an integration regression, not a defective
+ledger guard.
+
+Required change surface: ModelRuntime supplies an operation-contract scope;
+GatewayRuntime derives it from its existing canonical profile digest; the
+Automatic command uses it before owner allocation. See the sole behavioral rule
+in [Automatic suggestion request identity](CONTRACTS.md#automatic-suggestion-request-identity).
+Remove the unconditional suggestion-contract key in the caller. No downstream
+retry, ledger mutation, migration, prompt, label or source-boundary change.
+
+Verification plan: fail-first public-PDF regression through the real parser,
+normalizer, suggestion command binding, gateway runtime/client and SQLite ledger
+with a fixture transport. Exercise both task transition orders, identical-profile
+replay, restoration of a historical task1 owner, and context-profile changes.
+Run adjacent suggestion/owner/gateway tests plus format and strict Clippy. CI
+owns duplicate broad suites. Independent local review and fidelity remain held.
+
+Nonblocking review notes: new-runtime construction performs authenticated
+discovery before health, so an unreachable gateway may now report an unavailable
+status without runtime/model identity and status polling adds metadata requests.
+The accepted future context range also exceeds the transport message capacity;
+the deployed server advertises32768. Transport-aware planning for larger future
+profiles is deferred, not claimed by this fix.

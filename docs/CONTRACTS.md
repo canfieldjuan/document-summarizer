@@ -768,6 +768,25 @@ source admission. General remains the initial choice. An explicit General,
 Story or Contract selection is sent directly with the start command and does
 not run purpose classification.
 
+### Automatic suggestion request identity
+
+Before suggestion inference, the command gets a durable owner from the exact
+source content hash and the suggestion operation contract scoped by the selected
+runtime's request contract. The runtime owns that scope; the command must not
+infer it from a model name or duplicate task/profile rules. Gateway task2 scopes
+the operation contract with the canonical task-profile digest already used in
+its saved snapshot. A changed task profile gets a separate owner; the same
+profile reuses its owner across reopen and concurrent calls. Direct runtimes and
+gateway task1 preserve the historical unscoped operation key, including existing
+task1 completions when a task2 grant is later revoked.
+
+The existing transactional owner table and gateway semantic-hash conflict check
+remain authoritative. Do not overwrite, delete, re-key or retry conflicting
+ledger rows. Pipeline runs continue to use their run IDs and saved profiles.
+Prompt/schema/sampling changes still require a suggestion-contract revision.
+
+### Automatic suggestion classification
+
 Automatic suggestion is an opt-in selection mode rather than a stored summary
 profile. Before creating a run, the desktop parses, normalizes and interprets
 the selected source in memory, then asks the configured model for exactly one
