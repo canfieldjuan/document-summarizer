@@ -66,3 +66,37 @@ status without runtime/model identity and status polling adds metadata requests.
 The accepted future context range also exceeds the transport message capacity;
 the deployed server advertises32768. Transport-aware planning for larger future
 profiles is deferred, not claimed by this fix.
+
+## Suggestion identity correction proof
+
+Implementation afbb4f564f4960495aa71a691377d99aa7e5745b. Public-PDF reproduction on7558795 plus the regression
+failed with MODEL_GATEWAY_STORE_FAILED (0passed/1failed) at the task1-to-task2
+transition. The same test now passes, including task2-to-task1, unchanged-profile
+replay without transport, historical task1 owner reuse and changed-context
+isolation. Gateway53passed; suggestion9passed/1ignored; direct-owner1passed;
+strict all-target/all-feature Clippy, format and diff checks passed. No live model
+call was made. Evidence alias pr121-suggestion-identity-20261005/summary.json
+SHA256 6dacd7c306289b3fde131b12d9be949dac4524306e1422348046c05755b032d9.
+
+Cold audit: lib.rs::bind_profile_suggestion_request_owner uses the runtime's
+contract before transactional allocation; contracts.rs::ModelRuntime supplies a
+backward-compatible default; gateway_runtime.rs::request_owner_contract reuses
+the existing canonical profile digest and preserves legacy keys. The only
+gateway_client.rs change in this correction is the regression test. The
+unconditional caller key was replaced; the ledger guard and all run identities
+are unchanged. Historical documentation links to the canonical identity rule.
+
+boundary-probe: both task transition directions succeed; same-profile repeats
+produce no new inference; changed context isolates ownership; old task1 IDs
+are preserved. Existing owner validation/concurrency and semantic-conflict
+tests pass.
+effect-trace: Automatic survives a task-profile change | runtime contract feeds
+owner allocation before real gateway request construction | public-PDF
+suggestion regression changes from the reproduced store failure to acknowledged
+completion, with replay call counts verified.
+
+Gap audit: NOT DONE for merge/qualification. Correction implementation and local
+proof are complete; new-head CI and Claude review, task2 grant, full-document
+execution and independent fidelity qualification remain. The prepared full-app
+runner uses explicit General mode, so it would not itself reproduce the reviewed
+Automatic-mode failure; the new regression supplies that missing path coverage.
