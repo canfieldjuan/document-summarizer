@@ -47,7 +47,8 @@ const CAPACITY_ANALYSIS_VERSION: &str = "7.0.0";
 const COMPLETION_ANALYSIS_VERSION: &str = "6.0.0";
 const MATERIALITY_ANALYSIS_VERSION: &str = "5.0.0";
 const SINGLE_PAGE_ANALYSIS_VERSION: &str = "4.0.0";
-pub const SYNTHESIS_VERSION: &str = "13.0.0";
+pub const SYNTHESIS_VERSION: &str = "14.0.0";
+const PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION: &str = "13.0.0";
 const PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION: &str = "12.0.0";
 const PRE_CLAUSE_SYNTHESIS_VERSION: &str = "11.0.0";
 const PRE_FURNITURE_SYNTHESIS_VERSION: &str = "10.0.0";
@@ -157,6 +158,7 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
         SYNTHESIS_VERSION
+            | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
             | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
             | PRE_FURNITURE_SYNTHESIS_VERSION
@@ -170,7 +172,9 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
 fn coherent_synthesis_uses_clause_verification(version: &str) -> bool {
     matches!(
         version,
-        SYNTHESIS_VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION
+            | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
     )
 }
 
@@ -1905,6 +1909,7 @@ fn verification_claim_budget(
     if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
             | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
             | PRE_FURNITURE_SYNTHESIS_VERSION
@@ -4286,6 +4291,7 @@ fn validate_synthesized_document_without_runtime(
     let synthesis_version_supported = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
             | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
             | PRE_FURNITURE_SYNTHESIS_VERSION
@@ -4305,6 +4311,7 @@ fn validate_synthesized_document_without_runtime(
     let claim_limit = if matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
+            | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
             | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
             | PRE_FURNITURE_SYNTHESIS_VERSION
@@ -4571,7 +4578,10 @@ fn validate_coherent_verified_document(
 ) -> Result<(), PipelineFailure> {
     let delivery_coverage_fallback = matches!(
         synthesized.synthesis_version.as_str(),
-        SYNTHESIS_VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+        SYNTHESIS_VERSION
+            | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
+            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+            | PRE_CLAUSE_SYNTHESIS_VERSION
     ) && matches!(
         verified.verification_version.as_str(),
         VERIFICATION_VERSION
@@ -12645,7 +12655,8 @@ mod tests {
 
     #[test]
     fn exported_versions_name_the_default_artifacts_not_historical_hierarchy() {
-        assert_eq!(SYNTHESIS_VERSION, "13.0.0");
+        assert_eq!(SYNTHESIS_VERSION, "14.0.0");
+        assert_eq!(PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION, "13.0.0");
         assert_eq!(PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION, "12.0.0");
         assert_eq!(PRE_FURNITURE_SYNTHESIS_VERSION, "10.0.0");
         assert_eq!(PRE_BALANCED_SYNTHESIS_VERSION, "9.0.0");
