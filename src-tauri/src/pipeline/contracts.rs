@@ -899,6 +899,11 @@ pub trait ModelRuntime: Send + Sync {
     fn model_id_for_stage(&self, _stage: PipelineStage) -> &str {
         self.model_id()
     }
+    /// Whether the runtime task can represent a named response protocol.
+    /// Size limits remain independent of protocol support.
+    fn supports_response_schema(&self, _name: &str) -> bool {
+        true
+    }
     /// The caller must respect any tighter transport limit before generation.
     fn response_schema_byte_limit(&self, _stage: PipelineStage, name: &str) -> usize {
         response_schema_byte_limit(name)

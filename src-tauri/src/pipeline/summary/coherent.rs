@@ -2790,6 +2790,7 @@ enum FallbackReason {
     IncompleteCatalog,
     RequestTooLarge,
     VerificationRequestTooLarge,
+    VerificationUnavailable,
     DeliveryCoverage,
     ModelOutputInvalid,
 }
@@ -2798,6 +2799,7 @@ impl FallbackReason {
     fn warning_code(self) -> &'static str {
         match self {
             Self::ModelOutputInvalid => MODEL_OUTPUT_INVALID_WARNING_CODE,
+            Self::VerificationUnavailable => "COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE",
             _ => FALLBACK_WARNING_CODE,
         }
     }
@@ -2812,6 +2814,9 @@ impl FallbackReason {
             }
             Self::VerificationRequestTooLarge => {
                 "The coherent summary does not fit bounded semantic verification; showing verified source claims instead"
+            }
+            Self::VerificationUnavailable => {
+                "The selected model service does not support comparison verification; showing verified source claims instead"
             }
             Self::ModelOutputInvalid => {
                 "The model's summary output was invalid; showing verified source claims instead"
@@ -3018,6 +3023,18 @@ fn synthesize_with_delivery_coverage(
     } else {
         catalog.clone()
     };
+
+    if profile == SummaryProfile::General
+        && !runtime.supports_response_schema(comparisons::SCHEMA_NAME)
+    {
+        return finish(fallback_document(
+            runtime,
+            analyzed,
+            chunked,
+            ledger_claims,
+            FallbackReason::VerificationUnavailable,
+        )?);
+    }
 
     let (user_prompt, output_schema) = prompt_and_schema(profile, &synthesis_catalog)?;
     if !model_health_checked {
@@ -7858,6 +7875,12 @@ pub(super) fn validate_for_runtime(
                     synthesized,
                     FallbackReason::VerificationRequestTooLarge,
                 )
+                || (profile == SummaryProfile::General
+                    && synthesized.synthesis_version == VERSION
+                    && has_fallback_warning(
+                        synthesized,
+                        FallbackReason::VerificationUnavailable,
+                    ))
                 || has_fallback_warning(synthesized, FallbackReason::DeliveryCoverage)
                 || (profile == SummaryProfile::General
                     && has_fallback_warning(synthesized, FallbackReason::ModelOutputInvalid)) => {}
@@ -7986,7 +8009,9 @@ pub(super) fn validate_content(
                 || synthesized.warnings.iter().any(|warning| {
                     matches!(
                         warning.code.as_str(),
-                        FALLBACK_WARNING_CODE | MODEL_OUTPUT_INVALID_WARNING_CODE
+                        FALLBACK_WARNING_CODE
+                            | MODEL_OUTPUT_INVALID_WARNING_CODE
+                            | "COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE"
                     )
                 })
             {
@@ -8076,7 +8101,9 @@ fn fallback_warning(synthesized: &SynthesizedDocument) -> Option<&PipelineWarnin
     let mut warnings = synthesized.warnings.iter().filter(|warning| {
         matches!(
             warning.code.as_str(),
-            FALLBACK_WARNING_CODE | MODEL_OUTPUT_INVALID_WARNING_CODE
+            FALLBACK_WARNING_CODE
+                | MODEL_OUTPUT_INVALID_WARNING_CODE
+                | "COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE"
         )
     });
     let warning = warnings.next()?;
@@ -8084,6 +8111,7 @@ fn fallback_warning(synthesized: &SynthesizedDocument) -> Option<&PipelineWarnin
         FallbackReason::IncompleteCatalog,
         FallbackReason::RequestTooLarge,
         FallbackReason::VerificationRequestTooLarge,
+        FallbackReason::VerificationUnavailable,
         FallbackReason::DeliveryCoverage,
         FallbackReason::ModelOutputInvalid,
     ]

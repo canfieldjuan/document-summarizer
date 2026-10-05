@@ -1127,6 +1127,16 @@ mod tests {
     #[test]
     #[ignore = "explicit known PDFs, copied installed settings, private durable output and inference lock required"]
     fn complete_document_live_app_worker_proof() {
+        live_app_worker_proof(false);
+    }
+
+    #[test]
+    #[ignore = "explicit synthetic PDFs, copied installed settings, private output and inference lock required"]
+    fn complete_document_live_app_worker_fallback_proof() {
+        live_app_worker_proof(true);
+    }
+
+    fn live_app_worker_proof(expect_unsupported_protocol: bool) {
         use crate::pipeline::workspace;
         use serde_json::{json, Value};
         let output = PathBuf::from(std::env::var("DOC_SUM_APP_PROOF_OUTPUT").unwrap());
@@ -1210,9 +1220,26 @@ mod tests {
             let coherent = original_view
                 .as_ref()
                 .is_some_and(|v| v.summary.presentation_mode == SummaryPresentationMode::Coherent);
-            let passed =
+            let c9_passed =
                 original_view.is_some() && reloaded == original_view && coherent && comparison_used;
+            let disclosed_unavailable = artifacts["synthesized"]["warnings"]
+                .as_array()
+                .is_some_and(|warnings| {
+                    warnings
+                        .iter()
+                        .any(|w| w["code"] == "COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE")
+                });
+            let passed = if expect_unsupported_protocol {
+                original_view.is_some()
+                    && reloaded == original_view
+                    && !coherent
+                    && !comparison_used
+                    && disclosed_unavailable
+            } else {
+                c9_passed
+            };
             let row = json!({"alias":alias,"run_id":accepted.run_id,"passed":passed,
+                "c9_qualified":c9_passed,"proof_kind":if expect_unsupported_protocol {"unsupported_protocol_fallback"} else {"c9_app_path"},
                 "completed":original_view.is_some(),"coherent":coherent,
                 "comparison_used":comparison_used,"reopen_equal":reloaded == original_view,
                 "milliseconds":started.elapsed().as_millis()});

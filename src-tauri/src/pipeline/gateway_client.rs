@@ -33,6 +33,12 @@ const MAX_TOKEN_BYTES: usize = 512;
 const MAX_CA_BYTES: usize = 1_000_000;
 const MAX_RETRY_AFTER_SECONDS: u64 = 3_600;
 
+// document.summary.step@1 rejects shared definitions/references and large
+// passage enums. Byte admission alone cannot establish C9 compatibility.
+pub(super) fn supports_response_schema(name: &str) -> bool {
+    name != crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct GatewayClientConfig {
     pub base_url: String,
@@ -69,6 +75,8 @@ pub(crate) enum GatewayClientError {
     Expired,
     #[error("Inference gateway response violated the protocol: {0}")]
     Protocol(&'static str),
+    #[error("Inference gateway task does not support this response protocol")]
+    UnsupportedSchema,
     #[error("Inference gateway rejected the request: {code}")]
     Rejected {
         code: String,
@@ -86,7 +94,8 @@ impl GatewayClientError {
             | Self::Configuration(_)
             | Self::Credential
             | Self::Expired
-            | Self::Protocol(_) => false,
+            | Self::Protocol(_)
+            | Self::UnsupportedSchema => false,
         }
     }
 }
@@ -675,6 +684,9 @@ fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClient
             ))
         }
     };
+    if !supports_response_schema(name) {
+        return Err(GatewayClientError::UnsupportedSchema);
+    }
     if encode_json(schema)?.len() > MAX_SCHEMA_BYTES || !schema.is_object() {
         return Err(GatewayClientError::Protocol(
             "response schema is outside task bounds",
@@ -1212,16 +1224,17 @@ mod tests {
     }
 
     #[test]
-    fn c9_gateway_wire_keeps_declared_property_order() {
+    fn c9_gateway_request_rejects_unsupported_protocol_before_transport() {
         let mut request = request();
         request.output_format = ModelOutputFormat::JsonSchema {
             name: crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME.into(),
             schema: serde_json::json!({"properties":{"a":{},"z":{}},"required":["z","a"]}),
         };
-        let core = request_core(&request).unwrap();
-        preflight_request_size(&core).unwrap();
-        let wire = String::from_utf8(encode_json(&core).unwrap()).unwrap();
-        assert!(wire.find("\"z\":{").unwrap() < wire.find("\"a\":{").unwrap());
+        assert!(matches!(
+            request_core(&request),
+            Err(GatewayClientError::UnsupportedSchema)
+        ));
+        assert!(supports_response_schema("document_claim_verdicts_v1"));
     }
 
     #[test]

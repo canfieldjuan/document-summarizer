@@ -55,6 +55,7 @@ struct FixtureRuntime {
     admissions: Mutex<Vec<ModelRequest>>,
     unsupported: Option<String>,
     schema_limit: Option<usize>,
+    unsupported_protocol: bool,
 }
 
 impl ModelRuntime for FixtureRuntime {
@@ -69,6 +70,9 @@ impl ModelRuntime for FixtureRuntime {
     }
     fn context_tokens(&self, _: PipelineStage) -> u32 {
         32_768
+    }
+    fn supports_response_schema(&self, name: &str) -> bool {
+        !self.unsupported_protocol || name != comparisons::SCHEMA_NAME
     }
     fn response_schema_byte_limit(&self, _: PipelineStage, name: &str) -> usize {
         self.schema_limit
@@ -252,6 +256,48 @@ fn c9_current_and_historical_saved_results_remain_readable() {
         fallback.presentation_mode = SummaryPresentationMode::ClaimLedgerFallback;
         assert!(!comparisons::applies(SummaryProfile::General, &fallback));
     }
+}
+
+#[test]
+fn c9_unsupported_protocol_falls_back_before_drafting_and_survives_validation() {
+    let (normalized, chunked, analyzed, synthesized) = fixture(&CASES[0], CASES[0].faithful);
+    let runtime = FixtureRuntime {
+        unsupported_protocol: true,
+        ..Default::default()
+    };
+    let error =
+        summary_verification_batches(SummaryProfile::General, &runtime, &synthesized, &normalized)
+            .unwrap_err();
+    assert_eq!(error.code, "VERIFICATION_PROTOCOL_UNSUPPORTED");
+    let fallback = synthesize(
+        SummaryProfile::General,
+        &runtime,
+        &analyzed,
+        &chunked,
+        &normalized,
+        7,
+        &UNCONTROLLED_EXECUTION,
+    )
+    .unwrap();
+    assert_eq!(
+        fallback.presentation_mode,
+        SummaryPresentationMode::ClaimLedgerFallback
+    );
+    assert!(has_fallback_warning(
+        &fallback,
+        FallbackReason::VerificationUnavailable
+    ));
+    assert!(runtime.requests.lock().unwrap().is_empty());
+    validate_for_runtime(
+        SummaryProfile::General,
+        &fallback,
+        &analyzed,
+        &chunked,
+        &normalized,
+        &runtime,
+    )
+    .unwrap();
+    validate_content(&fallback, &analyzed, &chunked, &normalized).unwrap();
 }
 
 #[test]

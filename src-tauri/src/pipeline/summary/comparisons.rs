@@ -294,6 +294,14 @@ pub(super) fn plan(
     claim_budget: usize,
 ) -> Result<Vec<VerificationBatch>, PipelineFailure> {
     validate_verification_claim_catalog(prompt, claims, claim_budget)?;
+    if !runtime.supports_response_schema(SCHEMA_NAME) {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "VERIFICATION_PROTOCOL_UNSUPPORTED",
+            "The selected runtime cannot represent comparison verification",
+            false,
+        ));
+    }
     ensure_verification_batch_count(claims.len())?;
     let request_limit = verification_request_character_limit(
         runtime.context_tokens(PipelineStage::Verify),

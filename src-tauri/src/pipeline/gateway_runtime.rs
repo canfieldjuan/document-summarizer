@@ -1,7 +1,7 @@
 use crate::pipeline::contracts::{
-    ModelProfileSnapshot, ModelRequest, ModelRequestAttemptDiagnostic, ModelResponse, ModelRuntime,
-    ModelRuntimeFailure, ModelRuntimeKind, ModelStageProfileSnapshot, ModelTokenUsage,
-    ModelTransportAttempt, PipelineStage,
+    ModelOutputFormat, ModelProfileSnapshot, ModelRequest, ModelRequestAttemptDiagnostic,
+    ModelResponse, ModelRuntime, ModelRuntimeFailure, ModelRuntimeKind, ModelStageProfileSnapshot,
+    ModelTokenUsage, ModelTransportAttempt, PipelineStage,
 };
 use crate::pipeline::control::ExecutionControl;
 use crate::pipeline::db;
@@ -156,12 +156,20 @@ impl ModelRuntime for GatewayRuntime {
         self.generate(request)
     }
 
+    fn supports_response_schema(&self, name: &str) -> bool {
+        crate::pipeline::gateway_client::supports_response_schema(name)
+    }
+
     fn response_schema_byte_limit(&self, _stage: PipelineStage, name: &str) -> usize {
         crate::pipeline::contracts::response_schema_byte_limit(name)
             .min(crate::pipeline::gateway_client::MAX_SCHEMA_BYTES)
     }
 
     fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        if matches!(&request.output_format, ModelOutputFormat::JsonSchema { name, .. } if !self.supports_response_schema(name))
+        {
+            return Err(map_client_failure(GatewayClientError::UnsupportedSchema));
+        }
         if request.max_output_tokens > MAX_OUTPUT_TOKENS {
             return Err(failure(
                 "MODEL_OUTPUT_BUDGET_EXCEEDED",
@@ -260,6 +268,10 @@ fn map_client_failure(error: GatewayClientError) -> ModelRuntimeFailure {
         GatewayClientError::Protocol(_) => (
             "MODEL_GATEWAY_PROTOCOL_INVALID",
             "Inference gateway response violated the application contract",
+        ),
+        GatewayClientError::UnsupportedSchema => (
+            "MODEL_SCHEMA_UNSUPPORTED",
+            "The gateway task does not support this response protocol",
         ),
         GatewayClientError::Rejected { .. } => (
             "MODEL_GATEWAY_REJECTED",
@@ -427,6 +439,23 @@ mod tests {
             runtime.response_schema_byte_limit(PipelineStage::Verify, "document_claim_verdicts_v1"),
             crate::pipeline::contracts::MAX_RESPONSE_SCHEMA_BYTES
         );
+    }
+
+    #[test]
+    fn c9_gateway_admission_rejects_unsupported_protocol() {
+        let root = TestDirectory::new();
+        let state = Arc::new(Mutex::new(ExecutorState::default()));
+        let runtime = runtime(&root, Arc::clone(&state), false, true);
+        let mut request = request();
+        request.output_format = ModelOutputFormat::JsonSchema {
+            name: crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME.into(),
+            schema: json!({"type":"object", "$defs":{"passage":{"type":"string","enum":["a"]}}}),
+        };
+        let result = runtime.preflight_request(&request);
+        println!("c9_gateway_admission={result:?}");
+        assert!(matches!(result, Err(ref e) if e.code == "MODEL_SCHEMA_UNSUPPORTED"));
+        assert_eq!(state.lock().unwrap().preflight_calls, 0);
+        assert!(state.lock().unwrap().keys.is_empty());
     }
 
     #[test]
