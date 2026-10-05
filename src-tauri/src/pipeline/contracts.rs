@@ -846,6 +846,18 @@ pub trait DocumentChunker {
     fn version(&self) -> &'static str;
 }
 
+pub(crate) const CLAIM_COMPARISON_SCHEMA_NAME: &str = "document_claim_comparisons_v1";
+pub(crate) const MAX_CLAIM_COMPARISON_SCHEMA_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
+
+pub(crate) fn response_schema_byte_limit(name: &str) -> usize {
+    if name == CLAIM_COMPARISON_SCHEMA_NAME {
+        MAX_CLAIM_COMPARISON_SCHEMA_BYTES
+    } else {
+        MAX_RESPONSE_SCHEMA_BYTES
+    }
+}
+
 /// Replaceable local inference boundary. Generic pipeline state and storage do
 /// not depend on a concrete server, model family, or SDK.
 pub trait ModelRuntime: Send + Sync {
@@ -886,6 +898,10 @@ pub trait ModelRuntime: Send + Sync {
     }
     fn model_id_for_stage(&self, _stage: PipelineStage) -> &str {
         self.model_id()
+    }
+    /// The caller must respect any tighter transport limit before generation.
+    fn response_schema_byte_limit(&self, _stage: PipelineStage, name: &str) -> usize {
+        response_schema_byte_limit(name)
     }
     fn context_tokens(&self, _stage: PipelineStage) -> u32 {
         8_192

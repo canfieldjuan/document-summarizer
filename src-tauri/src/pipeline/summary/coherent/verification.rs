@@ -40,5 +40,29 @@ pub(in crate::pipeline::summary) fn summary_verification_prompt(
     Ok(prompt)
 }
 
+pub(in crate::pipeline::summary) fn summary_verification_batches(
+    profile: SummaryProfile,
+    runtime: &dyn ModelRuntime,
+    synthesized: &SynthesizedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<Vec<VerificationBatch>, PipelineFailure> {
+    let prompt = summary_verification_prompt(profile, synthesized, normalized)?;
+    if comparisons::applies(profile, synthesized) {
+        comparisons::plan(
+            runtime,
+            &prompt,
+            &synthesized.summary_claims,
+            MAX_SUMMARY_CLAIMS,
+        )
+    } else {
+        verification_batches_for_runtime(
+            runtime,
+            &prompt,
+            &synthesized.summary_claims,
+            MAX_SUMMARY_CLAIMS,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests;

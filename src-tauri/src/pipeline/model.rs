@@ -27,7 +27,8 @@ const MAX_MODEL_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MODEL_METADATA_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RETAINED_MODEL_METADATA_FIELD_BYTES: usize = 512;
 const MAX_RETAINED_MODEL_METADATA_BYTES: usize = 256 * 1024;
-const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
+#[cfg(test)]
+use crate::pipeline::contracts::MAX_RESPONSE_SCHEMA_BYTES;
 const MAX_RESPONSE_SCHEMA_NAME_BYTES: usize = 64;
 const MIN_SUPPORTED_CONTEXT_TOKENS: u32 = 4_096;
 const MAX_SUPPORTED_CONTEXT_TOKENS: u32 = 1_048_576;
@@ -1421,7 +1422,7 @@ pub(crate) fn response_format(
                 )
             })?
             .len()
-            > MAX_RESPONSE_SCHEMA_BYTES
+            > crate::pipeline::contracts::response_schema_byte_limit(name)
     {
         return Err(runtime_failure(
             "MODEL_CONFIG_INVALID",
@@ -3084,6 +3085,40 @@ mod tests {
         })
         .expect_err("an oversized schema must fail before an HTTP request");
         assert_eq!(error.code, "MODEL_CONFIG_INVALID");
+    }
+
+    #[test]
+    fn c9_schema_allowance_is_named_and_bounded_at_transport_admission() {
+        use crate::pipeline::contracts::{
+            CLAIM_COMPARISON_SCHEMA_NAME, MAX_CLAIM_COMPARISON_SCHEMA_BYTES,
+        };
+        let empty = serde_json::json!({"description":""});
+        let overhead = serde_json::to_vec(&empty).unwrap().len();
+        for name in [
+            CLAIM_COMPARISON_SCHEMA_NAME,
+            "document_claim_verdicts_v1",
+            "document_claim_comparisons_v01",
+            "",
+        ] {
+            let limit = if name == CLAIM_COMPARISON_SCHEMA_NAME {
+                MAX_CLAIM_COMPARISON_SCHEMA_BYTES
+            } else {
+                MAX_RESPONSE_SCHEMA_BYTES
+            };
+            for size in [limit - 1, limit, limit + 1] {
+                let schema = serde_json::json!({"description":"x".repeat(size - overhead)});
+                assert_eq!(serde_json::to_vec(&schema).unwrap().len(), size);
+                assert_eq!(
+                    response_format(&ModelOutputFormat::JsonSchema {
+                        name: name.into(),
+                        schema
+                    })
+                    .is_ok(),
+                    !name.is_empty() && size <= limit,
+                    "{name}/{size}"
+                );
+            }
+        }
     }
 
     #[test]

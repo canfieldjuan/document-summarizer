@@ -54,6 +54,7 @@ struct FixtureRuntime {
     requests: Mutex<Vec<ModelRequest>>,
     admissions: Mutex<Vec<ModelRequest>>,
     unsupported: Option<String>,
+    schema_limit: Option<usize>,
 }
 
 impl ModelRuntime for FixtureRuntime {
@@ -69,6 +70,10 @@ impl ModelRuntime for FixtureRuntime {
     fn context_tokens(&self, _: PipelineStage) -> u32 {
         32_768
     }
+    fn response_schema_byte_limit(&self, _: PipelineStage, name: &str) -> usize {
+        self.schema_limit
+            .unwrap_or_else(|| crate::pipeline::contracts::response_schema_byte_limit(name))
+    }
     fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
         self.admissions.lock().unwrap().push(request.clone());
         Ok(())
@@ -79,10 +84,16 @@ impl ModelRuntime for FixtureRuntime {
         if request.stage == PipelineStage::Verify {
             let input: Value = serde_json::from_str(&request.user_prompt).unwrap();
             if let Some(claims) = input["claims"].as_array() {
-                text = json!({"verdicts": claims.iter().map(|c| json!({
+                if matches!(&request.output_format, ModelOutputFormat::JsonSchema { name, .. } if name == comparisons::SCHEMA_NAME)
+                {
+                    let unsupported = claims[0]["text"].as_str() == self.unsupported.as_deref();
+                    text = comparisons::fixture_response(request, unsupported);
+                } else {
+                    text = json!({"verdicts": claims.iter().map(|c| json!({
                     "claim_id": c["claim_id"],
                     "verdict": if c["text"].as_str() == self.unsupported.as_deref() { "unsupported" } else { "supported" }
                 })).collect::<Vec<_>>()}).to_string();
+                }
             }
         }
         Ok(ModelResponse {
@@ -175,6 +186,92 @@ fn fixture_for_version(
         warnings: vec![],
     };
     (normalized, chunked, analyzed, synthesized)
+}
+
+#[test]
+fn c9_production_request_requires_comparisons_instead_of_model_verdict() {
+    let (normalized, _, analyzed, synthesized) = fixture(&CASES[0], CASES[0].wrong);
+    let runtime = FixtureRuntime::default();
+    assert!(!coherent_verification_exceeds_runtime_context(
+        SummaryProfile::General,
+        &runtime,
+        &synthesized,
+        &analyzed,
+        &normalized,
+        7,
+    )
+    .unwrap());
+    let requests = runtime.admissions.lock().unwrap();
+    let request = requests.last().unwrap();
+    let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
+        panic!("verification must require structured output");
+    };
+    let properties = &schema["properties"]["verdicts"]["items"]["properties"];
+    assert!(
+        properties.get("comparisons").is_some() && properties.get("verdict").is_none(),
+        "production verifier still accepts a bare model verdict without comparisons"
+    );
+}
+
+#[test]
+fn c9_current_and_historical_saved_results_remain_readable() {
+    for version in [SYNTHESIS_VERSION, PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION] {
+        let (normalized, chunked, analyzed, synthesized) =
+            fixture_for_version(&CASES[0], CASES[0].faithful, version);
+        let verified = verify(
+            SummaryProfile::General,
+            &FixtureRuntime::default(),
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+            7,
+            0,
+            false,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(verified.verification_version, VERIFICATION_VERSION);
+        for saved_version in [
+            VERIFICATION_VERSION,
+            PRE_COMPARISON_VERIFICATION_VERSION,
+            PRE_CLAUSE_VERIFICATION_VERSION,
+        ] {
+            let mut saved = verified.clone();
+            saved.verification_version = saved_version.into();
+            let reopened: VerifiedDocument =
+                serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+            validate_verified_document(&reopened, &synthesized, &analyzed, &chunked, &normalized)
+                .unwrap();
+            assert_eq!(reopened, saved);
+        }
+        for profile in [SummaryProfile::Story, SummaryProfile::Contract] {
+            assert!(!comparisons::applies(profile, &synthesized));
+        }
+        let mut fallback = synthesized.clone();
+        fallback.presentation_mode = SummaryPresentationMode::ClaimLedgerFallback;
+        assert!(!comparisons::applies(SummaryProfile::General, &fallback));
+    }
+}
+
+#[test]
+fn c9_schema_overflow_uses_existing_admission_fallback_without_generation() {
+    let (normalized, _, analyzed, synthesized) = fixture(&CASES[0], CASES[0].faithful);
+    let runtime = FixtureRuntime {
+        schema_limit: Some(0),
+        ..Default::default()
+    };
+    assert!(coherent_verification_exceeds_runtime_context(
+        SummaryProfile::General,
+        &runtime,
+        &synthesized,
+        &analyzed,
+        &normalized,
+        7
+    )
+    .unwrap());
+    assert!(runtime.requests.lock().unwrap().is_empty());
+    assert!(runtime.admissions.lock().unwrap().is_empty());
 }
 
 #[test]

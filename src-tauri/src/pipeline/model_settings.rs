@@ -45,7 +45,7 @@ const MAX_REGISTERED_PATH_BYTES: usize = 4_096;
 const MAX_REGISTERED_LABEL_BYTES: usize = 512;
 const MAX_GATEWAY_URL_BYTES: usize = 2_048;
 const JACK_GGUF_DIGEST: &str = "e7fecb29086afb4f6ca054b0f1469f2704a24e56db27c5980827f5f32d26f041";
-const QUALIFIED_LLAMA_SERVER_DIGEST: &str =
+pub(super) const QUALIFIED_LLAMA_SERVER_DIGEST: &str =
     "0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099";
 static SETTINGS_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static ACTIVE_PROFILE_LEASE: OnceLock<Mutex<Option<(RuntimeProfileKey, usize)>>> = OnceLock::new();
@@ -102,7 +102,7 @@ const QUALIFIED_PROFILES: &[QualifiedProfile] = &[
     },
 ];
 
-const JACK_LLAMA_CPP_LIBRARIES: &[QualifiedRuntimeFile] = &[
+pub(super) const JACK_LLAMA_CPP_LIBRARIES: &[QualifiedRuntimeFile] = &[
     QualifiedRuntimeFile {
         file_name: "libllama-server-impl.so",
         digest: "bd3e91a31fb3c61152043083f1e5008f9b7aef7bf5c168d6b3eca0019f634008",

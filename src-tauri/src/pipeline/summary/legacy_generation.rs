@@ -343,7 +343,7 @@ fn conservative_verification_claim_fits(
             false,
         )
     })?;
-    let model_facing_characters = VERIFICATION_SYSTEM_PROMPT
+    let model_facing_characters = verification_system_prompt(&[])
         .chars()
         .count()
         .checked_add(user_prompt.chars().count())

@@ -11,7 +11,7 @@ mod trim;
 mod verification;
 pub(super) mod whole_clauses;
 pub(super) use trim::verify_source_contributions;
-pub(super) use verification::summary_verification_prompt;
+pub(super) use verification::summary_verification_batches;
 
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
 pub(super) const MAX_SUMMARY_CLAIMS: usize = 8;

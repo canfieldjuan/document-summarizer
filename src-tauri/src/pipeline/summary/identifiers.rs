@@ -306,7 +306,7 @@ mod tests {
         }
         let batch = materialize_verification_batch(claims, durable, 10_752).unwrap();
         assert_eq!(batch.user_prompt, serialized);
-        let exact = VERIFICATION_SYSTEM_PROMPT.chars().count() + serialized.chars().count();
+        let exact = verification_system_prompt(&[]).chars().count() + serialized.chars().count();
         assert_eq!(batch.model_facing_characters, exact);
         assert!(verification_request_within_bounds(2, exact, exact));
         assert!(!verification_request_within_bounds(2, exact, exact - 1));

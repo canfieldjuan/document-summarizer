@@ -156,6 +156,11 @@ impl ModelRuntime for GatewayRuntime {
         self.generate(request)
     }
 
+    fn response_schema_byte_limit(&self, _stage: PipelineStage, name: &str) -> usize {
+        crate::pipeline::contracts::response_schema_byte_limit(name)
+            .min(crate::pipeline::gateway_client::MAX_SCHEMA_BYTES)
+    }
+
     fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
         if request.max_output_tokens > MAX_OUTPUT_TOKENS {
             return Err(failure(
@@ -404,6 +409,24 @@ mod tests {
                 available,
             }),
         )
+    }
+
+    #[test]
+    fn c9_schema_admission_preserves_the_gateway_task_limit() {
+        let root = TestDirectory::new();
+        let state = Arc::new(Mutex::new(ExecutorState::default()));
+        let runtime = runtime(&root, state, false, true);
+        assert_eq!(
+            runtime.response_schema_byte_limit(
+                PipelineStage::Verify,
+                crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME
+            ),
+            crate::pipeline::gateway_client::MAX_SCHEMA_BYTES
+        );
+        assert_eq!(
+            runtime.response_schema_byte_limit(PipelineStage::Verify, "document_claim_verdicts_v1"),
+            crate::pipeline::contracts::MAX_RESPONSE_SCHEMA_BYTES
+        );
     }
 
     #[test]
