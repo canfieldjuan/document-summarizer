@@ -706,7 +706,12 @@ unique governing contexts, 8,192 catalog values per side, 240 characters per
 passage, and four passages per side per dimension. The serialized schema has a
 1 MiB bound measured using the actual compact Rust JSON encoding. Runtime
 admission can impose a tighter bound: the gateway's existing 250,000-byte schema
-limit remains authoritative. The named comparison schema has the larger native
+limit remains authoritative. Protocol support is checked independently of size.
+The current gateway task does not support C9's shared definitions and passage
+catalogs. Its capability declaration is consumed by both request construction and
+comparison planning. Current General synthesis selects the claim-ledger fallback
+before drafting, with `COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE`; this cannot
+count as C9 qualification. Native runtimes retain comparison verification. The named comparison schema has the larger native
 allowance; other native schemas retain 64 KiB. Prompt/context admission and the
 4,096-token response allowance also apply. The same prepared request plan serves
 admission and execution. A complete input that cannot fit, including an input with no
