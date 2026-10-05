@@ -103,6 +103,19 @@ fn fixture(
     AnalyzedDocument,
     SynthesizedDocument,
 ) {
+    fixture_for_version(case, text, VERSION)
+}
+
+fn fixture_for_version(
+    case: &Case,
+    text: &str,
+    version: &str,
+) -> (
+    NormalizedDocument,
+    ChunkedDocument,
+    AnalyzedDocument,
+    SynthesizedDocument,
+) {
     let (mut normalized, mut chunked) = contract_documents();
     chunked.chunks[0].ordinal = 1;
     set_furniture_fixture(&mut normalized, &mut chunked, |n| match n {
@@ -114,7 +127,7 @@ fn fixture(
     let analyzed = analyze(&runtime, &chunked, &normalized, 7, &UNCONTROLLED_EXECUTION).unwrap();
     let catalog = source_catalog_for_profile(
         SummaryProfile::General,
-        VERSION,
+        version,
         &chunked,
         &normalized,
         Some(&analyzed),
@@ -125,16 +138,31 @@ fn fixture(
         .iter()
         .find(|c| c.evidence.source_span.page_start == 2)
         .unwrap();
-    let (summary_claims, synthesis_evidence) = parse_response(
+    let (mut summary_claims, synthesis_evidence) = parse_response(
         SummaryProfile::General,
         &json!({"units":[{"text":text,"source_ids":[source.request_id]}]}).to_string(),
         &normalized.document_id,
         &catalog,
     )
     .unwrap();
+    if version != VERSION {
+        summary_claims = materialize_cited_claims(
+            &normalized.document_id,
+            version,
+            summary_claims
+                .into_iter()
+                .map(|claim| ValidatedClaim {
+                    text: claim.text,
+                    evidence_ids: claim.evidence_ids,
+                })
+                .collect(),
+        )
+        .unwrap();
+    }
     let synthesized = SynthesizedDocument {
+        contract_extraction: None,
         document_id: normalized.document_id.clone(),
-        synthesis_version: VERSION.into(),
+        synthesis_version: version.into(),
         runtime_id: runtime.runtime_id().into(),
         model_id: runtime.model_id().into(),
         presentation_mode: SummaryPresentationMode::Coherent,
@@ -507,4 +535,109 @@ fn clause_verification_live_public_fidelity() {
         results.iter().all(|r| r["passed"] == true),
         "public fidelity probe has failed cases; retained all attempts"
     );
+}
+
+#[test]
+fn clause_verification_version_refresh_preserves_completed_pairs() {
+    for synthesis in [SYNTHESIS_VERSION, PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION] {
+        for verification in [VERIFICATION_VERSION, PRE_CLAUSE_VERIFICATION_VERSION] {
+            assert!(
+                coherent_verification_versions_match(synthesis, verification),
+                "completed synthesis {synthesis} / verification {verification} must remain readable"
+            );
+        }
+    }
+    for synthesis in [
+        PRE_CLAUSE_SYNTHESIS_VERSION,
+        PRE_FURNITURE_SYNTHESIS_VERSION,
+        PRE_BALANCED_SYNTHESIS_VERSION,
+        PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION,
+    ] {
+        assert!(coherent_verification_versions_match(
+            synthesis,
+            PRE_CLAUSE_VERIFICATION_VERSION
+        ));
+        assert!(!coherent_verification_versions_match(
+            synthesis,
+            VERIFICATION_VERSION
+        ));
+    }
+    for synthesis in ["", "0", "14.0.0"] {
+        assert!(!coherent_verification_versions_match(
+            synthesis,
+            VERIFICATION_VERSION
+        ));
+    }
+}
+
+#[test]
+fn clause_verification_version_refresh_preserves_previous_context() {
+    let (normalized, chunked, analyzed, synthesized) = fixture_for_version(
+        &CASES[0],
+        CASES[0].faithful,
+        PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION,
+    );
+    let prompt =
+        summary_verification_prompt(SummaryProfile::General, &synthesized, &normalized).unwrap();
+    assert!(
+        prompt.claims[0].evidence[0]
+            .full_clause
+            .as_ref()
+            .is_some_and(|context| context.contains(CASES[0].opening)),
+        "previous F3 synthesis must retain its governing clause"
+    );
+    let verified = verify(
+        SummaryProfile::General,
+        &FixtureRuntime::default(),
+        &synthesized,
+        &analyzed,
+        &chunked,
+        &normalized,
+        7,
+        0,
+        false,
+        &UNCONTROLLED_EXECUTION,
+    )
+    .unwrap();
+    assert_eq!(verified.verification_version, VERIFICATION_VERSION);
+    validate_verified_document(&verified, &synthesized, &analyzed, &chunked, &normalized).unwrap();
+    let mut completed_before_f3 = verified;
+    completed_before_f3.verification_version = PRE_CLAUSE_VERIFICATION_VERSION.into();
+    validate_verified_document(
+        &completed_before_f3,
+        &synthesized,
+        &analyzed,
+        &chunked,
+        &normalized,
+    )
+    .unwrap();
+}
+
+#[test]
+fn clause_verification_version_refresh_reuses_historical_source_policy() {
+    let (mut normalized, _, _, mut synthesized) = fixture(&CASES[0], CASES[0].faithful);
+    // Keep the cited continuation intact; add running furniture to its governing
+    // page and the other pages so the original and current policies differ.
+    for page in normalized
+        .pages
+        .iter_mut()
+        .filter(|page| page.page_number != 2)
+    {
+        page.content[0].text.push_str(&format!(
+            "\nPublic Service Agreement Page {} of 6",
+            page.page_number
+        ));
+    }
+    for version in [PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION, SYNTHESIS_VERSION] {
+        synthesized.synthesis_version = version.into();
+        let prompt =
+            summary_verification_prompt(SummaryProfile::General, &synthesized, &normalized)
+                .unwrap();
+        let context = prompt.claims[0].evidence[0].full_clause.as_ref().unwrap();
+        assert!(context.contains(CASES[0].opening));
+        assert_eq!(
+            context.contains("Public Service Agreement"),
+            version == PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+        );
+    }
 }

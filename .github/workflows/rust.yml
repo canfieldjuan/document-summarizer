@@ -53,6 +53,37 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+  macos-recovery:
+    name: macOS standalone recovery
+    runs-on: macos-14
+    timeout-minutes: 40
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: 2
+      SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ env.SOURCE_REVISION }}
+      - name: Verify source revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - name: Verify native ownership-aware standalone recovery
+        working-directory: src-tauri
+        run: cargo test --locked --no-default-features --lib connect::provider::tests::connect_owned_provider_remains_available_after_foreground_exit -- --exact
+      - name: Verify unsupported direct runtime fails closed
+        working-directory: src-tauri
+        run: cargo test --locked --no-default-features --lib pipeline::llama_cpp::tests::unsupported_direct_gguf_platform_fails_before_staging -- --exact
+      - name: Deny native macOS warnings
+        working-directory: src-tauri
+        run: cargo clippy --locked --no-default-features --lib -- -D warnings
+
   windows-connect:
     name: Windows Connect security
     runs-on: windows-2022

@@ -5,6 +5,66 @@ This document describes contracts implemented by the Rust core in
 commands, and renders results; it does not assign identity, hash bytes, write
 SQLite, or mutate pipeline state.
 
+## Complete clause sources and Contract extraction
+
+The accepted Contract extraction policy is frozen in
+[PR-CLAUSE-EXTRACTION.md](PR-CLAUSE-EXTRACTION.md), including its heading grammar,
+section extents, fixed category table, opening-parties fallback and known limits.
+`summary/coherent/page_furniture.rs` remains the furniture owner;
+`summary/coherent/whole_clauses.rs` owns the versioned Contract source view.
+General keeps main's analysis 14 and synthesis 12 source and verification behavior.
+No independent Contract parser or furniture detector is retained.
+
+Contract profile (also Automatic resolving to Contract) uses
+`contract-extraction-3.1.2` for deterministic analysis, synthesis and verification.
+Source clause/evidence identities retain the 3.0.2 content-addressed recipe.
+The source reader carries sentence continuity across blocks and pages, repairs
+false leading-title splits, and records unfinished or unsupported heading/TOC
+boundaries; any affected key-term
+category renders `not identified`. Selection consumes origin uncertainty rather
+than re-parsing selected text.
+It stores ordered source clauses and typed selections for parties, payment,
+term/renewal, termination, insurance and liability/indemnity. Each selection
+contains a rule, root source-clause ID and all clause IDs in the selected section.
+Both term/renewal and termination may reference the same section; this adds no
+inventory records. Missing matches render `not identified`, not an inferred term.
+
+Desktop and Connect show key terms first, then every source clause. Source text,
+IDs and page citations are reconstructed and validated before persistence and
+on reload; recomputing hashes cannot authorize altered wording or section extent.
+Summary 9.0.0 and citation 5.0.0 bind the complete typed extraction and rendering.
+Released historical prose artifacts retain their original validation and hashes;
+incompatible extraction checkpoints require explicit retry, never reinterpretation.
+No model generation, ranking or semantic verification is used by this route.
+
+Policy 3 requires an uppercase-first numeric remainder and a preceding-unit
+boundary before a standalone title can move to the next clause. It accepts an
+uppercase ARTICLE/title with a whitespace-only separator and matches complete
+heading conjuncts against the existing alias table. The final conjunct is always
+matched; earlier conjuncts qualify only when the final conjunct is one word.
+Exact whole-heading aliases remain accepted; an empty final conjunct cannot
+enable earlier matches. These rules apply only to
+Contract extraction. A/B now serve as regressions, not qualification: freeze the
+rules/fixtures before opening the operator-screened C-onward set, then require
+zero wrong labels and independent review from fresh PDF ingestion. Stop before
+that held-out run until the private manifest is confirmed and supplied.
+
+Connect retains its closed text envelope and existing byte limits. A selected
+key-term section and all its citations form one atomic delivery unit; a prefix
+cannot deliver a heading stub or omit children. Full-list clauses are atomic
+individually. Labels and repeated references do not inflate source coverage.
+The existing truncation warning identifies omitted output; invalid extraction or
+an unacceptable prefix is a failure, not `not identified`. The full persisted
+inventory remains available to desktop. Existing run transactions, cancellation,
+state-version checks and retry ownership remain in force.
+
+The selector is positional, not a legal interpretation: numbered TOCs and
+trailing unnumbered material can be included under the wrong category. A/B replay
+must report these consequences locally. OCR wording retains its provenance and
+warnings; exact copying does not establish transcription accuracy. Model setup,
+General summaries, external capability/schema and storage migrations are outside
+this change.
+
 ## `PipelineRun`
 Represents an instance of processing a document.
 
@@ -588,8 +648,8 @@ a model-output reason, disclosed by `COHERENT_SUMMARY_MODEL_OUTPUT_INVALID`.
 Only a typed rejection of model-produced content admits that fallback; transport,
 identity, cancellation, runtime-admission and artifact/invariant failures do not.
 Rejected prose and citations are never delivered. The fallback still requires
-semantic verification and final page coverage. Story, Contract and source-ID
-selection failures retain their existing behavior.
+semantic verification and final page coverage. Story and source-ID selection
+failures retain their existing behavior. New Contract runs use source extraction.
 
 A narrow deterministic guard compares modal predicates in each prose unit with
 matching statements in its cited quotations. Predicate, bounded subject context,
@@ -633,10 +693,10 @@ reconstructs canonical synthesis-evidence identities with the artifact's
 synthesis version; mixed-version evidence identities fail validation.
 
 Connect General delivery-policy runs continue to use the version-5 direct
-claim-ledger synthesis path. Story and Contract use their source-aware coherent
-synthesis profiles. Before either specialized coherent result can persist, its
-cited evidence must satisfy Connect's existing raw and omission-adjusted page
-coverage floors. An undercovered specialized result becomes the verified
+claim-ledger synthesis path. Story uses its source-aware coherent synthesis
+profile; new Contract runs use the structured extraction contract above. Before
+a Story coherent result can persist, its cited evidence must satisfy Connect's
+existing raw and omission-adjusted page coverage floors. An undercovered Story result becomes the verified
 claim-ledger fallback, which preserves the delivery gate rather than weakening
 it for source-selective prose.
 
@@ -697,19 +757,15 @@ substitute a mutable current setting. A missing profile rejects synthesis,
 retry, continuation or workspace projection at the applicable boundary rather
 than permitting incompatible result reuse.
 
-Standalone General, Story and Contract runs share ingestion, normalization, bounded exact
-source catalogs, response shape, durable citations, semantic verification,
-fallback, retry, continuation and rendering. General synthesis preserves the
-main message, important support and qualifications. Story synthesis instead
-asks for a readable synopsis that preserves sourced character identity and
-motivation, conflict, causal relationships, major events, chronology and the
-resolution or explicitly unresolved ending. It must not infer a motivation,
-internal state or causal link from sequence alone. Contract synthesis produces a
-plain-language overview organized around parties and roles, scope and term,
-obligations, conditions, exceptions, deadlines, amounts, confidentiality,
-termination and remedies when present. It must retain who acts, what they do,
-the recipient, trigger, qualifications, timing and amount without adding legal
-advice, enforceability conclusions or judgments about a term.
+All profiles share ingestion, normalization, durable citations, retry and
+continuation. New Contract runs use the structured extraction route above.
+General synthesis preserves the main message, important support and
+qualifications. Story synthesis produces a readable synopsis preserving sourced
+character identity, motivation, conflict, causality, major events, chronology and
+resolution. Neither infers unstated motivations or relationships from sequence.
+
+The following Contract prose rules describe historical artifacts only. They are
+retained for validation/reopening and are not used by new Contract runs:
 
 Contract clause references are application-owned provenance. Ordinary source
 segments require a number token ending in a period and a clause title ending
@@ -756,9 +812,10 @@ and semantic acceptance criterion, not a mechanically measured quality score.
 
 Connect admissions assign the requested General, Story or Contract profile
 explicitly in their existing acceptance transaction. General retains direct
-delivery synthesis. Story and Contract retain their named coherent behavior and
-fall back to the verified ledger when their generated evidence cannot satisfy
-Connect page coverage. This contract does not add persisted document-type
+delivery synthesis. Story retains its named coherent behavior; new Contract runs
+use structured extraction. Story falls back to the verified ledger when its
+generated evidence cannot satisfy Connect page coverage. Contract keeps whole
+source clauses and the existing delivery-size gate. This contract does not add persisted document-type
 metadata, measured classification reliability, trained adapters, a parallel
 synthesis framework or a renderer redesign.
 
@@ -2040,7 +2097,80 @@ the executable contracts committed in the separate `connect-contracts`
 repository. Protocol, application, capability, and summary versions are
 separate fields.
 
-The Tauri process binds an ephemeral exact IPv4-loopback HTTP endpoint.
+The foreground Tauri process or Linux headless provider process binds an
+ephemeral exact IPv4-loopback HTTP endpoint. The Debian package installs a
+disabled systemd user unit whose exact entry point is
+`/usr/bin/document-summarizer --connect-provider`. Enabling that unit is an
+explicit per-user operator action; installation and entitlement do not enable
+it. The unit uses restart-on-failure with a five-second delay, five starts per
+five-minute window, control-group termination, and a 40-second stop timeout.
+The headless entry point opens the same per-user database, imports directory,
+model settings, v2 durable identity, and registration paths as the desktop.
+Closing the visible window therefore does not stop a provider owned by the user
+service manager.
+
+The operator changes this manager choice through
+`document-summarizer --connect-background enable|disable`. Before stopping an
+owner or changing systemd state, the controller durably writes one immutable,
+owner-private generation under the per-user configuration root. Its monotonic
+enable phases are `intent-recorded`, `source-stopped`, `manager-enabled`, and
+`successor-ready`; disable uses `intent-recorded`, `publisher-stopped`, and
+`manager-disabled`. An enable readiness failure durably changes to rollback,
+starts a fresh bounded rollback attempt, and restores the recorded prior choice.
+An enabled prior choice is started with `enable --now`; its exact generation may
+start in `rollback-target-stopped` and `prior-choice-restored`. Jobs remain
+barred until the restored provider passes readiness. A failed restoration keeps
+the rollback record for explicit recovery. A disabled prior choice stays stopped.
+`status` reports an incomplete generation
+and `recover` resumes only that exact generation. A shared admission lock plus
+the record blocks job creation through commit while a transition is incomplete.
+Each explicit recovery attempt refreshes the 35/40/45-second transition deadlines
+once under the control lock and persists them before effects. It preserves the
+generation, creation time, phase, disposition, prior choice, and state identity;
+an expired earlier attempt does not permanently prevent recovery. Provider
+cleanup and readiness consume those attempt deadlines. Each systemd command
+has its own ten-second timeout; the code does not enforce one total budget
+across all manager commands.
+The controller atomically writes an owner-only launch receipt and environment
+file at the fixed, non-XDG-dependent
+`$HOME/.local/state/document-summarizer/` path before systemd start. The unit
+loads that exact file. The child validates its owner, mode, link count,
+generation, byte-exact environment content, XDG configuration, data, and
+runtime paths, plus the application-data and lifecycle-control directory
+identities before provider startup. A changed runtime directory identity may
+be renewed under the control lock only when the other receipt fields and exact
+environment bytes still match, logind and the user manager both attest the same
+runtime path, and its private owner and identity remain stable through those
+queries. Renewal changes only the ephemeral runtime identity. The existing transition checks
+still revalidate the admitted generation immediately before each registration
+publication.
+
+Foreground startup preserves standalone recovery: a Connect startup failure is
+logged and the desktop continues without a provider. Headless startup is a
+Connect owner, so the same failure exits nonzero and is visible to systemd's
+bounded restart policy. Neither path changes Connect wire schemas or copies
+provider state.
+
+If a foreground owner already holds the provider lock, the headless process
+waits in place and retries after release instead of exiting through systemd's
+start limiter. A terminal HTTP-server result is propagated to the headless main
+function as an error, after exact registration cleanup, so systemd supervises a
+real server failure.
+
+On Linux, every foreground and headless provider takes the same nonblocking,
+owner-private application-state lock before stale-registration cleanup,
+interrupted pipeline or Connect-job recovery, endpoint binding, or publication,
+and holds it through ordered shutdown and registration removal. If a live
+background owner holds that lock, foreground startup continues as standalone
+without running interrupted-state recovery against the live owner's work.
+Standalone recovery runs only while the same lock proves there is no Connect
+owner.
+
+Startup observes blocked shutdown signals before owner acquisition, after
+recovery and server readiness, and immediately before publication. A stop at
+any of those boundaries shuts down the unpublished server and leaves no JSON
+registration.
+
 On Unix, it atomically writes owner-only registrations under
 `$XDG_RUNTIME_DIR/local-connect/v1/providers/` and
 `$XDG_RUNTIME_DIR/local-connect/v2/providers/`. On Windows, it publishes the
@@ -2078,7 +2208,184 @@ provider lifetime. An existing live owner therefore fails startup closed; a
 safe stale fixed registration may be replaced only after its ownership lock is
 held.
 
-On Tauri's final `RunEvent::Exit`, the provider unregisters both protocol files.
+Linux lifecycle shutdown authenticates one registration snapshot against the
+expected executable, UID, network namespace and listener ownership. It opens a
+pidfd before process authentication, retains it through signaling, and signals
+that handle. A later registration rewrite or numeric PID reuse cannot redirect
+the signal. Unsupported process handles fail closed without a numeric-PID
+fallback. Acquisition failures preserve their reason for diagnostic tests.
+
+Provider shutdown first closes new-job admission and requests cooperative
+cancellation from every retained Connect worker. The 30-second timeout bounds
+the HTTP job-creation request, including receipt of its body. Database lookup,
+PDF/OCR validation, runtime construction and acceptance run on owned admission
+workers, leaving the endpoint loop responsive. A single admission permit stays
+with a worker after a request expires, so retries cannot accumulate cold runtime
+initializations. The absolute request deadline, receiver lifetime and shutdown
+cancellation are checked before work and by the database admission predicate.
+An expired request cannot later admit a job; its staging owner cleans up when
+blocking work returns. Admitted workers have no additional absolute job deadline: model transports retain their normal
+configured request budgets and cooperative cancellation. Shutdown reaps
+finished worker handles during
+steady admission and drains remaining handles through the 35-second graceful
+deadline. It then requests endpoint shutdown, joins the server thread, and
+removes both exact protocol registrations. The headless owner also clears its
+managed llama runtime registry so the owned child is terminated. The foreground invokes this sequence
+on Tauri's final `RunEvent::Exit`; the headless owner invokes it after blocked
+`SIGTERM` or `SIGINT` is synchronously received. If a noncooperating worker
+survives the graceful deadline, process shutdown owns that thread and systemd
+force-terminates the complete service control group at 40 seconds. The next
+owner uses stale-registration and interrupted-job recovery before publishing
+fresh process credentials.
+
+Per-user lifecycle control and job-admission guards explicitly unlock when
+released. A descriptor inherited by an unrelated fork cannot prolong that
+guard's lock lifetime; independently acquired shared guards still block an
+exclusive operation until each has released.
+
+Debian maintainer scripts call the app-owned `--connect-package` controller.
+The production package authority is the fixed root-owned
+`/var/lib/document-summarizer` tree and cannot be redirected by an environment
+variable. Startup captures whether the running executable belongs to the
+installed package, including a hard-link alias or deleted installed pathname.
+That decision is retained for job admission. Unbundled foreground executables
+do not create or require Debian package authority. Package-owned provider
+startup and each final artifact promotion plus accepted-job commit hold its
+shared lock; missing or unsafe installed-package state fails closed.
+Authenticated multipart bodies stream into a
+private bounded staging file without package or per-user authority; cancellation
+and the absolute request timeout remove that file. The controller first holds a
+separate quiesce authority, persists a generation-bound SHA-256 intent, and
+stops all recorded publishers. It then waits for the package lock exclusively
+before package mutation and takes recorded per-user control and admission locks
+in ascending UID order. Packaged foreground and ordinary background startup
+record their participant before registration publication, while package and
+per-user admission are held. This includes users who never invoke background
+controls. A successor inside an explicit enable transition uses that controller's
+acknowledgement. Enable and disable record an
+owner-authenticated 0600 participant acknowledgement before manager mutation
+and update it after settlement while the per-user barrier is still held. It
+carries the exact runtime, application data, lifecycle control, and systemd
+enablement paths; those paths are not inferred from account homes or XDG defaults.
+Public package records and removal/install receipts establish mode 0644 before
+atomic publication, independently of the controller's process umask.
+
+The candidate namespace is the trusted NSS account enumeration, canonicalized
+and deduplicated by UID. Each account has one fixed acknowledgement at its NSS
+home's `.local/state/document-summarizer/package-participant-v2.json`, independent
+of XDG environment overrides. Publication selects from that same enumeration;
+lookup-only or otherwise non-enumerable accounts fail before package-owned
+provider registration. This package integration requires NSS-enumerable accounts;
+standalone startup is unchanged. Remote directory-service integration is not
+qualified by the local account tests.
+
+The home and each directory below it are opened without following a final
+symlink and authenticated for the account owner and absence of group/other write
+permission. The final directory must have exact mode 0700. First creation
+prepares private sibling directories and publishes each with an atomic
+no-replace rename before it can be used. Receipt updates hold the private final
+directory's lock, recover the fixed `.package-participant-v2.tmp` only when it is
+an owner-private regular file with one link, establish exact mode 0600 regardless
+of umask, then fsync and atomically replace the fixed receipt. The directory is
+synced before releasing the lock.
+
+Root discovery visits only that fixed receipt for each enumerated account. It
+never enumerates user-controlled filenames. Reads are bounded and nonblocking,
+reject links and unsafe owners or modes, and authenticate the owner-bound record
+contents. A retired `participants-v1` shared inbox, if present, is ignored and
+preserved; its unpublished intermediate entries are not migrated into authority.
+Once a participant is accepted, its exact directory identities and pending
+transitions remain strict lifecycle checks; root-owned package records still
+fail closed.
+
+Upgrade, removal, and reinstall suppress every recorded manager, stop and clean
+each exact provider, and keep the package record as an admission barrier while
+each participant is settled. An enabled participant with an available user
+manager is restored only after the controller releases quiesce, package, and
+per-user startup authorities. The package record remains the admission barrier
+while that successor starts. After authenticated readiness, the controller
+reacquires quiesce, package, and per-user authorities in canonical order and
+revalidates the exact generation, phase, participant snapshot, runtime identity,
+and provider registration before recording settlement. An
+enabled participant without a service session is durably recorded
+`deferred_enabled`; a disabled participant remains disabled. Removal writes a
+generation-bound receipt and retains its root-only controller. A later install
+first completes any interrupted removal, then durably writes a distinct
+reinstall generation before package admission. Successful reinstall writes an
+install receipt that copies the preserved choices and enters a durable
+`finalizing` phase before retiring the old controller and removal receipt. The
+admission barrier is cleared only after those idempotent finalization effects.
+Malformed, wrong-kind, wrong-target, changed
+generation, unowned participant receipt, or incomplete per-user transition
+fails closed.
+
+Purge uses `finish-purge`, including after an ordinary removal has completed.
+The controller persists a distinct `purge` operation before settling any pending
+removal, so an interrupted purge cannot resume as reinstall. Once publishers
+are settled, it validates the complete package-owned cleanup set before removing
+participant acknowledgement files and temporaries, removal/install receipts,
+and the operation record. Account cleanup visits only the fixed receipt and
+fixed temporary through authenticated directory descriptors for NSS-enumerated
+accounts. Unrelated user files and unsafe receipt leaves are preserved. The
+copied controller is retired only after that choice state is durably gone. Fixed
+package lock files remain, preserving the lock authority across retries. A
+retired shared inbox is left untouched and never traversed. Without a controller,
+the shell retry checks only trusted package root entries and validates any
+retired inbox directory itself without traversing its contents. Unknown files or
+unsafe file types/ownership/modes in root-owned package state, conflicting
+operations and unsettled state fail closed. Cleanup never traverses the
+application-data paths recorded inside participant acknowledgements.
+Ordinary removal continues to preserve its reinstall receipt and controller.
+
+If removal preparation fails, `postinst abort-remove` invokes the installed
+controller's explicit rollback action. It persists a rollback disposition on
+the same removal generation before clearing the quiesce marker, then uses the
+existing settlement path to restore each recorded background choice. Only the
+exact pending enabled participant may start during settlement; ordinary jobs
+remain blocked until the operation clears. Interrupted rollback resumes its
+saved progress and cannot be completed as forward removal or purge. It writes
+no completed-removal receipt. Forward records retain their previous serialized
+shape; an absent disposition is forward, and rollback is valid only for removal.
+
+When a package participant was captured with no runtime directory, a runtime
+created by a later login remains untrusted until the system manager reports the
+exact runtime path, the named user manager reports the same
+`XDG_RUNTIME_DIR`, NSS still binds the recorded UID and name, and the directory
+is owner-private. The controller persists that authenticated device and inode in
+the same package generation before restoration. A participant captured with an
+existing runtime never accepts a replacement inode. For the first upgrade from
+a legacy package, preinstall writes the fixed root-owned quiesce record directly
+and never invokes the installed desktop executable. Before accepting an existing
+record it requires a no-follow regular root-owned 0600 file with one link, exact
+canonical fields, matching source and target versions, a valid phase, and a
+matching SHA-256 digest. The record binds the legacy executable device, inode,
+and digest. Preinstall copies that exact executable into a private fixed
+generation quarantine, removes the exact installed pathname, atomically
+installs a launcher that exits closed, validates published registrations, and
+stops every process still executing the bound inode with bounded TERM and KILL
+waits. Preinstall uses Debian's essential perl-base runtime in taint mode to open
+Linux process descriptors before authenticating executable identity; both signals
+and exit waits retain those descriptors, so PID reuse cannot redirect a signal.
+The x86-64 and arm64 syscall ABIs and kernel support are checked before package
+mutation. Unsupported process handles fail closed with no numeric-PID fallback.
+The wrapper
+blocks legacy restarts before unpack; after unpack, the quiesce record blocks the
+new binary until adoption. Every mutation is replayable from `quarantining` or
+`quiesced` without executing the old binary. Postinstall's new controller
+validates the same record and quarantine, creates the exact package operation,
+durably advances the marker to `adopted`, and removes only the matching private
+quarantine. A crash before or after removal resumes from that phase. Malformed,
+replayed-different, or tampered bootstrap state remains a barrier.
+
+A failed preinstall upgrade is unwound by `postrm abort-upgrade` before the new
+package payload is required. Under the stable controller and quiesce locks it
+validates the exact bootstrap receipt and quarantined executable, atomically
+restores the prior executable at its fixed installed pathname with mode 0755,
+then removes its quarantine and quiesce marker. It never executes the old
+binary. Replay after executable restoration recognizes the same validated
+content. Mismatched versions, foreign installed content, unsafe quarantine
+files, or an adopted package operation remain blocked instead of being cleared.
+
 On Unix, publication, startup scavenging, and removal share an owner-only
 lifecycle-file lock. Windows publication writes a fixed same-directory
 temporary file, applies and validates its private DACL, writes and flushes the

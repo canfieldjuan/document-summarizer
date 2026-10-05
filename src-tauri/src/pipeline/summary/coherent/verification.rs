@@ -14,11 +14,14 @@ pub(in crate::pipeline::summary) fn summary_verification_prompt(
     )?;
     if profile != SummaryProfile::General
         || synthesized.presentation_mode != SummaryPresentationMode::Coherent
-        || synthesized.synthesis_version != VERSION
+        || !coherent_synthesis_uses_clause_verification(&synthesized.synthesis_version)
     {
         return Ok(prompt);
     }
-    let furniture = page_furniture::Furniture::new(normalized);
+    let furniture = page_furniture::Furniture::for_synthesis_version(
+        normalized,
+        &synthesized.synthesis_version,
+    );
     let clauses = whole_clauses::Clauses::new(normalized, &furniture, ANALYSIS_VERSION);
     let contexts = synthesized
         .synthesis_evidence
