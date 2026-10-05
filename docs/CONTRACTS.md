@@ -681,8 +681,48 @@ mode, supported prose claims, ledger claims, their exact evidence and the canoni
 rendered text. The desktop shows coherent paragraphs first and keeps any supported
 ledger claims available as supporting detail.
 
-Current artifacts use synthesis 12.0.0, verification 11.0.0, summary 8.0.0 and
-citation 4.0.0. Completed coherent artifacts from before Contract source
+### General prose comparison verification
+
+General coherent prose from synthesis 12.0.0 or 13.0.0 uses comparison
+verification 12.0.0. The source-owned clause builder supplies complete governing
+text; where it has no larger clause, the original exact quotation is the context.
+Each request contains one claim, its own deduplicated source contexts, and local
+claim ID `k1`. Requests require stage, conditions, qualifiers and scope comparisons.
+For this named schema, transport preserves that dimension order and emits source
+passages, claim passages, then relation within each dimension. The shared schema
+serializer consumes the originating `required` arrays; other schemas keep their
+existing serialization. This order is part of the decoder protocol, since the
+qualified grammar converter generates required fields in property iteration order.
+The model chooses exact source and claim passages from separate bounded catalogs;
+it does not supply the final verdict. Rust rejects unknown/duplicate/missing fields,
+foreign IDs, non-catalog passages and invalid relation/span shapes. Changed or
+omitted meaning derives unsupported; uncertainty derives ambiguous; otherwise the
+claim is supported. Existing semantic and source-contribution checks may still
+withhold it. Exact passages constrain output; the model still judges meaning.
+
+The protocol limits are 4,096 Unicode scalar characters across the claim and
+unique governing contexts, 8,192 catalog values per side, 240 characters per
+passage, and four passages per side per dimension. The serialized schema has a
+1 MiB bound measured using the actual compact Rust JSON encoding. Runtime
+admission can impose a tighter bound: the gateway's existing 250,000-byte schema
+limit remains authoritative. The named comparison schema has the larger native
+allowance; other native schemas retain 64 KiB. Prompt/context admission and the
+4,096-token response allowance also apply. The same prepared request plan serves
+admission and execution. A complete input that cannot fit, including an input with no
+admissible token-bounded passage, uses the existing disclosed claim-ledger
+fallback during admission. Source clauses are never shortened to fit. Cancellation
+checkpoints surround generation; no new retry or response repair is introduced.
+
+This protocol is under the PR116 fidelity hold. Recorded-response parity and the
+approved public controls are development evidence, not release qualification.
+The implementation/evidence record is [C9 production integration](PR-C9-PRODUCTION-VERIFICATION.md).
+
+General comparison artifacts retain summary 8.0.0 and citation 4.0.0. Completed
+verification-11 and verification-10 artifacts remain readable under their saved
+versions. The saved verification shape still contains the derived final verdict
+and citation identity; it does not store the raw model comparisons. Story,
+claim-ledger fallback and older synthesis paths retain their existing verifier
+protocol and version selection. Completed coherent artifacts from before Contract source
 segmentation retain synthesis 8.0.0 with verification 10.0.0 and summary 8.0.0
 compatibility, while an active coherent synthesis-8 checkpoint must regenerate
 before verification. Completed pre-disclosure coherent artifacts retain

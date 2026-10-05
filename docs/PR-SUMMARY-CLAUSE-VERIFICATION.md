@@ -1,5 +1,9 @@
 # F3: verify prose against its governing clause
 
+This is the historical F3 evidence record. The current verification contract is
+[General prose comparison verification](CONTRACTS.md#general-prose-comparison-verification);
+[C9 production integration](PR-C9-PRODUCTION-VERIFICATION.md) records its replacement.
+
 ## Contract
 
 ### Root cause
