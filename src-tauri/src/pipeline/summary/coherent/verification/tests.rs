@@ -682,7 +682,11 @@ fn clause_verification_live_public_fidelity() {
 
 #[test]
 fn clause_verification_version_refresh_preserves_completed_pairs() {
-    for synthesis in [SYNTHESIS_VERSION, PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION] {
+    for synthesis in [
+        SYNTHESIS_VERSION,
+        PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION,
+        PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION,
+    ] {
         for verification in [VERIFICATION_VERSION, PRE_CLAUSE_VERIFICATION_VERSION] {
             assert!(
                 coherent_verification_versions_match(synthesis, verification),
@@ -705,7 +709,7 @@ fn clause_verification_version_refresh_preserves_completed_pairs() {
             VERIFICATION_VERSION
         ));
     }
-    for synthesis in ["", "0", "14.0.0"] {
+    for synthesis in ["", "0", "15.0.0"] {
         assert!(!coherent_verification_versions_match(
             synthesis,
             VERIFICATION_VERSION

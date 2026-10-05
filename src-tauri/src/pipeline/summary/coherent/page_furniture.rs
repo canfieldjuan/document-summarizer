@@ -348,7 +348,10 @@ impl Furniture {
     ) -> Self {
         Self::for_policy(
             document,
-            if version == SYNTHESIS_VERSION {
+            if matches!(
+                version,
+                SYNTHESIS_VERSION | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
+            ) {
                 Policy::RunningMetadata
             } else {
                 Policy::Original
