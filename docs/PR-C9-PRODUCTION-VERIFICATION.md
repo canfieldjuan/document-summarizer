@@ -228,6 +228,55 @@ wire behavior is tested locally; live gateway-model qualification remains unprov
   Documentation-only publication reuses this source evidence with a no-source-diff
   check; it does not rerun model inference or change the frozen rules.
 
+## Qualification follow-up contract (2026-10-05)
+
+Root cause: `Prepared::parse` introduced in `fa93c8a` treats absence of changed
+or uncertain relations as positive support. Four empty `not_applicable` entries
+therefore produce supported without a single passage comparison. The frozen
+experimental implementation has the same rule, but its retained results and
+labels remain immutable. Correct the production aggregation at this owner:
+without a validated preserved comparison, an otherwise non-negative response is
+ambiguous. Changed/omitted remains unsupported; malformed shape remains invalid.
+
+Required surface: the production parser, its minimal all-empty and mixed-dimension
+regressions, and the canonical contract. No downstream filter, model prompt/schema
+change or relabeling. Verify fail-before/pass-after, retained public response
+parity, and the complete document path on a new source lock. This is a declared
+production semantics correction relative to frozen C9. The old control receipts
+remain evidence of their original source only; the release hold stays.
+
+The review's qualification concern remains open. Its assertion that the original
+invoice-period and temporary-equipment rows are approved faithful labels is
+contradicted by the operator decision linked in the PR: unresolved and withhold,
+respectively. Their legacy names and original scores are historical records.
+
+### CI cancellation probe correction
+
+CI run `37258719644` failed after cancellation plus next-root recovery took
+1.001851714 seconds. The test introduced in main `62cc1ca` measures both operations
+but asserts the combined duration is cancellation latency. Reproduce this false
+failure by adding a valid slow status response for the second root after the first
+socket closes. Correct only the test: explicitly require closure of the stalled
+socket before its read timeout, then verify both roots' terminal/released state
+under the existing recovery deadline. Retain the slow second-root case so this
+separation cannot regress. No OCR runtime timing or cancellation rule changes.
+
+### Complete-document app-worker proof
+
+Use the existing A/B PDFs as known regression documents, not unseen qualification.
+The installed settings select the loopback inference gateway. Copy those settings
+unchanged into owner-private durable proof storage, initialize a fresh app database,
+and call the ordinary `DesktopJobManager::new/start_pdf` path with General mode.
+The opt-in test owns no alternate model or runtime implementation. Record each
+stage and final persisted artifacts, then reopen through `workspace::get_persisted_summary`,
+the same source-validation/presentation boundary used by the desktop command.
+Require coherent output with comparison verification actually exercised; fallback
+alone cannot pass the C9 app proof. Retain partial artifacts if a document fails.
+
+This test proves the app worker and saved-view boundary. Visual UI interaction,
+blind semantic review and the unseen batch remain separately reported gates.
+No installed settings, existing database, model preset or source documents change.
+
 ## Gap audit
 
 NOT DONE for release. Production integration and local structural regressions

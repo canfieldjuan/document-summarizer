@@ -696,8 +696,9 @@ qualified grammar converter generates required fields in property iteration orde
 The model chooses exact source and claim passages from separate bounded catalogs;
 it does not supply the final verdict. Rust rejects unknown/duplicate/missing fields,
 foreign IDs, non-catalog passages and invalid relation/span shapes. Changed or
-omitted meaning derives unsupported; uncertainty derives ambiguous; otherwise the
-claim is supported. Existing semantic and source-contribution checks may still
+omitted meaning derives unsupported; uncertainty derives ambiguous. Support
+requires at least one validated preserved comparison. Four empty not-applicable
+comparisons provide no positive evidence and derive ambiguous. Existing semantic and source-contribution checks may still
 withhold it. Exact passages constrain output; the model still judges meaning.
 
 The protocol limits are 4,096 Unicode scalar characters across the claim and
