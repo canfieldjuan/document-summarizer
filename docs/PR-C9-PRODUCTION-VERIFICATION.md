@@ -300,10 +300,93 @@ capability consumption, saved fallback validation and live small-document fallba
 Native C9 semantics remain unchanged. Gateway C9 support is a separate protocol
 and deployment task; no gateway repository or installed service is changed here.
 
+## Follow-up proof and cold audit (2026-10-05)
+
+Tested production source: `b7d1de016e8e39d6abbd6d3ffdfa94b15614a32c`;
+Rust tree `9adaf65cd26de66e16fdb6c6838ddd14bf0987a7`. Earlier records above
+remain historical. This follow-up does not claim a successful C9 full-document run.
+
+### Reproduced defects and origin corrections
+
+- **Empty comparisons:** `summary/comparisons.rs::Prepared::parse` defaulted to
+  supported without a preserved comparison. The minimal all-not-applicable
+  regression failed with Supported, then passed with Ambiguous. Each dimension's
+  preserved/changed/omitted/uncertain sibling cases and retained-response replay
+  pass. This corrects my port; no downstream filter or prompt change was added.
+- **CI cancellation test:** the old test timed cancellation together with the
+  next root's recovery. A deliberately slow next-root response reproduced its
+  false failure after the stalled connection already returned EOF. The test now
+  proves socket closure before the read timeout and retains terminal-state and
+  root-release assertions. Its exact reproduction passes. Runtime OCR is unchanged.
+- **Gateway protocol mismatch:** complete synthetic app runs failed with HTTP422
+  at comparison verification. An installed-validator probe isolates shared
+  definitions and enum bounds. The local admission regression failed with Ok,
+  then passed with MODEL_SCHEMA_UNSUPPORTED. One gateway capability declaration
+  now controls request construction, runtime preflight and comparison planning.
+  General synthesis consumes this declaration before drafting and persists the
+  verification-unavailable fallback. The old gateway ordering test's inference
+  of protocol support is removed. Native ordering tests and strict parsing remain.
+  This is another defect in my integration, not a model-quality finding.
+
+### Actual app runs
+
+| Run | Observed outcome | Meaning |
+|---|---|---|
+| Known complete A/B PDFs at `3e16b95` | Both completed and reopened; source-context-too-large fallback; no synthesis requests | C9 app qualification failed; the configured task context is 8192 |
+| Small complete synthetic A/B PDFs at `3e16b95` | Both drafted then failed at verification with gateway rejection | Isolated live integration defect; no qualification pass |
+| Identical small PDFs at `b7d1de0` | Both completed and reopened with verification-unavailable warning; no synthesis or C9 request | Corrected fallback behavior only; `c9_qualified=false` for both |
+
+All attempts and exact input hashes are retained. Installed settings and source
+hashes stayed unchanged during each run. The proof used a fresh isolated app
+storage directory and the actual configured gateway. The gateway's managed Ollama
+process remained resident after the run; no shared service was killed or reconfigured.
+The earlier desktop debug build passed, but visual UI proof was not performed and
+that build predates the final capability correction.
+
+### Incremental verification
+
+- Focused C9 and capability tests: 20 passed, 1 opt-in live test ignored.
+- Gateway caller/storage/projection tests: 46 passed.
+- Fallback tests: 11 passed, 1 explicit live test ignored.
+- Corrected same-input live fallback proof: 1 passed, both document results pass.
+- Cancellation timing reproduction: 1 passed after the test correction.
+- Strict all-target/all-feature Clippy, formatting and diff checks passed.
+- Two compile mistakes in the capability edit and one missing warning-recognition
+  branch in the initial test run were corrected before the final lock. They are
+  rework, not additional product qualification.
+- Broad suites remain CI-owned. Documentation-only publication reuses the exact
+  tested Rust tree, with no relevant source diff.
+
+Cold diff audit: `comparisons.rs` owns positive-support aggregation and consumes
+runtime capability; its tests cover empty/mixed responses. `gateway_client.rs`
+owns task capability and request rejection; `gateway_runtime.rs` exposes it and
+maps a typed error; `contracts.rs` supplies the runtime capability seam.
+`coherent.rs` selects and recognizes the disclosed fallback; its verification
+tests exercise planner consumption, no drafting and stored-artifact validation.
+`desktop.rs` adds explicit ignored app-worker proof entrypoints, with C9 and
+fallback outcomes distinguished. The OCR test change targets its faulty timing
+assertion only. Each changed source/test file serves these stated boundaries.
+
+**boundary-probe:** empty/mixed comparison dimensions; supported legacy schema
+and rejected C9; installed enum values at 100 accepted and 101 rejected; shared
+definitions rejected; unknown/foreign passage and malformed-response regressions
+remain passing. No weakening of source-span or relation validation.
+
+**effect-trace:** gateway capability controls preflight and General synthesis;
+small documents that previously failed now finish and reopen with the specific
+fallback warning. The original C9 proof remains failed, preventing this fallback
+correction from being represented as verifier qualification.
+
+Durable receipt alias `pr116-app-proof-verification-summary`: SHA256
+`6499f5a81ea2f5fec9549925f67b6a24ac98073d623a00bef774ae64b7aac831`.
+Gateway protocol support is tracked in
+[local-inference-gateway #28](https://github.com/canfieldjuan/local-inference-gateway/issues/28).
+
 ## Gap audit
 
-NOT DONE for release. Production integration and local structural regressions
-are implemented. Full-document app proof, locked unseen fidelity qualification
-and exact-head CI/review remain. PR116 and PR100 stay held; the existing fidelity
-review thread is not resolved by these development controls. Do not merge or
-promote a model on the strength of the public controls.
+NOT DONE for release. Production corrections and the installed-route fallback
+proof are complete. The configured gateway still cannot run C9; gateway protocol
+support, successful full-document C9 app proof, visual UI proof, locked unseen
+fidelity qualification and exact-head CI/review remain. PR116 and PR100 stay held.
+The fidelity review threads are not resolved by structural or fallback evidence.
+Do not merge or promote a model from these results.
