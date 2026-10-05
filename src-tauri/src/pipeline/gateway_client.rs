@@ -22,7 +22,6 @@ use thiserror::Error;
 
 const PROTOCOL_VERSION: u32 = 1;
 const TASK_ID: &str = "document.summary.step";
-const TASK_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 1_000_000;
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
 const MAX_MESSAGE_CHARS: usize = 500_000;
@@ -33,10 +32,45 @@ const MAX_TOKEN_BYTES: usize = 512;
 const MAX_CA_BYTES: usize = 1_000_000;
 const MAX_RETRY_AFTER_SECONDS: u64 = 3_600;
 
-// document.summary.step@1 rejects shared definitions/references and large
-// passage enums. Byte admission alone cannot establish C9 compatibility.
-pub(super) fn supports_response_schema(name: &str) -> bool {
-    name != crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GatewayTaskProfile {
+    task_version: u32,
+    context_tokens: u32,
+}
+
+impl GatewayTaskProfile {
+    pub(super) const LEGACY: Self = Self {
+        task_version: 1,
+        context_tokens: 8_192,
+    };
+
+    pub(super) fn passages(context_tokens: u32) -> Result<Self, GatewayClientError> {
+        if !(8_192..=1_048_576).contains(&context_tokens) {
+            return Err(GatewayClientError::Protocol(
+                "task context is outside supported bounds",
+            ));
+        }
+        Ok(Self {
+            task_version: 2,
+            context_tokens,
+        })
+    }
+
+    pub(super) fn context_tokens(self) -> u32 {
+        self.context_tokens
+    }
+
+    pub(super) fn model_id(self) -> &'static str {
+        if self.task_version == 2 {
+            "document.summary.step@2"
+        } else {
+            "document.summary.step@1"
+        }
+    }
+
+    pub(super) fn supports_response_schema(self, name: &str) -> bool {
+        self.task_version == 2 || name != crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +203,7 @@ impl GatewayTransport for ReqwestGatewayTransport {
 }
 
 pub(crate) struct GatewayClient {
+    profile: GatewayTaskProfile,
     token_file: PathBuf,
     timeout: Duration,
     request_lifetime: ChronoDuration,
@@ -206,6 +241,7 @@ impl GatewayClient {
             .build()
             .map_err(|_| GatewayClientError::Configuration("TLS client could not be built"))?;
         Ok(Self {
+            profile: GatewayTaskProfile::LEGACY,
             token_file: config.token_file,
             timeout,
             request_lifetime: ChronoDuration::from_std(request_lifetime).map_err(|_| {
@@ -225,6 +261,7 @@ impl GatewayClient {
         clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     ) -> Self {
         Self {
+            profile: GatewayTaskProfile::LEGACY,
             token_file,
             timeout,
             request_lifetime: ChronoDuration::from_std(request_lifetime).unwrap(),
@@ -233,7 +270,43 @@ impl GatewayClient {
         }
     }
 
-    pub(crate) fn health(&self) -> Result<GatewayHealth, GatewayClientError> {
+    pub(super) fn profile(&self) -> GatewayTaskProfile {
+        self.profile
+    }
+
+    pub(super) fn with_profile(mut self, profile: GatewayTaskProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    pub(super) fn negotiate_profile(mut self) -> Result<Self, GatewayClientError> {
+        let health = self.read_health()?;
+        if health
+            .tasks
+            .iter()
+            .any(|task| task.id == TASK_ID && task.version == 2)
+        {
+            health.for_version(2)?;
+            self.profile = self.read_profile()?.0;
+        } else {
+            health.for_version(1)?;
+        }
+        Ok(self)
+    }
+
+    fn read_profile(&self) -> Result<(GatewayTaskProfile, GatewayHealth), GatewayClientError> {
+        let response = self.send(
+            "GET",
+            "/v1/tasks/document.summary.step/2/profile",
+            None,
+            Duration::from_secs(5),
+        )?;
+        require_success_status(&response)?;
+        let envelope: ProfileEnvelope = decode_response(&response)?;
+        envelope.validate()
+    }
+
+    fn read_health(&self) -> Result<HealthEnvelope, GatewayClientError> {
         let response = self.send("GET", "/v1/health", None, Duration::from_secs(5))?;
         require_success_status(&response)?;
         let health: HealthEnvelope = decode_response(&response)?;
@@ -242,29 +315,23 @@ impl GatewayClient {
                 "health protocol version is unsupported",
             ));
         }
-        let task = health
-            .tasks
-            .into_iter()
-            .find(|task| task.id == TASK_ID && task.version == TASK_VERSION)
-            .ok_or(GatewayClientError::Protocol(
-                "document task is not advertised",
-            ))?;
-        if !matches!(
-            task.status.as_str(),
-            "available" | "degraded" | "unavailable"
-        ) {
-            return Err(GatewayClientError::Protocol(
-                "document task status is invalid",
-            ));
+        Ok(health)
+    }
+
+    pub(crate) fn health(&self) -> Result<GatewayHealth, GatewayClientError> {
+        if self.profile.task_version == 2 {
+            let (profile, health) = self.read_profile()?;
+            if profile != self.profile {
+                return Err(GatewayClientError::Protocol("gateway task profile changed"));
+            }
+            Ok(health)
+        } else {
+            self.read_health()?.for_version(1)
         }
-        Ok(GatewayHealth {
-            available: matches!(task.status.as_str(), "available" | "degraded"),
-            status: task.status,
-        })
     }
 
     pub(crate) fn preflight(&self, request: &ModelRequest) -> Result<(), GatewayClientError> {
-        let core = request_core(request)?;
+        let core = request_core_for_profile(request, self.profile)?;
         preflight_request_size(&core)
     }
 
@@ -280,7 +347,7 @@ impl GatewayClient {
                 "request identity does not match ledger key",
             ));
         }
-        let core = request_core(request)?;
+        let core = request_core_for_profile(request, self.profile)?;
         let semantic_hash = sha256_hex(&encode_json(&core)?);
         preflight_request_size(&core)?;
         let record = match reserve_request_after_lock(conn, key, &semantic_hash, || {
@@ -663,7 +730,94 @@ struct HealthTask {
     _diagnostic_code: String,
 }
 
+impl HealthEnvelope {
+    fn for_version(&self, version: u32) -> Result<GatewayHealth, GatewayClientError> {
+        let mut matches = self
+            .tasks
+            .iter()
+            .filter(|task| task.id == TASK_ID && task.version == version);
+        let task = matches.next().ok_or(GatewayClientError::Protocol(
+            "document task is not advertised",
+        ))?;
+        if matches.next().is_some()
+            || !matches!(
+                task.status.as_str(),
+                "available" | "degraded" | "unavailable"
+            )
+        {
+            return Err(GatewayClientError::Protocol(
+                "document task health is invalid",
+            ));
+        }
+        Ok(GatewayHealth {
+            available: matches!(task.status.as_str(), "available" | "degraded"),
+            status: task.status.clone(),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileTask {
+    id: String,
+    version: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileLimits {
+    version: u32,
+    context_tokens: u32,
+    max_output_tokens: u32,
+    max_schema_bytes: usize,
+    schema_features: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileEnvelope {
+    protocol_version: u32,
+    task: ProfileTask,
+    profile: ProfileLimits,
+    status: String,
+    diagnostic_code: String,
+}
+
+impl ProfileEnvelope {
+    fn validate(self) -> Result<(GatewayTaskProfile, GatewayHealth), GatewayClientError> {
+        if self.protocol_version != PROTOCOL_VERSION
+            || self.task.id != TASK_ID
+            || self.task.version != 2
+            || self.profile.version != 1
+            || self.profile.max_output_tokens != MAX_OUTPUT_TOKENS
+            || self.profile.max_schema_bytes != MAX_SCHEMA_BYTES
+            || self.profile.schema_features != ["bounded_source_passages_v1"]
+            || !matches!(
+                (self.status.as_str(), self.diagnostic_code.as_str()),
+                ("available", "ready") | ("unavailable", "worker_unavailable")
+            )
+        {
+            return Err(GatewayClientError::Protocol("task profile is unsupported"));
+        }
+        Ok((
+            GatewayTaskProfile::passages(self.profile.context_tokens)?,
+            GatewayHealth {
+                available: self.status == "available",
+                status: self.status,
+            },
+        ))
+    }
+}
+
+#[cfg(test)]
 fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClientError> {
+    request_core_for_profile(request, GatewayTaskProfile::LEGACY)
+}
+
+fn request_core_for_profile(
+    request: &ModelRequest,
+    profile: GatewayTaskProfile,
+) -> Result<RequestCore<'_>, GatewayClientError> {
     if request.system_prompt.is_empty()
         || request.user_prompt.is_empty()
         || request.system_prompt.chars().count() > MAX_MESSAGE_CHARS
@@ -684,7 +838,7 @@ fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClient
             ))
         }
     };
-    if !supports_response_schema(name) {
+    if !profile.supports_response_schema(name) {
         return Err(GatewayClientError::UnsupportedSchema);
     }
     if encode_json(schema)?.len() > MAX_SCHEMA_BYTES || !schema.is_object() {
@@ -695,7 +849,7 @@ fn request_core(request: &ModelRequest) -> Result<RequestCore<'_>, GatewayClient
     Ok(RequestCore {
         task: TaskReference {
             id: TASK_ID,
-            version: TASK_VERSION,
+            version: profile.task_version,
         },
         requirements: Requirements {
             input_modalities: ["text"],
@@ -1223,6 +1377,377 @@ mod tests {
         }
     }
 
+    fn task_health(versions: &[u32]) -> Value {
+        serde_json::json!({"protocol_version":1,"tasks":versions.iter().map(|version| {
+            serde_json::json!({"id":"document.summary.step","version":version,"status":"available","diagnostic_code":"ready"})
+        }).collect::<Vec<_>>()})
+    }
+
+    fn task_profile(context: u32) -> Value {
+        serde_json::json!({
+            "protocol_version":1,"task":{"id":"document.summary.step","version":2},
+            "profile":{"version":1,"context_tokens":context,"max_output_tokens":4096,"max_schema_bytes":250000,"schema_features":["bounded_source_passages_v1"]},
+            "status":"available","diagnostic_code":"ready"
+        })
+    }
+
+    #[test]
+    fn automatic_suggestion_replays_across_gateway_profile_transitions() {
+        use crate::pipeline::contracts::{
+            DocumentNormalizer, DocumentParser, ModelRuntime, StructureInterpreter, SummaryProfile,
+        };
+        use crate::pipeline::gateway_runtime::GatewayRuntime;
+        use crate::pipeline::ingest::prepare_pdf_ingestion;
+        use crate::pipeline::normalize::CanonicalNormalizer;
+        use crate::pipeline::parser::PdfExtractParser;
+        use crate::pipeline::profile_suggestion::{
+            suggest_summary_profile, PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
+        };
+        use crate::pipeline::structure::DeterministicStructureInterpreter;
+
+        struct SuggestionTransport {
+            profile: GatewayTaskProfile,
+            submitted_versions: Arc<Mutex<Vec<u32>>>,
+        }
+        impl GatewayTransport for SuggestionTransport {
+            fn request(
+                &self,
+                method: &str,
+                path: &str,
+                _token: &str,
+                body: Option<&[u8]>,
+                _timeout: Duration,
+            ) -> Result<RawResponse, GatewayClientError> {
+                match (method, path) {
+                    ("GET", "/v1/health") => {
+                        response(200, task_health(&[self.profile.task_version]))
+                    }
+                    ("GET", "/v1/tasks/document.summary.step/2/profile") => {
+                        response(200, task_profile(self.profile.context_tokens))
+                    }
+                    ("POST", "/v1/inference") => {
+                        let wire: Value = serde_json::from_slice(body.unwrap()).unwrap();
+                        let version = wire["task"]["version"].as_u64().unwrap() as u32;
+                        self.submitted_versions.lock().unwrap().push(version);
+                        let mut result = completed(wire["request_id"].as_str().unwrap());
+                        result["output"]["content"] =
+                            serde_json::json!(r#"{"purpose":"informational"}"#);
+                        response(200, result)
+                    }
+                    ("POST", _) if path.ends_with("/ack") => {
+                        let id = path
+                            .strip_prefix("/v1/inference/")
+                            .unwrap()
+                            .strip_suffix("/ack")
+                            .unwrap();
+                        response(200, acknowledged(id))
+                    }
+                    _ => panic!("unexpected gateway proof route {method} {path}"),
+                }
+            }
+        }
+
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let (document, _) = prepare_pdf_ingestion(fixture.to_str().unwrap(), None).unwrap();
+        let parsed = PdfExtractParser::new().parse(&document).unwrap();
+        let normalized = CanonicalNormalizer::new().normalize(&parsed).unwrap();
+        let structured = DeterministicStructureInterpreter::new()
+            .interpret(&normalized)
+            .unwrap();
+        let legacy = GatewayTaskProfile::LEGACY;
+        let v2 = GatewayTaskProfile::passages(32768).unwrap();
+        let changed_context = GatewayTaskProfile::passages(16384).unwrap();
+        for (first, second) in [(legacy, v2), (v2, legacy)] {
+            let (context, mut conn) = TestContext::new();
+            // Seed the exact historical owner key, before profile scoping existed.
+            let historical_owner = db::get_or_create_profile_suggestion_owner(
+                &mut conn,
+                &document.content_hash,
+                PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
+            )
+            .unwrap();
+            drop(conn);
+            let submitted = Arc::new(Mutex::new(Vec::new()));
+            let mut owners = Vec::new();
+            for profile in [first, first, second, second, first, changed_context, v2] {
+                let transport = Arc::new(SuggestionTransport {
+                    profile,
+                    submitted_versions: submitted.clone(),
+                });
+                let client = client(&context, transport).negotiate_profile().unwrap();
+                let mut runtime = GatewayRuntime::with_client(context.database.clone(), client);
+                let owner = crate::bind_profile_suggestion_request_owner(
+                    &mut runtime,
+                    &context.database,
+                    &document.content_hash,
+                )
+                .unwrap();
+                runtime.health().unwrap();
+                let calls_before = submitted.lock().unwrap().len();
+                let result = suggest_summary_profile(
+                    &runtime,
+                    &normalized,
+                    &structured,
+                    &document.content_hash,
+                )
+                .unwrap_or_else(|error| panic!("Automatic suggestion on {profile:?}: {error:?}"));
+                assert_eq!(result.suggested_profile, SummaryProfile::General);
+                if profile == legacy {
+                    assert_eq!(owner, historical_owner);
+                }
+                if let Some((_, earlier_owner)) = owners.iter().find(|(p, _)| *p == profile) {
+                    assert_eq!(&owner, earlier_owner);
+                    assert_eq!(submitted.lock().unwrap().len(), calls_before);
+                } else {
+                    assert!(owners
+                        .iter()
+                        .all(|(_, earlier_owner)| earlier_owner != &owner));
+                    assert_eq!(submitted.lock().unwrap().len(), calls_before + 1);
+                    assert_eq!(
+                        submitted.lock().unwrap().last(),
+                        Some(&profile.task_version)
+                    );
+                    owners.push((profile, owner.clone()));
+                }
+                let conn = db::init_db(&context.database).unwrap();
+                let row = load_request(
+                    &conn,
+                    &GatewayRequestKey {
+                        owner_id: owner,
+                        stage: PipelineStage::Analyze,
+                        ordinal: 0,
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(row.state, GatewayRequestState::Acknowledged);
+            }
+            assert_eq!(submitted.lock().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn negotiated_profile_controls_c9_wire_identity_and_durable_replay() {
+        let (context, mut conn) = TestContext::new();
+        let transport = Arc::new(FakeTransport::default());
+        transport.responses.lock().unwrap().extend([
+            response(200, task_health(&[1, 2])),
+            response(200, task_profile(32768)),
+        ]);
+        let client = client(&context, transport.clone())
+            .negotiate_profile()
+            .unwrap();
+        assert_eq!(client.profile().context_tokens(), 32768);
+        let mut request = request();
+        request.output_format = ModelOutputFormat::JsonSchema {
+            name: crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME.into(),
+            schema: serde_json::json!({"type":"object","$defs":{"passage":{"type":"string","enum":["a","b"]}},"properties":{"p":{"$ref":"#/$defs/passage"}},"required":["p"],"additionalProperties":false}),
+        };
+        client.preflight(&request).unwrap();
+        let core = request_core_for_profile(&request, client.profile()).unwrap();
+        let now = Utc::now().with_nanosecond(0).unwrap();
+        let reserved = reserve_request(
+            &mut conn,
+            &key(0),
+            &sha256_hex(&encode_json(&core).unwrap()),
+            now + ChronoDuration::minutes(10),
+            now,
+        )
+        .unwrap();
+        transport.responses.lock().unwrap().extend([
+            response(200, completed(&reserved.request_id)),
+            response(200, acknowledged(&reserved.request_id)),
+        ]);
+        let first = client.execute(&mut conn, &key(0), &request, now).unwrap();
+        assert_eq!(
+            client.execute(&mut conn, &key(0), &request, now).unwrap(),
+            first
+        );
+        let calls = transport.calls.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].path, "/v1/health");
+        assert_eq!(calls[1].path, "/v1/tasks/document.summary.step/2/profile");
+        assert_eq!(calls[2].path, "/v1/inference");
+        let wire: Value = serde_json::from_slice(calls[2].body.as_ref().unwrap()).unwrap();
+        assert_eq!(wire["task"]["version"], 2);
+        assert_eq!(
+            wire["generation"]["response_schema"]["$defs"]["passage"]["enum"],
+            serde_json::json!(["a", "b"])
+        );
+        assert_eq!(
+            load_request(&conn, &key(0)).unwrap().unwrap().state,
+            GatewayRequestState::Acknowledged
+        );
+    }
+
+    #[test]
+    fn task_profile_negotiation_retains_legacy_only_when_v2_is_absent() {
+        let (context, _) = TestContext::new();
+        let legacy = Arc::new(FakeTransport::default());
+        legacy
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(response(200, task_health(&[1])));
+        let old = client(&context, legacy.clone())
+            .negotiate_profile()
+            .unwrap();
+        assert_eq!(old.profile(), GatewayTaskProfile::LEGACY);
+        assert_eq!(legacy.calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            request_core_for_profile(&request(), old.profile())
+                .unwrap()
+                .task
+                .version,
+            1
+        );
+        for status in [401, 403, 404, 500] {
+            let transport = Arc::new(FakeTransport::default());
+            transport.responses.lock().unwrap().extend([
+                response(200, task_health(&[1, 2])),
+                response(status, serde_json::json!({})),
+            ]);
+            assert!(client(&context, transport.clone())
+                .negotiate_profile()
+                .is_err());
+            assert_eq!(transport.calls.lock().unwrap().len(), 2);
+        }
+        for versions in [&[][..], &[2, 2][..], &[1, 1][..]] {
+            let transport = Arc::new(FakeTransport::default());
+            transport
+                .responses
+                .lock()
+                .unwrap()
+                .push_back(response(200, task_health(versions)));
+            assert!(client(&context, transport.clone())
+                .negotiate_profile()
+                .is_err());
+            assert_eq!(transport.calls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn task_profile_bounds_defaults_and_partial_fields_fail_closed() {
+        for capacity in [8192, 8193, 32768, 1048575, 1048576] {
+            let envelope: ProfileEnvelope =
+                decode_response(&raw_response(200, task_profile(capacity))).unwrap();
+            assert_eq!(envelope.validate().unwrap().0.context_tokens(), capacity);
+        }
+        let mut invalid = Vec::new();
+        for (key, values) in [
+            (
+                "context_tokens",
+                vec![
+                    serde_json::json!(8191),
+                    serde_json::json!(1048577),
+                    serde_json::json!(32768.5),
+                ],
+            ),
+            (
+                "max_output_tokens",
+                vec![serde_json::json!(4095), serde_json::json!(4097)],
+            ),
+            (
+                "max_schema_bytes",
+                vec![serde_json::json!(249999), serde_json::json!(250001)],
+            ),
+            ("version", vec![serde_json::json!(2)]),
+            (
+                "schema_features",
+                vec![
+                    serde_json::json!([]),
+                    serde_json::json!(["bounded_source_passages_v1", "unknown"]),
+                    serde_json::json!(["bounded_source_passages_v1", "bounded_source_passages_v1"]),
+                ],
+            ),
+        ] {
+            for value in values.into_iter().chain([
+                Value::Null,
+                serde_json::json!(false),
+                serde_json::json!(0),
+                serde_json::json!(""),
+            ]) {
+                let mut body = task_profile(32768);
+                body["profile"][key] = value;
+                invalid.push(body);
+            }
+            let mut body = task_profile(32768);
+            body["profile"].as_object_mut().unwrap().remove(key);
+            invalid.push(body);
+        }
+        for (key, value) in [
+            ("status", serde_json::json!("degraded")),
+            ("diagnostic_code", serde_json::json!("wrong")),
+            ("protocol_version", serde_json::json!(2)),
+            ("extra", serde_json::json!(true)),
+        ] {
+            let mut body = task_profile(32768);
+            body[key] = value;
+            invalid.push(body);
+        }
+        for (key, value) in [
+            ("version", serde_json::json!(1)),
+            ("id", serde_json::json!("email.analyze")),
+        ] {
+            let mut body = task_profile(32768);
+            body["task"][key] = value;
+            invalid.push(body);
+        }
+        for body in invalid {
+            let result = decode_response::<ProfileEnvelope>(&raw_response(200, body))
+                .and_then(ProfileEnvelope::validate);
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn selected_profile_health_rejects_drift_and_keeps_unavailability() {
+        let (context, _) = TestContext::new();
+        let transport = Arc::new(FakeTransport::default());
+        let mut unavailable = task_profile(32768);
+        unavailable["status"] = serde_json::json!("unavailable");
+        unavailable["diagnostic_code"] = serde_json::json!("worker_unavailable");
+        transport.responses.lock().unwrap().extend([
+            response(200, task_health(&[2])),
+            response(200, unavailable.clone()),
+            response(200, unavailable),
+            response(200, task_profile(16384)),
+        ]);
+        let client = client(&context, transport.clone())
+            .negotiate_profile()
+            .unwrap();
+        assert_eq!(client.profile().model_id(), "document.summary.step@2");
+        assert!(!client.health().unwrap().available);
+        assert!(client.health().is_err());
+        assert_eq!(transport.calls.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn restored_legacy_task_cannot_reinterpret_v2_state() {
+        let (context, mut conn) = TestContext::new();
+        let transport = Arc::new(FakeTransport::default());
+        let now = Utc::now().with_nanosecond(0).unwrap();
+        let request = request();
+        let legacy = GatewayTaskProfile::LEGACY;
+        let core = request_core_for_profile(&request, GatewayTaskProfile::passages(32768).unwrap())
+            .unwrap();
+        reserve_request(
+            &mut conn,
+            &key(0),
+            &sha256_hex(&encode_json(&core).unwrap()),
+            now + ChronoDuration::minutes(10),
+            now,
+        )
+        .unwrap();
+        let restored = client(&context, transport.clone()).with_profile(legacy);
+        assert!(matches!(
+            restored.execute(&mut conn, &key(0), &request, now),
+            Err(GatewayClientError::Store(_))
+        ));
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn c9_gateway_request_rejects_unsupported_protocol_before_transport() {
         let mut request = request();
@@ -1234,7 +1759,7 @@ mod tests {
             request_core(&request),
             Err(GatewayClientError::UnsupportedSchema)
         ));
-        assert!(supports_response_schema("document_claim_verdicts_v1"));
+        assert!(GatewayTaskProfile::LEGACY.supports_response_schema("document_claim_verdicts_v1"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::pipeline::control::ExecutionControl;
 use crate::pipeline::db;
 use crate::pipeline::gateway_client::{
     GatewayClient, GatewayClientConfig, GatewayClientError, GatewayHealth, GatewayResult,
-    MAX_OUTPUT_TOKENS,
+    GatewayTaskProfile, MAX_OUTPUT_TOKENS,
 };
 use crate::pipeline::gateway_store::GatewayRequestKey;
 use chrono::Utc;
@@ -19,10 +19,10 @@ use std::time::Instant;
 
 const SNAPSHOT_VERSION: u32 = 3;
 const RUNTIME_ID: &str = "local-inference-gateway";
+#[cfg(test)]
 const TASK_ID: &str = "document.summary.step@1";
 const TASK_PROFILE_ID: &str = "gateway-document-summary-step-v1";
 const TASK_PROFILE_VERSION: &str = "gateway-task-profile-v1";
-const CONTEXT_TOKENS: u32 = 8_192;
 const TASK_PROFILE_CANONICAL: &str = concat!(
     "task=document.summary.step@1\n",
     "input=text\n",
@@ -63,6 +63,7 @@ impl GatewayExecutor for GatewayClient {
 }
 
 pub(crate) struct GatewayRuntime {
+    profile: GatewayTaskProfile,
     db_path: PathBuf,
     executor: Arc<dyn GatewayExecutor>,
     bound_owner_id: Option<String>,
@@ -74,8 +75,15 @@ impl GatewayRuntime {
         db_path: PathBuf,
         config: GatewayClientConfig,
     ) -> Result<Self, ModelRuntimeFailure> {
-        let client = GatewayClient::new(config).map_err(map_client_failure)?;
-        Ok(Self::with_executor(db_path, Arc::new(client)))
+        let client = GatewayClient::new(config)
+            .and_then(GatewayClient::negotiate_profile)
+            .map_err(map_client_failure)?;
+        let profile = client.profile();
+        Ok(Self::with_profile_executor(
+            db_path,
+            Arc::new(client),
+            profile,
+        ))
     }
 
     pub(crate) fn from_snapshot(
@@ -83,21 +91,55 @@ impl GatewayRuntime {
         config: GatewayClientConfig,
         snapshot: &ModelProfileSnapshot,
     ) -> Result<Self, ModelRuntimeFailure> {
-        validate_snapshot(snapshot)?;
-        Self::new(db_path, config)
+        let profile = validate_snapshot(snapshot)?;
+        let client = GatewayClient::new(config)
+            .map_err(map_client_failure)?
+            .with_profile(profile);
+        Ok(Self::with_profile_executor(
+            db_path,
+            Arc::new(client),
+            profile,
+        ))
     }
 
+    #[cfg(test)]
+    pub(super) fn with_client(db_path: PathBuf, client: GatewayClient) -> Self {
+        let profile = client.profile();
+        Self::with_profile_executor(db_path, Arc::new(client), profile)
+    }
+
+    #[cfg(test)]
     fn with_executor(db_path: PathBuf, executor: Arc<dyn GatewayExecutor>) -> Self {
+        Self::with_profile_executor(db_path, executor, GatewayTaskProfile::LEGACY)
+    }
+
+    fn with_profile_executor(
+        db_path: PathBuf,
+        executor: Arc<dyn GatewayExecutor>,
+        profile: GatewayTaskProfile,
+    ) -> Self {
         Self {
+            profile,
             db_path,
             executor,
             bound_owner_id: None,
-            snapshot: canonical_snapshot(),
+            snapshot: canonical_snapshot(profile),
         }
     }
 }
 
 impl ModelRuntime for GatewayRuntime {
+    fn request_owner_contract(&self, operation_contract: &str) -> String {
+        if self.profile == GatewayTaskProfile::LEGACY {
+            operation_contract.to_string()
+        } else {
+            format!(
+                "{operation_contract}.{}",
+                self.snapshot.analysis.model_digest
+            )
+        }
+    }
+
     fn bind_request_owner(&mut self, owner_id: &str) {
         self.bound_owner_id = Some(owner_id.to_string());
     }
@@ -129,7 +171,7 @@ impl ModelRuntime for GatewayRuntime {
             Ok(result) => Ok(ModelResponse {
                 text: result.content,
                 runtime_id: RUNTIME_ID.to_string(),
-                model_id: TASK_ID.to_string(),
+                model_id: self.profile.model_id().to_string(),
                 request_attempts: vec![diagnostic(request, started, true)],
             }),
             Err(error) => {
@@ -157,7 +199,7 @@ impl ModelRuntime for GatewayRuntime {
     }
 
     fn supports_response_schema(&self, name: &str) -> bool {
-        crate::pipeline::gateway_client::supports_response_schema(name)
+        self.profile.supports_response_schema(name)
     }
 
     fn response_schema_byte_limit(&self, _stage: PipelineStage, name: &str) -> usize {
@@ -200,11 +242,11 @@ impl ModelRuntime for GatewayRuntime {
     }
 
     fn model_id(&self) -> &str {
-        TASK_ID
+        self.profile.model_id()
     }
 
     fn context_tokens(&self, _stage: PipelineStage) -> u32 {
-        CONTEXT_TOKENS
+        self.profile.context_tokens()
     }
 
     fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
@@ -212,26 +254,42 @@ impl ModelRuntime for GatewayRuntime {
     }
 }
 
-fn canonical_snapshot() -> ModelProfileSnapshot {
+fn canonical_snapshot(profile: GatewayTaskProfile) -> ModelProfileSnapshot {
+    let (profile_id, canonical) = if profile == GatewayTaskProfile::LEGACY {
+        (TASK_PROFILE_ID, TASK_PROFILE_CANONICAL.to_string())
+    } else {
+        ("gateway-document-summary-step-v2", format!(
+            "task={}\nprofile_version=1\ninput=text\noutput=application/json\nstructured_output=true\ncontext_tokens={}\nmax_output_tokens={}\nmax_schema_bytes={}\nschema_features=bounded_source_passages_v1\n",
+            profile.model_id(), profile.context_tokens(), MAX_OUTPUT_TOKENS, crate::pipeline::gateway_client::MAX_SCHEMA_BYTES
+        ))
+    };
     let stage = ModelStageProfileSnapshot {
         runtime_kind: ModelRuntimeKind::InferenceGateway,
-        profile_id: TASK_PROFILE_ID.to_string(),
-        model_name: TASK_ID.to_string(),
-        model_digest: format!("{:x}", Sha256::digest(TASK_PROFILE_CANONICAL.as_bytes())),
-        context_tokens: CONTEXT_TOKENS,
+        profile_id: profile_id.to_string(),
+        model_name: profile.model_id().to_string(),
+        model_digest: format!("{:x}", Sha256::digest(canonical.as_bytes())),
+        context_tokens: profile.context_tokens(),
         tokenizer_version: TASK_PROFILE_VERSION.to_string(),
     };
     ModelProfileSnapshot {
         version: SNAPSHOT_VERSION,
-        preset_id: TASK_PROFILE_ID.to_string(),
+        preset_id: profile_id.to_string(),
         analysis: stage.clone(),
         verification: stage,
     }
 }
 
-fn validate_snapshot(snapshot: &ModelProfileSnapshot) -> Result<(), ModelRuntimeFailure> {
-    if snapshot == &canonical_snapshot() {
-        Ok(())
+fn validate_snapshot(
+    snapshot: &ModelProfileSnapshot,
+) -> Result<GatewayTaskProfile, ModelRuntimeFailure> {
+    let profile = if snapshot.preset_id == "gateway-document-summary-step-v2" {
+        GatewayTaskProfile::passages(snapshot.analysis.context_tokens)
+            .map_err(map_client_failure)?
+    } else {
+        GatewayTaskProfile::LEGACY
+    };
+    if snapshot == &canonical_snapshot(profile) {
+        Ok(profile)
     } else {
         Err(failure(
             "MODEL_CONFIG_INVALID",
@@ -421,6 +479,81 @@ mod tests {
                 available,
             }),
         )
+    }
+
+    #[test]
+    fn negotiated_gateway_snapshot_preserves_budget_capability_and_task() {
+        let root = TestDirectory::new();
+        let state = Arc::new(Mutex::new(ExecutorState::default()));
+        let profile = GatewayTaskProfile::passages(32768).unwrap();
+        let runtime = GatewayRuntime::with_profile_executor(
+            root.0.join("summarizer.db"),
+            Arc::new(FixtureExecutor {
+                state: state.clone(),
+                rejection: false,
+                available: true,
+            }),
+            profile,
+        );
+        for stage in [
+            PipelineStage::Analyze,
+            PipelineStage::Verify,
+            PipelineStage::Synthesize,
+        ] {
+            assert_eq!(runtime.context_tokens(stage), 32768);
+        }
+        assert_eq!(runtime.model_id(), "document.summary.step@2");
+        let mut request = request();
+        request.output_format = ModelOutputFormat::JsonSchema {
+            name: crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME.into(),
+            schema: json!({"type":"object"}),
+        };
+        assert!(runtime
+            .supports_response_schema(crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME));
+        runtime.preflight_request(&request).unwrap();
+        assert_eq!(state.lock().unwrap().preflight_calls, 1);
+        let snapshot = runtime.profile_snapshot().unwrap();
+        let mut conn = db::init_db(root.0.join("summarizer.db")).unwrap();
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let (_, run) = admit_pdf_for_background(
+            &mut conn,
+            fixture.to_str().unwrap(),
+            Some(&snapshot),
+            SummaryProfile::General,
+            None,
+        )
+        .unwrap();
+        let restored = db::get_run_model_profile(&conn, &run.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored, snapshot);
+        assert_eq!(validate_snapshot(&restored).unwrap(), profile);
+        assert_eq!(
+            canonical_snapshot(validate_snapshot(&restored).unwrap()),
+            snapshot
+        );
+        let legacy = canonical_snapshot(GatewayTaskProfile::LEGACY);
+        assert_eq!(
+            validate_snapshot(&legacy).unwrap(),
+            GatewayTaskProfile::LEGACY
+        );
+        assert_eq!(legacy.analysis.context_tokens, 8192);
+        assert_ne!(legacy.analysis.model_digest, snapshot.analysis.model_digest);
+        for field in ["version", "presetId", "analysis", "verification"] {
+            let mut serialized = serde_json::to_value(&snapshot).unwrap();
+            // Mutate real serialized fields rather than adding ignored data.
+            if field == "version" {
+                serialized[field] = json!(4);
+            } else if field == "presetId" {
+                serialized[field] = json!("unknown");
+            } else {
+                serialized[field]["contextTokens"] = json!(16384);
+            }
+            let changed: ModelProfileSnapshot = serde_json::from_value(serialized).unwrap();
+            assert_ne!(changed, snapshot);
+            assert!(validate_snapshot(&changed).is_err());
+        }
     }
 
     #[test]
