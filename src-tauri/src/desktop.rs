@@ -1124,6 +1124,109 @@ mod tests {
         assert!(db::summary_artifact_exists(&reopened, &accepted.run_id).unwrap());
     }
 
+    #[test]
+    #[ignore = "explicit known PDFs, copied installed settings, private durable output and inference lock required"]
+    fn complete_document_live_app_worker_proof() {
+        use crate::pipeline::workspace;
+        use serde_json::{json, Value};
+        let output = PathBuf::from(std::env::var("DOC_SUM_APP_PROOF_OUTPUT").unwrap());
+        let database = output.join("app-data/com.juan-canfield.docsum/summarizer.db");
+        let settings = database.parent().unwrap().join("model-settings-v1.json");
+        assert!(settings.is_file() && !database.exists());
+        let inputs: Vec<Value> =
+            serde_json::from_slice(&fs::read(output.join("inputs.json")).unwrap()).unwrap();
+        let save = |name: &str, value: &Value| {
+            fs::write(output.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
+        };
+        db::init_db(&database).unwrap();
+        let runtime = runtime_from_settings(&settings, &database).unwrap();
+        let health = runtime.health();
+        save(
+            "runtime.json",
+            &json!({"profile":runtime.profile_snapshot(),
+            "health_error":health.as_ref().err().map(|e| &e.code)}),
+        );
+        health.unwrap();
+        drop(runtime);
+        let manager = DesktopJobManager::new(database.clone(), settings);
+        let mut results = Vec::new();
+        for input in inputs {
+            let alias = input["alias"].as_str().unwrap();
+            assert!(matches!(alias, "A" | "B"));
+            let accepted = manager
+                .start_pdf(
+                    input["path"].as_str().unwrap(),
+                    SummaryProfile::General,
+                    Some(input["sha256"].as_str().unwrap()),
+                )
+                .unwrap();
+            save(&format!("{alias}-accepted.json"), &json!(accepted));
+            let started = Instant::now();
+            let mut previous = None;
+            loop {
+                let conn = db::init_db(&database).unwrap();
+                let run = db::get_pipeline_run(&conn, &accepted.run_id)
+                    .unwrap()
+                    .unwrap();
+                if previous.as_ref() != Some(&run.state) {
+                    println!("APP_PROOF_STATE {alias} {:?}", run.state);
+                    previous = Some(run.state.clone());
+                    save(&format!("{alias}-run.json"), &json!(run));
+                }
+                if !manager.is_active(&accepted.run_id).unwrap() {
+                    break;
+                }
+                if started.elapsed() > Duration::from_secs(1800) {
+                    manager
+                        .request_cancellation(&accepted.run_id, run.state_version)
+                        .unwrap();
+                    panic!("app proof exceeded its document deadline");
+                }
+                drop(conn);
+                thread::sleep(Duration::from_millis(250));
+            }
+            let conn = db::init_db(&database).unwrap();
+            let verified = db::get_verified_document(&conn, &accepted.run_id).unwrap();
+            let view = workspace::get_persisted_summary(&conn, &accepted.run_id);
+            let original_view = view.as_ref().ok().cloned();
+            let artifacts = json!({"run":db::get_pipeline_run(&conn,&accepted.run_id).unwrap(),
+                "events":db::list_pipeline_events(&conn,&accepted.run_id).unwrap(),
+                "profile":db::get_run_model_profile(&conn,&accepted.run_id).unwrap(),
+                "parsed":db::get_parsed_document(&conn,&accepted.run_id).unwrap(),
+                "normalized":db::get_normalized_document(&conn,&accepted.run_id).unwrap(),
+                "analyzed":db::get_analyzed_document(&conn,&accepted.run_id).unwrap(),
+                "synthesized":db::get_synthesized_document(&conn,&accepted.run_id).unwrap(),
+                "verified":verified,
+                "summary":db::get_summary_artifact(&conn,&accepted.run_id).unwrap(),
+                "citations":db::get_citation_artifact(&conn,&accepted.run_id).unwrap(),
+                "view":original_view,"view_error":view.as_ref().err().map(|e| e.to_string())});
+            save(&format!("{alias}-artifacts.json"), &artifacts);
+            drop(conn);
+            let reopened = db::init_db(&database).unwrap();
+            let reloaded = workspace::get_persisted_summary(&reopened, &accepted.run_id).ok();
+            let comparison_used = verified.as_ref().is_some_and(|v| {
+                v.verification_version == crate::pipeline::summary::VERIFICATION_VERSION
+            });
+            let coherent = original_view
+                .as_ref()
+                .is_some_and(|v| v.summary.presentation_mode == SummaryPresentationMode::Coherent);
+            let passed =
+                original_view.is_some() && reloaded == original_view && coherent && comparison_used;
+            let row = json!({"alias":alias,"run_id":accepted.run_id,"passed":passed,
+                "completed":original_view.is_some(),"coherent":coherent,
+                "comparison_used":comparison_used,"reopen_equal":reloaded == original_view,
+                "milliseconds":started.elapsed().as_millis()});
+            println!("APP_PROOF_RESULT {row}");
+            results.push(row);
+            save("results.json", &json!(results));
+        }
+        assert_eq!(results.len(), 2);
+        assert!(
+            results.iter().all(|r| r["passed"] == true),
+            "app proof incomplete; inspect retained artifacts"
+        );
+    }
+
     fn fixture_manager(database: &TestDatabase) -> DesktopJobManager {
         DesktopJobManager::with_runtime_factory(
             database.0.clone(),

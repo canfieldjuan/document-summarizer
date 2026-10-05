@@ -281,6 +281,47 @@ fn c9_relations_derive_verdict_and_enforce_both_span_sides() {
 }
 
 #[test]
+fn c9_no_applicable_comparison_cannot_support_claim() {
+    let f = fixture();
+    let (prompt, claims) = input(&f["records"][0]);
+    let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+    let prepared = batches[0].comparison.as_ref().unwrap();
+    let empty = json!({"source_spans":[],"claim_spans":[],"relation":"not_applicable"});
+    let mut response = json!({"verdicts":[{"claim_id":"k1","comparisons":{
+        "stage":empty,"conditions":empty,"qualifiers":empty,"scope":empty}}]});
+    let actual = prepared
+        .parse(&response.to_string(), &claims[0])
+        .unwrap()
+        .verdict;
+    println!("all_not_applicable_verdict={actual:?}");
+    assert_eq!(
+        actual,
+        ClaimVerdict::Ambiguous,
+        "empty comparisons cannot prove support"
+    );
+    for dimension in DIMENSIONS {
+        for (relation, expected) in [
+            ("preserved", ClaimVerdict::Supported),
+            ("changed", ClaimVerdict::Unsupported),
+            ("omitted", ClaimVerdict::Unsupported),
+            ("uncertain", ClaimVerdict::Ambiguous),
+        ] {
+            response["verdicts"][0]["comparisons"][dimension] = json!({
+                "relation":relation, "source_spans":[prepared.source_spans.first().unwrap()],
+                "claim_spans":[prepared.claim_spans.first().unwrap()]});
+            assert_eq!(
+                prepared
+                    .parse(&response.to_string(), &claims[0])
+                    .unwrap()
+                    .verdict,
+                expected
+            );
+        }
+        response["verdicts"][0]["comparisons"][dimension] = empty.clone();
+    }
+}
+
+#[test]
 fn c9_catalog_preserves_unicode_punctuation_and_token_boundaries() {
     let catalog = span_catalog(&["A\tB, café e\u{301} 一二 ² _x \u{1c}Z"]).unwrap();
     for yes in [

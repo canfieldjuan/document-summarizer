@@ -202,6 +202,7 @@ impl Prepared {
         }
         let mut changed = false;
         let mut uncertain = false;
+        let mut preserved = false;
         for comparison in verdict.comparisons.all() {
             if comparison.source_spans.len() > MAX_SPANS
                 || comparison.claim_spans.len() > MAX_SPANS
@@ -229,13 +230,14 @@ impl Prepared {
             }
             changed |= matches!(comparison.relation, Relation::Changed | Relation::Omitted);
             uncertain |= comparison.relation == Relation::Uncertain;
+            preserved |= comparison.relation == Relation::Preserved;
         }
         Ok(ClaimVerification {
             claim_id: claim.claim_id.clone(),
             evidence_ids: claim.evidence_ids.clone(),
             verdict: if changed {
                 ClaimVerdict::Unsupported
-            } else if uncertain {
+            } else if uncertain || !preserved {
                 ClaimVerdict::Ambiguous
             } else {
                 ClaimVerdict::Supported
