@@ -861,6 +861,11 @@ pub(crate) fn response_schema_byte_limit(name: &str) -> usize {
 /// Replaceable local inference boundary. Generic pipeline state and storage do
 /// not depend on a concrete server, model family, or SDK.
 pub trait ModelRuntime: Send + Sync {
+    /// Scopes a pre-run operation's durable identity to this runtime's request
+    /// contract. The default preserves existing operation identities.
+    fn request_owner_contract(&self, operation_contract: &str) -> String {
+        operation_contract.to_string()
+    }
     /// Binds the durable owner of future requests to this worker-local runtime.
     /// Direct runtimes do not require the identity and retain the inert default.
     fn bind_request_owner(&mut self, _owner_id: &str) {}

@@ -103,6 +103,12 @@ impl GatewayRuntime {
     }
 
     #[cfg(test)]
+    pub(super) fn with_client(db_path: PathBuf, client: GatewayClient) -> Self {
+        let profile = client.profile();
+        Self::with_profile_executor(db_path, Arc::new(client), profile)
+    }
+
+    #[cfg(test)]
     fn with_executor(db_path: PathBuf, executor: Arc<dyn GatewayExecutor>) -> Self {
         Self::with_profile_executor(db_path, executor, GatewayTaskProfile::LEGACY)
     }
@@ -123,6 +129,17 @@ impl GatewayRuntime {
 }
 
 impl ModelRuntime for GatewayRuntime {
+    fn request_owner_contract(&self, operation_contract: &str) -> String {
+        if self.profile == GatewayTaskProfile::LEGACY {
+            operation_contract.to_string()
+        } else {
+            format!(
+                "{operation_contract}.{}",
+                self.snapshot.analysis.model_digest
+            )
+        }
+    }
+
     fn bind_request_owner(&mut self, owner_id: &str) {
         self.bound_owner_id = Some(owner_id.to_string());
     }

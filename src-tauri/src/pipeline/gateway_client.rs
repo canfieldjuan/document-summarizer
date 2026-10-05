@@ -1392,6 +1392,142 @@ mod tests {
     }
 
     #[test]
+    fn automatic_suggestion_replays_across_gateway_profile_transitions() {
+        use crate::pipeline::contracts::{
+            DocumentNormalizer, DocumentParser, ModelRuntime, StructureInterpreter, SummaryProfile,
+        };
+        use crate::pipeline::gateway_runtime::GatewayRuntime;
+        use crate::pipeline::ingest::prepare_pdf_ingestion;
+        use crate::pipeline::normalize::CanonicalNormalizer;
+        use crate::pipeline::parser::PdfExtractParser;
+        use crate::pipeline::profile_suggestion::{
+            suggest_summary_profile, PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
+        };
+        use crate::pipeline::structure::DeterministicStructureInterpreter;
+
+        struct SuggestionTransport {
+            profile: GatewayTaskProfile,
+            submitted_versions: Arc<Mutex<Vec<u32>>>,
+        }
+        impl GatewayTransport for SuggestionTransport {
+            fn request(
+                &self,
+                method: &str,
+                path: &str,
+                _token: &str,
+                body: Option<&[u8]>,
+                _timeout: Duration,
+            ) -> Result<RawResponse, GatewayClientError> {
+                match (method, path) {
+                    ("GET", "/v1/health") => {
+                        response(200, task_health(&[self.profile.task_version]))
+                    }
+                    ("GET", "/v1/tasks/document.summary.step/2/profile") => {
+                        response(200, task_profile(self.profile.context_tokens))
+                    }
+                    ("POST", "/v1/inference") => {
+                        let wire: Value = serde_json::from_slice(body.unwrap()).unwrap();
+                        let version = wire["task"]["version"].as_u64().unwrap() as u32;
+                        self.submitted_versions.lock().unwrap().push(version);
+                        let mut result = completed(wire["request_id"].as_str().unwrap());
+                        result["output"]["content"] =
+                            serde_json::json!(r#"{"purpose":"informational"}"#);
+                        response(200, result)
+                    }
+                    ("POST", _) if path.ends_with("/ack") => {
+                        let id = path
+                            .strip_prefix("/v1/inference/")
+                            .unwrap()
+                            .strip_suffix("/ack")
+                            .unwrap();
+                        response(200, acknowledged(id))
+                    }
+                    _ => panic!("unexpected gateway proof route {method} {path}"),
+                }
+            }
+        }
+
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let (document, _) = prepare_pdf_ingestion(fixture.to_str().unwrap(), None).unwrap();
+        let parsed = PdfExtractParser::new().parse(&document).unwrap();
+        let normalized = CanonicalNormalizer::new().normalize(&parsed).unwrap();
+        let structured = DeterministicStructureInterpreter::new()
+            .interpret(&normalized)
+            .unwrap();
+        let legacy = GatewayTaskProfile::LEGACY;
+        let v2 = GatewayTaskProfile::passages(32768).unwrap();
+        let changed_context = GatewayTaskProfile::passages(16384).unwrap();
+        for (first, second) in [(legacy, v2), (v2, legacy)] {
+            let (context, mut conn) = TestContext::new();
+            // Seed the exact historical owner key, before profile scoping existed.
+            let historical_owner = db::get_or_create_profile_suggestion_owner(
+                &mut conn,
+                &document.content_hash,
+                PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
+            )
+            .unwrap();
+            drop(conn);
+            let submitted = Arc::new(Mutex::new(Vec::new()));
+            let mut owners = Vec::new();
+            for profile in [first, first, second, second, first, changed_context, v2] {
+                let transport = Arc::new(SuggestionTransport {
+                    profile,
+                    submitted_versions: submitted.clone(),
+                });
+                let client = client(&context, transport).negotiate_profile().unwrap();
+                let mut runtime = GatewayRuntime::with_client(context.database.clone(), client);
+                let owner = crate::bind_profile_suggestion_request_owner(
+                    &mut runtime,
+                    &context.database,
+                    &document.content_hash,
+                )
+                .unwrap();
+                runtime.health().unwrap();
+                let calls_before = submitted.lock().unwrap().len();
+                let result = suggest_summary_profile(
+                    &runtime,
+                    &normalized,
+                    &structured,
+                    &document.content_hash,
+                )
+                .unwrap_or_else(|error| panic!("Automatic suggestion on {profile:?}: {error:?}"));
+                assert_eq!(result.suggested_profile, SummaryProfile::General);
+                if profile == legacy {
+                    assert_eq!(owner, historical_owner);
+                }
+                if let Some((_, earlier_owner)) = owners.iter().find(|(p, _)| *p == profile) {
+                    assert_eq!(&owner, earlier_owner);
+                    assert_eq!(submitted.lock().unwrap().len(), calls_before);
+                } else {
+                    assert!(owners
+                        .iter()
+                        .all(|(_, earlier_owner)| earlier_owner != &owner));
+                    assert_eq!(submitted.lock().unwrap().len(), calls_before + 1);
+                    assert_eq!(
+                        submitted.lock().unwrap().last(),
+                        Some(&profile.task_version)
+                    );
+                    owners.push((profile, owner.clone()));
+                }
+                let conn = db::init_db(&context.database).unwrap();
+                let row = load_request(
+                    &conn,
+                    &GatewayRequestKey {
+                        owner_id: owner,
+                        stage: PipelineStage::Analyze,
+                        ordinal: 0,
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(row.state, GatewayRequestState::Acknowledged);
+            }
+            assert_eq!(submitted.lock().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
     fn negotiated_profile_controls_c9_wire_identity_and_durable_replay() {
         let (context, mut conn) = TestContext::new();
         let transport = Arc::new(FakeTransport::default());
