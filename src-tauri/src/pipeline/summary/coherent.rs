@@ -161,8 +161,6 @@ struct PromptSourceSegment {
     #[serde(skip_serializing_if = "Option::is_none")]
     source_framing: Option<SourceFraming>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    source_claim: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     contract_clause: Option<ContractClauseReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
     clause_context_id: Option<String>,
@@ -2716,7 +2714,6 @@ struct SourceCandidate {
     chunk_ordinal: u32,
     selection_window: Option<usize>,
     source_framing: Option<SourceFraming>,
-    drafting_claim: Option<String>,
     contract_clause: Option<ContractClauseReference>,
     full_clause: Option<String>,
 }
@@ -3583,7 +3580,6 @@ fn source_selection_prompt_and_schema(
                 page_number: candidate.evidence.source_span.page_start,
                 selection_window: candidate.selection_window,
                 source_framing: None,
-                source_claim: None,
                 contract_clause: None,
                 clause_context_id: intern_clause_context(
                     candidate.full_clause.as_deref(),
@@ -5283,7 +5279,6 @@ fn contract_source_catalog(
                 chunk_ordinal: candidate.chunk_ordinal,
                 selection_window: None,
                 source_framing: None,
-                drafting_claim: None,
                 contract_clause,
                 full_clause: None,
             });
@@ -6711,11 +6706,6 @@ fn prompt_and_schema_for_version(
                 } else {
                     None
                 },
-                source_claim: if profile == SummaryProfile::General {
-                    candidate.drafting_claim.clone()
-                } else {
-                    None
-                },
                 contract_clause: if include_contract_clause_mapping {
                     candidate.contract_clause.clone().or_else(|| {
                         sole_contract_source_clause_reference(&candidate.evidence.exact_quote)
@@ -7604,7 +7594,6 @@ fn contract_source_catalog_from_blocks(
                 chunk_ordinal: chunk.ordinal,
                 selection_window: None,
                 source_framing: None,
-                drafting_claim: None,
                 contract_clause: None,
                 full_clause: None,
             });
@@ -7764,24 +7753,6 @@ fn source_catalog_with_furniture_policy(
                     false,
                 )
             })?;
-            // Generated drafts can be copied and concatenated past the decoder
-            // ceiling. New synthesis reads exact source text; keep enrichment
-            // only when reconstructing a historical catalog.
-            let drafting_claim = if synthesis_version == VERSION {
-                None
-            } else {
-                analyzed
-                    .into_iter()
-                    .flat_map(|document| &document.chunks)
-                    .flat_map(|chunk| &chunk.evidence)
-                    .find(|evidence| {
-                        evidence.block_id == source.block_id
-                            && evidence.exact_quote == source.exact_quote
-                    })
-                    .map(|evidence| evidence.claim_text.clone())
-                    .filter(|claim| claim != &source.exact_quote)
-                    .filter(|_| source_framing.is_none())
-            };
             let full_clause = clauses
                 .as_ref()
                 .and_then(|clauses| clauses.context(&source.block_id, &source.exact_quote));
@@ -7798,7 +7769,6 @@ fn source_catalog_with_furniture_policy(
                 chunk_ordinal: chunk.ordinal,
                 selection_window: None,
                 source_framing,
-                drafting_claim,
                 contract_clause: None,
                 full_clause,
             });
@@ -10914,7 +10884,6 @@ mod tests {
             chunk_ordinal: page - 1,
             selection_window: None,
             source_framing: None,
-            drafting_claim: None,
             contract_clause: None,
             full_clause: None,
         }
@@ -13856,7 +13825,6 @@ mod tests {
                         &format!("story-evidence-{}", index + 1),
                         page,
                     );
-                    source.drafting_claim = None;
                     source.evidence.claim_text = (*line).to_string();
                     source.evidence.exact_quote = (*line).to_string();
                     source
@@ -13878,7 +13846,6 @@ mod tests {
                         &format!("contract-evidence-{}", index + 1),
                         page,
                     );
-                    source.drafting_claim = None;
                     source.evidence.claim_text = (*line).to_string();
                     source.evidence.exact_quote = (*line).to_string();
                     source
@@ -13904,7 +13871,6 @@ mod tests {
                             &format!("contract-evidence-{ordinal}"),
                             page,
                         );
-                        source.drafting_claim = None;
                         source.evidence.claim_text = (*line).to_string();
                         source.evidence.exact_quote = (*line).to_string();
                         source
@@ -13971,56 +13937,60 @@ mod tests {
     }
 
     #[test]
-    fn general_source_catalog_does_not_offer_extracted_drafts() {
+    fn source_catalog_never_uses_extracted_drafts() {
         let (normalized, chunked) = contract_documents();
-        let original = source_catalog(&chunked, &normalized, None).unwrap();
-        let (expected_prompt, expected_schema) =
-            prompt_and_schema(SummaryProfile::General, &original).unwrap();
-        for words in [1, 55, 300] {
-            let evidence = original
-                .candidates
-                .iter()
-                .enumerate()
-                .map(|(index, candidate)| {
-                    let mut evidence = candidate.evidence.clone();
-                    evidence.claim_text = if index % 2 == 0 {
-                        format!("Draft {}.", "guidance ".repeat(words))
-                    } else {
-                        evidence.exact_quote.clone()
-                    };
-                    evidence
-                })
-                .collect();
-            let analyzed = AnalyzedDocument {
-                document_id: normalized.document_id.clone(),
-                analysis_version: ANALYSIS_VERSION.into(),
-                runtime_id: "test-runtime".into(),
-                model_id: "test-model".into(),
-                chunks: vec![ChunkAnalysis {
-                    chunk_id: chunked.chunks[0].chunk_id.clone(),
-                    summary_text: "Generated drafting guidance.".into(),
-                    source_spans: chunked.chunks[0].source_spans.clone(),
-                    evidence,
-                }],
-                warnings: Vec::new(),
-                omissions: Vec::new(),
-                inspected_pages: Vec::new(),
-            };
-            let current = source_catalog(&chunked, &normalized, Some(&analyzed)).unwrap();
-            assert!(
-                current
+        for version in [VERSION, PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION] {
+            let original =
+                source_catalog_for_synthesis_version(version, &chunked, &normalized, None).unwrap();
+            let (expected_prompt, expected_schema) =
+                prompt_and_schema_for_version(SummaryProfile::General, version, &original).unwrap();
+            for words in [1, 55, 300] {
+                let evidence = original
                     .candidates
                     .iter()
-                    .all(|source| source.drafting_claim.is_none()),
-                "new General catalogs must not carry generated drafting hints"
-            );
-            let (prompt, schema) = prompt_and_schema(SummaryProfile::General, &current).unwrap();
-            assert_eq!(
-                prompt, expected_prompt,
-                "drafts cannot alter the source request"
-            );
-            assert_eq!(schema, expected_schema);
-            assert_eq!(current.candidates, original.candidates);
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        let mut evidence = candidate.evidence.clone();
+                        evidence.claim_text = if index % 2 == 0 {
+                            format!("Draft {}.", "guidance ".repeat(words))
+                        } else {
+                            evidence.exact_quote.clone()
+                        };
+                        evidence
+                    })
+                    .collect();
+                let analyzed = AnalyzedDocument {
+                    document_id: normalized.document_id.clone(),
+                    analysis_version: ANALYSIS_VERSION.into(),
+                    runtime_id: "test-runtime".into(),
+                    model_id: "test-model".into(),
+                    chunks: vec![ChunkAnalysis {
+                        chunk_id: chunked.chunks[0].chunk_id.clone(),
+                        summary_text: "Generated drafting guidance.".into(),
+                        source_spans: chunked.chunks[0].source_spans.clone(),
+                        evidence,
+                    }],
+                    warnings: Vec::new(),
+                    omissions: Vec::new(),
+                    inspected_pages: Vec::new(),
+                };
+                let current = source_catalog_for_synthesis_version(
+                    version,
+                    &chunked,
+                    &normalized,
+                    Some(&analyzed),
+                )
+                .unwrap();
+                let (prompt, schema) =
+                    prompt_and_schema_for_version(SummaryProfile::General, version, &current)
+                        .unwrap();
+                assert_eq!(
+                    prompt, expected_prompt,
+                    "drafts cannot alter the source request"
+                );
+                assert_eq!(schema, expected_schema);
+                assert_eq!(current.candidates, original.candidates);
+            }
         }
     }
 
@@ -14299,15 +14269,10 @@ mod tests {
                 candidate.evidence.claim_text,
                 candidate.evidence.exact_quote
             );
-            assert!(candidate.drafting_claim.is_none());
         }
         for candidate in &enriched.candidates[4..] {
             assert_eq!(candidate.source_framing, None);
         }
-        assert_eq!(
-            enriched.candidates[6].drafting_claim.as_deref(),
-            Some("Later extracted claim.")
-        );
         let verification_evidence = enriched
             .candidates
             .iter()
@@ -14350,10 +14315,11 @@ mod tests {
         for source in &prompt["source_segments"].as_array().unwrap()[4..] {
             assert!(source.get("source_framing").is_none());
         }
-        assert_eq!(
-            prompt["source_segments"][6]["source_claim"],
-            "Later extracted claim."
-        );
+        assert!(prompt["source_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|source| source.get("source_claim").is_none()));
     }
 
     #[test]
@@ -15271,7 +15237,6 @@ mod tests {
             "Common Problems\n\nEmployees paid a piece rate may fall below the minimum wage."
                 .into();
         catalog.candidates[1].source_framing = Some(SourceFraming::Problem);
-        catalog.candidates[1].drafting_claim = None;
         let (general_prompt, general_schema) =
             prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
         let (story_prompt, story_schema) =

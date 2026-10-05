@@ -1,8 +1,9 @@
 # General synthesis from exact source text
 
 Status: the operator explicitly accepted this revised contract on 2026-10-05:
-"Accept the revised contract." PR122 remains draft pending implementation,
-verification and independent review. Acceptance is not implementation approval.
+"Accept the revised contract." The removal and local verification are complete.
+PR122 remains draft pending independent implementation review and CI. Acceptance
+is not implementation approval or fidelity qualification.
 
 ## Contract
 
@@ -109,7 +110,7 @@ Revised verification plan:
 
 Keep all raw evidence outside worktrees with private permissions. Existing live
 results below remain historical evidence for `a070297`, not test results for the
-pending removal.
+removal documented below.
 
 ## Evidence
 
@@ -120,7 +121,7 @@ Short-writing and field-order alternatives reduced cited-page coverage and were
 rejected. The actual worker and exact request reconstruction supplied the public
 reproduction; no private qualification input was used to tune the change.
 
-## Existing implementation and evidence (before the pending revision)
+## Earlier implementation and evidence (before the accepted revision)
 
 `source_catalog_with_furniture_policy` now omits generated drafting hints for
 new synthesis. The previous lookup, quote-equality filter and framing filter
@@ -179,19 +180,64 @@ The full clause list is untouched.
 This documentation follow-up does not rerun code tests; its Rust tree must equal
 the tested source tree above.
 
+## Accepted revision: implementation and verification
+
+The accepted revision was committed as `856937bc9db323df8d9c86baa4a403744e2bc99a`
+before further source changes. This correction removes the historical hint path
+I introduced in the previous implementation; it is one rework round.
+
+- Removed both hint fields, all constructor assignments, extracted-draft lookup,
+  equality/framing filters, General-only hint serialization, and obsolete hint
+  test assignments. No historical hint-generation branch remains.
+- Current General, Story and Contract system prompts remain byte-identical.
+  No model, settings, decoder, schema cap, C9 rules or full-clause changes.
+- The catalog regression now covers current and previous synthesis versions
+  with short, long and mixed extraction drafts. Framing, split-section, source
+  identity and saved-version checks remain.
+- The regression failed before removal with `drafts cannot alter the source
+  request`; afterward it passed. An earlier selector matched zero tests and is
+  not counted as evidence.
+- Adjacent coherent-summary tests: 97 passed, 0 failed, 11 ignored. Formatting,
+  strict all-target/all-feature Clippy and diff checks passed.
+- Two offline proof tests passed. The saved public A/B synthesis-13 views reopen
+  identically from an isolated database copy. The actual current synthesis
+  requests reproduce both persisted candidate semantic hashes exactly. The
+  source databases are unchanged, no inference ran, and temporary probe code
+  was archived and byte-restored.
+
+Durable evidence manifest alias `pr122-hint-path-removal-20261005/manifest.json`,
+SHA256 `6f7e2c6806d78bab409987d964a107b17090accbf5a447f3c75c803684ffe733`.
+It identifies the fail-before/pass-after logs, offline proof, test and lint logs.
+
+### Cold diff audit of the accepted revision
+
+| File and line | Change | Contract / evidence |
+| --- | --- | --- |
+| `summary/coherent.rs:155` | Remove optional prompt hint field and its serializer assignments | Current saved request hashes unchanged |
+| `summary/coherent.rs:2711` | Remove source candidate hint field and constructor copies | No hint storage or consumers remain |
+| `summary/coherent.rs:7620` | Remove extracted-draft lookup and historical branch at origin | Fail-before/pass-after owner regression |
+| `summary/coherent.rs:13940` | Extend regression to historical catalog; retain source/framing checks | 97 adjacent tests and saved-view proof |
+| `docs/PR-GENERAL-SOURCE-ONLY-SYNTHESIS.md:1` | Record accepted scope, correction and evidence | Source unchanged after the tested edit |
+
+Effect trace: historical drafts no longer enter requests because the catalog
+and prompt types no longer carry hints; the historical regression fails before
+and passes after. Current request hashes remain identical.
+
+Boundary probe: absent drafts, short/long drafts, mixed exact/changed draft text,
+and current/historical catalogs retain the same source evidence and schema.
+The adjacent suite retains invalid-source, framing and unknown-version checks.
+
 ## Gap audit
 
-NOT DONE. Contract acceptance is recorded. Hint-path removal and verification,
-independent implementation review, and full-document qualification remain. This
-contract commit changes documentation only; implementation follows acceptance.
+NOT DONE for merge or full-document qualification. The accepted hint-path
+removal and local proof are complete. Independent review of the new source
+head, CI and reconciliation of the open oversight thread remain.
 
-The draft-copying mechanism
-has a fail-before/pass-after regression, controlled public replay, and actual
-worker confirmation on public B. The live A/B qualification remains red because
-both fall back at comparison admission; A also retains decoder clipping.
-Independent implementation review and CI for any new source head remain required.
+The earlier live A/B qualification remains red at comparison admission, and A
+also retains decoder clipping. This cleanup does not change those outcomes or
+clear PR116's fidelity hold. No new private qualification was run.
 
 Next separate slice: reproduce the comparison enumeration/schema admission
 constraint with a small public fixture and derive an origin fix while retaining
 source ownership and bounded requests. Do not enlarge limits or tune generation
-on the held private batch. PR116 remains fidelity-held.
+on the held private batch.
