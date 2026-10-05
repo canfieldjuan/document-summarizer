@@ -1,5 +1,9 @@
 # General synthesis from exact source text
 
+Status: the operator explicitly accepted this revised contract on 2026-10-05:
+"Accept the revised contract." PR122 remains draft pending implementation,
+verification and independent review. Acceptance is not implementation approval.
+
 ## Contract
 
 Root cause: General source-catalog construction enriches authoritative quotes
@@ -23,16 +27,61 @@ Do not add a transport filter or relax completion checks.
 
 Required change surface:
 
-- Version new synthesis as 14.0.0. Keep 13.0.0 and older saved artifacts readable
-  with their existing catalog, furniture, evidence and verification behavior.
-- New General catalogs carry exact quotes, framing and governing clause context,
-  without generated drafting hints. Story and Contract request content stays the
-  same. Preserve the optional hint machinery only for historical catalog replay.
-- Remove the current path's draft lookup and framing-dependent draft suppression;
-  they remain within the historical branch because old artifacts need them.
-- Regression at the catalog owner: supplying short, long, or mixed extracted
-  drafts cannot change a new General request; source content and identifiers
-  remain intact. Historical catalogs retain their previous hints and policies.
+- Version new synthesis as 14.0.0. Retain existing saved-artifact version,
+  evidence-identity, furniture and verification validation for 13.0.0 and older.
+  This does not require rebuilding generated drafting hints.
+- Remove `SourceCandidate.drafting_claim`, `PromptSourceSegment.source_claim`,
+  their constructor/serializer assignments, and the extracted-draft lookup from
+  `src-tauri/src/pipeline/summary/coherent.rs`. Exact quotes, framing and
+  governing clause contexts remain the source catalog's content.
+- Remove the draft-versus-quote equality filter, framing-specific draft
+  suppression, General-only hint serialization branch, and test-only hint
+  assignments/assertions. Do not keep a second historical hint path.
+- Keep current General, Story and Contract request content unchanged relative
+  to published source commit `a070297`: the removed optional field already
+  serializes as absent on those current paths. Keep the General prompt wording
+  byte-identical for this cleanup; its optional-hint instructions do not require
+  hints and preserving it avoids introducing another model variable.
+- Regression at the catalog owner: supplying short, long or mixed extracted
+  drafts cannot change current or historical source evidence, request payloads
+  or schemas. Retain framing, split-section and source-order assertions when
+  removing obsolete hint expectations.
+
+### Contract revision after oversight
+
+New evidence: the branch at `coherent.rs:7770` was introduced by this slice in
+`a070297`. Its only generated-hint consumer is prompt serialization at line
+6714. Saved coherent evidence validation at lines 8067-8093 compares canonical
+`EvidenceItem` values, not `drafting_claim`. The earlier contract's claim that
+old artifacts need the hint path was unsupported.
+
+The named public reproduction is
+`public-synthesis-worker-20261005/public-worker-20261005T223251Z` (A/B), with
+request reconstruction in the sibling `reconstructed-requests.json`. That
+reconstruction runs `synthesize` at recorded source commit
+`decf41007d29edc3d12a5cc06ecb91805ab3ebe0`; it does not dispatch new synthesis by
+an artifact's saved version. The frozen comparison requests are also preserved
+in `public-synthesis-draft-guidance-20261005/cases.json`. Neither requires a
+historical hint-generation path in the new production code. Preserve those
+artifacts and commits; do not rewrite the evidence to fit the new code.
+
+Frozen replay receipts (alias and SHA256):
+
+- `public-synthesis-worker-20261005/reconstructed-requests.json`:
+  `c9d3c55a44071142219f51fc3d8ab7c47ace1a8e0554ad01c4c1643b689ef696`.
+- `public-synthesis-worker-20261005/coherent-reconstruction-probe.rs`:
+  `77cb2feb02abc9eed7e7966eee062b58209b16b19a225ad0ed119ad7e1666d2b`.
+- `public-synthesis-draft-guidance-20261005/cases.json`:
+  `f01b6efe3bf7c68e49e88cf3457eba475309f1f114443d596d1a0f2dfc538c62`.
+
+Revised root cause: copied extracted drafts caused the demonstrated synthesis
+failure. I then unnecessarily kept that behavior behind a historical-version
+branch. Remove the branch and its data fields at their owner, rather than
+adding a later suppression check.
+
+Accepted scope: the source-only origin fix plus the hint-path removal above. Acceptance permits implementation and verification of this scope; it
+is not merge approval or fidelity qualification. Independent review, CI, the
+open oversight thread and PR116's fidelity hold still apply.
 
 Explicit non-scope: no decoder ceiling, model, prompt wording, output budget,
 completion parser, deterministic trim, C9 verdict, source coverage threshold,
@@ -46,11 +95,21 @@ Assumptions/blockers: the controlled public reproduction establishes this failur
 mechanism, not a guarantee for all model outputs. Independent review, a frozen
 new candidate, and later full-document fidelity qualification remain required.
 
-Verification plan: declared fail-first owner regression; source and historical
-version tests; adjacent summary tests because version dispatch crosses the
-summary artifact boundary; formatting and strict Clippy; exact public synthesis
-request replay and a live candidate confirmation. Keep all raw evidence outside
-worktrees with private permissions. CI owns duplicate broader suites.
+Revised verification plan:
+
+- First demonstrate that a historical catalog still includes a generated hint;
+  make the owner regression fail before removal and pass afterward.
+- Check current serialized request content and schemas against the published
+  source-only candidate without new inference. Retain all framing, split-section,
+  evidence identity and historical version-pair tests.
+- Reopen copied public A/B baseline artifacts under the revised code, using
+  isolated storage, to check the retained saved-artifact validation path.
+- Run the affected summary tests, formatting and strict Clippy. CI owns duplicate
+  broader suites. No fresh private qualification or C9 change is authorized.
+
+Keep all raw evidence outside worktrees with private permissions. Existing live
+results below remain historical evidence for `a070297`, not test results for the
+pending removal.
 
 ## Evidence
 
@@ -61,7 +120,7 @@ Short-writing and field-order alternatives reduced cited-page coverage and were
 rejected. The actual worker and exact request reconstruction supplied the public
 reproduction; no private qualification input was used to tune the change.
 
-## Implementation summary
+## Existing implementation and evidence (before the pending revision)
 
 `source_catalog_with_furniture_policy` now omits generated drafting hints for
 new synthesis. The previous lookup, quote-equality filter and framing filter
@@ -103,7 +162,7 @@ The source Rust tree is `60915f3e34242bc5094d36d41745a38812935e91`.
 Public probe artifacts are durable; private qualification was not rerun or
 modified. These results do not authorize changing frozen C9 limits.
 
-## Cold diff audit
+## Existing source diff audit
 
 | File and line | Actual change and contract trace | Verification |
 | --- | --- | --- |
@@ -115,17 +174,22 @@ modified. These results do not authorize changing frozen C9 limits.
 
 Every changed source file serves the origin fix or version compatibility.
 No parser, transport, completion recovery, C9 rules, limits, model settings,
-dependencies or installed application changed. The full clause list is untouched.
+dependencies or installed application changed in the existing implementation.
+The full clause list is untouched.
 This documentation follow-up does not rerun code tests; its Rust tree must equal
 the tested source tree above.
 
 ## Gap audit
 
-NOT DONE for merge or full-document qualification. The draft-copying mechanism
+NOT DONE. Contract acceptance is recorded. Hint-path removal and verification,
+independent implementation review, and full-document qualification remain. This
+contract commit changes documentation only; implementation follows acceptance.
+
+The draft-copying mechanism
 has a fail-before/pass-after regression, controlled public replay, and actual
 worker confirmation on public B. The live A/B qualification remains red because
 both fall back at comparison admission; A also retains decoder clipping.
-Independent review and CI for the published head remain required.
+Independent implementation review and CI for any new source head remain required.
 
 Next separate slice: reproduce the comparison enumeration/schema admission
 constraint with a small public fixture and derive an origin fix while retaining
