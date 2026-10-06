@@ -1,9 +1,9 @@
 # C9: complete segments and one constrained dimension per request
 
-Status: PROPOSED. Operator acceptance is required before implementation.
-This contract is committed before any production/test changes. Acceptance must
-be recorded as operator acceptance in a separate contract commit before code;
-Codex self-acceptance is insufficient.
+Status: ACCEPTED by Juan in this chat on October 5, 2026 (America/Chicago).
+The operator accepted revision `05dd213` with the exact reply: "Accept the revised
+contract". This separate acceptance commit precedes every production/test change.
+Acceptance authorizes the declared implementation and gates, not release or merge.
 
 Base: `080197280b03746ce931d0b120c79da2b1aa2304`, the frozen failed segment
 candidate. New branch: `codex/verification-dimension-contract`. Preserve the
@@ -227,7 +227,7 @@ without moving references or labels. Existing caps can still cause fallback.
 ## Implementation summary
 
 Contract only. No source, tests, model calls, settings or remote PR state changed.
-The contract awaits explicit operator acceptance, recorded before implementation.
+Operator acceptance is recorded above before implementation; source work follows this commit.
 
 ## Cold diff audit
 
@@ -238,6 +238,6 @@ Rust tree to the frozen base. No code tests are warranted for this doc-only diff
 
 ## Gap audit
 
-NOT DONE for implementation or qualification. Required next step is operator
-acceptance of this combined contract. Both previous candidates remain failed and
+NOT DONE for implementation or qualification. Operator acceptance is recorded;
+the next step is the declared fail-first regressions and origin fixes. Both previous candidates remain failed and
 frozen. No review thread is resolved by a proposed contract; PR116 stays held.
