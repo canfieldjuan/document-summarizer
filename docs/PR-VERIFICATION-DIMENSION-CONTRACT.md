@@ -90,8 +90,8 @@ paragraph cut within 240 scalars. If no such cut can bound the next piece, try
 the furthest comma or coordinating-conjunction boundary within that target.
 
 The fallback is lexical and source-independent: a comma must be followed by
-whitespace; a conjunction is a complete word (`and`, `or`, `but`, `nor`, `for`,
-`yet`, `so`, matched case-insensitively without rewriting text). Split after a
+whitespace; a conjunction is a complete word (`and`, `or`, `but`, `nor`,
+matched case-insensitively without rewriting text). Split after a
 comma or before the conjunction, preserving all punctuation and conjunction
 text on one side. Do not split inside words, numbers or substrings. These cuts
 are packing boundaries, not assertions that each piece is a complete proposition.
@@ -188,7 +188,14 @@ whole-document fallback and issue123's resume identity remain separate.
    regressions. Re-run all six saved public B inputs: target all six admitted;
    for each remaining rejection report the input alias, dimension and cause.
    Preflight success alone does not prove grammar execution or fidelity.
-5. Freeze candidate source, prompts, scorer, original references, model identity
+5. Before any live probe or control call, run the static catalog coverage check
+   against every recorded C9 passage in the four approved controls. Each exact
+   reference must fit inside one available piece on its original side, at the
+   scorer's existing token boundaries. A split reference fails the gate before
+   inference; do not join pieces, move cuts for that case, or drop a reference
+   from the denominator. Preserve the complete per-reference report. This
+   admission/coverage proof must use the final splitter that will be frozen.
+6. Freeze candidate source, prompts, scorer, original references, model identity
    and settings before inference. Actual native and gateway grammar probes are
    a prerequisite to the control run. Include public valid shapes and requests
    that explicitly ask for prohibited list/relation combinations. Preserve the
@@ -196,7 +203,7 @@ whole-document fallback and issue123's resume identity remain separate.
    the grammar/converter boundary where supported, not merely Rust rejection
    after generation. If enforcement cannot be established on either runtime,
    stop and record it; no unconstrained retry or field-order workaround.
-6. Run each of the four approved gateway controls three times with the frozen
+7. Run each of the four approved gateway controls three times with the frozen
    9B settings, seed and output allowance. Each repetition has a fresh run owner
    so gateway memoization cannot substitute an old result. Each complete control
    requires four dimension requests: 12 planned control runs and 48 planned
@@ -205,13 +212,13 @@ whole-document fallback and issue123's resume identity remain separate.
    Complete the prescribed repetitions without changing the candidate; no retry
    replaces a failed attempt. Report actual calls and latency per dimension,
    per control and overall, including added cost relative to one-request C9.
-7. Every run must pass verdict parity, exact owned membership, valid shapes and
+8. Every run must pass verdict parity, exact owned membership, valid shapes and
    containment of every recorded C9 passage in its original dimension/side.
    The recorded bytes must fit within one selected piece at token boundaries;
    no concatenation or prefix credit. Report exact phrase matches and extra text
    separately. Zero wrong approvals across all runs is mandatory. A single
    failed run fails the candidate; no averaging, relabeling, tuning or ID switch.
-8. Freeze and report the outcome. Passing development controls do not lift the
+9. Freeze and report the outcome. Passing development controls do not lift the
    PR116 hold: full public A/B worker proof, independent review and unseen
    qualification still remain. Failed controls are preserved, not tuned against.
 
@@ -241,3 +248,10 @@ Rust tree to the frozen base. No code tests are warranted for this doc-only diff
 NOT DONE for implementation or qualification. Operator acceptance is recorded;
 the next step is the declared fail-first regressions and origin fixes. Both previous candidates remain failed and
 frozen. No review thread is resolved by a proposed contract; PR116 stays held.
+
+## Accepted amendment during implementation
+
+The operator requested a static recorded-passage coverage gate before the live
+run and offered a narrower conjunction list. Both are incorporated above before
+candidate freeze or inference. The conjunction vocabulary is now only and/or/
+but/nor. This amendment does not relax labels, passage boundaries or live gates.
