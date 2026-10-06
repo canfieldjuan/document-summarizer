@@ -1,6 +1,6 @@
-# Proposed C9 per sentence verification contract
+# Accepted C9 per sentence verification contract
 
-Status: PROPOSED, not accepted. This commit records the contract only. The operator must accept this exact revision before implementation or inference, and that acceptance must be recorded separately before code. Direction to write the contract is not acceptance.
+Status: ACCEPTED WITH AMENDMENT. On 2026-10-06 the operator accepted the published contract with a higher call limit, then explicitly selected "128 calls / 32 sentences (recommended)". This separate contract commit records that acceptance before implementation. The amendment changes only the C9 comparison-call ceiling; the qualification and operator release holds remain.
 
 This proposal follows [issuecomment-6020285805](https://github.com/canfieldjuan/document-summarizer/pull/116#issuecomment-6020285805). It supersedes the uncommitted proposal in issuecomment-6019175152, which incorrectly retained the failed trial's replacement instruction. That instruction is excluded here. The failed trial and its evidence remain preserved.
 
@@ -23,26 +23,26 @@ The implementation base is `3ccf3be8a59c2999c3d1e82e38facad4b7d6ffe4`, a descend
 
 ## Request count and latency report
 
-`summary.rs::MAX_VERIFICATION_BATCHES` is 64. Four dimension requests per unit give a theoretical ceiling of 16 C9 comparison units. `summary/coherent.rs::MAX_SUMMARY_CLAIMS` separately caps coherent summary units at eight. Analysis, synthesis and ledger verification are additional calls outside the C9 plan count.
+The existing shared `summary.rs::MAX_VERIFICATION_BATCHES` is 64 and also bounds legacy verification and Contract material coverage. Preserve that shared ceiling for those paths. Give the C9 comparison planner and its plan validator one protocol-owned ceiling of 128 comparison calls, consumed by both checks. `summary/coherent.rs::MAX_SUMMARY_CLAIMS` separately caps coherent summary units at eight. Analysis, synthesis and ledger verification are additional calls outside the C9 plan count.
 
-With sentence counts S1 through Sn, comparison calls become `4 * sum(Si)`. The unchanged cap permits at most 16 sentence claims across the document. Preserve the existing cap owner; do not reset the budget for each parent, partition an oversized document into separate admitted plans, truncate it or silently raise a limit. Whole-document fallback remains outside this contract under issue #124.
+With sentence counts S1 through Sn, comparison calls become `4 * sum(Si)`. The accepted C9 cap permits at most 32 sentence claims across the document. The operator reported A has nine sentences (36 calls) and B has 24 sentences (96 calls); these counts must still be measured through the shared sentence owner before sampling. Do not reset the budget for each parent, partition an oversized document into separate admitted plans, truncate it or raise another limit. Whole-document fallback remains outside this contract under issue #124.
 
 After acceptance and static implementation, but before any live generation, produce a frozen cost report containing:
 
 - Each public A/B unit's exact sentence ranges, sentence count, original call count, proposed call count and total per document.
-- Every required worker/control projection's claim/source size, actual prompt size, schema size, native/gateway admission and rejection reason. State explicitly whether all of full A and full B fit existing caps. Check all original control reference passages against the eligible sentence/source catalogs.
+- Every required worker/control projection's claim/source size, actual prompt size, schema size, native/gateway admission and rejection reason. State explicitly whether all of full A and full B fit the amended C9 cap and unchanged input/runtime caps. Check all original control reference passages against the eligible sentence/source catalogs.
 - A latency estimate per unit, per document and for the full planned experiment, using recorded `4c8b9dc` baseline request timings. Identify the timing field, sample count and observed spread; separate queue/transport time where the receipt permits. This is an estimate, not measured sentence-run latency. Do not use the failed replacement-prompt trial as the latency baseline. If baseline timings cannot support an estimate, report that limitation before sampling; do not create an extra warm-up or pilot run.
 - The exact maximum generation-call count, frozen input/seed/runtime identities, and execution order. Actual per-request, sentence, parent and document elapsed times must be retained during the run and compared with the estimate.
 
-Actual sentence counts and expanded latency are not yet measured. If any required A/B document or control fails static coverage or admission, stop before live sampling and report the blocker. A cap increase or scope reduction requires a separate operator decision; neither is authorized here.
+Actual sentence counts and expanded latency are not yet measured. If any required A/B document or control fails static coverage or admission, stop before live sampling and report the blocker. Any further cap increase or scope reduction requires a separate operator decision. The accepted 128-call ceiling bounds comparison requests only; it is not a promise that the document fits input/runtime admission or a measured latency guarantee.
 
 ## Explicit non-scope
 
-No prompt revision, evidence-ID selection protocol, free copied quotes, fuzzy matching, verdict rewrite, synthesis/source-selection fix, model/template/thinking/settings change, label change, cap increase, public API or storage change, dependency change, UI change, deployment or merge. No production activation or historical artifact reinterpretation. Issues #123 and #124 are out of scope. No private or unseen documents enter this development experiment. No unrelated tests or formatting change.
+No prompt revision, evidence-ID selection protocol, free copied quotes, fuzzy matching, verdict rewrite, synthesis/source-selection fix, model/template/thinking/settings change, label change, limit increase beyond the accepted C9 call ceiling, public API or storage change, dependency change, UI change, deployment or merge. No production activation or historical artifact reinterpretation. Issues #123 and #124 are out of scope. No private or unseen documents enter this development experiment. No unrelated tests or formatting change.
 
 ## Assumptions and blockers
 
-- Operator acceptance of this committed revision is required. The earlier instruction-trial acceptance does not authorize this experiment.
+- The operator accepted the sentence contract and explicitly selected the 128-call amendment before implementation. The earlier instruction-trial acceptance is not used as authorization.
 - The public nine-unit parent labels are fixed. They do not provide independent sentence labels. Report each sentence's text, dimension relations and derived verdict without inventing new gold labels.
 - Cross-sentence references must remain interpretable through retained context. Unresolved meaning remains Ambiguous; do not borrow support from another sentence. The context projection is an explicit proposed change and must be included in review and admission proof.
 - The production gate and [operator hold](https://github.com/canfieldjuan/document-summarizer/pull/116#discussion_r4196409571) remain. Development success does not establish full-worker delivery or unseen qualification, and only the operator clears the hold.
@@ -52,7 +52,7 @@ No prompt revision, evidence-ID selection protocol, free copied quotes, fuzzy ma
 1. Record explicit acceptance in a separate contract commit before code. Preserve the frozen candidate, failed trial, public source artifacts and independent labels. Reconstruct baseline requests with the production owners and compare all instruction components with `4c8b9dc`.
 2. Prove the shared helper preserves old evidence catalogs and schemas on all existing segment regressions: abbreviations, decimals, Unicode terminals and closers, line breaks, whitespace, long sentences and unsplittable fallback. Add public reconstruction/ownership tests for empty, single, multiple and repeated sentences. Do not merge identical sentences or derive identity solely from their text.
 3. Reproduce the parent-coverage failure with a public scripted result where a wrong first, middle or last sentence is hidden by a supported sibling. Before parent aggregation this must fail the expected verdict; afterwards it must withhold the complete parent. Cover uncertain/all-not-applicable siblings, missing/duplicate/foreign results and interruption between dimension or sentence requests. Reuse the production four-dimension parser and aggregation; no parallel semantic parser.
-4. Test document admission at 15, 16 and 17 sentences, including uneven distribution across parents. Rejection must precede every generation call. Retain the 4096/4097 combined-input boundary and both runtime schema limits under the actual parent-context projection. Report measured native and gateway maxima. Complete the cost report and static passage-containment pre-check before generation.
+4. Test C9 document admission at 31, 32 and 33 sentences, including uneven distribution across parents, empty plans and a single sentence. Prove the formerly rejected 24-sentence/96-call document is admitted and the legacy/Contract 64-call ceiling is unchanged. Rejection must precede every generation call. Retain the 4096/4097 combined-input boundary and both runtime schema limits under the actual parent-context projection. Report measured native and gateway maxima. Complete the cost report and static passage-containment pre-check before generation.
 5. Run the existing native and gateway grammar probes on the sentence schema projections before semantic sampling. Preserve relation-shape negatives and all unchanged transport boundaries. Check the installed gateway, running process and every completion against the deployment receipt. Capture all raw requests, responses, errors, sizes and exposed provenance with fresh durable ownership.
 6. Freeze and run the nine labelled parent units once in A1 through B6 order, sentences in source order and dimensions in their existing order. Use each input's original seed, fixed model and settings. Any invalid response, runtime failure or completed-parent label disagreement stops the entire run immediately. Do not complete more units, rerun, tune or relabel after a failure.
 7. Only after that worker pass is clean, run each of the four original controls three times through the same sentence path and original control seed. Require exact parent-verdict parity, owned passage membership and complete containment of the recorded C9 passages within the selected pieces. Stop on the first failure here too. There are no additional worker repetitions or diagnostic model calls in this contract.
@@ -61,14 +61,14 @@ No prompt revision, evidence-ID selection protocol, free copied quotes, fuzzy ma
 
 ## Implementation summary
 
-This change adds only this proposed contract. No sentence-helper extraction, orchestration, scorer, fixture, production change or inference is implemented. The earlier local proposal and failed trial remain immutable evidence.
+This commit records only the contract acceptance and call-ceiling amendment. No sentence-helper extraction, orchestration, scorer, fixture, production change or inference is implemented. The earlier local proposal and failed trial remain immutable evidence.
 
 ## Cold diff audit
 
-`docs/PR-C9-SENTENCE-VERIFICATION.md` is the sole intended repository change. It corrects the baseline/instruction choice, defines the sentence owner and parent verdict rule, adds the required cost report and grammar/control gates, and preserves acceptance and release boundaries. Verify a documentation-only diff against `3ccf3be` and that no source, tests, fixtures, dependencies or configuration changed. Code tests are not rerun for this proposal.
+`docs/PR-C9-SENTENCE-VERIFICATION.md` is the sole intended repository change. The acceptance amendment scopes the increase to C9, sets its ceiling to 128 calls/32 sentences, and revises the boundary proof. Verify a documentation-only diff against `f8930a600dbf90d9541742e6275d9c19c14a33e6` and that no source, tests, fixtures, dependencies or configuration changed. Code tests are not rerun for this amendment.
 
 ## Gap audit
 
 NOT DONE
 
-Implementation remains blocked on operator acceptance of this committed contract. Sentence counts, cost/latency estimates, admission, grammar, development semantics, full-worker proof and unseen qualification remain unproven. Contract preparation is complete only after its committed contents and publication are verified.
+Acceptance is recorded; implementation and verification remain outstanding. Sentence counts, cost/latency estimates, admission, grammar, development semantics, full-worker proof and unseen qualification remain unproven. The next step is implementation under this accepted contract.
