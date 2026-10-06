@@ -295,6 +295,8 @@ fn c9_recorded_controls_fit_segments_and_keep_relation_aggregation() {
         assert_eq!(batches.len(), 4);
         for (dimension, batch) in batches.iter().enumerate() {
             let request = verification_request(batch, dimension as u32, 7);
+            let projected = fixture_verification_prompt(&request.user_prompt).unwrap();
+            assert_eq!(projected.claims.len(), 1);
             assert_eq!(request.max_output_tokens, 4096);
             let prepared = batch.comparison.as_ref().unwrap();
             let mut wire: Value = serde_json::from_str(&request.user_prompt).unwrap();

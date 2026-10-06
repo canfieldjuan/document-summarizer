@@ -2788,6 +2788,7 @@ enum FallbackReason {
     RequestTooLarge,
     VerificationRequestTooLarge,
     VerificationUnavailable,
+    VerificationUnqualified,
     DeliveryCoverage,
     ModelOutputInvalid,
 }
@@ -2797,6 +2798,7 @@ impl FallbackReason {
         match self {
             Self::ModelOutputInvalid => MODEL_OUTPUT_INVALID_WARNING_CODE,
             Self::VerificationUnavailable => "COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE",
+            Self::VerificationUnqualified => "COHERENT_SUMMARY_VERIFICATION_UNQUALIFIED",
             _ => FALLBACK_WARNING_CODE,
         }
     }
@@ -2814,6 +2816,9 @@ impl FallbackReason {
             }
             Self::VerificationUnavailable => {
                 "The selected model service does not support comparison verification; showing verified source claims instead"
+            }
+            Self::VerificationUnqualified => {
+                "General coherent verification has not passed qualification; showing verified source claims instead"
             }
             Self::ModelOutputInvalid => {
                 "The model's summary output was invalid; showing verified source claims instead"
@@ -2931,6 +2936,15 @@ fn synthesize_with_delivery_coverage(
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
         Ok(result)
     };
+    if profile == SummaryProfile::General && !comparisons::candidate_enabled() {
+        return finish(fallback_document(
+            runtime,
+            analyzed,
+            chunked,
+            ledger_claims,
+            FallbackReason::VerificationUnqualified,
+        )?);
+    }
     let catalog =
         source_catalog_for_profile(profile, VERSION, chunked, normalized, Some(analyzed))?;
     if incomplete_catalog_requires_fallback(profile, &catalog) {
@@ -7820,6 +7834,17 @@ pub(super) fn validate_for_runtime(
     if actual != expected.as_ref().into_iter().collect::<Vec<_>>() {
         return Err(invalid_document());
     }
+    if has_fallback_warning(synthesized, FallbackReason::VerificationUnqualified) {
+        if profile != SummaryProfile::General
+            || synthesized.synthesis_version != VERSION
+            || synthesized.presentation_mode != SummaryPresentationMode::ClaimLedgerFallback
+        {
+            return Err(invalid_document());
+        }
+        // Qualification admission precedes catalog construction and budgeting.
+        // Validate the fallback's owned evidence without re-entering C9 planning.
+        return validate_content(synthesized, analyzed, chunked, normalized);
+    }
     let catalog = source_catalog_for_profile(
         profile,
         &synthesized.synthesis_version,
@@ -8100,6 +8125,7 @@ fn fallback_warning(synthesized: &SynthesizedDocument) -> Option<&PipelineWarnin
             FALLBACK_WARNING_CODE
                 | MODEL_OUTPUT_INVALID_WARNING_CODE
                 | "COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE"
+                | "COHERENT_SUMMARY_VERIFICATION_UNQUALIFIED"
         )
     });
     let warning = warnings.next()?;
@@ -8108,6 +8134,7 @@ fn fallback_warning(synthesized: &SynthesizedDocument) -> Option<&PipelineWarnin
         FallbackReason::RequestTooLarge,
         FallbackReason::VerificationRequestTooLarge,
         FallbackReason::VerificationUnavailable,
+        FallbackReason::VerificationUnqualified,
         FallbackReason::DeliveryCoverage,
         FallbackReason::ModelOutputInvalid,
     ]

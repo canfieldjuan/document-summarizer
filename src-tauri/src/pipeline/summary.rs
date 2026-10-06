@@ -872,6 +872,16 @@ pub(crate) fn complete_verified_document_with_delivery(
                 run_id: run_id.to_string(),
             },
         )?;
+    if comparisons::applies(summary_profile, &persisted_synthesis) {
+        if let Err(failure) = comparisons::require_candidate_enabled() {
+            return Err(persist_final_failure(
+                conn,
+                run_id,
+                run.state_version,
+                failure,
+            ));
+        }
+    }
     if coherent_checkpoint_requires_retry(
         &persisted_synthesis,
         Some(&verified.verification_version),
@@ -1285,6 +1295,9 @@ fn verify(
     cancellation_checkpoint(control, PipelineStage::Verify)?;
     validate_synthesized_document_without_runtime(synthesized, analyzed, chunked, normalized)?;
     coherent::validate_model_output_fallback_boundary(summary_profile, synthesized)?;
+    if comparisons::applies(summary_profile, synthesized) {
+        comparisons::require_candidate_enabled()?;
+    }
     let ledger_evidence = analyzed
         .chunks
         .iter()
@@ -5546,7 +5559,17 @@ fn fixture_claim_groups(item_count: usize, claim_count: usize) -> Vec<Vec<usize>
 fn fixture_verification_prompt(text: &str) -> serde_json::Result<VerificationPrompt> {
     let mut wire: Value = serde_json::from_str(text)?;
     if let Some(object) = wire.as_object_mut() {
-        object.remove("clause_contexts");
+        // Shared scripted-verdict fixtures consume the claim projection for
+        // both the ledger and dimension protocols. Decoder catalogs/dimension
+        // are tested by the comparison fixtures, not VerificationPrompt.
+        for key in [
+            "clause_contexts",
+            "source_segments",
+            "claim_segments",
+            "dimension",
+        ] {
+            object.remove(key);
+        }
     }
     if let Some(claims) = wire["claims"].as_array_mut() {
         for claim in claims {
@@ -11928,7 +11951,8 @@ mod tests {
             SummaryPresentationMode::Coherent
         );
         assert_eq!(runtime.synthesis_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
+        // One ledger request plus all four comparison dimensions; no retry.
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 5);
         assert_eq!(verified.synthesis_attempt_ordinal, 0);
         assert_eq!(verified.claims, vec![synthesized.claims[0].clone()]);
         assert_eq!(verified.claim_verifications.len(), synthesized.claims.len());
@@ -12749,7 +12773,8 @@ mod tests {
         let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
         let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
         assert_eq!(runtime.synthesis_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
+        // One ledger request plus all four comparison dimensions; no retry.
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 5);
         assert_eq!(verified.synthesis_attempt_ordinal, 0);
         assert_eq!(verified.claims, vec![synthesized.claims[0].clone()]);
         assert_eq!(verified.claim_verifications.len(), synthesized.claims.len());
@@ -12798,7 +12823,8 @@ mod tests {
             .unwrap()
             .expect("the failed verification attempt must remain auditable");
         assert_eq!(runtime.synthesis_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
+        // One ledger request plus all four comparison dimensions; no retry.
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 5);
         assert_eq!(verified.claims, vec![synthesized.claims[0].clone()]);
         assert!(verified.summary_claims.is_empty());
         assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
@@ -12834,7 +12860,8 @@ mod tests {
             .iter()
             .any(|warning| warning.code == "SEMANTIC_CLAIMS_WITHHELD"));
         assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
-        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
+        // One ledger request plus all four comparison dimensions; no retry.
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 5);
     }
 
     #[test]

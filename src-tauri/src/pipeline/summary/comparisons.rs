@@ -27,6 +27,27 @@ pub(super) fn applies(profile: SummaryProfile, synthesized: &SynthesizedDocument
         && coherent_synthesis_uses_clause_verification(&synthesized.synthesis_version)
 }
 
+// The candidate has not passed the fidelity gate. Keep qualification possible
+// in unit-test binaries, but provide no feature, setting or runtime opt-in in
+// an ordinary library/application build. `applies` remains a format predicate:
+// disabling it would silently send pending C9 prose through an older verifier.
+pub(super) fn candidate_enabled() -> bool {
+    cfg!(test)
+}
+
+pub(super) fn require_candidate_enabled() -> Result<(), PipelineFailure> {
+    if candidate_enabled() {
+        Ok(())
+    } else {
+        Err(stage_failure(
+            PipelineStage::Verify,
+            "VERIFICATION_NOT_QUALIFIED",
+            "General coherent verification has not passed qualification; retry to use verified source claims",
+            true,
+        ))
+    }
+}
+
 fn too_large() -> PipelineFailure {
     stage_failure(
         PipelineStage::Verify,
@@ -457,6 +478,7 @@ pub(super) fn plan(
     claims: &[CitedClaim],
     claim_budget: usize,
 ) -> Result<Vec<VerificationBatch>, PipelineFailure> {
+    require_candidate_enabled()?;
     validate_verification_claim_catalog(prompt, claims, claim_budget)?;
     if !runtime.supports_response_schema(SCHEMA_NAME) {
         return Err(stage_failure(

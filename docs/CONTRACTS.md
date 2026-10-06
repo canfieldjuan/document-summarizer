@@ -683,14 +683,21 @@ ledger claims available as supporting detail.
 
 ### General prose comparison verification
 
-This is an unqualified local candidate. Its static recorded-passage gate and
-native converter matrix pass, but the installed gateway rejects the combined
-root-choice/shared-definition schema and still limits passage enums to 240
-characters. No live control run or runtime admission qualification has occurred
-for this candidate; PR116 remains held. See
+This is an unqualified candidate. Ordinary library/application builds, including
+all-feature builds, cannot enable it through runtime capabilities, settings or
+environment. General synthesis uses the verified-source-claim fallback before
+drafting and discloses `COHERENT_SUMMARY_VERIFICATION_UNQUALIFIED`. Pending
+coherent checkpoints stop with `VERIFICATION_NOT_QUALIFIED` before verification
+inference or new artifact completion; completed historical results remain readable.
+Only unit-test/qualification binaries (`cfg(test)`) can exercise the candidate.
+See [the activation gate](PR-C9-QUALIFICATION-GATE.md).
+
+The corrected gateway admitted the frozen candidate and the approved development
+controls passed. The later full public worker proof failed, so PR116 remains held.
+This activation fix makes no semantic qualification claim. See
 [the accepted contract](PR-VERIFICATION-DIMENSION-CONTRACT.md).
 
-General coherent prose from synthesis 12.0.0, 13.0.0 or 14.0.0 uses comparison
+Within qualification binaries, General coherent prose from synthesis 12.0.0, 13.0.0 or 14.0.0 uses comparison
 verification 15.0.0 with schema `document_claim_comparisons_v4`. The source-owned clause builder supplies complete governing
 text; where it has no larger clause, the original exact quotation is the context.
 Each request contains one claim, its own deduplicated source contexts, and local
@@ -734,10 +741,11 @@ above and declares `bounded_source_passages_v1`; its bounded context allocation
 comes from the server. The selected task, context and profile fingerprint persist
 in the run snapshot. Resumed runs keep that original profile and request identity.
 Both request construction and comparison planning consume the selected capability.
-Version-1 General synthesis selects the claim-ledger fallback before drafting,
+Within qualification binaries, version-1 General synthesis selects the claim-ledger fallback before drafting,
 with `COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE`; this cannot count as C9
 qualification. Version-2 support alone is also not qualification: full-app and
-fidelity gates remain. Native runtimes retain comparison verification. The named comparison schema has the larger native
+fidelity gates remain. Native qualification runtimes retain comparison verification. Ordinary
+builds select the unqualified fallback regardless of protocol support. The named comparison schema has the larger native
 allowance; other native schemas retain 64 KiB. Prompt/context admission and the
 4,096-token response allowance also apply. The same prepared request plan serves
 admission and execution. The 64-request cap now admits at most 16 complete claim

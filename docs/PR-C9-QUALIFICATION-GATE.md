@@ -3,14 +3,16 @@
 Authority: operator request, "Address those open blockers." This is the requested safety/publication fix, not acceptance of the deferred prompt trial.
 
 ## Root cause
+
 - P1: General coherent admission selects an unqualified comparison protocol without an activation gate. The local worker proof has semantic failures. A PR hold does not prevent ordinary binaries from using that code.
 - P2: published head 49e22a7e3422c42ef4202d5048b15e1693ff119f still enumerates token-aligned substrings. The already accepted segment implementation at 4c8b9dc75f1b38f39eb8a9b681b8c04ff8413da6 is six commits ahead and has not been published there. The existing frozen implementation and its prior evidence are preserved.
 
 ## Required change surface
+
 - Start an isolated branch from frozen 4c8b9dc and fast-forward the PR with its accepted segment implementation plus the gate.
 - Keep the unqualified C9 path available only to Rust unit-test/qualification binaries (cfg(test)); ordinary library/application builds, including all-feature builds, cannot enable it via settings, environment or features. Existing ignored qualification tests remain explicitly opt-in.
 - Gate at General synthesis admission before drafting, using the existing verified-source-claim fallback with a distinct truthful warning. Preserve subsequent source-claim verification.
-- Gate pending General coherent verification before any inference. Block directly planned C9 requests too. Do not downgrade to an older prose verifier or rewrite a semantic verdict.
+- Gate pending General coherent verification before any inference and already-verified pending checkpoints before new artifact completion. Block directly planned C9 requests too. Do not downgrade to an older prose verifier or rewrite a semantic verdict.
 - Preserve reads of completed historical artifacts. Keep source extraction, Story, Connect's existing direct-General delivery path, models, prompts, schemas, caps and labels unchanged.
 - Add integration regressions that link the ordinary library (without cfg(test)) even under cargo test --all-features. This is essential: the existing unit tests exercise the candidate and cannot by themselves prove the production gate.
 
@@ -21,6 +23,7 @@ No fidelity claim, live inference, prompt experiment, new model, cap increase, d
 The gate is a safety stop pending qualification, not a fix to the model's semantic decisions. There is no production opt-in. A later qualified activation requires a separate accepted change. The failed candidate and all its raw outputs stay immutable.
 
 ## Verification plan
+
 1. Fail-first ordinary-library integration test: General synthesis must select the disclosed verified-source fallback with zero synthesis/comparison requests. On the frozen candidate it instead drafts coherent prose; retain that expected failure.
 2. Same input passes after gating, proceeds through source-claim verification, saves and reopens identically without emitting the comparison version. Pending coherent checkpoint fails before any model request. Completed historical coherent artifacts remain readable.
 3. Positive boundary: unit-test qualification remains available; replay/segment/admission regressions pass, including exact source preservation and overflow boundaries. Negative boundary: ordinary library remains gated with all Cargo features and maliciously permissive model responses.
@@ -28,10 +31,37 @@ The gate is a safety stop pending qualification, not a fix to the model's semant
 5. Cold audit, publish by normal fast-forward, update PR documentation to distinguish candidate from qualified production. Resolve only these code defects after the published head contains their fixes; preserve the separate release/fidelity hold. Record the exact head and defer the next PR check for fifteen minutes.
 
 ## Implementation summary
-Pending. No new semantic fix is claimed.
+The shared comparison owner now permits the candidate only under cfg(test). General synthesis uses a distinct disclosed source-claim fallback before catalog construction or drafting. Pending coherent verification and final completion use the same activation decision. The protocol predicate stays separate so disabling activation cannot silently select an older prose verifier. Direct comparison planning also rejects ordinary builds.
+
+The accepted segment implementation is included through ancestry from 4c8b9dc. It replaces the substring enumeration at its owner. The old nested token-window enumeration and enum-cardinality escape are removed; exact membership, input/schema limits and semantic aggregation remain. This gate change introduces no new text re-scan or heuristic.
+
+Our earlier segment revision also left shared scripted fixtures expecting the old prompt projection and request count. The test-only adapter now handles the dimension metadata; four callers expect one ledger request plus four dimension requests. Production response validation is unchanged.
+
+Local proof:
+- Three activation regressions failed before their origin fixes: synthesis reached the runtime, pending verification reached inference, and a Verified checkpoint created a new summary.
+- Five ordinary-library integration regressions pass with all features: those three boundaries, unsupported source claims withheld, and completed historical workspace views reopened identically.
+- Summary module: 371 passed, 18 opt-in tests ignored, including Story, Contract, source verification, segment/parser boundaries and historical artifacts.
+- Segment planner admits 4096 combined characters and rejects 4097 under both runtime schema limits. Qualification unit tests still run; no live model calls were made.
+- Frontend build, cargo fmt check and strict all-target/all-feature clippy pass.
+
+No new semantic fix or qualification is claimed.
 
 ## Cold diff audit
-Pending implementation and focused proof.
+- `summary/comparisons.rs:34,38,481`: shared activation decision and planner admission. No setting, feature or environment opt-in exists in ordinary builds.
+- `summary/coherent.rs:2939,7837`: gate before source catalog/drafting; validate the new fallback as owned source claims. The new warning has a distinct qualification explanation.
+- `summary.rs:875,1298`: saved protocol metadata gates verification and completion, before model inference or new output artifacts. Completed workspace reads are not changed.
+- `summary.rs:5559` and its four scripted call-count assertions: test-only projection/caller repairs required by the inherited dimension protocol. `comparisons/tests.rs` exercises the shared adapter for each recorded dimension.
+- `tests/c9_production_gate.rs:139,180,261,276,290` and `tests/fixtures/c9-public-checkpoint.json`: public fixture, ordinary-library proof and historical workspace reload. The fixture comes from scripted pre-fix public pipeline calls, not semantic model evidence.
+- `docs/CONTRACTS.md` and this contract: truthful current activation/status documentation. Existing accepted segment/dimension contract history remains intact.
+
+boundary-probe: ordinary builds reject C9 despite a runtime advertising every schema; supported source claims still save/reopen and unsupported source claims save no result. Both pending checkpoint stages stop; completed historical workspace reads succeed. Unit qualification remains available. Existing invalid/partial/wrong-side/duplicate segment tests and 4096/4097 input boundaries pass. The activation decision has no falsy/default input.
+
+effect-trace: prevent unqualified General prose delivery | shared activation decision at synthesis, verification, planning and final completion | three fail-before regressions now pass in the ordinary library with all features; no synthesis/C9 request or new unqualified result escapes. Source-claim verification and historical reads remain exercised.
 
 ## Gap audit
-NOT DONE. Runtime gate, ordinary-library regressions and publication remain.
+DONE for implementation and local proof. The publication receipt must identify the pushed head; this document is not a claim that unpublished code resolved a thread. Exact-head CI/review and semantic qualification remain separate open gates. PR116 remains on fidelity/release hold; no merge or installed-app promotion.
+
+## Contract revision from code inspection
+`complete_verified_document_with_delivery` can complete a saved Verified checkpoint without calling verification again. Apply the same activation decision there before creating artifacts. This consumes the saved protocol/presentation metadata, preserves completed reads, and closes the same unqualified-output blocker. Add a fail-first regression restored to the recorded Verified transition.
+
+The adjacent scripted-verdict caller also reproduced an inherited segment-candidate fixture defect: the shared test-only VerificationPrompt adapter rejected claim_segments/dimension metadata. Update that adapter at its owner, keep production strict parsing unchanged, and cover every dimension through the existing recorded-control regression. Adjacent callers must pass before publication.
