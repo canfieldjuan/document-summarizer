@@ -5567,6 +5567,7 @@ fn fixture_verification_prompt(text: &str) -> serde_json::Result<VerificationPro
             "source_segments",
             "claim_segments",
             "dimension",
+            "parent_claim_context",
         ] {
             object.remove(key);
         }

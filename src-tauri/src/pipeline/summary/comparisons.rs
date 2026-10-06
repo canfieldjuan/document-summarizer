@@ -1,11 +1,13 @@
 //! Bounded, source-owned C9 comparisons for General prose verification.
 use super::*;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 pub(super) const SCHEMA_NAME: &str = crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME;
 const MAX_INPUT_CHARACTERS: usize = 4096;
 const MAX_SPAN_CHARACTERS: usize = 240;
 const MAX_SPANS: usize = 4;
+const MAX_COMPARISON_CALLS: usize = 128;
 const DIMENSIONS: [&str; 4] = ["stage", "conditions", "qualifiers", "scope"];
 const DIMENSION_DEFINITIONS: [&str; 4] = [
     "Stage means the event or lifecycle point to which the claim assigns an action or consequence.",
@@ -105,7 +107,7 @@ fn trimmed_range(text: &str, start: usize, end: usize) -> Option<(usize, usize)>
     (left < right).then_some((left, right))
 }
 
-fn segment_ranges(text: &str) -> Result<Vec<(usize, usize)>, PipelineFailure> {
+fn sentence_ranges(text: &str) -> Vec<(usize, usize)> {
     let mut sentences = Vec::new();
     let mut start = 0;
     for (offset, c) in text.char_indices() {
@@ -139,11 +141,15 @@ fn segment_ranges(text: &str) -> Result<Vec<(usize, usize)>, PipelineFailure> {
     if start < text.len() {
         sentences.push((start, text.len()));
     }
+    sentences
+        .into_iter()
+        .filter_map(|(start, end)| trimmed_range(text, start, end))
+        .collect()
+}
+
+fn segment_ranges(text: &str) -> Result<Vec<(usize, usize)>, PipelineFailure> {
     let mut pieces = Vec::new();
-    for (start, end) in sentences {
-        let Some((mut start, end)) = trimmed_range(text, start, end) else {
-            continue;
-        };
+    for (mut start, end) in sentence_ranges(text) {
         if text[start..end].chars().count() <= MAX_SPAN_CHARACTERS {
             pieces.push((start, end));
             continue;
@@ -234,36 +240,78 @@ pub(super) struct Prepared {
     pub(super) schema: Value,
     source_spans: BTreeSet<String>,
     claim_spans: BTreeSet<String>,
+    sentence: Option<SentenceAssociation>,
+}
+
+#[derive(Debug)]
+struct ParentSentences {
+    claim: CitedClaim,
+    ranges: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Clone)]
+struct SentenceAssociation {
+    document: Arc<Vec<ParentSentences>>,
+    parent: usize,
+    ordinal: usize,
+}
+
+impl ParentSentences {
+    fn sentence_claim(&self, parent: usize, ordinal: usize) -> CitedClaim {
+        let (start, end) = self.ranges[ordinal];
+        CitedClaim {
+            claim_id: format!("c9-sentence-{parent}-{ordinal}"),
+            text: self.claim.text[start..end].to_string(),
+            evidence_ids: self.claim.evidence_ids.clone(),
+        }
+    }
+}
+
+fn ensure_comparison_call_count(count: usize) -> Result<(), PipelineFailure> {
+    if !(1..=MAX_COMPARISON_CALLS).contains(&count) {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "VERIFICATION_PLAN_TOO_LARGE",
+            "C9 requires a nonempty document plan within its comparison-call limit",
+            false,
+        ));
+    }
+    Ok(())
 }
 
 fn strict_object(properties: Value, required: &[&str]) -> Value {
     json!({"type":"object", "properties":properties, "required":required, "additionalProperties":false})
 }
 
-impl Prepared {
-    fn new(input: &PromptVerificationClaim, schema_limit: usize) -> Result<Self, PipelineFailure> {
-        if input.text.trim().is_empty() || input.evidence.is_empty() {
+fn owned_sources(input: &PromptVerificationClaim) -> Result<Vec<&str>, PipelineFailure> {
+    if input.text.trim().is_empty() || input.evidence.is_empty() {
+        return Err(invalid_input());
+    }
+    let mut seen = HashSet::new();
+    let mut sources = Vec::new();
+    for evidence in &input.evidence {
+        let source = evidence.full_clause.as_deref().ok_or_else(invalid_input)?;
+        if source.trim().is_empty()
+            || evidence.exact_quote.trim().is_empty()
+            || !source.contains(&evidence.exact_quote)
+        {
             return Err(invalid_input());
         }
-        let mut seen = HashSet::new();
-        let mut sources = Vec::new();
-        for evidence in &input.evidence {
-            let source = evidence.full_clause.as_deref().ok_or_else(invalid_input)?;
-            if source.trim().is_empty()
-                || evidence.exact_quote.trim().is_empty()
-                || !source.contains(&evidence.exact_quote)
-            {
-                return Err(invalid_input());
-            }
-            if seen.insert(source) {
-                sources.push(source);
-            }
+        if seen.insert(source) {
+            sources.push(source);
         }
-        if input.text.chars().count() + sources.iter().map(|s| s.chars().count()).sum::<usize>()
-            > MAX_INPUT_CHARACTERS
-        {
-            return Err(too_large());
-        }
+    }
+    if input.text.chars().count() + sources.iter().map(|s| s.chars().count()).sum::<usize>()
+        > MAX_INPUT_CHARACTERS
+    {
+        return Err(too_large());
+    }
+    Ok(sources)
+}
+
+impl Prepared {
+    fn new(input: &PromptVerificationClaim, schema_limit: usize) -> Result<Self, PipelineFailure> {
+        let sources = owned_sources(input)?;
         let source_spans = segment_catalog(&sources)?;
         let claim_spans = segment_catalog(&[&input.text])?;
         let choices: Vec<_> = Relation::ALL
@@ -296,6 +344,7 @@ impl Prepared {
             schema,
             source_spans,
             claim_spans,
+            sentence: None,
         })
     }
 
@@ -309,6 +358,9 @@ impl Prepared {
         value["dimension"] = json!(DIMENSIONS[self.dimension]);
         value["source_segments"] = json!(self.source_spans);
         value["claim_segments"] = json!(self.claim_spans);
+        if let Some(sentence) = &self.sentence {
+            value["parent_claim_context"] = json!(sentence.document[sentence.parent].claim.text);
+        }
         Ok((
             serde_json::to_string(&value).map_err(|_| invalid_input())?,
             ids,
@@ -392,35 +444,65 @@ fn aggregate(comparisons: &[Comparison; 4]) -> ClaimVerdict {
     }
 }
 
-fn validate_plan(batches: &[VerificationBatch]) -> Result<(), PipelineFailure> {
-    ensure_verification_batch_count(batches.len())?;
-    if !batches.len().is_multiple_of(DIMENSIONS.len()) {
-        return Err(invalid_input());
-    }
+fn validate_plan(
+    batches: &[VerificationBatch],
+) -> Result<Arc<Vec<ParentSentences>>, PipelineFailure> {
+    ensure_comparison_call_count(batches.len())?;
+    let document = batches[0]
+        .comparison
+        .as_ref()
+        .and_then(|p| p.sentence.as_ref())
+        .ok_or_else(invalid_input)?
+        .document
+        .clone();
     let mut seen = HashSet::new();
-    for group in batches.as_chunks::<{ DIMENSIONS.len() }>().0 {
-        let [claim] = group[0].claims.as_slice() else {
-            return Err(invalid_input());
-        };
-        if !seen.insert(&claim.claim_id) {
+    let mut offset = 0;
+    for (parent_index, parent) in document.iter().enumerate() {
+        if !seen.insert(&parent.claim.claim_id)
+            || parent.ranges.is_empty()
+            || parent.ranges != sentence_ranges(&parent.claim.text)
+        {
             return Err(invalid_input());
         }
-        for (dimension, batch) in group.iter().enumerate() {
-            let [owned] = batch.claims.as_slice() else {
-                return Err(invalid_input());
-            };
-            let prepared = batch.comparison.as_ref().ok_or_else(invalid_input)?;
-            if prepared.dimension != dimension
-                || prepared.claim_id != claim.claim_id
-                || owned.claim_id != claim.claim_id
-                || owned.text != claim.text
-                || owned.evidence_ids != claim.evidence_ids
-            {
-                return Err(invalid_input());
+        for ordinal in 0..parent.ranges.len() {
+            let claim = parent.sentence_claim(parent_index, ordinal);
+            for dimension in 0..DIMENSIONS.len() {
+                let batch = batches.get(offset).ok_or_else(invalid_input)?;
+                let [owned] = batch.claims.as_slice() else {
+                    return Err(invalid_input());
+                };
+                let prepared = batch.comparison.as_ref().ok_or_else(invalid_input)?;
+                let association = prepared.sentence.as_ref().ok_or_else(invalid_input)?;
+                if !Arc::ptr_eq(&association.document, &document)
+                    || association.parent != parent_index
+                    || association.ordinal != ordinal
+                    || prepared.dimension != dimension
+                    || prepared.claim_id != claim.claim_id
+                    || owned != &claim
+                {
+                    return Err(invalid_input());
+                }
+                offset += 1;
             }
         }
     }
-    Ok(())
+    if offset != batches.len() {
+        return Err(invalid_input());
+    }
+    Ok(document)
+}
+
+fn aggregate_parent(sentences: &[ClaimVerdict]) -> Result<ClaimVerdict, PipelineFailure> {
+    if sentences.is_empty() {
+        return Err(invalid_response());
+    }
+    Ok(if sentences.contains(&ClaimVerdict::Unsupported) {
+        ClaimVerdict::Unsupported
+    } else if sentences.contains(&ClaimVerdict::Ambiguous) {
+        ClaimVerdict::Ambiguous
+    } else {
+        ClaimVerdict::Supported
+    })
 }
 
 pub(super) fn classify(
@@ -430,7 +512,7 @@ pub(super) fn classify(
     next_ordinal: &mut u32,
     control: &dyn ExecutionControl,
 ) -> Result<Vec<ClaimVerification>, PipelineFailure> {
-    validate_plan(&batches)?;
+    let document = validate_plan(&batches)?;
     let mut admission_ordinal = *next_ordinal;
     for batch in &batches {
         cancellation_checkpoint(control, PipelineStage::Verify)?;
@@ -463,13 +545,22 @@ pub(super) fn classify(
             );
         }
         let selected: [Comparison; 4] = selected.try_into().map_err(|_| invalid_response())?;
-        verdicts.push(ClaimVerification {
-            claim_id: group[0].claims[0].claim_id.clone(),
-            evidence_ids: group[0].claims[0].evidence_ids.clone(),
-            verdict: aggregate(&selected),
-        });
+        verdicts.push(aggregate(&selected));
     }
-    Ok(verdicts)
+    let mut start = 0;
+    document
+        .iter()
+        .map(|parent| {
+            let end = start + parent.ranges.len();
+            let verdict = aggregate_parent(&verdicts[start..end])?;
+            start = end;
+            Ok(ClaimVerification {
+                claim_id: parent.claim.claim_id.clone(),
+                evidence_ids: parent.claim.evidence_ids.clone(),
+                verdict,
+            })
+        })
+        .collect()
 }
 
 pub(super) fn plan(
@@ -488,9 +579,24 @@ pub(super) fn plan(
             false,
         ));
     }
-    ensure_verification_batch_count(
-        claims
-            .len()
+    let mut seen = HashSet::new();
+    let mut parents = Vec::new();
+    for claim in claims {
+        let ranges = sentence_ranges(&claim.text);
+        if ranges.is_empty() || !seen.insert(&claim.claim_id) {
+            return Err(invalid_input());
+        }
+        parents.push(ParentSentences {
+            claim: claim.clone(),
+            ranges,
+        });
+    }
+    let document = Arc::new(parents);
+    ensure_comparison_call_count(
+        document
+            .iter()
+            .map(|p| p.ranges.len())
+            .sum::<usize>()
             .checked_mul(DIMENSIONS.len())
             .ok_or_else(too_large)?,
     )?;
@@ -498,36 +604,57 @@ pub(super) fn plan(
         runtime.context_tokens(PipelineStage::Verify),
         VERIFICATION_OUTPUT_TOKENS,
     )?;
-    let groups = prompt
-        .claims
-        .iter()
-        .zip(claims)
-        .map(|(input, claim)| {
-            let mut input = input.clone();
-            // The source owner may have no larger clause. Keep the exact quotation;
-            // never borrow another claim's context or silently shorten a clause.
-            for evidence in &mut input.evidence {
-                if evidence.full_clause.is_none() {
-                    evidence.full_clause = Some(evidence.exact_quote.clone());
-                }
+    let mut batches = Vec::new();
+    for (parent_index, input) in prompt.claims.iter().enumerate() {
+        let mut input = input.clone();
+        // The source owner may have no larger clause. Keep the exact quotation;
+        // never borrow another claim's context or silently shorten a clause.
+        for evidence in &mut input.evidence {
+            if evidence.full_clause.is_none() {
+                evidence.full_clause = Some(evidence.exact_quote.clone());
             }
-            let prepared = Prepared::new(
+        }
+        // Check the complete parent, so splitting cannot bypass input admission.
+        owned_sources(&input)?;
+        for ordinal in 0..document[parent_index].ranges.len() {
+            let claim = document[parent_index].sentence_claim(parent_index, ordinal);
+            input.claim_id.clone_from(&claim.claim_id);
+            input.text.clone_from(&claim.text);
+            let mut prepared = Prepared::new(
                 &input,
                 runtime.response_schema_byte_limit(PipelineStage::Verify, SCHEMA_NAME),
             )?;
-            (0..DIMENSIONS.len()).map(|dimension| {
+            prepared.sentence = Some(SentenceAssociation {
+                document: document.clone(),
+                parent: parent_index,
+                ordinal,
+            });
+            for dimension in 0..DIMENSIONS.len() {
                 let mut prepared = prepared.clone();
                 prepared.dimension = dimension;
                 let mut system_prompt = format!("{VERIFICATION_ENTAILMENT_INSTRUCTION}{CLAUSE_VERIFICATION_INSTRUCTION}\n{INSTRUCTION}\nRequested dimension: {}. {}", DIMENSIONS[dimension], DIMENSION_DEFINITIONS[dimension]);
-                if input.source_framing.is_some() { system_prompt.push_str(SOURCE_FRAMING_VERIFICATION_INSTRUCTION); }
+                if input.source_framing.is_some() {
+                    system_prompt.push_str(SOURCE_FRAMING_VERIFICATION_INSTRUCTION);
+                }
                 let (user_prompt, identifiers) = prepared.prompt(&input)?;
-                let model_facing_characters = system_prompt.chars().count() + user_prompt.chars().count();
-                if !verification_request_within_bounds(1, model_facing_characters, request_limit) { return Err(too_large()); }
-                Ok(VerificationBatch { system_prompt, user_prompt, claims:vec![claim.clone()], identifiers,
-                    comparison:Some(prepared), #[cfg(test)] model_facing_characters })
-            }).collect::<Result<Vec<_>, PipelineFailure>>()
-        }).collect::<Result<Vec<_>, PipelineFailure>>()?;
-    Ok(groups.into_iter().flatten().collect())
+                let model_facing_characters =
+                    system_prompt.chars().count() + user_prompt.chars().count();
+                if !verification_request_within_bounds(1, model_facing_characters, request_limit) {
+                    return Err(too_large());
+                }
+                batches.push(VerificationBatch {
+                    system_prompt,
+                    user_prompt,
+                    claims: vec![claim.clone()],
+                    identifiers,
+                    comparison: Some(prepared),
+                    #[cfg(test)]
+                    model_facing_characters,
+                });
+            }
+        }
+    }
+    Ok(batches)
 }
 
 #[cfg(test)]

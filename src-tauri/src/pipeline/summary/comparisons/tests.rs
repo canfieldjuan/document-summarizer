@@ -303,7 +303,12 @@ fn c9_recorded_controls_fit_segments_and_keep_relation_aggregation() {
             assert_eq!(wire["dimension"], DIMENSIONS[dimension]);
             assert_eq!(wire["source_segments"], json!(prepared.source_spans));
             assert_eq!(wire["claim_segments"], json!(prepared.claim_spans));
-            for key in ["source_segments", "claim_segments", "dimension"] {
+            for key in [
+                "source_segments",
+                "claim_segments",
+                "dimension",
+                "parent_claim_context",
+            ] {
                 wire.as_object_mut().unwrap().remove(key);
             }
             assert_eq!(wire, record["user_prompt"]);
@@ -1531,10 +1536,10 @@ fn repeated_claims(count: usize) -> (VerificationPrompt, Vec<CitedClaim>) {
 
 #[test]
 fn dimension_plan_count_and_association_boundaries() {
-    for count in [0, 1, 15, 16, 17] {
+    for count in [0, 1, 16, 17, 31, 32, 33] {
         let (prompt, claims) = repeated_claims(count);
         let result = plan(&Runtime::default(), &prompt, &claims, 32);
-        if (1..=16).contains(&count) {
+        if (1..=32).contains(&count) {
             let batches = result.unwrap();
             assert_eq!(batches.len(), count * 4);
             validate_plan(&batches).unwrap();
@@ -1620,43 +1625,55 @@ fn dimension_executor_preflights_all_and_returns_only_complete_owned_results() {
         (Some(17), None, None),
         (None, Some(16), None),
         (None, None, Some(12)),
+        (None, None, Some(13)),
+        (None, None, Some(14)),
     ] {
-        let runtime = Sequenced {
-            preflights: Mutex::new(vec![]),
-            calls: Mutex::new(vec![]),
-            reject,
-            invalid,
-            cancel,
-            token: CancellationToken::new(),
-        };
-        let (prompt, claims) = repeated_claims(2);
-        let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
-        let mut ordinal = 10;
-        let result =
-            classify_verification_batches(&runtime, batches, 7, &mut ordinal, &runtime.token);
-        let expected_calls = if reject.is_some() {
-            0
-        } else if invalid.is_some() {
-            7
-        } else if cancel.is_some() {
-            3
-        } else {
-            8
-        };
-        assert_eq!(ordinal, 10 + expected_calls);
-        assert_eq!(
-            *runtime.calls.lock().unwrap(),
-            (10..10 + expected_calls).collect::<Vec<_>>()
-        );
-        if reject.is_some() || invalid.is_some() || cancel.is_some() {
-            assert!(result.is_err());
-        } else {
-            let verdicts = result.unwrap();
-            assert_eq!(verdicts.len(), 2);
-            assert_eq!(verdicts[0].claim_id, "durable-0");
-            assert_eq!(verdicts[0].verdict, ClaimVerdict::Supported);
-            assert_eq!(verdicts[1].claim_id, "durable-1");
-            assert_eq!(verdicts[1].verdict, ClaimVerdict::Unsupported);
+        for sentence_counts in [&[1, 1][..], &[2][..]] {
+            let runtime = Sequenced {
+                preflights: Mutex::new(vec![]),
+                calls: Mutex::new(vec![]),
+                reject,
+                invalid,
+                cancel,
+                token: CancellationToken::new(),
+            };
+            let (prompt, claims) = sentence_document(sentence_counts);
+            let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+            let mut ordinal = 10;
+            let result =
+                classify_verification_batches(&runtime, batches, 7, &mut ordinal, &runtime.token);
+            let expected_calls = if reject.is_some() {
+                0
+            } else if invalid.is_some() {
+                7
+            } else if let Some(cancel) = cancel {
+                cancel - 10 + 1
+            } else {
+                8
+            };
+            assert_eq!(ordinal, 10 + expected_calls);
+            assert_eq!(
+                *runtime.calls.lock().unwrap(),
+                (10..10 + expected_calls).collect::<Vec<_>>()
+            );
+            if reject.is_some() || invalid.is_some() || cancel.is_some() {
+                assert!(result.is_err());
+            } else {
+                let verdicts = result.unwrap();
+                assert_eq!(verdicts.len(), claims.len());
+                for (index, (verdict, claim)) in verdicts.iter().zip(&claims).enumerate() {
+                    assert_eq!(verdict.claim_id, claim.claim_id);
+                    assert_eq!(verdict.evidence_ids, claim.evidence_ids);
+                    assert_eq!(
+                        verdict.verdict,
+                        if index + 1 == claims.len() {
+                            ClaimVerdict::Unsupported
+                        } else {
+                            ClaimVerdict::Supported
+                        }
+                    );
+                }
+            }
         }
     }
 }
@@ -1740,3 +1757,254 @@ fn verdict_parity_rejects_ambiguous_in_place_of_recorded_unsupported() {
     assert_eq!(row["verdict_parity_passed"], false);
     assert_eq!(row["gate_passed"], false);
 }
+
+#[test]
+fn sentence_parent_cannot_hide_a_wrong_first_middle_or_last_sentence() {
+    struct SentenceRuntime;
+    impl ModelRuntime for SentenceRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let wire: Value = serde_json::from_str(&request.user_prompt).unwrap();
+            // Public scripted reproduction: the coarse judgment misses the wrong
+            // relationship, while the isolated sentence exposes it.
+            let wrong = wire["claims"][0]["text"] == "Payment precedes approval.";
+            Ok(ModelResponse {
+                text: fixture_response(request, wrong),
+                runtime_id: "fixture".into(),
+                model_id: "fixture".into(),
+                request_attempts: vec![],
+            })
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "fixture"
+        }
+        fn model_id(&self) -> &str {
+            "fixture"
+        }
+    }
+    for wrong_index in 0..3 {
+        let (mut prompt, mut claims) = repeated_claims(1);
+        let mut sentences = [
+            "Approval is required.",
+            "Approval is required.",
+            "Approval is required.",
+        ];
+        sentences[wrong_index] = "Payment precedes approval.";
+        claims[0].text = sentences.join(" ");
+        prompt.claims[0].text = claims[0].text.clone();
+        let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+        let mut ordinal = 0;
+        let verdicts = classify(
+            &SentenceRuntime,
+            batches,
+            7,
+            &mut ordinal,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0].claim_id, claims[0].claim_id);
+        assert_eq!(verdicts[0].evidence_ids, claims[0].evidence_ids);
+        assert_eq!(
+            verdicts[0].verdict,
+            ClaimVerdict::Unsupported,
+            "wrong sentence index {wrong_index}"
+        );
+        assert_eq!(ordinal, 12);
+    }
+}
+
+fn sentence_document(counts: &[usize]) -> (VerificationPrompt, Vec<CitedClaim>) {
+    let (mut prompt, mut claims) = repeated_claims(counts.len());
+    for ((input, claim), count) in prompt.claims.iter_mut().zip(&mut claims).zip(counts) {
+        claim.text = std::iter::repeat_n("Approval is required.", *count)
+            .collect::<Vec<_>>()
+            .join(" ");
+        input.text.clone_from(&claim.text);
+    }
+    (prompt, claims)
+}
+
+#[test]
+fn sentence_document_admission_and_original_parent_bounds() {
+    for counts in [vec![1], vec![12, 12], vec![1, 30], vec![1, 31], vec![1, 32]] {
+        let (prompt, claims) = sentence_document(&counts);
+        let calls = counts.iter().sum::<usize>() * 4;
+        let planned = plan(&Runtime::default(), &prompt, &claims, 8);
+        if calls <= 128 {
+            let batches = planned.unwrap();
+            assert_eq!(batches.len(), calls);
+            assert_eq!(validate_plan(&batches).unwrap().len(), counts.len());
+        } else {
+            assert_eq!(planned.unwrap_err().code, "VERIFICATION_PLAN_TOO_LARGE");
+        }
+    }
+    for (count, valid) in [
+        (0, false),
+        (1, true),
+        (127, true),
+        (128, true),
+        (129, false),
+    ] {
+        assert_eq!(ensure_comparison_call_count(count).is_ok(), valid);
+    }
+    // The shared legacy policy and coherent parent count are not widened.
+    assert!(ensure_verification_batch_count(64).is_ok());
+    assert!(ensure_verification_batch_count(65).is_err());
+    let (prompt, claims) = sentence_document(&[1; 9]);
+    assert!(plan(&Runtime::default(), &prompt, &claims, 8).is_err());
+    let (mut prompt, mut claims) = sentence_document(&[2]);
+    prompt.claims[0].evidence.truncate(1);
+    claims[0].evidence_ids.truncate(1);
+    let parent_len = claims[0].text.chars().count();
+    prompt.claims[0].evidence[0].exact_quote = "X".into();
+    for total in [4095, 4096, 4097] {
+        prompt.claims[0].evidence[0].full_clause = Some("X".repeat(total - parent_len));
+        let planned = plan(&Runtime::default(), &prompt, &claims, 8);
+        assert_eq!(
+            planned.is_ok(),
+            total <= 4096,
+            "full-parent plus source {total}"
+        );
+    }
+}
+
+#[test]
+fn sentence_plan_rejects_missing_duplicate_foreign_and_partial_ownership() {
+    let (prompt, claims) = sentence_document(&[3, 1]);
+    for defect in 0..8 {
+        let mut batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+        match defect {
+            0 => {
+                batches.drain(4..8);
+            } // Complete middle sentence missing.
+            1 => {
+                batches.drain(12..);
+            } // Complete final parent missing.
+            2 => {
+                batches.truncate(4);
+            } // Supported prefix is not a full plan.
+            3 => {
+                for dimension in 0..4 {
+                    batches[4 + dimension].claims = batches[dimension].claims.clone();
+                    batches[4 + dimension].comparison = batches[dimension].comparison.clone();
+                }
+            }
+            4 => {
+                batches[4] = plan(&Runtime::default(), &prompt, &claims, 8)
+                    .unwrap()
+                    .remove(4);
+            }
+            5 => {
+                batches[4]
+                    .comparison
+                    .as_mut()
+                    .unwrap()
+                    .sentence
+                    .as_mut()
+                    .unwrap()
+                    .ordinal = 0;
+            }
+            6 => {
+                batches[4].claims[0].claim_id = "foreign".into();
+            }
+            7 => {
+                batches.pop();
+            }
+            _ => unreachable!(),
+        }
+        // Runtime::generate panics; malformed ownership must fail before it.
+        let mut ordinal = 0;
+        assert_eq!(
+            classify(
+                &Runtime::default(),
+                batches,
+                7,
+                &mut ordinal,
+                &UNCONTROLLED_EXECUTION
+            )
+            .unwrap_err()
+            .code,
+            "MODEL_REQUEST_INVALID",
+            "defect {defect}"
+        );
+        assert_eq!(ordinal, 0);
+    }
+}
+
+#[test]
+fn sentences_preserve_context_ranges_identity_and_long_piece_catalogs() {
+    for text in ["", " \t\n"] {
+        assert!(sentence_ranges(text).is_empty());
+    }
+    let text = "  Dr. Smith pays $27.50 today.\nApproval is required.  Approval is required.\t";
+    let (mut prompt, mut claims) = sentence_document(&[1]);
+    claims[0].text = text.into();
+    prompt.claims[0].text = text.into();
+    let original_catalog = Prepared::new(&prompt.claims[0], usize::MAX)
+        .unwrap()
+        .source_spans;
+    let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+    let document = validate_plan(&batches).unwrap();
+    let parent = &document[0];
+    assert_eq!(parent.ranges.len(), 3);
+    let mut cursor = 0;
+    let mut reconstructed = String::new();
+    let mut ids = HashSet::new();
+    for (ordinal, &(start, end)) in parent.ranges.iter().enumerate() {
+        assert!(text[cursor..start].chars().all(whitespace));
+        reconstructed.push_str(&text[cursor..start]);
+        reconstructed.push_str(&text[start..end]);
+        cursor = end;
+        let batch = &batches[ordinal * 4];
+        let prepared = batch.comparison.as_ref().unwrap();
+        assert!(ids.insert(batch.claims[0].claim_id.clone()));
+        assert_eq!(prepared.source_spans, original_catalog);
+        assert_eq!(batch.claims[0].text, text[start..end]);
+        let wire: Value = serde_json::from_str(&batch.user_prompt).unwrap();
+        assert_eq!(wire["parent_claim_context"], text);
+        assert_eq!(wire["claim_segments"], json!([&text[start..end]]));
+        assert_eq!(
+            batch.model_facing_characters,
+            batch.system_prompt.chars().count() + batch.user_prompt.chars().count()
+        );
+    }
+    assert!(text[cursor..].chars().all(whitespace));
+    reconstructed.push_str(&text[cursor..]);
+    assert_eq!(reconstructed, text);
+    let long = format!("{}; {}.", "alpha ".repeat(30), "beta ".repeat(30));
+    assert_eq!(sentence_ranges(&long), vec![(0, long.len())]);
+    assert_eq!(segment_ranges(&long).unwrap().len(), 2);
+}
+
+#[test]
+fn sentence_uncertainty_and_not_applicable_cannot_be_rescued_by_siblings() {
+    for middle in [
+        ClaimVerdict::Supported,
+        ClaimVerdict::Unsupported,
+        ClaimVerdict::Ambiguous,
+    ] {
+        let result = aggregate_parent(&[
+            ClaimVerdict::Supported,
+            middle.clone(),
+            ClaimVerdict::Supported,
+        ])
+        .unwrap();
+        assert_eq!(result, middle);
+    }
+    let absent = std::array::from_fn(|_| Comparison {
+        source_spans: vec![],
+        claim_spans: vec![],
+        relation: Relation::NotApplicable,
+    });
+    assert_eq!(
+        aggregate_parent(&[ClaimVerdict::Supported, aggregate(&absent)]).unwrap(),
+        ClaimVerdict::Ambiguous
+    );
+    assert!(aggregate_parent(&[]).is_err());
+}
+
+#[path = "sentence_run.rs"]
+mod sentence_run;

@@ -61,14 +61,26 @@ No prompt revision, evidence-ID selection protocol, free copied quotes, fuzzy ma
 
 ## Implementation summary
 
-This commit records only the contract acceptance and call-ceiling amendment. No sentence-helper extraction, orchestration, scorer, fixture, production change or inference is implemented. The earlier local proposal and failed trial remain immutable evidence.
+Accepted amendment recorded before code in `8778c00ef710aa710c814d4e29ff01cf87399f0e`.
+
+The C9 owner now plans complete sentences using the existing boundary pass, retains an immutable document/parent/range association, validates full coverage before runtime admission, and aggregates sentence verdicts back to original parent identities. One C9-specific 128-call policy is used by planner and validator; legacy and Contract limits remain 64. The complete parent input is checked before sentence expansion, and the parent context is included in the actual prompt budget. There is no competing whole-unit mode. The original four-dimension parser and instruction text are unchanged.
+
+Public regressions reproduce Supported instead of Unsupported before the origin change, then withhold a wrong first, middle or last sentence. Boundary, ownership, incomplete-plan, uncertainty and interruption checks pass. Archived A/B evidence catalogs, full context and original system instructions compare exactly. The existing production gate remains in force.
+
+The development runner contains the frozen public A/B inputs and independent parent labels. It preflights both entire documents and all controls, records requests/responses/timings, and stops at the first invalid response, runtime failure or parent-label disagreement. No sentence gold labels are invented.
 
 ## Cold diff audit
 
-`docs/PR-C9-SENTENCE-VERIFICATION.md` is the sole intended repository change. The acceptance amendment scopes the increase to C9, sets its ceiling to 128 calls/32 sentences, and revises the boundary proof. Verify a documentation-only diff against `f8930a600dbf90d9541742e6275d9c19c14a33e6` and that no source, tests, fixtures, dependencies or configuration changed. Code tests are not rerun for this amendment.
+The runtime diff is confined to the C9 owner. `summary.rs` changes only its test fixture input adapter for the new context field. Comparison tests, the public fixture and the development runner implement the accepted proof. The former whole-claim planning assumption is replaced; the splitter and source admission rules each remain owned by one helper. No system instruction, output schema shape, persisted result schema, model configuration, release activation or unrelated verifier policy changed.
+
+Local evidence before freezing: summary tests 378 passed; service tests 16 passed; ordinary-library production gate under all features 5 passed; final comparison tests 35 passed; formatting and strict Clippy passed. Two new fixture mistakes and one test lint were corrected locally before publication; these were not model results.
+
+The zero-generation gateway cost report confirms A: 9 sentences/36 calls; B: 24 sentences/96 calls. Both pass; all four control reference catalogs pass containment. Gateway measured maxima are 4096 accepted/4097 rejected for all three sizing families. Baseline timing estimates are A: 154 seconds and B: 336 seconds. The experiment permits at most 180 semantic calls plus 10 actual grammar calls; historical timings estimate 570.661 seconds of requests, excluding model startup, admission and harness overhead. These are estimates, not measured sentence-run latency.
+
+Evidence aliases: `c9-sentence-implementation-20261006/{fail-first.log,isolated-after.log,summary-tests.log,service-tests.log,production-gate.log,comparison-final.log,clippy-final.log,gateway-static/cost-report.json,latency-estimate.json}`. Final source and evidence hashes will be recorded in the freeze/result receipts.
 
 ## Gap audit
 
 NOT DONE
 
-Acceptance is recorded; implementation and verification remain outstanding. Sentence counts, cost/latency estimates, admission, grammar, development semantics, full-worker proof and unseen qualification remain unproven. The next step is implementation under this accepted contract.
+Sentence planning and static gateway checks are implemented. Native admission, actual grammar probes and the single frozen semantic run remain unproven. Full-worker proof, unseen qualification and explicit operator clearance remain separate release gates. PR116 stays held; this commit does not activate C9.
