@@ -4,14 +4,13 @@ use std::collections::BTreeSet;
 
 pub(super) const SCHEMA_NAME: &str = crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME;
 const MAX_INPUT_CHARACTERS: usize = 4096;
-const MAX_ENUM_VALUES: usize = 8192;
 const MAX_SPAN_CHARACTERS: usize = 240;
 const MAX_SPANS: usize = 4;
 const DIMENSIONS: [&str; 4] = ["stage", "conditions", "qualifiers", "scope"];
 const INSTRUCTION: &str = r#"Compare the claim with its cited quotation interpreted in the complete governing clause.
 Return exactly one JSON object with verdicts containing one item with claim_id and comparisons.
 The comparisons object must contain stage, conditions, qualifiers, and scope. Do not choose a subset.
-For each dimension copy source_spans from the supplied full_clause and claim_spans from the claim text, exactly. Do not paraphrase these spans. Then assign its relation.
+For each dimension choose source_spans from source_segments and claim_spans from claim_segments. Each selection must be one complete supplied segment string, exactly. Do not shorten, join or paraphrase segments. Interpret each selected piece in the complete governing clause, including restrictions in neighboring pieces. Then assign its relation.
 Stage means the event or lifecycle point to which the claim assigns an action or consequence.
 Conditions means prerequisites, exceptions or contingencies governing the proposition the claim asserts.
 Qualifiers means negation, modality, time-unit or other restrictions on the asserted relationship.
@@ -57,6 +56,7 @@ fn invalid_response() -> PipelineFailure {
 // Python C9 uses Unicode \w+|[^\w\s]: letters, numbers and underscore form
 // words; combining marks and punctuation are individual tokens. Keep source
 // byte boundaries as well as Unicode scalar counts; never normalize text.
+#[cfg(test)]
 fn word_character(c: char) -> bool {
     c == '_'
         || matches!(
@@ -76,32 +76,104 @@ fn whitespace(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
 }
 
-fn span_catalog(texts: &[&str]) -> Result<BTreeSet<String>, PipelineFailure> {
+const SEGMENTATION_FAILURE_MESSAGE: &str =
+    "A complete source or claim cannot be partitioned into bounded comparison segments";
+
+fn trimmed_range(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    let piece = &text[start..end];
+    let left = start + piece.len() - piece.trim_start_matches(whitespace).len();
+    let right = start + piece.trim_end_matches(whitespace).len();
+    (left < right).then_some((left, right))
+}
+
+fn segment_ranges(text: &str) -> Result<Vec<(usize, usize)>, PipelineFailure> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    for (offset, c) in text.char_indices() {
+        if offset < start {
+            continue;
+        }
+        let class = analysis_sentence_break(c);
+        if !matches!(class, SentenceBreak::ATerm | SentenceBreak::STerm) {
+            continue;
+        }
+        let mut end = offset + c.len_utf8();
+        while let Some(closer) = text[end..].chars().next().filter(|c| {
+            is_analysis_sentence_closer(*c)
+                || matches!(
+                    analysis_sentence_break(*c),
+                    SentenceBreak::ATerm | SentenceBreak::STerm
+                )
+        }) {
+            end += closer.len_utf8();
+        }
+        if class == SentenceBreak::ATerm
+            && text[end..].chars().next().is_some_and(|c| !whitespace(c))
+        {
+            continue;
+        }
+        if analysis_sentence_boundary(text, start, end, text.len(), false) {
+            sentences.push((start, end));
+            start = end;
+        }
+    }
+    if start < text.len() {
+        sentences.push((start, text.len()));
+    }
+    let mut pieces = Vec::new();
+    for (start, end) in sentences {
+        let Some((mut start, end)) = trimmed_range(text, start, end) else {
+            continue;
+        };
+        if text[start..end].chars().count() <= MAX_SPAN_CHARACTERS {
+            pieces.push((start, end));
+            continue;
+        }
+        let mut boundaries = Vec::new();
+        for (offset, c) in text[start..end].char_indices() {
+            let next = start + offset + c.len_utf8();
+            let after = &text[next..end];
+            let punctuation = matches!(c, ';' | '\u{61b}' | ':' | '\u{ff1a}')
+                && after.chars().next().is_some_and(whitespace);
+            let paragraph = c == '\n'
+                && after
+                    .trim_start_matches([' ', '\t', '\r'])
+                    .starts_with('\n');
+            if punctuation || paragraph {
+                boundaries.push(next);
+            }
+        }
+        boundaries.push(end);
+        while start < end {
+            let mut selected = None;
+            for &cut in boundaries.iter().filter(|&&cut| cut > start) {
+                if let Some(range) = trimmed_range(text, start, cut) {
+                    if text[range.0..range.1].chars().count() > MAX_SPAN_CHARACTERS {
+                        break;
+                    }
+                    selected = Some((cut, range));
+                }
+            }
+            let (cut, range) = selected.ok_or_else(|| {
+                stage_failure(
+                    PipelineStage::Verify,
+                    "VERIFICATION_INPUT_TOO_LARGE",
+                    SEGMENTATION_FAILURE_MESSAGE,
+                    false,
+                )
+            })?;
+            pieces.push(range);
+            start = trimmed_range(text, cut, end).map_or(end, |(left, _)| left);
+        }
+    }
+    Ok(pieces)
+}
+
+fn segment_catalog(texts: &[&str]) -> Result<BTreeSet<String>, PipelineFailure> {
     let mut values = BTreeSet::new();
     for text in texts {
-        let mut tokens: Vec<(usize, usize, usize, usize)> = Vec::new();
-        let mut previous_word = false;
-        for (position, (byte, c)) in text.char_indices().enumerate() {
-            let word = word_character(c);
-            if word && previous_word {
-                let last = tokens.last_mut().expect("preceding word token");
-                last.1 = byte + c.len_utf8();
-                last.3 = position + 1;
-            } else if !whitespace(c) {
-                tokens.push((byte, byte + c.len_utf8(), position, position + 1));
-            }
-            previous_word = word;
-        }
-        for (index, start) in tokens.iter().enumerate() {
-            for end in &tokens[index..] {
-                if end.3 - start.2 > MAX_SPAN_CHARACTERS {
-                    break;
-                }
-                values.insert(text[start.0..end.1].to_string());
-                if values.len() > MAX_ENUM_VALUES {
-                    return Err(too_large());
-                }
-            }
+        for (start, end) in segment_ranges(text)? {
+            values.insert(text[start..end].to_string());
         }
     }
     if values.is_empty() {
@@ -145,8 +217,8 @@ impl Prepared {
         {
             return Err(too_large());
         }
-        let source_spans = span_catalog(&sources)?;
-        let claim_spans = span_catalog(&[&input.text])?;
+        let source_spans = segment_catalog(&sources)?;
+        let claim_spans = segment_catalog(&[&input.text])?;
         let comparison = strict_object(
             json!({
                 "source_spans":{"type":"array", "items":{"$ref":"#/$defs/source_span"}, "minItems":0,"maxItems":MAX_SPANS},
@@ -186,6 +258,21 @@ impl Prepared {
             source_spans,
             claim_spans,
         })
+    }
+
+    fn prompt(
+        &self,
+        input: &PromptVerificationClaim,
+    ) -> Result<(String, identifiers::RequestIds), PipelineFailure> {
+        let (wire, ids) = identifiers::verification_prompt(std::slice::from_ref(input))
+            .map_err(|_| invalid_input())?;
+        let mut value: Value = serde_json::from_str(&wire).map_err(|_| invalid_input())?;
+        value["source_segments"] = json!(self.source_spans);
+        value["claim_segments"] = json!(self.claim_spans);
+        Ok((
+            serde_json::to_string(&value).map_err(|_| invalid_input())?,
+            ids,
+        ))
     }
 
     pub(super) fn parse(
@@ -330,8 +417,7 @@ pub(super) fn plan(
             if input.source_framing.is_some() {
                 system_prompt.push_str(SOURCE_FRAMING_VERIFICATION_INSTRUCTION);
             }
-            let (user_prompt, identifiers) =
-                identifiers::verification_prompt(&[input]).map_err(|_| invalid_input())?;
+            let (user_prompt, identifiers) = prepared.prompt(&input)?;
             let model_facing_characters =
                 system_prompt.chars().count() + user_prompt.chars().count();
             if !verification_request_within_bounds(1, model_facing_characters, request_limit) {

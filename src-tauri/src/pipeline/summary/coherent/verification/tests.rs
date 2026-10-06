@@ -238,6 +238,7 @@ fn c9_current_and_historical_saved_results_remain_readable() {
         assert_eq!(verified.verification_version, VERIFICATION_VERSION);
         for saved_version in [
             VERIFICATION_VERSION,
+            PRE_SEGMENT_ENUM_VERIFICATION_VERSION,
             PRE_COMPARISON_VERIFICATION_VERSION,
             PRE_CLAUSE_VERIFICATION_VERSION,
         ] {

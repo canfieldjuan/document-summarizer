@@ -1,9 +1,9 @@
 # Bounded segment-text enums for General verification
 
 Status: design accepted by Codex in response to the operator's clarified
-recommendation. This is the contract before implementation; no production or
-test code has changed. The concrete splitting policy and gates below are the
-standard for the next implementation. PR116 remains fidelity-held.
+recommendation. Contract commit `5adaa3b` preceded implementation. The local
+candidate and focused proof are now complete; actual runtime boundaries and
+live controls remain pending. PR116 remains fidelity-held.
 
 Base: `49e22a7e3422c42ef4202d5048b15e1693ff119f`, on
 `codex/verification-revision-contract`. Do not base this work on, or cherry-pick
@@ -191,22 +191,83 @@ only its connection to the new owner:
 
 ## Implementation summary
 
-Contract only. Source, tests, production settings and frozen fixtures are unchanged
-from the specified base. Expected implementation surface: `summary/comparisons.rs`,
-its directly owned splitter/tests, the shared schema/version constants and
-completed-artifact tests, and the canonical verification contract. No code from
-the failed candidate has been carried forward yet.
+Implemented only on the requested base. `comparisons.rs::segment_ranges` and
+`segment_catalog` build bounded owned pieces; `Prepared::prompt` presents those
+same choices; the existing parser retains exact string membership before relation
+aggregation. Source/claim text is complete. The old substring expansion and
+8,192-entry representation limit are removed. No position implementation or ID
+allocator from the failed branch was carried into production.
+
+The shared schema name is v3 and verification is 14.0.0; completed verification12
+and earlier supported artifacts retain their validation. No live historical
+planner was introduced. Test support carries the boundary, passage-accuracy,
+separate validity and saved-view proofs requested by the operator. The frozen
+C9 fixture is unchanged from the base.
+
+### Reproduction and origin fixes
+
+- Expansion: the public 12-sentence input failed the real baseline planner with
+  `VERIFICATION_INPUT_TOO_LARGE`. Its small source was expanded at the old
+  `span_catalog` owner, not rejected for its authoritative input size. Replacing
+  that catalog admits the original fixture and the smaller/larger siblings while
+  preserving complete source text. The permanent admission regression passed.
+- My first splitter used the general sentence iterator, which grouped lowercase
+  numbered sentences into one oversized unit. The isolated input
+  `w000 w001. w002 w003.` reproduced one piece instead of two. The origin now
+  proposes Unicode terminal boundaries directly and applies the shared
+  abbreviation/decimal predicate. That regression and the original admission
+  regression pass; the frozen input was not changed.
+- My terminal scanner initially split `Ask now?!` into `Ask now?` and `!`. The
+  fail-first regression reproduced it. The owner now consumes the complete
+  terminal/closing-quote group before proposing a cut. The original example,
+  repeated terminals and quoted siblings pass. No downstream repair was added.
+
+### Local proof before the live freeze
+
+- Final comparisons: 17 passed, two opt-in tests ignored.
+- Focused coherent verification: 10 passed, two ignored; C9/transport: 20 passed,
+  one ignored. These counts overlap and are not an aggregate suite total.
+- Copied public A/B saved views: one opt-in test passed, both views unchanged;
+  original database hashes unchanged. The replay uses read-only connections.
+- Strict all-target/all-feature Clippy passed. Frontend build passed to supply
+  the fresh worktree's required Tauri test assets; an initial missing-dist
+  compiler failure is retained separately from the fail-first evidence.
+- Static catalog feasibility covers all 32 recorded passages across four controls
+  under the unchanged labels. This is an oracle ceiling, not a live model score.
+- Planner boundaries (claim plus unique source): sparse 260/261, ordinary prose
+  4,096/4,097, dense punctuation 260/261, admitted/rejected neighbors on both
+  cap profiles. The sparse/dense limits arise from unsplittable text, not schema
+  growth. Prose reaches the combined input cap. Actual runtimes still must be
+  measured. No cap was raised, and no old numerical maxima were copied as claims.
+
+Durable evidence prefix: `verification-revision-contract-20261005/`.
+The fail-before/pass-after logs, catalog oracle, boundary measurements, source
+receipts and saved-view replay are retained there. The failed position experiment
+remains separately archived under its original prefix and is not overwritten.
 
 ## Cold diff audit
 
-Only this contract is added. Its baseline catalog/validation claims were checked
-against `49e22a7`; its failed-candidate claims were checked against retained raw
-receipts. A source-tree comparison proves no implementation is included. No code
-tests are needed or claimed for this documentation-only revision.
+| File / owner | Change and contract trace | Proof |
+| --- | --- | --- |
+| `summary/comparisons.rs` | Replace expanded excerpts with owned segment enums; one prompt/schema/membership owner | Admission, segmentation, exact membership and boundary regressions |
+| `summary/comparisons/tests.rs` | Carry measurement/scoring/reporting; add containment and parser negatives | Static four-control oracle, focused suite, source-preserving receipts |
+| `pipeline/contracts.rs` | Name the changed decoder protocol v3 | Native/gateway C9 transport checks |
+| `summary.rs` | Emit verification14; retain completed12 | Saved-version integration and copied-view replay |
+| `summary/coherent/verification/tests.rs` | Include saved12 in reopened-artifact cases | Focused integration suite |
+| `docs/CONTRACTS.md` and this file | Describe the actual representation, limits, gate and fallback non-scope | Compared with the controlling code; issue124 unchanged |
+
+Boundary-probe: exact/near-copy, mixed/missing fields, wrong side, unknown IDs,
+invalid relation, Unicode lengths, token-prefix containment, split/join rejection,
+empty dimensions and admission neighbors pass. Runtime measurements are pending.
+
+Effect-trace: avoid excerpt expansion while forcing exact text choices |
+`segment_catalog` supplies each enum and `Prepared::parse` checks that same set |
+original admission regression now passes; non-member copies fail even if decoder
+constraints are bypassed. This does not establish model fidelity.
 
 ## Gap audit
 
-NOT DONE. This is an accepted design, not an implemented or qualified candidate.
-Splitting, schema/runtime bounds, coverage feasibility, live controls and
-independent review remain to be proven before any merge. Preserve and disclose
-failures rather than starting another implementation round by default.
+NOT DONE. Actual gateway/native measurements and the frozen live control gate are
+next. Full public A/B worker proof is conditional on that gate. Independent review
+and fresh unseen qualification still precede release; PR116 remains held. A failed
+live candidate must be recorded and frozen without relabeling or prompt tuning.

@@ -683,8 +683,8 @@ ledger claims available as supporting detail.
 
 ### General prose comparison verification
 
-General coherent prose from synthesis 12.0.0 or 13.0.0 uses comparison
-verification 12.0.0. The source-owned clause builder supplies complete governing
+General coherent prose from synthesis 12.0.0, 13.0.0 or 14.0.0 uses comparison
+verification 14.0.0 with schema `document_claim_comparisons_v3`. The source-owned clause builder supplies complete governing
 text; where it has no larger clause, the original exact quotation is the context.
 Each request contains one claim, its own deduplicated source contexts, and local
 claim ID `k1`. Requests require stage, conditions, qualifiers and scope comparisons.
@@ -693,8 +693,15 @@ passages, claim passages, then relation within each dimension. The shared schema
 serializer consumes the originating `required` arrays; other schemas keep their
 existing serialization. This order is part of the decoder protocol, since the
 qualified grammar converter generates required fields in property iteration order.
-The model chooses exact source and claim passages from separate bounded catalogs;
-it does not supply the final verdict. Rust rejects unknown/duplicate/missing fields,
+The model chooses exact source and claim segments from separate finite text enums.
+The comparison owner builds non-overlapping bounded sentences/sub-clauses, retains
+all non-whitespace source text and the complete governing contexts, and supplies
+the same segment strings to the prompt, decoder and parser. Returned text must
+match an owned segment byte-for-byte after JSON decoding; no fuzzy matching,
+normalization, position lookup or unrestricted copied-quote path is accepted.
+Unsplit long units fail admission rather than silently losing their restrictions;
+the original full clause list and extraction rules are unaffected. The model
+does not supply the final verdict. Rust rejects unknown/duplicate/missing fields,
 foreign IDs, non-catalog passages and invalid relation/span shapes. Changed or
 omitted meaning derives unsupported; uncertainty derives ambiguous. Support
 requires at least one validated preserved comparison. Four empty not-applicable
@@ -702,8 +709,7 @@ comparisons provide no positive evidence and derive ambiguous. Existing semantic
 withhold it. Exact passages constrain output; the model still judges meaning.
 
 The protocol limits are 4,096 Unicode scalar characters across the claim and
-unique governing contexts, 8,192 catalog values per side, 240 characters per
-passage, and four passages per side per dimension. The serialized schema has a
+unique governing contexts, 240 characters per segment, and four passages per side per dimension. The serialized schema has a
 1 MiB bound measured using the actual compact Rust JSON encoding. Runtime
 admission can impose a tighter bound: the gateway's existing 250,000-byte schema
 limit remains authoritative. Protocol support is checked independently of size.
@@ -722,17 +728,24 @@ qualification. Version-2 support alone is also not qualification: full-app and
 fidelity gates remain. Native runtimes retain comparison verification. The named comparison schema has the larger native
 allowance; other native schemas retain 64 KiB. Prompt/context admission and the
 4,096-token response allowance also apply. The same prepared request plan serves
-admission and execution. A complete input that cannot fit, including an input with no
-admissible token-bounded passage, uses the existing disclosed claim-ledger
-fallback during admission. Source clauses are never shortened to fit. Cancellation
+admission and execution. A complete input that cannot fit, including an input whose complete source cannot be partitioned
+into admissible segments, uses the existing disclosed claim-ledger
+fallback during admission. Source clauses are never shortened to fit. One over-limit claim still causes
+whole-document fallback; changing that behavior is non-scope and tracked in
+[issue #124](https://github.com/canfieldjuan/document-summarizer/issues/124). Cancellation
 checkpoints surround generation; no new retry or response repair is introduced.
 
 This protocol is under the PR116 fidelity hold. Recorded-response parity and the
 approved public controls are development evidence, not release qualification.
-The implementation/evidence record is [C9 production integration](PR-C9-PRODUCTION-VERIFICATION.md).
+The original integration record is [C9 production integration](PR-C9-PRODUCTION-VERIFICATION.md).
+The current candidate contract is [bounded segment-text enums](PR-VERIFICATION-SEGMENT-ENUMS.md).
+Its development gate keeps the four independent control labels and zero wrong
+approvals, and measures exact-token-boundary containment of recorded C9 passages
+within selected pieces. Exact-match scores remain separately reported. Catalog
+coverage and parser acceptance do not establish semantic fidelity.
 
 General comparison artifacts retain summary 8.0.0 and citation 4.0.0. Completed
-verification-11 and verification-10 artifacts remain readable under their saved
+verification-12, verification-11 and verification-10 artifacts remain readable under their saved
 versions. The saved verification shape still contains the derived final verdict
 and citation identity; it does not store the raw model comparisons. Story,
 claim-ledger fallback and older synthesis paths retain their existing verifier

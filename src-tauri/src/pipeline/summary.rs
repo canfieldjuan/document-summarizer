@@ -53,7 +53,8 @@ const PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION: &str = "12.0.0";
 const PRE_CLAUSE_SYNTHESIS_VERSION: &str = "11.0.0";
 const PRE_FURNITURE_SYNTHESIS_VERSION: &str = "10.0.0";
 const PRE_BALANCED_SYNTHESIS_VERSION: &str = "9.0.0";
-pub const VERIFICATION_VERSION: &str = "12.0.0";
+pub const VERIFICATION_VERSION: &str = "14.0.0";
+const PRE_SEGMENT_ENUM_VERIFICATION_VERSION: &str = "12.0.0";
 const PRE_COMPARISON_VERIFICATION_VERSION: &str = "11.0.0";
 const PRE_CLAUSE_VERIFICATION_VERSION: &str = "10.0.0";
 pub const SUMMARY_VERSION: &str = "8.0.0";
@@ -186,6 +187,7 @@ fn coherent_verification_versions_match(
         && matches!(
             verification_version,
             VERIFICATION_VERSION
+                | PRE_SEGMENT_ENUM_VERIFICATION_VERSION
                 | PRE_COMPARISON_VERIFICATION_VERSION
                 | PRE_CLAUSE_VERIFICATION_VERSION
         ))
@@ -958,6 +960,7 @@ pub(crate) fn complete_verified_document_with_delivery(
         }
         PRE_CONTEXT_VERIFICATION_VERSION => PRE_CONTEXT_SUMMARY_VERSION,
         VERIFICATION_VERSION
+        | PRE_SEGMENT_ENUM_VERIFICATION_VERSION
         | PRE_COMPARISON_VERIFICATION_VERSION
         | PRE_CLAUSE_VERIFICATION_VERSION => SUMMARY_VERSION,
         version if contract_extraction::version_supported(version) => "9.0.0",
@@ -4494,6 +4497,7 @@ fn validate_verified_document(
             | PRE_DISCLOSURE_VERIFICATION_VERSION
             | PRE_CONTEXT_VERIFICATION_VERSION
             | PRE_CLAUSE_VERIFICATION_VERSION
+            | PRE_SEGMENT_ENUM_VERIFICATION_VERSION
             | PRE_COMPARISON_VERIFICATION_VERSION
             | VERIFICATION_VERSION
     ) {
@@ -4585,6 +4589,7 @@ fn validate_coherent_verified_document(
     ) && matches!(
         verified.verification_version.as_str(),
         VERIFICATION_VERSION
+            | PRE_SEGMENT_ENUM_VERIFICATION_VERSION
             | PRE_COMPARISON_VERIFICATION_VERSION
             | PRE_CLAUSE_VERIFICATION_VERSION
     ) && synthesized.presentation_mode
@@ -12669,7 +12674,8 @@ mod tests {
         assert_eq!(PREVIOUS_COHERENT_VERIFICATION_VERSION, "7.0.0");
         assert_eq!(PRE_DISCLOSURE_VERIFICATION_VERSION, "8.0.0");
         assert_eq!(PRE_CONTEXT_VERIFICATION_VERSION, "9.0.0");
-        assert_eq!(VERIFICATION_VERSION, "12.0.0");
+        assert_eq!(VERIFICATION_VERSION, "14.0.0");
+        assert_eq!(PRE_SEGMENT_ENUM_VERIFICATION_VERSION, "12.0.0");
         assert_eq!(PRE_COMPARISON_VERIFICATION_VERSION, "11.0.0");
         assert_eq!(PRE_CLAUSE_VERIFICATION_VERSION, "10.0.0");
         assert_eq!(PRE_CONTEXT_SUMMARY_VERSION, "7.0.0");
