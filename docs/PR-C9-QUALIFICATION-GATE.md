@@ -1,6 +1,34 @@
 # PR116 blocker fix contract
 
-Authority: operator request, "Address those open blockers." This is the requested safety/publication fix, not acceptance of the deferred prompt trial.
+## Operator acceptance and sequence
+
+The operator explicitly accepted contract revision `3b17a09` as written in
+[discussion_r4196477618](https://github.com/canfieldjuan/document-summarizer/pull/116#discussion_r4196477618),
+posted on 2026-10-06 at 14:24:15 UTC: "Keep 116 until C9 qualifies. Accept the gate contract".
+
+The earlier request, "Address those open blockers", was direction to address the
+findings, not contract acceptance. Codex incorrectly treated it as authorization
+to implement the proposed contract. Implementation `42fc08c` was written and
+published before explicit acceptance: the recorded push advanced PR116 from
+`49e22a7` to `42fc08c` before the publication receipt at 14:02:13 UTC. The P1/P2
+code-defect resolutions were also recorded before acceptance. This separate
+contract commit records the actual sequence; it does not imply prior approval or
+rewrite published history. The comment's description of the branch as unpublished
+was stale when posted.
+
+The accepted verification plan still applies. Its recorded implementation proof
+is attached to `42fc08c`; this acceptance-only commit changes no code, tests,
+fixtures, configuration or dependencies and does not rerun those tests.
+
+## Operator-controlled merge hold
+
+PR116 stays held until C9 passes full-document proof and unseen qualification,
+and the operator explicitly clears
+[the hold thread](https://github.com/canfieldjuan/document-summarizer/pull/116#discussion_r4196409571).
+That thread must remain unresolved until then. The operator chose not to ship C9
+gated off. Green CI, review, contract acceptance and resolution of the P1/P2 code
+defects do not authorize merging this PR. The deferred prompt trial remains
+unaccepted.
 
 ## Root cause
 
