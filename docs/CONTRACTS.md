@@ -683,24 +683,35 @@ ledger claims available as supporting detail.
 
 ### General prose comparison verification
 
+This is an unqualified local candidate. Its static recorded-passage gate and
+native converter matrix pass, but the installed gateway rejects the combined
+root-choice/shared-definition schema and still limits passage enums to 240
+characters. No live control run or runtime admission qualification has occurred
+for this candidate; PR116 remains held. See
+[the accepted contract](PR-VERIFICATION-DIMENSION-CONTRACT.md).
+
 General coherent prose from synthesis 12.0.0, 13.0.0 or 14.0.0 uses comparison
-verification 14.0.0 with schema `document_claim_comparisons_v3`. The source-owned clause builder supplies complete governing
+verification 15.0.0 with schema `document_claim_comparisons_v4`. The source-owned clause builder supplies complete governing
 text; where it has no larger clause, the original exact quotation is the context.
 Each request contains one claim, its own deduplicated source contexts, and local
-claim ID `k1`. Requests require stage, conditions, qualifiers and scope comparisons.
-For this named schema, transport preserves that dimension order and emits source
-passages, claim passages, then relation within each dimension. The shared schema
+claim ID `k1`. Each claim requires four sequential requests: stage, conditions, qualifiers and
+scope. Each response is one comparison object. The schema and parser share one
+relation/list-shape definition. Transport emits source passages, claim passages,
+then relation within each dimension. The shared schema
 serializer consumes the originating `required` arrays; other schemas keep their
 existing serialization. This order is part of the decoder protocol, since the
 qualified grammar converter generates required fields in property iteration order.
 The model chooses exact source and claim segments from separate finite text enums.
-The comparison owner builds non-overlapping bounded sentences/sub-clauses, retains
+The comparison owner builds non-overlapping sentences/sub-clauses, retains
 all non-whitespace source text and the complete governing contexts, and supplies
 the same segment strings to the prompt, decoder and parser. Returned text must
 match an owned segment byte-for-byte after JSON decoding; no fuzzy matching,
 normalization, position lookup or unrestricted copied-quote path is accepted.
-Unsplit long units fail admission rather than silently losing their restrictions;
-the original full clause list and extraction rules are unaffected. The model
+Long sentences prefer semicolon/colon or paragraph cuts, then commas followed by
+whitespace or complete and/or/but/nor tokens. If any residual cannot fit the
+240-scalar target, all tentative cuts for that sentence are discarded and the
+whole exact sentence becomes one piece. The original full clause list and
+extraction rules are unaffected. The model
 does not supply the final verdict. Rust rejects unknown/duplicate/missing fields,
 foreign IDs, non-catalog passages and invalid relation/span shapes. Changed or
 omitted meaning derives unsupported; uncertainty derives ambiguous. Support
@@ -709,7 +720,8 @@ comparisons provide no positive evidence and derive ambiguous. Existing semantic
 withhold it. Exact passages constrain output; the model still judges meaning.
 
 The protocol limits are 4,096 Unicode scalar characters across the claim and
-unique governing contexts, 240 characters per segment, and four passages per side per dimension. The serialized schema has a
+unique governing contexts, a preferred 240-character segment size with the
+whole-sentence exception above, and four passages per side per dimension. The serialized schema has a
 1 MiB bound measured using the actual compact Rust JSON encoding. Runtime
 admission can impose a tighter bound: the gateway's existing 250,000-byte schema
 limit remains authoritative. Protocol support is checked independently of size.
@@ -728,9 +740,10 @@ qualification. Version-2 support alone is also not qualification: full-app and
 fidelity gates remain. Native runtimes retain comparison verification. The named comparison schema has the larger native
 allowance; other native schemas retain 64 KiB. Prompt/context admission and the
 4,096-token response allowance also apply. The same prepared request plan serves
-admission and execution. A complete input that cannot fit, including an input whose complete source cannot be partitioned
-into admissible segments, uses the existing disclosed claim-ledger
-fallback during admission. Source clauses are never shortened to fit. One over-limit claim still causes
+admission and execution. The 64-request cap now admits at most 16 complete claim
+groups. Every dimension is preflighted before generation; cancellation, unique
+ordinals and complete claim association apply to every call. A complete input
+that cannot fit uses the existing disclosed claim-ledger fallback during admission. Source clauses are never shortened to fit. One over-limit claim still causes
 whole-document fallback; changing that behavior is non-scope and tracked in
 [issue #124](https://github.com/canfieldjuan/document-summarizer/issues/124). Cancellation
 checkpoints surround generation; no new retry or response repair is introduced.

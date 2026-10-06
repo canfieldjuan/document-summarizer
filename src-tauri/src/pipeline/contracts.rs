@@ -846,7 +846,7 @@ pub trait DocumentChunker {
     fn version(&self) -> &'static str;
 }
 
-pub(crate) const CLAIM_COMPARISON_SCHEMA_NAME: &str = "document_claim_comparisons_v3";
+pub(crate) const CLAIM_COMPARISON_SCHEMA_NAME: &str = "document_claim_comparisons_v4";
 pub(crate) const MAX_CLAIM_COMPARISON_SCHEMA_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
 

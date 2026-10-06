@@ -53,7 +53,7 @@ const PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION: &str = "12.0.0";
 const PRE_CLAUSE_SYNTHESIS_VERSION: &str = "11.0.0";
 const PRE_FURNITURE_SYNTHESIS_VERSION: &str = "10.0.0";
 const PRE_BALANCED_SYNTHESIS_VERSION: &str = "9.0.0";
-pub const VERIFICATION_VERSION: &str = "14.0.0";
+pub const VERIFICATION_VERSION: &str = "15.0.0";
 const PRE_SEGMENT_ENUM_VERIFICATION_VERSION: &str = "12.0.0";
 const PRE_COMPARISON_VERIFICATION_VERSION: &str = "11.0.0";
 const PRE_CLAUSE_VERIFICATION_VERSION: &str = "10.0.0";
@@ -1579,6 +1579,15 @@ fn classify_verification_batches(
     })?;
     cancellation_checkpoint(control, PipelineStage::Verify)?;
 
+    if batches.iter().any(|batch| batch.comparison.is_some()) {
+        return comparisons::classify(
+            runtime,
+            batches,
+            generation_seed,
+            next_request_ordinal,
+            control,
+        );
+    }
     let mut claim_verifications = Vec::new();
     for batch in batches {
         cancellation_checkpoint(control, PipelineStage::Verify)?;
@@ -1592,13 +1601,10 @@ fn classify_verification_batches(
         })?;
         cancellation_checkpoint(control, PipelineStage::Verify)?;
         validate_runtime_response(runtime, &response, PipelineStage::Verify)?;
-        claim_verifications.extend(match &batch.comparison {
-            Some(comparison) => vec![comparison.parse(&response.text, &batch.claims[0])?],
-            None => parse_verification_response(
-                &batch.identifiers.verdict_response(&response.text)?,
-                &batch.claims,
-            )?,
-        });
+        claim_verifications.extend(parse_verification_response(
+            &batch.identifiers.verdict_response(&response.text)?,
+            &batch.claims,
+        )?);
     }
     Ok(claim_verifications)
 }
@@ -12674,7 +12680,7 @@ mod tests {
         assert_eq!(PREVIOUS_COHERENT_VERIFICATION_VERSION, "7.0.0");
         assert_eq!(PRE_DISCLOSURE_VERIFICATION_VERSION, "8.0.0");
         assert_eq!(PRE_CONTEXT_VERIFICATION_VERSION, "9.0.0");
-        assert_eq!(VERIFICATION_VERSION, "14.0.0");
+        assert_eq!(VERIFICATION_VERSION, "15.0.0");
         assert_eq!(PRE_SEGMENT_ENUM_VERIFICATION_VERSION, "12.0.0");
         assert_eq!(PRE_COMPARISON_VERIFICATION_VERSION, "11.0.0");
         assert_eq!(PRE_CLAUSE_VERIFICATION_VERSION, "10.0.0");

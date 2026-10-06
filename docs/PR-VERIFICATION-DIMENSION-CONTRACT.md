@@ -233,21 +233,84 @@ without moving references or labels. Existing caps can still cause fallback.
 
 ## Implementation summary
 
-Contract only. No source, tests, model calls, settings or remote PR state changed.
-Operator acceptance is recorded above before implementation; source work follows this commit.
+Local implementation now changes the comparison owner, schema protocol identity,
+verification dispatch and the adjacent tests. It is not runtime-qualified.
+
+- `summary/comparisons.rs:87`: the existing sentence owner retains original bytes,
+  tries the approved packing cuts and rolls back all tentative cuts if the whole
+  original sentence is needed. The unsplittable-source rejection is removed.
+- `summary/comparisons.rs:222`: one relation-shape table drives complete-object
+  decoder alternatives and the parser. The permissive independent schema and
+  handwritten parser shape match are removed.
+- `summary/comparisons.rs:405`: the executor validates the complete dimension plan,
+  preflights all requests, reserves shared ordinals and aggregates only complete
+  groups. The old all-dimensions response parser/dispatch is removed.
+- `summary/comparisons.rs:454`: the planner emits four owned dimension requests
+  per claim under the unchanged 64-request cap. This permits at most 16 claims.
+- The static coverage gate reports every original reference before runtime setup.
+  Live reporting preserves individual responses and explicitly records unexecuted
+  dimensions. A reporting adapter wraps exact response objects for the historical
+  scorer without filling, repairing or combining their passages.
+- An inherited scorer defect compared only admission booleans. The minimal
+  regression reproduced a false parity pass for ambiguous instead of recorded
+  unsupported; reporting now compares the exact recorded verdict as well.
+- The protocol reserves verification 15 and schema v4. Historical persisted A/B
+  views reopen unchanged. Original labels, passages, model and settings are fixed.
+
+## Verification results and stop
+
+Durable alias: `verification-dimension-contract-20261005`.
+
+- The four declared origin probes failed before the implementation and pass after.
+- Final comparison tests: 28 passed, 0 failed, 2 ignored.
+- Coherent verification tests: 10 passed, 0 failed, 2 ignored.
+- Copied historical A/B views: 1 test passed; both unchanged.
+- Formatting and strict all-target/all-feature Clippy pass. After the fixed-array
+  grouping lint correction, both affected executor/count tests pass again.
+- Static coverage: all 32 recorded passages in four controls fit one owned piece.
+  The cross-piece negative regression fails the gate without dropping references.
+- The qualified native converter/grammar library accepts and rejects all 80
+  independently specified shape cases correctly. The first probe export was
+  invalid because converting the ordered decoder schema into a JSON value sorted
+  its fields. That invalid result is retained separately. The corrected probe
+  preserves the exact transport serialization; no production ordering changed.
+- Installed gateway admission rejects the actual candidate schema before inference:
+  `_passage_definitions` requires a root object while root alternatives require
+  the root to contain only `anyOf`. Their composition is not supported. Its
+  passage enum cap also admits a 240-character control but rejects a 241-character
+  whole sentence. Isolating the branch-validation layer also reproduces its
+  passage-budget rejection: it adds mutually exclusive alternatives to the same
+  budget accumulator. Reproductions and the installed validator hash are retained.
+- Planner-only sizing reaches the combined 4096-character cap for sparse, prose
+  and dense fixtures on all four projections; 4097 rejects. These are not actual
+  gateway/native runtime maxima. Runtime measurements and six-input B admission
+  remain unrun because the gateway prerequisite failed.
+- No live generation or repeated control run was performed. No semantic outcome
+  or runtime fidelity claim is available. No model/settings/installed runtime,
+  push, merge or review-thread state changed.
 
 ## Cold diff audit
 
-Only this document is added against `0801972`. It supersedes the narrow rejected
-proposal and states all requested changes, origin components, removed assumptions,
-runtime gates and remaining limits. Verify a clean docs-only commit and identical
-Rust tree to the frozen base. No code tests are warranted for this doc-only diff.
+The production surface is limited to the comparison owner, dispatch and protocol
+identity. Existing extraction, synthesis prompts, model defaults and persisted
+schemas are unchanged. Source catalogs and full contexts remain owned by the same
+claim; parser and decoder consume the shared relation-shape table. Regression
+expectations use independent shape rules. No position parser or free quote path
+was introduced. Test-only historical wrappers are used solely for replay/scoring.
+
+The installed gateway is the next origin that requires a bounded compatibility
+contract. Do not inline duplicate enums, weaken relation constraints, restore the
+240-character rejection or raise runtime caps to evade its rejection. This arc
+stops at the required runtime gate; it is not a qualified release candidate.
 
 ## Gap audit
 
-NOT DONE for implementation or qualification. Operator acceptance is recorded;
-the next step is the declared fail-first regressions and origin fixes. Both previous candidates remain failed and
-frozen. No review thread is resolved by a proposed contract; PR116 stays held.
+NOT DONE for runtime qualification. Static coverage and local origin fixes are
+verified. Gateway schema admission is blocked; actual native/gateway generation
+probes, runtime maximum measurements, six-input B admission, the frozen repeated
+run driver, and the three repetitions of each control remain pending. PR116 stays
+held. Full A/B worker proof, independent review and unseen qualification follow
+only after those prerequisites pass.
 
 ## Accepted amendment during implementation
 

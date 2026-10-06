@@ -189,11 +189,102 @@ fn segment_catalog_admits_sentence_inputs_rejected_by_excerpt_expansion() {
     }
 }
 
+// Only test/replay data uses the historical four-dimension fixture wrapper.
+// Production receives one object per request and cannot use this adapter.
+fn parse_recorded_comparisons(
+    prepared: &Prepared,
+    response: &Value,
+) -> Result<ClaimVerdict, PipelineFailure> {
+    let selected: Vec<_> = DIMENSIONS
+        .iter()
+        .map(|dim| prepared.parse(&response["verdicts"][0]["comparisons"][dim].to_string()))
+        .collect::<Result<_, _>>()?;
+    Ok(aggregate(
+        &selected.try_into().map_err(|_| invalid_response())?,
+    ))
+}
+
+fn static_catalog_coverage(records: &[Value]) -> Value {
+    let mut controls = Vec::new();
+    for record in records
+        .iter()
+        .filter(|r| r["operator_expected_admit"].is_boolean())
+    {
+        let (prompt, claims) = input(record);
+        let planned = plan(&Runtime::default(), &prompt, &claims, 8);
+        let recorded: Value =
+            serde_json::from_str(record["raw_response"].as_str().unwrap()).unwrap();
+        let prepared = planned
+            .as_ref()
+            .ok()
+            .and_then(|b| b.first())
+            .and_then(|b| b.comparison.as_ref());
+        let mut references = Vec::new();
+        for dimension in DIMENSIONS {
+            for side in ["source_spans", "claim_spans"] {
+                for passage in recorded["verdicts"][0]["comparisons"][dimension][side]
+                    .as_array()
+                    .unwrap()
+                {
+                    let containing: Vec<_> = prepared
+                        .into_iter()
+                        .flat_map(|p| {
+                            if side == "source_spans" {
+                                &p.source_spans
+                            } else {
+                                &p.claim_spans
+                            }
+                        })
+                        .filter(|piece| piece_covers_reference(piece, passage.as_str().unwrap()))
+                        .collect();
+                    references.push(json!({"dimension":dimension,"side":side,"recorded":passage,
+                        "covered":!containing.is_empty(),"containing_pieces":containing}));
+                }
+            }
+        }
+        controls.push(json!({"case":record["case"],"admitted":planned.is_ok(),
+            "error":planned.err().map(|e| e.code),
+            "coverage_complete":references.iter().all(|r| r["covered"]==true),"references":references}));
+    }
+    json!({"gate_passed":controls.len()==4 && controls.iter().all(|c| c["admitted"]==true && c["coverage_complete"]==true),"controls":controls})
+}
+
+#[test]
+fn static_coverage_gate_reports_every_reference_and_rejects_cross_piece_spans() {
+    let f = fixture();
+    let mut records = f["records"].as_array().unwrap().clone();
+    let gate = static_catalog_coverage(&records);
+    println!("C9_STATIC_COVERAGE {gate}");
+    assert_eq!(gate["gate_passed"], true);
+    assert_eq!(gate["controls"].as_array().unwrap().len(), 4);
+    let record = records
+        .iter_mut()
+        .find(|r| r["operator_expected_admit"].is_boolean())
+        .unwrap();
+    let (prompt, _) = input(record);
+    let source = prompt.claims[0].evidence[0].full_clause.as_ref().unwrap();
+    assert!(segment_ranges(source).unwrap().len() > 1);
+    let mut raw: Value = serde_json::from_str(record["raw_response"].as_str().unwrap()).unwrap();
+    raw["verdicts"][0]["comparisons"]["stage"]["source_spans"] = json!([source]);
+    record["raw_response"] = json!(raw.to_string());
+    let failed = static_catalog_coverage(&records);
+    assert_eq!(failed["gate_passed"], false);
+    assert_eq!(failed["controls"][0]["coverage_complete"], false);
+    assert_eq!(failed["controls"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        failed["controls"][0]["references"]
+            .as_array()
+            .unwrap()
+            .len(),
+        8
+    );
+}
+
 #[test]
 fn c9_recorded_controls_fit_segments_and_keep_relation_aggregation() {
-    let fixture = fixture();
+    let f = fixture();
     let mut approved = 0;
-    for record in fixture["records"]
+    for record in f["records"]
         .as_array()
         .unwrap()
         .iter()
@@ -201,17 +292,28 @@ fn c9_recorded_controls_fit_segments_and_keep_relation_aggregation() {
     {
         let (prompt, claims) = input(record);
         let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
-        assert_eq!(batches.len(), 1);
-        let batch = &batches[0];
-        let request = verification_request(batch, 0, 7);
-        assert_eq!(request.max_output_tokens, 4096);
-        let prepared = batch.comparison.as_ref().unwrap();
-        let mut wire: Value = serde_json::from_str(&request.user_prompt).unwrap();
-        assert_eq!(wire["source_segments"], json!(prepared.source_spans));
-        assert_eq!(wire["claim_segments"], json!(prepared.claim_spans));
-        wire.as_object_mut().unwrap().remove("source_segments");
-        wire.as_object_mut().unwrap().remove("claim_segments");
-        assert_eq!(wire, record["user_prompt"]);
+        assert_eq!(batches.len(), 4);
+        for (dimension, batch) in batches.iter().enumerate() {
+            let request = verification_request(batch, dimension as u32, 7);
+            assert_eq!(request.max_output_tokens, 4096);
+            let prepared = batch.comparison.as_ref().unwrap();
+            let mut wire: Value = serde_json::from_str(&request.user_prompt).unwrap();
+            assert_eq!(wire["dimension"], DIMENSIONS[dimension]);
+            assert_eq!(wire["source_segments"], json!(prepared.source_spans));
+            assert_eq!(wire["claim_segments"], json!(prepared.claim_spans));
+            for key in ["source_segments", "claim_segments", "dimension"] {
+                wire.as_object_mut().unwrap().remove(key);
+            }
+            assert_eq!(wire, record["user_prompt"]);
+            assert_eq!(
+                crate::pipeline::model::response_format(&request.output_format)
+                    .unwrap()
+                    .unwrap()
+                    .as_value(),
+                &prepared.schema
+            );
+        }
+        let prepared = batches[0].comparison.as_ref().unwrap();
         let response =
             recorded_segments(prepared, record["raw_response"].as_str().unwrap()).unwrap();
         let accuracy = passage_accuracy(
@@ -225,83 +327,58 @@ fn c9_recorded_controls_fit_segments_and_keep_relation_aggregation() {
             "C9_CATALOG_ORACLE {}",
             json!({"case":record["case"],"source_pieces":prepared.source_spans.len(),"claim_pieces":prepared.claim_spans.len(),"schema_bytes":serde_json::to_vec(&prepared.schema).unwrap().len(),"accuracy":accuracy})
         );
-        let decoded = prepared.parse(&response.to_string(), &claims[0]).unwrap();
+        let verdict = parse_recorded_comparisons(prepared, &response).unwrap();
         assert_eq!(
-            serde_json::to_value(&decoded.verdict).unwrap(),
-            record["recorded_verdict"],
-            "{}",
-            record["case"]
+            serde_json::to_value(&verdict).unwrap(),
+            record["recorded_verdict"]
         );
-        assert_eq!(decoded.claim_id, claims[0].claim_id);
-        if let Some(expected) = record["operator_expected_admit"].as_bool() {
-            approved += 1;
-            assert_eq!(
-                decoded.verdict == ClaimVerdict::Supported,
-                expected,
-                "{}",
-                record["case"]
-            );
-        }
-        // Exercise the actual native schema admission, not just the planner.
         assert_eq!(
-            crate::pipeline::model::response_format(&request.output_format)
-                .unwrap()
-                .unwrap()
-                .as_value(),
-            &prepared.schema
+            verdict == ClaimVerdict::Supported,
+            record["operator_expected_admit"].as_bool().unwrap()
         );
+        approved += 1;
     }
     assert_eq!(approved, 4);
 }
 
 #[test]
-fn c9_decoder_wire_preserves_frozen_comparison_order() {
+fn c9_decoder_wire_preserves_comparison_field_order() {
     let f = fixture();
     let (prompt, claims) = input(&f["records"][0]);
-    let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
-    let request = verification_request(&batches[0], 0, 7);
-    let schema = crate::pipeline::model::response_format(&request.output_format)
-        .unwrap()
+    for batch in plan(&Runtime::default(), &prompt, &claims, 8).unwrap() {
+        let request = verification_request(&batch, 0, 7);
+        let wire = serde_json::to_string(
+            &crate::pipeline::model::response_format(&request.output_format)
+                .unwrap()
+                .unwrap(),
+        )
         .unwrap();
-    let wire = serde_json::to_string(&schema).unwrap();
-    for names in [
-        vec!["stage", "conditions", "qualifiers", "scope"],
-        vec!["source_spans", "claim_spans", "relation"],
-    ] {
-        let offsets = names
-            .iter()
-            .map(|name| wire.find(&format!("\"{name}\":{{")).unwrap())
-            .collect::<Vec<_>>();
-        assert!(
-            offsets.windows(2).all(|pair| pair[0] < pair[1]),
-            "decoder property order drifted: {names:?} at {offsets:?}"
-        );
+        let offsets = ["source_spans", "claim_spans", "relation"]
+            .map(|name| wire.find(&format!("\"{name}\":{{")).unwrap());
+        assert!(offsets.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(!wire.contains("\"comparisons\""));
+        assert!(!wire.contains("\"verdicts\""));
     }
 }
 
 #[test]
 fn c9_parser_rejects_partial_foreign_wrong_side_and_invented_spans() {
-    let fixture = fixture();
-    let record = &fixture["records"][0];
-    let (prompt, claims) = input(record);
+    let f = fixture();
+    let (prompt, claims) = input(&f["records"][0]);
     let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
-    let batch = &batches[0];
-    let prepared = batch.comparison.as_ref().unwrap();
-    let raw = fixture_response(&verification_request(batch, 0, 7), false);
+    let prepared = batches[0].comparison.as_ref().unwrap();
+    let raw = fixture_response(&verification_request(&batches[0], 0, 7), false);
     let valid: Value = serde_json::from_str(&raw).unwrap();
-    assert!(prepared.parse(&raw, &claims[0]).is_ok());
+    assert!(prepared.parse(&raw).is_ok());
     let mut bad = Vec::new();
-    for id in ["durable-claim", "k2", "k01", "e1", "clause-context-1", ""] {
+    for key in ["source_spans", "claim_spans", "relation"] {
         let mut v = valid.clone();
-        v["verdicts"][0]["claim_id"] = json!(id);
+        v.as_object_mut().unwrap().remove(key);
         bad.push(v);
     }
-    for dim in DIMENSIONS {
+    for key in ["claim_id", "verdict", "comparisons", "other"] {
         let mut v = valid.clone();
-        v["verdicts"][0]["comparisons"]
-            .as_object_mut()
-            .unwrap()
-            .remove(dim);
+        v[key] = json!("extra");
         bad.push(v);
     }
     for value in [
@@ -311,9 +388,10 @@ fn c9_parser_rejects_partial_foreign_wrong_side_and_invented_spans() {
         json!(""),
         json!([]),
         json!({}),
+        json!("unknown"),
     ] {
         let mut v = valid.clone();
-        v["verdicts"][0]["comparisons"]["scope"] = value;
+        v["relation"] = value;
         bad.push(v);
     }
     for field in ["source_spans", "claim_spans"] {
@@ -322,120 +400,96 @@ fn c9_parser_rejects_partial_foreign_wrong_side_and_invented_spans() {
             json!([""]),
             json!(["ayment"]),
             json!(vec!["payment"; 5]),
+            json!(false),
+            json!(null),
         ] {
             let mut v = valid.clone();
-            v["verdicts"][0]["comparisons"]["stage"][field] = spans;
+            v[field] = spans;
             bad.push(v);
         }
     }
     let mut wrong_side = valid.clone();
-    wrong_side["verdicts"][0]["comparisons"]["stage"]["source_spans"] = json!(["Final payment"]);
+    wrong_side["source_spans"] = valid["claim_spans"].clone();
     bad.push(wrong_side);
-    for verdicts in [
-        json!([]),
-        json!([valid["verdicts"][0], valid["verdicts"][0]]),
-    ] {
-        bad.push(json!({"verdicts":verdicts}));
-    }
-    let mut extra = valid.clone();
-    extra["verdicts"][0]["verdict"] = json!("supported");
-    bad.push(extra);
-    let mut extra = valid.clone();
-    extra["verdicts"][0]["comparisons"]["other"] = json!({});
-    bad.push(extra);
     for v in bad {
-        assert!(prepared.parse(&v.to_string(), &claims[0]).is_err(), "{v}");
+        assert!(prepared.parse(&v.to_string()).is_err(), "{v}");
     }
-    let duplicate = raw.replacen("\"claim_id\":", "\"claim_id\":\"k1\",\"claim_id\":", 1);
-    assert!(prepared.parse(&duplicate, &claims[0]).is_err());
+    let duplicate = raw.replacen(
+        "\"relation\":",
+        "\"relation\":\"preserved\",\"relation\":",
+        1,
+    );
+    assert!(prepared.parse(&duplicate).is_err());
     assert!(prepared
-        .parse(
-            r#"{"verdicts":[{"claim_id":"k1","verdict":"supported"}]}"#,
-            &claims[0]
-        )
+        .parse(f["records"][0]["raw_response"].as_str().unwrap())
         .is_err());
 }
 
 #[test]
-fn c9_relations_derive_verdict_and_enforce_both_span_sides() {
-    let fixture = fixture();
-    let (prompt, claims) = input(&fixture["records"][0]);
-    let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
-    let batch = &batches[0];
-    let prepared = batch.comparison.as_ref().unwrap();
-    let mut response: Value =
-        serde_json::from_str(&fixture_response(&verification_request(batch, 0, 7), false)).unwrap();
-    for (relation, source, target, expected) in [
-        ("preserved", true, true, Some(ClaimVerdict::Supported)),
-        ("changed", true, true, Some(ClaimVerdict::Unsupported)),
-        ("omitted", true, false, Some(ClaimVerdict::Unsupported)),
-        ("uncertain", true, false, Some(ClaimVerdict::Ambiguous)),
-        ("uncertain", false, true, Some(ClaimVerdict::Ambiguous)),
+fn c9_relations_schema_and_parser_agree_on_independent_shape_matrix() {
+    let f = fixture();
+    let (prompt, _) = input(&f["records"][0]);
+    let prepared = Prepared::new(&prompt.claims[0], usize::MAX).unwrap();
+    let mut shape_cases = 0;
+    for (relation, allowed) in [
+        ("preserved", vec![(true, true)]),
+        ("changed", vec![(true, true)]),
+        ("omitted", vec![(true, false), (true, true)]),
         (
-            "not_applicable",
-            false,
-            false,
-            Some(ClaimVerdict::Supported),
+            "uncertain",
+            vec![(false, true), (true, false), (true, true)],
         ),
-        ("preserved", true, false, None),
-        ("changed", false, true, None),
-        ("omitted", false, true, None),
-        ("uncertain", false, false, None),
-        ("not_applicable", true, false, None),
-        ("unknown", true, true, None),
+        ("not_applicable", vec![(false, false)]),
     ] {
-        response["verdicts"][0]["comparisons"]["conditions"] = json!({
-            "relation":relation,
-            "source_spans":if source {vec![prepared.source_spans.first().unwrap().clone()]} else {vec![]},
-            "claim_spans":if target {vec![prepared.claim_spans.first().unwrap().clone()]} else {vec![]}
-        });
-        let actual = prepared.parse(&response.to_string(), &claims[0]);
-        assert_eq!(
-            actual.ok().map(|v| v.verdict),
-            expected,
-            "{relation}/{source}/{target}"
-        );
+        for source in [0, 1, 4, 5] {
+            for claim in [0, 1, 4, 5] {
+                let response = json!({"source_spans":vec![prepared.source_spans.first().unwrap();source],
+                "claim_spans":vec![prepared.claim_spans.first().unwrap();claim],"relation":relation});
+                let expected =
+                    source <= 4 && claim <= 4 && allowed.contains(&(source > 0, claim > 0));
+                assert_eq!(
+                    prepared.parse(&response.to_string()).is_ok(),
+                    expected,
+                    "Rust {relation}/{source}/{claim}"
+                );
+                assert_eq!(
+                    schema_accepts(&prepared.schema, &prepared.schema, &response),
+                    expected,
+                    "schema {relation}/{source}/{claim}"
+                );
+                if source <= 1 && claim <= 1 {
+                    shape_cases += 1;
+                }
+            }
+        }
     }
+    assert_eq!(shape_cases, 20);
 }
 
 #[test]
 fn c9_no_applicable_comparison_cannot_support_claim() {
-    let f = fixture();
-    let (prompt, claims) = input(&f["records"][0]);
-    let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
-    let prepared = batches[0].comparison.as_ref().unwrap();
-    let empty = json!({"source_spans":[],"claim_spans":[],"relation":"not_applicable"});
-    let mut response = json!({"verdicts":[{"claim_id":"k1","comparisons":{
-        "stage":empty,"conditions":empty,"qualifiers":empty,"scope":empty}}]});
-    let actual = prepared
-        .parse(&response.to_string(), &claims[0])
-        .unwrap()
-        .verdict;
-    println!("all_not_applicable_verdict={actual:?}");
-    assert_eq!(
-        actual,
-        ClaimVerdict::Ambiguous,
-        "empty comparisons cannot prove support"
-    );
-    for dimension in DIMENSIONS {
+    let empty = || Comparison {
+        source_spans: vec![],
+        claim_spans: vec![],
+        relation: Relation::NotApplicable,
+    };
+    let mut comparisons = std::array::from_fn(|_| empty());
+    assert_eq!(aggregate(&comparisons), ClaimVerdict::Ambiguous);
+    for dimension in 0..DIMENSIONS.len() {
         for (relation, expected) in [
-            ("preserved", ClaimVerdict::Supported),
-            ("changed", ClaimVerdict::Unsupported),
-            ("omitted", ClaimVerdict::Unsupported),
-            ("uncertain", ClaimVerdict::Ambiguous),
+            (Relation::Preserved, ClaimVerdict::Supported),
+            (Relation::Changed, ClaimVerdict::Unsupported),
+            (Relation::Omitted, ClaimVerdict::Unsupported),
+            (Relation::Uncertain, ClaimVerdict::Ambiguous),
         ] {
-            response["verdicts"][0]["comparisons"][dimension] = json!({
-                "relation":relation, "source_spans":[prepared.source_spans.first().unwrap()],
-                "claim_spans":[prepared.claim_spans.first().unwrap()]});
-            assert_eq!(
-                prepared
-                    .parse(&response.to_string(), &claims[0])
-                    .unwrap()
-                    .verdict,
-                expected
-            );
+            comparisons[dimension] = Comparison {
+                source_spans: vec!["source".into()],
+                claim_spans: vec!["claim".into()],
+                relation,
+            };
+            assert_eq!(aggregate(&comparisons), expected);
         }
-        response["verdicts"][0]["comparisons"][dimension] = empty.clone();
+        comparisons[dimension] = empty();
     }
 }
 
@@ -448,15 +502,13 @@ fn segment_catalog_preserves_exact_unicode_and_complete_pieces() {
         assert!(!catalog.contains(partial));
     }
     for count in [239, 240, 241] {
-        assert_eq!(
-            segment_catalog(&[&"字".repeat(count)]).is_ok(),
-            count <= 240
-        );
+        let text = "字".repeat(count);
+        assert_eq!(segment_catalog(&[&text]).unwrap(), BTreeSet::from([text]));
     }
 }
 
 #[test]
-fn segments_keep_all_source_and_reject_unsplittable_restrictions() {
+fn segments_keep_all_source_and_preserve_unsplittable_restrictions() {
     let cases = [
         "Dr. Smith pays $27.50. Work starts after approval.",
         "A\tB stays exact.\nWrapped text stays\non one sentence.",
@@ -486,25 +538,17 @@ fn segments_keep_all_source_and_reject_unsplittable_restrictions() {
         "{}unless separately authorized",
         "Work continues ".repeat(30)
     );
-    assert_eq!(
-        segment_ranges(&long).unwrap_err().message,
-        SEGMENTATION_FAILURE_MESSAGE
-    );
+    assert_eq!(segment_ranges(&long).unwrap(), vec![(0, long.len())]);
 }
 
 #[test]
-fn c9_single_token_over_span_limit_uses_admission_fallback() {
+fn c9_single_token_over_target_uses_exact_sentence_fallback() {
     let f = fixture();
     let (mut prompt, claims) = input(&f["records"][0]);
     let source = "x".repeat(MAX_SPAN_CHARACTERS + 1);
     prompt.claims[0].evidence[0].exact_quote = source.clone();
     prompt.claims[0].evidence[0].full_clause = Some(source);
-    assert_eq!(
-        plan(&Runtime::default(), &prompt, &claims, 8)
-            .unwrap_err()
-            .code,
-        "VERIFICATION_INPUT_TOO_LARGE"
-    );
+    assert!(plan(&Runtime::default(), &prompt, &claims, 8).is_ok());
 }
 
 #[test]
@@ -574,19 +618,14 @@ fn c9_multiple_claims_keep_passages_and_local_ids_isolated() {
     prompt.claims.extend(second.claims);
     claims.extend(next);
     let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
-    assert_eq!(batches.len(), 2);
+    assert_eq!(batches.len(), 8);
     for batch in &batches {
         assert_eq!(batch.identifiers.vocabulary(), &["k1"]);
     }
     assert!(!batches[0].user_prompt.contains("temporary equipment"));
-    assert!(!batches[1].user_prompt.contains("Substantial Completion"));
+    assert!(!batches[4].user_prompt.contains("Substantial Completion"));
     let raw = records[0]["raw_response"].as_str().unwrap();
-    assert!(batches[1]
-        .comparison
-        .as_ref()
-        .unwrap()
-        .parse(raw, &claims[1])
-        .is_err());
+    assert!(batches[4].comparison.as_ref().unwrap().parse(raw).is_err());
 }
 
 #[test]
@@ -723,6 +762,45 @@ fn passage_accuracy(
     )
 }
 
+// Reporting only: preserve each received dimension object verbatim in the
+// historical scorer's container. Missing/duplicate/foreign dimensions fail.
+fn scoring_wrapper(responses: &[Value]) -> Option<Value> {
+    if responses.len() != DIMENSIONS.len() {
+        return None;
+    }
+    let mut comparisons = serde_json::Map::new();
+    for (expected, response) in DIMENSIONS.iter().zip(responses) {
+        if response["dimension"].as_str() != Some(expected) {
+            return None;
+        }
+        let decoded: Value = serde_json::from_str(response["text"].as_str()?).ok()?;
+        comparisons.insert((*expected).into(), decoded);
+    }
+    Some(json!({"text":json!({"verdicts":[{"comparisons":comparisons}]}).to_string()}))
+}
+
+#[test]
+fn scoring_wrapper_cannot_fill_missing_dimensions_or_repair_shapes() {
+    let responses:Vec<_> = DIMENSIONS.iter().map(|d| json!({"dimension":d,"text":r#"{"source_spans":["owned"],"claim_spans":[],"relation":"not_applicable"}"#})).collect();
+    let wrapped = scoring_wrapper(&responses).unwrap();
+    let v: Value = serde_json::from_str(wrapped["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        v["verdicts"][0]["comparisons"]["stage"]["source_spans"],
+        json!(["owned"])
+    );
+    assert_eq!(
+        v["verdicts"][0]["comparisons"]["stage"]["relation"],
+        "not_applicable"
+    );
+    assert!(scoring_wrapper(&responses[..3]).is_none());
+    let mut wrong = responses.clone();
+    wrong[1]["dimension"] = json!("stage");
+    assert!(scoring_wrapper(&wrong).is_none());
+    wrong[1]["dimension"] = json!("conditions");
+    wrong[1]["text"] = json!("{");
+    assert!(scoring_wrapper(&wrong).is_none());
+}
+
 fn live_control_observation(
     prepared: &Prepared,
     record: &Value,
@@ -731,8 +809,15 @@ fn live_control_observation(
     milliseconds: u128,
 ) -> Value {
     let expected = record["operator_expected_admit"].as_bool().unwrap();
-    let verdict = actual.as_ref().ok().map(|v| v[0].verdict.clone());
-    let verdict_passed = actual.is_ok() && (verdict == Some(ClaimVerdict::Supported)) == expected;
+    let verdict = actual
+        .as_ref()
+        .ok()
+        .filter(|v| v.len() == 1)
+        .map(|v| v[0].verdict.clone());
+    let verdict_passed = verdict.as_ref().is_some_and(|v| {
+        serde_json::to_value(v).unwrap() == record["recorded_verdict"]
+            && (*v == ClaimVerdict::Supported) == expected
+    });
     let accuracy = raw["text"].as_str().and_then(|text| {
         passage_accuracy(prepared, text, record["raw_response"].as_str().unwrap()).ok()
     });
@@ -777,12 +862,22 @@ fn c9_live_approved_controls_use_production_runtime() {
             request: &ModelRequest,
             control: &dyn ExecutionControl,
         ) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let started = std::time::Instant::now();
             let result = self.inner.generate_with_control(request, control);
-            self.responses.lock().unwrap().push(match &result {
+            let mut row = match &result {
                 Ok(response) => json!({"text":response.text,"runtime_id":response.runtime_id,
                     "model_id":response.model_id,"request_attempts":response.request_attempts}),
-                Err(error) => json!({"error":error.code,"message":error.message,"request_attempts":error.request_attempts}),
-            });
+                Err(error) => {
+                    json!({"error":error.code,"message":error.message,"request_attempts":error.request_attempts})
+                }
+            };
+            row["ordinal"] = json!(request.ordinal);
+            row["milliseconds"] = json!(started.elapsed().as_millis());
+            row["dimension"] = serde_json::from_str::<Value>(&request.user_prompt)
+                .ok()
+                .and_then(|v| v.get("dimension").cloned())
+                .unwrap_or(Value::Null);
+            self.responses.lock().unwrap().push(row);
             result
         }
         fn health(&self) -> Result<(), ModelRuntimeFailure> {
@@ -812,6 +907,13 @@ fn c9_live_approved_controls_use_production_runtime() {
     let save = |name: &str, value: &Value| {
         std::fs::write(output.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
     };
+    let f = fixture();
+    let coverage = static_catalog_coverage(f["records"].as_array().unwrap());
+    save("static-coverage.json", &coverage);
+    assert_eq!(
+        coverage["gate_passed"], true,
+        "static coverage must pass before runtime or inference"
+    );
     let route = std::env::var("DOC_SUM_C9_RUNTIME").unwrap_or_else(|_| "native".into());
     let scratch = tempfile::Builder::new()
         .prefix("docsum-c9-")
@@ -923,16 +1025,23 @@ fn c9_live_approved_controls_use_production_runtime() {
                     continue;
                 }
             };
-            let request = verification_request(&batches[0], 0, 7);
-            runtime.preflight_request(&request).unwrap();
-            let ModelOutputFormat::JsonSchema { name, schema } = &request.output_format else {
-                unreachable!();
-            };
-            save(
-                &format!("public-B-request-{}.json", index + 1),
-                &json!({"system_prompt":request.system_prompt,"user_prompt":request.user_prompt,"schema_name":name,"schema":schema}),
-            );
-            rows.push(json!({"unit":index+1,"admitted":true,"prompt_characters":request.system_prompt.chars().count()+request.user_prompt.chars().count(),"schema_bytes":serde_json::to_vec(schema).unwrap().len()}));
+            let mut dimensions = Vec::new();
+            for (dimension, batch) in batches.iter().enumerate() {
+                let request = verification_request(batch, dimension as u32, 7);
+                let admission = runtime.preflight_request(&request);
+                let ModelOutputFormat::JsonSchema { name, schema } = &request.output_format else {
+                    unreachable!();
+                };
+                save(
+                    &format!("public-B-request-{}-{dimension}.json", index + 1),
+                    &json!({"system_prompt":request.system_prompt,"user_prompt":request.user_prompt,"schema_name":name,"schema":schema}),
+                );
+                dimensions.push(json!({"dimension":DIMENSIONS[dimension],"admitted":admission.is_ok(),
+                    "error":admission.err().map(|e| json!({"code":e.code,"message":e.message})),
+                    "prompt_characters":request.system_prompt.chars().count()+request.user_prompt.chars().count(),
+                    "schema_bytes":serde_json::to_vec(schema).unwrap().len()}));
+            }
+            rows.push(json!({"unit":index+1,"admitted":dimensions.iter().all(|d| d["admitted"]==true),"dimensions":dimensions}));
         }
         save("public-B-admission.json", &json!(rows));
         println!("C9_PUBLIC_B_ADMISSION {}", json!(rows));
@@ -946,6 +1055,7 @@ fn c9_live_approved_controls_use_production_runtime() {
     }
     let f = fixture();
     let mut results = Vec::new();
+    let mut ordinal = 0;
     for record in f["records"]
         .as_array()
         .unwrap()
@@ -954,19 +1064,21 @@ fn c9_live_approved_controls_use_production_runtime() {
     {
         let (prompt, claims) = input(record);
         let batches = plan(&runtime, &prompt, &claims, 8).unwrap();
-        let mut ordinal = results.len() as u32;
-        let request = verification_request(&batches[0], ordinal, 7);
-        let ModelOutputFormat::JsonSchema { name, schema } = &request.output_format else {
-            unreachable!();
-        };
-        save(
-            &format!("request-{ordinal}.json"),
-            &json!({"system_prompt":request.system_prompt,
-            "user_prompt":request.user_prompt,"seed":request.seed,"max_output_tokens":request.max_output_tokens,
-            "schema_name":name,"schema":schema,
-            "decoder_schema_json":serde_json::to_string(&crate::pipeline::model::response_format(&request.output_format).unwrap().unwrap()).unwrap()}),
-        );
-        runtime.preflight_request(&request).unwrap();
+        let start_response = runtime.responses.lock().unwrap().len();
+        for (dimension, batch) in batches.iter().enumerate() {
+            let request = verification_request(batch, ordinal + dimension as u32, 7);
+            let ModelOutputFormat::JsonSchema { name, schema } = &request.output_format else {
+                unreachable!();
+            };
+            save(
+                &format!("request-{}.json", request.ordinal),
+                &json!({
+                "case":record["case"],"dimension":DIMENSIONS[dimension],"ordinal":request.ordinal,
+                "system_prompt":request.system_prompt,"user_prompt":request.user_prompt,"seed":request.seed,
+                "max_output_tokens":request.max_output_tokens,"schema_name":name,"schema":schema,
+                "decoder_schema_json":serde_json::to_string(&crate::pipeline::model::response_format(&request.output_format).unwrap().unwrap()).unwrap()}),
+            );
+        }
         let prepared = Prepared::new(
             &prompt.claims[0],
             runtime.response_schema_byte_limit(PipelineStage::Verify, SCHEMA_NAME),
@@ -980,15 +1092,24 @@ fn c9_live_approved_controls_use_production_runtime() {
             &mut ordinal,
             &UNCONTROLLED_EXECUTION,
         );
-        let raw = runtime.responses.lock().unwrap().last().unwrap().clone();
-        save(&format!("response-{}.json", results.len()), &raw);
-        let row = live_control_observation(
+        let raw = runtime.responses.lock().unwrap()[start_response..].to_vec();
+        save(&format!("responses-{}.json", results.len()), &json!(raw));
+        let scored = scoring_wrapper(&raw).unwrap_or(Value::Null);
+        let mut row = live_control_observation(
             &prepared,
             record,
-            &raw,
+            &scored,
             actual,
             started.elapsed().as_millis(),
         );
+        row["planned_generation_calls"] = json!(DIMENSIONS.len());
+        row["actual_generation_calls"] = json!(raw.len());
+        row["dimensions"] = json!(DIMENSIONS
+            .iter()
+            .enumerate()
+            .map(|(n, dim)| json!({
+            "dimension":dim,"executed":n<raw.len(),"raw":raw.get(n)}))
+            .collect::<Vec<_>>());
         println!("C9_PRODUCTION_CONTROL {row}");
         results.push(row);
         save("results.json", &json!(results));
@@ -1021,7 +1142,13 @@ fn passage_accuracy_separates_containment_exactness_and_relation_validity() {
     let response = recorded_segments(&prepared, record["raw_response"].as_str().unwrap()).unwrap();
     let observe = |response: &Value| {
         let text = response.to_string();
-        let actual = prepared.parse(&text, &claims[0]).map(|v| vec![v]);
+        let actual = parse_recorded_comparisons(&prepared, response).map(|verdict| {
+            vec![ClaimVerification {
+                claim_id: claims[0].claim_id.clone(),
+                evidence_ids: claims[0].evidence_ids.clone(),
+                verdict,
+            }]
+        });
         live_control_observation(&prepared, record, &json!({"text":text}), actual, 0)
     };
     let good = observe(&response);
@@ -1130,25 +1257,16 @@ fn sizing_observation(runtime: &dyn ModelRuntime, family: &str, size: usize) -> 
         json!({"family":family,"claim_and_unique_source_characters":size,"admitted":false});
     match planned {
         Ok(batches) => {
-            let request = verification_request(&batches[0], 0, 7);
-            row["projected_prompt_characters"] =
-                json!(request.system_prompt.chars().count() + request.user_prompt.chars().count());
-            row["schema_bytes"] = json!(serde_json::to_vec(
-                &batches[0].comparison.as_ref().unwrap().schema
-            )
-            .unwrap()
-            .len());
-            match runtime.preflight_request(&request) {
-                Ok(()) => row["admitted"] = json!(true),
-                Err(e) => {
-                    assert_eq!(
-                        e.code, "MODEL_CONTEXT_EXCEEDED",
-                        "unexpected preflight error: {e:?}"
-                    );
-                    row["error"] = json!(e.code);
-                    row["message"] = json!(e.message);
-                }
-            }
+            let dimensions: Vec<_> = batches.iter().enumerate().map(|(dimension, batch)| {
+                let request = verification_request(batch, dimension as u32, 7);
+                let admission = runtime.preflight_request(&request);
+                json!({"dimension":DIMENSIONS[dimension],
+                    "projected_prompt_characters":request.system_prompt.chars().count()+request.user_prompt.chars().count(),
+                    "schema_bytes":serde_json::to_vec(&batch.comparison.as_ref().unwrap().schema).unwrap().len(),
+                    "admitted":admission.is_ok(),"error":admission.err().map(|e| json!({"code":e.code,"message":e.message}))})
+            }).collect();
+            row["admitted"] = json!(dimensions.iter().all(|d| d["admitted"] == true));
+            row["dimensions"] = json!(dimensions);
         }
         Err(e) => {
             assert_eq!(
@@ -1157,14 +1275,6 @@ fn sizing_observation(runtime: &dyn ModelRuntime, family: &str, size: usize) -> 
             );
             row["error"] = json!(e.code);
             row["message"] = json!(e.message);
-            if let Ok(prepared) = Prepared::new(
-                &prompt.claims[0],
-                runtime.response_schema_byte_limit(PipelineStage::Verify, SCHEMA_NAME),
-            ) {
-                let (user, _) = prepared.prompt(&prompt.claims[0]).unwrap();
-                row["projected_prompt_characters"]=json!(format!("{VERIFICATION_ENTAILMENT_INSTRUCTION}{CLAUSE_VERIFICATION_INSTRUCTION}\n{INSTRUCTION}").chars().count()+user.chars().count());
-                row["schema_bytes"] = json!(serde_json::to_vec(&prepared.schema).unwrap().len());
-            }
         }
     }
     row
@@ -1209,7 +1319,7 @@ fn segment_projection_size_boundaries() {
             .as_array()
             .unwrap()
             .iter()
-            .zip([260, 4096, 260])
+            .zip([4096, 4096, 4096])
         {
             assert_eq!(
                 row["maximum_admitted"]["claim_and_unique_source_characters"],
@@ -1246,4 +1356,385 @@ fn segment_saved_views_reopen_unchanged() {
         assert_eq!(serde_json::to_value(view).unwrap(), case["view"]);
         println!("SEGMENT_SAVED_VIEW_UNCHANGED {}", case["alias"]);
     }
+}
+
+// Independent, deliberately limited JSON Schema evaluator for the generated
+// comparison schema. Unsupported keywords fail the test rather than pass open.
+fn schema_accepts(root: &Value, node: &Value, value: &Value) -> bool {
+    for key in node.as_object().unwrap().keys() {
+        assert!(
+            [
+                "$defs",
+                "$ref",
+                "anyOf",
+                "type",
+                "enum",
+                "properties",
+                "required",
+                "additionalProperties",
+                "items",
+                "minItems",
+                "maxItems"
+            ]
+            .contains(&key.as_str()),
+            "unsupported test schema keyword: {key}"
+        );
+    }
+    if let Some(reference) = node["$ref"].as_str() {
+        return schema_accepts(
+            root,
+            root.pointer(reference.strip_prefix('#').unwrap()).unwrap(),
+            value,
+        );
+    }
+    if let Some(choices) = node["anyOf"].as_array() {
+        return choices
+            .iter()
+            .any(|choice| schema_accepts(root, choice, value));
+    }
+    if let Some(choices) = node["enum"].as_array() {
+        if !choices.contains(value) {
+            return false;
+        }
+    }
+    match node["type"].as_str().unwrap() {
+        "string" => value.is_string(),
+        "array" => value.as_array().is_some_and(|items| {
+            items.len() >= node["minItems"].as_u64().unwrap_or(0) as usize
+                && items.len() <= node["maxItems"].as_u64().unwrap_or(u64::MAX) as usize
+                && items
+                    .iter()
+                    .all(|item| schema_accepts(root, &node["items"], item))
+        }),
+        "object" => value.as_object().is_some_and(|object| {
+            let properties = node["properties"].as_object().unwrap();
+            node["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|key| object.contains_key(key.as_str().unwrap()))
+                && object.iter().all(|(key, child)| match properties.get(key) {
+                    Some(property) => schema_accepts(root, property, child),
+                    None => node["additionalProperties"] != false,
+                })
+        }),
+        other => panic!("unsupported test schema type: {other}"),
+    }
+}
+
+#[test]
+fn revision_schema_rejects_contradictory_relation_shape() {
+    let f = fixture();
+    let (prompt, _) = input(&f["records"][0]);
+    let prepared = Prepared::new(&prompt.claims[0], usize::MAX).unwrap();
+    let invalid = json!({"source_spans":[prepared.source_spans.first().unwrap()],
+        "claim_spans":[],"relation":"not_applicable"});
+    assert!(
+        !schema_accepts(&prepared.schema, &prepared.schema, &invalid),
+        "decoder admits a nonempty not_applicable source list"
+    );
+}
+
+#[test]
+fn revision_comma_fallback_preserves_source() {
+    let text = format!(
+        "{}, {}.",
+        "alpha ".repeat(25).trim(),
+        "beta ".repeat(25).trim()
+    );
+    let ranges = segment_ranges(&text).expect("comma-only long sentence should be admitted");
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(
+        &text[ranges[0].0..ranges[0].1],
+        text.split_once(", ").unwrap().0.to_string() + ","
+    );
+    assert_eq!(
+        &text[ranges[1].0..ranges[1].1],
+        text.split_once(", ").unwrap().1
+    );
+}
+
+#[test]
+fn revision_unsplittable_sentence_is_one_exact_piece() {
+    let text = format!("{}.", "unbroken ".repeat(40).trim());
+    assert_eq!(
+        segment_ranges(&text).expect("whole sentence fallback should be admitted"),
+        vec![(0, text.len())]
+    );
+}
+
+#[test]
+fn revision_plans_each_dimension() {
+    let f = fixture();
+    let (prompt, claims) = input(&f["records"][0]);
+    let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+    assert_eq!(
+        batches.len(),
+        DIMENSIONS.len(),
+        "one prepared request per dimension"
+    );
+}
+
+#[test]
+fn segment_conjunction_vocabulary_and_fallback_rollback() {
+    let left = "alpha ".repeat(25);
+    let right = "beta ".repeat(25);
+    for word in ["and", "OR", "but", "Nor"] {
+        let text = format!("{left}{word} {right}");
+        let ranges = segment_ranges(&text).unwrap();
+        assert_eq!(ranges.len(), 2, "{word}");
+        assert!(text[ranges[1].0..ranges[1].1].starts_with(word));
+        let joined: String = ranges
+            .iter()
+            .flat_map(|&(a, b)| text[a..b].chars())
+            .filter(|c| !whitespace(*c))
+            .collect();
+        assert_eq!(
+            joined,
+            text.chars().filter(|c| !whitespace(*c)).collect::<String>()
+        );
+    }
+    for word in ["for", "yet", "so", "android", "and2", "and_name", "oranges"] {
+        let text = format!("{left}{word} {right}");
+        assert_eq!(
+            segment_ranges(&text).unwrap(),
+            vec![(0, text.trim_end().len())],
+            "{word}"
+        );
+    }
+    let text = format!("Already done. {}and {}", left, "unbroken ".repeat(40));
+    let ranges = segment_ranges(&text).unwrap();
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(&text[ranges[0].0..ranges[0].1], "Already done.");
+    assert_eq!(&text[ranges[1].0..ranges[1].1], text[14..].trim());
+    let text = format!("{left}1,000 {right}");
+    assert_eq!(segment_ranges(&text).unwrap().len(), 1);
+}
+
+fn repeated_claims(count: usize) -> (VerificationPrompt, Vec<CitedClaim>) {
+    let f = fixture();
+    let (prompt, claims) = input(&f["records"][0]);
+    let mut repeated = VerificationPrompt { claims: vec![] };
+    let mut owned = vec![];
+    for n in 0..count {
+        let mut input = prompt.claims[0].clone();
+        let mut claim = claims[0].clone();
+        input.claim_id = format!("durable-{n}");
+        claim.claim_id.clone_from(&input.claim_id);
+        repeated.claims.push(input);
+        owned.push(claim);
+    }
+    (repeated, owned)
+}
+
+#[test]
+fn dimension_plan_count_and_association_boundaries() {
+    for count in [0, 1, 15, 16, 17] {
+        let (prompt, claims) = repeated_claims(count);
+        let result = plan(&Runtime::default(), &prompt, &claims, 32);
+        if (1..=16).contains(&count) {
+            let batches = result.unwrap();
+            assert_eq!(batches.len(), count * 4);
+            validate_plan(&batches).unwrap();
+        } else {
+            assert!(result.is_err());
+        }
+    }
+    let (prompt, claims) = repeated_claims(2);
+    for defect in 0..6 {
+        let mut batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+        match defect {
+            0 => {
+                batches.pop();
+            }
+            1 => batches.swap(0, 1),
+            2 => batches.swap(0, 4),
+            3 => batches[2].claims[0].text.push('!'),
+            4 => batches[2].comparison = None,
+            5 => batches[2].claims[0].evidence_ids.clear(),
+            _ => unreachable!(),
+        }
+        assert!(validate_plan(&batches).is_err(), "defect {defect}");
+    }
+}
+
+#[test]
+fn dimension_executor_preflights_all_and_returns_only_complete_owned_results() {
+    use crate::pipeline::control::CancellationToken;
+    use std::sync::Mutex;
+    struct Sequenced {
+        preflights: Mutex<Vec<u32>>,
+        calls: Mutex<Vec<u32>>,
+        reject: Option<u32>,
+        invalid: Option<u32>,
+        cancel: Option<u32>,
+        token: CancellationToken,
+    }
+    impl ModelRuntime for Sequenced {
+        fn preflight_request(&self, r: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            self.preflights.lock().unwrap().push(r.ordinal);
+            if self.reject == Some(r.ordinal) {
+                return Err(ModelRuntimeFailure {
+                    code: "MODEL_CONTEXT_EXCEEDED".into(),
+                    message: "fixture".into(),
+                    recoverable: false,
+                    request_attempts: vec![],
+                });
+            }
+            Ok(())
+        }
+        fn generate(&self, r: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            assert_eq!(
+                *self.preflights.lock().unwrap(),
+                (10..18).collect::<Vec<_>>()
+            );
+            self.calls.lock().unwrap().push(r.ordinal);
+            if self.cancel == Some(r.ordinal) {
+                self.token.request();
+            }
+            Ok(ModelResponse {
+                text: if self.invalid == Some(r.ordinal) {
+                    "{}".into()
+                } else {
+                    fixture_response(r, r.ordinal == 16)
+                },
+                runtime_id: "fixture".into(),
+                model_id: "fixture".into(),
+                request_attempts: vec![],
+            })
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "fixture"
+        }
+        fn model_id(&self) -> &str {
+            "fixture"
+        }
+    }
+    for (reject, invalid, cancel) in [
+        (None, None, None),
+        (Some(17), None, None),
+        (None, Some(16), None),
+        (None, None, Some(12)),
+    ] {
+        let runtime = Sequenced {
+            preflights: Mutex::new(vec![]),
+            calls: Mutex::new(vec![]),
+            reject,
+            invalid,
+            cancel,
+            token: CancellationToken::new(),
+        };
+        let (prompt, claims) = repeated_claims(2);
+        let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+        let mut ordinal = 10;
+        let result =
+            classify_verification_batches(&runtime, batches, 7, &mut ordinal, &runtime.token);
+        let expected_calls = if reject.is_some() {
+            0
+        } else if invalid.is_some() {
+            7
+        } else if cancel.is_some() {
+            3
+        } else {
+            8
+        };
+        assert_eq!(ordinal, 10 + expected_calls);
+        assert_eq!(
+            *runtime.calls.lock().unwrap(),
+            (10..10 + expected_calls).collect::<Vec<_>>()
+        );
+        if reject.is_some() || invalid.is_some() || cancel.is_some() {
+            assert!(result.is_err());
+        } else {
+            let verdicts = result.unwrap();
+            assert_eq!(verdicts.len(), 2);
+            assert_eq!(verdicts[0].claim_id, "durable-0");
+            assert_eq!(verdicts[0].verdict, ClaimVerdict::Supported);
+            assert_eq!(verdicts[1].claim_id, "durable-1");
+            assert_eq!(verdicts[1].verdict, ClaimVerdict::Unsupported);
+        }
+    }
+}
+
+#[test]
+fn export_actual_decoder_schema_and_independent_shapes() {
+    let f = fixture();
+    let record = f["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["operator_expected_admit"].is_boolean())
+        .unwrap();
+    let (prompt, claims) = input(record);
+    let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+    let request = verification_request(&batches[0], 0, 7);
+    let prepared = batches[0].comparison.as_ref().unwrap();
+    let source = prepared.source_spans.iter().next().unwrap();
+    let claim = prepared.claim_spans.iter().next().unwrap();
+    let mut cases = Vec::new();
+    for relation in [
+        "preserved",
+        "changed",
+        "omitted",
+        "uncertain",
+        "not_applicable",
+    ] {
+        for n in [0, 1, 4, 5] {
+            for m in [0, 1, 4, 5] {
+                let expected = n <= 4
+                    && m <= 4
+                    && match relation {
+                        "preserved" | "changed" => n > 0 && m > 0,
+                        "omitted" => n > 0,
+                        "uncertain" => n > 0 || m > 0,
+                        "not_applicable" => n == 0 && m == 0,
+                        _ => unreachable!(),
+                    };
+                let text = format!(
+                    "{{\"source_spans\":{},\"claim_spans\":{},\"relation\":{}}}",
+                    json!(vec![source; n]),
+                    json!(vec![claim; m]),
+                    json!(relation)
+                );
+                assert_eq!(prepared.parse(&text).is_ok(), expected);
+                cases.push(json!({"relation":relation,"source_count":n,"claim_count":m,"expected":expected,"text":text}));
+            }
+        }
+    }
+    let schema = crate::pipeline::model::response_format(&request.output_format)
+        .unwrap()
+        .unwrap();
+    if let Ok(path) = std::env::var("DOC_SUM_C9_GRAMMAR_PACKET") {
+        std::fs::write(path, serde_json::to_vec_pretty(&json!({"schema":schema.as_value(),"decoder_schema_json":serde_json::to_string(&schema).unwrap(),"cases":cases})).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn verdict_parity_rejects_ambiguous_in_place_of_recorded_unsupported() {
+    let f = fixture();
+    let record = f["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["case"] == "invoice-explicit-difference")
+        .unwrap();
+    let (prompt, claims) = input(record);
+    let prepared = Prepared::new(&prompt.claims[0], usize::MAX).unwrap();
+    let covered = recorded_segments(&prepared, record["raw_response"].as_str().unwrap()).unwrap();
+    let row = live_control_observation(
+        &prepared,
+        record,
+        &json!({"text":covered.to_string()}),
+        Ok(vec![ClaimVerification {
+            claim_id: claims[0].claim_id.clone(),
+            evidence_ids: claims[0].evidence_ids.clone(),
+            verdict: ClaimVerdict::Ambiguous,
+        }]),
+        0,
+    );
+    assert_eq!(row["verdict_parity_passed"], false);
+    assert_eq!(row["gate_passed"], false);
 }

@@ -210,11 +210,32 @@ fn c9_production_request_requires_comparisons_instead_of_model_verdict() {
     let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
         panic!("verification must require structured output");
     };
-    let properties = &schema["properties"]["verdicts"]["items"]["properties"];
-    assert!(
-        properties.get("comparisons").is_some() && properties.get("verdict").is_none(),
-        "production verifier still accepts a bare model verdict without comparisons"
-    );
+    let choices = schema["anyOf"]
+        .as_array()
+        .expect("dimension must use constrained alternatives");
+    for choice in choices {
+        assert_eq!(
+            choice["required"],
+            json!(["source_spans", "claim_spans", "relation"])
+        );
+        assert!(choice["properties"].get("verdict").is_none());
+    }
+    let comparison_requests: Vec<_> = requests
+        .iter()
+        .filter(|r| {
+            matches!(&r.output_format,
+        ModelOutputFormat::JsonSchema { name, .. } if name == comparisons::SCHEMA_NAME)
+        })
+        .collect();
+    assert_eq!(comparison_requests.len(), 4);
+    for (request, expected) in
+        comparison_requests
+            .iter()
+            .zip(["stage", "conditions", "qualifiers", "scope"])
+    {
+        let input: Value = serde_json::from_str(&request.user_prompt).unwrap();
+        assert_eq!(input["dimension"], expected);
+    }
 }
 
 #[test]
