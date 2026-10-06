@@ -867,18 +867,49 @@ mod tests {
     struct CountingFixtureRuntime {
         generate_calls: AtomicU32,
         health_calls: AtomicU32,
+        requests: Mutex<Vec<ModelRequest>>,
     }
 
     impl CountingFixtureRuntime {
         fn reset(&self) {
             self.generate_calls.store(0, Ordering::Relaxed);
             self.health_calls.store(0, Ordering::Relaxed);
+            self.requests.lock().unwrap().clear();
+        }
+
+        fn assert_single_verification_sequence(&self) {
+            let requests = self.requests.lock().unwrap();
+            let verification: Vec<_> = requests
+                .iter()
+                .filter(|request| request.stage == PipelineStage::Verify)
+                .collect();
+            assert_eq!(verification.len(), 5, "one ledger and four dimensions");
+            let dimensions: Vec<_> = verification
+                .iter()
+                .filter(|request| {
+                    matches!(&request.output_format,
+                    crate::pipeline::contracts::ModelOutputFormat::JsonSchema { name, .. }
+                    if name == crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME)
+                })
+                .map(|request| {
+                    serde_json::from_str::<serde_json::Value>(&request.user_prompt).unwrap()
+                        ["dimension"]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
+                .collect();
+            assert_eq!(dimensions, ["stage", "conditions", "qualifiers", "scope"]);
+            let ordinals: Vec<_> = verification.iter().map(|r| r.ordinal).collect();
+            assert_eq!(ordinals, [0, 1, 2, 3, 4]);
+            println!("CONTINUATION_VERIFICATION one ledger; dimensions={dimensions:?}; ordinals={ordinals:?}");
         }
     }
 
     impl ModelRuntime for CountingFixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             self.generate_calls.fetch_add(1, Ordering::Relaxed);
+            self.requests.lock().unwrap().push(request.clone());
             Ok(ModelResponse {
                 text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
@@ -1290,11 +1321,11 @@ mod tests {
 
             match checkpoint {
                 ContinuationCheckpoint::Analyzed => {
-                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 3);
+                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 6);
                     assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 3);
                 }
                 ContinuationCheckpoint::Synthesized => {
-                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 2);
+                    assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 5);
                     assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 2);
                 }
                 ContinuationCheckpoint::Verified => {
@@ -1305,6 +1336,9 @@ mod tests {
                     assert!(runtime.generate_calls.load(Ordering::Relaxed) > 1);
                     assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 4);
                 }
+            }
+            if checkpoint != ContinuationCheckpoint::Verified {
+                runtime.assert_single_verification_sequence();
             }
         }
     }
@@ -1799,8 +1833,9 @@ mod tests {
             )
             .expect("reopened synthesized checkpoint should verify with the runtime")
         };
-        assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 5);
         assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 2);
+        runtime.assert_single_verification_sequence();
 
         let reopened = init_db(&database.0).expect("completed database should reopen again");
         assert_eq!(

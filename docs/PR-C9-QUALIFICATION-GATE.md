@@ -27,8 +27,12 @@ and the operator explicitly clears
 [the hold thread](https://github.com/canfieldjuan/document-summarizer/pull/116#discussion_r4196409571).
 That thread must remain unresolved until then. The operator chose not to ship C9
 gated off. Green CI, review, contract acceptance and resolution of the P1/P2 code
-defects do not authorize merging this PR. The deferred prompt trial remains
-unaccepted.
+defects do not authorize merging this PR. The separate test-only prompt trial was accepted earlier in
+[issuecomment-6010039229](https://github.com/canfieldjuan/document-summarizer/pull/116#issuecomment-6010039229).
+The earlier unaccepted status was an agent tracking error. The single development
+trial stopped at its first unit after four calls: A1 was labelled withhold but
+returned Supported. No rerun or further prompt revision is allowed. This result
+cannot clear the hold; per-sentence verification requires a new accepted contract.
 
 ## Root cause
 
@@ -93,3 +97,19 @@ DONE for implementation and local proof. The publication receipt must identify t
 `complete_verified_document_with_delivery` can complete a saved Verified checkpoint without calling verification again. Apply the same activation decision there before creating artifacts. This consumes the saved protocol/presentation metadata, preserves completed reads, and closes the same unqualified-output blocker. Add a fail-first regression restored to the recorded Verified transition.
 
 The adjacent scripted-verdict caller also reproduced an inherited segment-candidate fixture defect: the shared test-only VerificationPrompt adapter rejected claim_segments/dimension metadata. Update that adapter at its owner, keep production strict parsing unchanged, and cover every dimension through the existing recorded-control regression. Adjacent callers must pass before publication.
+
+## Continuation test correction
+
+CI at `83d3f83` exposed two remaining test callers of the inherited dimension
+protocol. Both failures reproduced locally: observed generation counts were six
+versus three and five versus two. These tests still assumed one comparison call;
+the planner correctly makes four dimension calls. This omission came from our
+earlier protocol change.
+
+The test-only counting runtime now records requests, and the checkpoint tests
+require one ledger request plus stage, conditions, qualifiers and scope once
+each, with verification ordinals zero through four. Expected synthesis and
+verification counts are corrected; health-call and completed-artifact invariance
+assertions remain. No production path or expected semantic verdict changes.
+The adjacent service suite passes 16 tests, with one live test ignored; strict
+all-feature lint and formatting pass. CI owns the broader repeat.
