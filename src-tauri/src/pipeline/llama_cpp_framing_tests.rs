@@ -339,7 +339,9 @@ fn original_c9_native_framing_parity() {
 thread_local! {
     static COMPLETION_CAPTURE: std::cell::RefCell<Option<(PathBuf, bool)>> = const { std::cell::RefCell::new(None) };
 }
+#[cfg(target_os = "linux")]
 struct CompletionCapture;
+#[cfg(target_os = "linux")]
 impl Drop for CompletionCapture {
     fn drop(&mut self) {
         COMPLETION_CAPTURE.with(|c| *c.borrow_mut() = None);
@@ -368,12 +370,16 @@ pub(super) fn capture_completion_response(bytes: &[u8]) {
         }
     });
 }
+const SUMMARY_MANIFEST: &str =
+    include_str!("summary/comparisons/fixtures/native-summary-parity-manifest.json");
+const SUMMARY_MANIFEST_SHA: &str =
+    "5ed3e4c777eb6dd6da0f2c8cf03d3b084f11969f04e7f65ae99af11ebe8fd4cc";
 fn summary_manifest() -> Value {
-    let registry: Value = serde_json::from_str(include_str!(
-        "summary/comparisons/fixtures/c9-parity-manifest.json"
-    ))
-    .unwrap();
-    registry["additional_tasks"][0].clone()
+    assert_eq!(
+        format!("{:x}", Sha256::digest(SUMMARY_MANIFEST.as_bytes())),
+        SUMMARY_MANIFEST_SHA
+    );
+    serde_json::from_str(SUMMARY_MANIFEST).unwrap()
 }
 fn summary_packet(root: &Path, manifest: &Value) -> Result<Vec<ModelRequest>, String> {
     let check = |ok: bool, message: &str| if ok { Ok(()) } else { Err(message.to_string()) };
@@ -555,6 +561,7 @@ fn native_summary_registry_rejects_budget_settings_and_case_drift() {
         fs::write(root.path().join(&name), bytes).unwrap();
     }
 }
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "accepted two-call summary parity; frozen packet, exclusive inference lock and pinned GGUF required"]
 fn original_summary_native_adapter_parity() {

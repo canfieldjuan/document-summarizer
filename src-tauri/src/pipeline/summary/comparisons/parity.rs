@@ -17,6 +17,11 @@ fn manifest() -> Value {
     serde_json::from_str(MANIFEST).unwrap()
 }
 
+#[test]
+fn original_c9_manifest_bytes_remain_frozen() {
+    assert_eq!(hash(MANIFEST.as_bytes()), MANIFEST_SHA);
+}
+
 fn records(m: &Value, f: &Value) -> Result<Vec<Value>, &'static str> {
     if m != &manifest() {
         return Err("manifest/labels changed");

@@ -1352,32 +1352,42 @@ fn stage_runtime(
                 .map(|profile| profile.digest)
                 .collect::<Vec<_>>();
             ollama.ensure_models_not_resident_by_digest(&admitted_ollama_digests)?;
-            let registration = settings
-                .registered_ggufs
-                .iter()
-                .find(|registration| registration.digest == snapshot.model_digest)
-                .ok_or_else(|| config_failure("Run GGUF registration is unavailable"))?;
-            let server_digest = profile
-                .runtime_binary_digest
-                .ok_or_else(|| config_failure("Qualified GGUF runtime identity is missing"))?;
             Ok(StageRuntime::LlamaCpp(LlamaCppRuntime::shared(
-                GgufRuntimeConfig {
-                    model_path: registration.canonical_path.clone(),
-                    runtime_parent: runtime_parent.to_path_buf(),
-                    model_digest: snapshot.model_digest.clone(),
-                    expected_size_bytes: registration.size_bytes,
-                    expected_file_identity: registration.file_identity.clone(),
-                    expected_server_digest: server_digest.to_string(),
-                    expected_runtime_libraries: profile.runtime_libraries,
-                    context_tokens: snapshot.context_tokens,
-                    disable_thinking: profile.disable_thinking,
-                },
+                native_profile_config(snapshot, profile, settings, runtime_parent)?,
             )?))
         }
         ModelRuntimeKind::InferenceGateway => Err(config_failure(
             "Gateway task profiles cannot be constructed by the direct runtime factory",
         )),
     }
+}
+
+// Single projection from an admitted profile and registration to native launch config.
+fn native_profile_config(
+    snapshot: &ModelStageProfileSnapshot,
+    profile: &QualifiedProfile,
+    settings: &ModelSettings,
+    runtime_parent: &Path,
+) -> Result<GgufRuntimeConfig, ModelRuntimeFailure> {
+    let registration = settings
+        .registered_ggufs
+        .iter()
+        .find(|registration| registration.digest == snapshot.model_digest)
+        .ok_or_else(|| config_failure("Run GGUF registration is unavailable"))?;
+    let server_digest = profile
+        .runtime_binary_digest
+        .ok_or_else(|| config_failure("Qualified GGUF runtime identity is missing"))?;
+    Ok(GgufRuntimeConfig {
+        model_path: registration.canonical_path.clone(),
+        runtime_parent: runtime_parent.to_path_buf(),
+        model_digest: snapshot.model_digest.clone(),
+        expected_size_bytes: registration.size_bytes,
+        expected_file_identity: registration.file_identity.clone(),
+        expected_server_digest: server_digest.to_string(),
+        expected_runtime_libraries: profile.runtime_libraries,
+        context_tokens: snapshot.context_tokens,
+        disable_thinking: profile.disable_thinking,
+    })
 }
 
 fn qualification_stage_profile(
@@ -1926,6 +1936,21 @@ mod tests {
     }
 
     #[test]
+    fn production_profiles_preserve_qualified_thinking_policy() {
+        let policies: Vec<_> = QUALIFIED_PROFILES
+            .iter()
+            .map(|p| (p.profile_id, p.disable_thinking))
+            .collect();
+        assert_eq!(
+            policies,
+            vec![
+                ("qwen3-30b-a3b-q4ks-v1", false),
+                ("jack-qwen38-27b-iq2m-v1", false)
+            ]
+        );
+    }
+
+    #[test]
     fn selected_direct_profile_reconstructs_without_ollama_discovery() {
         let profile = QUALIFIED_PROFILES[1];
         let registration = RegisteredGguf {
@@ -1960,6 +1985,34 @@ mod tests {
         assert_eq!(snapshot.analysis.model_name, "jack.gguf");
         assert_eq!(snapshot.analysis.model_digest, profile.digest);
         assert_eq!(snapshot.analysis, snapshot.verification);
+        for disable_thinking in [false, true] {
+            let policy = QualifiedProfile {
+                disable_thinking,
+                ..profile
+            };
+            let config = native_profile_config(
+                &snapshot.analysis,
+                &policy,
+                &settings,
+                Path::new("/runtime"),
+            )
+            .unwrap();
+            assert_eq!(
+                config.disable_thinking, disable_thinking,
+                "factory discarded profile thinking policy"
+            );
+            assert_eq!(
+                config.model_path,
+                settings.registered_ggufs[0].canonical_path
+            );
+            assert_eq!(
+                config.expected_file_identity,
+                settings.registered_ggufs[0].file_identity
+            );
+            assert_eq!(config.context_tokens, snapshot.analysis.context_tokens);
+            assert_eq!(config.expected_server_digest, QUALIFIED_LLAMA_SERVER_DIGEST);
+            assert_eq!(config.runtime_parent, Path::new("/runtime"));
+        }
 
         let missing = ModelSettings {
             registered_ggufs: Vec::new(),

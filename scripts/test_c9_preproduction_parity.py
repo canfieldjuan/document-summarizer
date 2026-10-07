@@ -29,6 +29,13 @@ class ReceiptTests(unittest.TestCase):
         parity.validate_receipt(receipt, {'head': 'current', 'files': {'owner': 'hash'}},
                                 {'manifest': 'frozen'}, {'deployment': 'frozen'}, phase)
 
+    def test_separate_summary_manifest_is_pinned(self):
+        self.assertEqual(parity.summary_manifest()['task'], 'native-summary-parity')
+        self.assertNotIn('additional_tasks', parity.read(parity.REPO / parity.MANIFEST_PATH))
+        with mock.patch.object(parity, 'sha', return_value='changed'):
+            with self.assertRaisesRegex(ValueError, 'summary manifest changed'):
+                parity.summary_manifest()
+
     def test_complete_gateway_and_native(self):
         self.check(self.receipt())
         self.check(self.receipt('native'), 'native')

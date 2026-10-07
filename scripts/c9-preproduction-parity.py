@@ -20,6 +20,8 @@ import urllib.request
 
 REPO = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = Path('src-tauri/src/pipeline/summary/comparisons/fixtures/c9-parity-manifest.json')
+SUMMARY_MANIFEST_PATH = Path('src-tauri/src/pipeline/summary/comparisons/fixtures/native-summary-parity-manifest.json')
+SUMMARY_MANIFEST_SHA = '5ed3e4c777eb6dd6da0f2c8cf03d3b084f11969f04e7f65ae99af11ebe8fd4cc'
 TEST = 'pipeline::summary::comparisons::tests::parity::original_c9_production_gateway_parity'
 NATIVE_TEST = 'pipeline::llama_cpp::framing_tests::original_c9_native_framing_parity'
 
@@ -192,10 +194,15 @@ def reserve_gateway(packet, source, output):
         'phase': 'corrected-production', **budget})
 
 
+def summary_manifest():
+    require(sha(REPO / SUMMARY_MANIFEST_PATH) == SUMMARY_MANIFEST_SHA, 'summary manifest changed')
+    return read(REPO / SUMMARY_MANIFEST_PATH)
+
+
 def summary_lane(args, source):
     require(args.output is not None and args.gguf is not None and args.server is not None,
             'summary output/model/server are required')
-    m = read(REPO / MANIFEST_PATH)['additional_tasks'][0]
+    m = summary_manifest()
     require(sha(args.gguf) == m['model_sha256'] and sha(args.server) == m['server_sha256'],
             'native summary runtime pin changed')
     require(sha(args.packet / 'execution.json') == m['execution_sha256'], 'summary freeze changed')
