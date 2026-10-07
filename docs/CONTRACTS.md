@@ -3053,3 +3053,7 @@ Contract revisions preceded implementation; private content remains local.
 Gap audit: DONE for the lettered-clause correction and local proof. NOT DONE for
 merge until the published head has fresh CI and review. Unpunctuated headings
 remain a follow-up; source preservation is not a generated-summary quality claim.
+
+## C9 and General pre-production inventory
+
+Before writing any C9 or General contract, inventory the affected validated experiments, settings, runtime, framing, prompts and results. Open the contract with that inventory, every evidenced departure and the parity check that covers it. A contract without this inventory is not ready for acceptance. The [accepted parity lane](PR-C9-PREPRODUCTION-PARITY.md) supplies the standing receipt-bound acceptance gate; missing, partial, failed or stale live evidence cannot satisfy it. Native framing and gateway verdict parity are separate requirements. PR116 remains held.
