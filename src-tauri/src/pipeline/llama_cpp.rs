@@ -575,6 +575,24 @@ impl LlamaCppRuntime {
         Ok(tokens)
     }
 
+    fn completion_request<'a>(
+        &'a self,
+        request: &ModelRequest,
+        prompt: &'a [u32],
+        schema: Option<DecoderSchema>,
+    ) -> CompletionRequest<'a> {
+        CompletionRequest {
+            prompt,
+            n_predict: request.max_output_tokens,
+            temperature: 0.0,
+            seed: request.seed,
+            stop: [PromptFraming::MESSAGE_END],
+            cache_prompt: true,
+            message_delimiters: &PromptFraming::MESSAGE_DELIMITERS,
+            json_schema: schema,
+        }
+    }
+
     fn completion(
         &self,
         request: &ModelRequest,
@@ -582,15 +600,7 @@ impl LlamaCppRuntime {
         schema: Option<DecoderSchema>,
         timeout: Duration,
     ) -> Result<CompletionResponse, ModelRuntimeFailure> {
-        let payload = CompletionRequest {
-            prompt,
-            n_predict: request.max_output_tokens,
-            temperature: 0.0,
-            seed: request.seed,
-            stop: ["<|im_end|>"],
-            cache_prompt: true,
-            json_schema: schema,
-        };
+        let payload = self.completion_request(request, prompt, schema);
         #[cfg(test)]
         framing_tests::capture_completion_request(&payload);
         let response = self
@@ -1452,37 +1462,66 @@ fn create_private_api_key_file(
 }
 
 impl PromptFraming {
+    const MESSAGE_END: &'static str = "<|im_end|>";
+    // Exact ordered metadata from the qualified Qwen chat projector. Control
+    // fragments below use these same role prefixes; content is never scanned.
+    const MESSAGE_DELIMITERS: [MessageDelimiter; 5] = [
+        MessageDelimiter {
+            role: "assistant",
+            delimiter: "<|im_start|>assistant",
+        },
+        MessageDelimiter {
+            role: "tool",
+            delimiter: "<|im_start|>user\n<tool_response>",
+        },
+        MessageDelimiter {
+            role: "tool",
+            delimiter: "<|im_start|>tool_response",
+        },
+        MessageDelimiter {
+            role: "user",
+            delimiter: "<|im_start|>user",
+        },
+        MessageDelimiter {
+            role: "system",
+            delimiter: "<|im_start|>system",
+        },
+    ];
     fn load(
         client: &Client,
         base_url: &str,
         token: &str,
         disable_thinking: bool,
     ) -> Result<Self, ModelRuntimeFailure> {
+        let system_prefix = format!("{}\n", Self::MESSAGE_DELIMITERS[4].delimiter);
+        let user_prefix = format!(
+            "{}\n{}\n",
+            Self::MESSAGE_END,
+            Self::MESSAGE_DELIMITERS[3].delimiter
+        );
+        let mut assistant_prefix = format!(
+            "{}\n{}\n",
+            Self::MESSAGE_END,
+            Self::MESSAGE_DELIMITERS[0].delimiter
+        );
+        if disable_thinking {
+            assistant_prefix.push_str("<think>\n\n</think>\n\n");
+        }
         let system_open = tokenize_text(
             client,
             base_url,
             token,
-            "<|im_start|>system\n",
+            &system_prefix,
             true,
             HEALTH_TIMEOUT,
         )?;
-        let system_close_user_open = tokenize_text(
-            client,
-            base_url,
-            token,
-            "<|im_end|>\n<|im_start|>user\n",
-            true,
-            HEALTH_TIMEOUT,
-        )?;
+        let system_close_user_open =
+            tokenize_text(client, base_url, token, &user_prefix, true, HEALTH_TIMEOUT)?;
         let user_close_assistant_open = tokenize_text(
             client,
             base_url,
             token,
-            if disable_thinking {
-                "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            } else {
-                "<|im_end|>\n<|im_start|>assistant\n"
-            },
+            &assistant_prefix,
             true,
             HEALTH_TIMEOUT,
         )?;
@@ -2087,6 +2126,12 @@ struct TokenizeResponse {
 }
 
 #[derive(Serialize)]
+struct MessageDelimiter {
+    role: &'static str,
+    delimiter: &'static str,
+}
+
+#[derive(Serialize)]
 struct CompletionRequest<'a> {
     prompt: &'a [u32],
     n_predict: u32,
@@ -2094,6 +2139,7 @@ struct CompletionRequest<'a> {
     seed: u64,
     stop: [&'a str; 1],
     cache_prompt: bool,
+    message_delimiters: &'a [MessageDelimiter],
     #[serde(skip_serializing_if = "Option::is_none")]
     json_schema: Option<DecoderSchema>,
 }
@@ -2157,6 +2203,7 @@ mod tests {
             seed: 7,
             stop: ["<|im_end|>"],
             cache_prompt: true,
+            message_delimiters: &PromptFraming::MESSAGE_DELIMITERS,
             json_schema: response_format(&output).unwrap(),
         };
         let wire = serde_json::to_string(&request).unwrap();

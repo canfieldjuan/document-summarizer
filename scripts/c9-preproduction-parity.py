@@ -199,6 +199,52 @@ def summary_manifest():
     return read(REPO / SUMMARY_MANIFEST_PATH)
 
 
+REPAIR_CONTRACT_PATH = Path('docs/PR-NATIVE-MESSAGE-BOUNDARY-REPAIR.md')
+REPAIR_PROPOSAL_SHA = 'd39b7edf442e678db8aefd8e9a5eae1154c53216ea4720697d1710246f1e7e07'
+REPAIR_RESERVATION = 'native-message-boundary-repair-generation-reservation.json'
+
+
+def repair_preflight_hashes(packet):
+    root = packet.parent / 'native-message-boundary-repair-preflight'
+    result = {}
+    for i in [1, 2]:
+        for suffix in ['candidate-wire', 'oracle-verified']:
+            name = f'case-{i}-{suffix}.json'
+            result[name] = sha(root / name)
+        oracle = read(root / f'case-{i}-oracle-verified.json')
+        require(oracle.get('candidate_match') is True and oracle.get('full_actual_input_tokens_equal') is True
+                and oracle.get('metadata_only_sampler_equal') is True and type(oracle.get('generation_calls')) is int and oracle['generation_calls'] == 0
+                and oracle.get('context_created') is False, 'offline repair oracle failed')
+    return result
+
+
+def validate_repair_approval(approval, source, packet):
+    require(approval.get('operator_message') == 'i accept production repair'
+            and approval.get('proposal_sha256') == REPAIR_PROPOSAL_SHA, 'missing repair acceptance')
+    require(type(approval.get('maximum_calls')) is int and approval['maximum_calls'] == 2, 'repair budget changed')
+    contract = sha(REPO / REPAIR_CONTRACT_PATH)
+    require(approval.get('accepted_contract_sha256') == contract, 'accepted repair contract changed')
+    require(approval.get('source') == source, 'stale repair source')
+    prior = sha(packet.parent / 'native-summary-parity-generation-reservation.json')
+    require(approval.get('prior_reservation_sha256') == prior, 'repair history changed')
+    preflight = repair_preflight_hashes(packet)
+    require(approval.get('preflight_hashes') == preflight, 'repair preflight changed')
+    return {'accepted_contract_sha256': contract, 'maximum_calls': 2,
+            'source': source, 'prior_reservation_sha256': prior, 'preflight_hashes': preflight}
+
+
+def reserve_summary_repair(packet, approval_path, source, output):
+    value = validate_repair_approval(read(approval_path), source, packet)
+    value.update(approval_sha256=sha(approval_path), output=str(output))
+    save(packet.parent / REPAIR_RESERVATION, value)
+    return value
+
+
+def summary_gpu_idle():
+    queue = http('http://127.0.0.1:8189/queue')
+    require(not queue.get('queue_running') and not queue.get('queue_pending'), 'ComfyUI is busy')
+
+
 def summary_lane(args, source):
     require(args.output is not None and args.gguf is not None and args.server is not None,
             'summary output/model/server are required')
@@ -209,7 +255,13 @@ def summary_lane(args, source):
     out = args.output.resolve()
     require(not out.is_relative_to(REPO) and '.codex/worktrees' not in str(out), 'durable output required')
     require(not out.exists(), 'summary output already exists; no retry')
-    require(not (args.packet.parent / 'native-summary-parity-generation-reservation.json').exists(), 'summary budget already reserved')
+    repair = getattr(args, 'repair_acceptance', None)
+    if repair:
+        validate_repair_approval(read(repair), source, args.packet)
+        require(not (args.packet.parent / REPAIR_RESERVATION).exists(), 'repair budget already reserved')
+        summary_gpu_idle()
+    else:
+        require(not (args.packet.parent / 'native-summary-parity-generation-reservation.json').exists(), 'summary budget already reserved')
     with args.lock.open('r+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         out.mkdir(parents=True, mode=0o700)
@@ -219,6 +271,9 @@ def summary_lane(args, source):
         env.update(DOC_SUM_SUMMARY_ORIGINAL=str(args.packet.resolve()),
                    DOC_SUM_SUMMARY_PARITY_OUTPUT=str(out), DOC_SUM_QUALIFICATION_GGUF=str(args.gguf),
                    DOC_SUM_LLAMA_SERVER_PATH=str(args.server))
+        if repair:
+            reservation = reserve_summary_repair(args.packet, repair, source, out)
+            env['DOC_SUM_SUMMARY_REPAIR_CONTRACT_SHA'] = reservation['accepted_contract_sha256']
         test = 'pipeline::llama_cpp::framing_tests::original_summary_native_adapter_parity'
         cmd = ['cargo','test','--locked','--all-features','--lib',test,'--','--exact','--ignored','--nocapture','--test-threads=1']
         with (out / 'run.log').open('x') as log:
@@ -232,6 +287,8 @@ def summary_lane(args, source):
         if code:
             print(f'Native summary check exited {code}; stopped at {out}',flush=True)
             return code
+        if repair:
+            summary_gpu_idle()
         result=read(out / 'results.json') if (out / 'results.json').exists() else {'passed':False,'calls':0}
         require(type(result['calls']) is int and 0 <= result['calls'] <= 2, 'summary budget exceeded')
         require(not result['passed'] or (result['calls']==2 and len(result.get('cases',[]))==2 and all(c['passed'] for c in result['cases'])), 'incomplete summary cannot pass')
@@ -251,7 +308,7 @@ def main():
         p.add_argument('--' + key, type=Path, required=True)
     for key in ['deployment', 'model', 'settings']:
         p.add_argument('--' + key, type=Path)
-    for key in ['output', 'verify', 'native-receipt', 'gguf', 'server']:
+    for key in ['output', 'verify', 'native-receipt', 'gguf', 'server', 'repair-acceptance']:
         p.add_argument('--' + key, type=Path)
     args = p.parse_args()
     os.umask(0o077)

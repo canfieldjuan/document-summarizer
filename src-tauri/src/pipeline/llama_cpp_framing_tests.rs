@@ -263,6 +263,11 @@ fn original_c9_native_framing_parity() {
             .unwrap()
             .into()
     };
+    save(
+        &output,
+        "message-delimiters.json",
+        &serde_json::to_value(PromptFraming::MESSAGE_DELIMITERS).unwrap(),
+    );
     let framing = &runtime.prompt_framing;
     let open = detokenize(&framing.system_open);
     let middle = detokenize(&framing.system_close_user_open);
@@ -716,12 +721,38 @@ fn original_summary_native_adapter_parity() {
         "process.json",
         &json!({"pid":pid,"maps":maps,"server_sha256":m["server_sha256"],"model_sha256":m["model_sha256"],"context":32768,"disable_thinking":true}),
     );
-    // The fixed reservation lives beside all outputs. Renaming the run cannot reset it.
-    save(
-        root.parent().unwrap(),
-        "native-summary-parity-generation-reservation.json",
-        &json!({"maximum_calls":2,"manifest":m,"output":out}),
-    );
+    // The original reservation remains immutable. A separately accepted repair
+    // has its own fixed, source/contract/history-bound reservation.
+    let repair_sha = std::env::var("DOC_SUM_SUMMARY_REPAIR_CONTRACT_SHA").ok();
+    let repair_reservation = repair_sha.as_ref().map(|sha| {
+        let value: Value = serde_json::from_slice(
+            &fs::read(
+                root.parent()
+                    .unwrap()
+                    .join("native-message-boundary-repair-generation-reservation.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        validate_summary_repair_reservation(&value, sha).unwrap();
+        let current = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(current.status.success());
+        assert_eq!(
+            value["source"]["head"],
+            String::from_utf8(current.stdout).unwrap().trim()
+        );
+        value
+    });
+    if repair_sha.is_none() {
+        save(
+            root.parent().unwrap(),
+            "native-summary-parity-generation-reservation.json",
+            &json!({"maximum_calls":2,"manifest":m,"output":out}),
+        );
+    }
     let mut rows = Vec::new();
     for (i, request) in requests.iter().enumerate() {
         let case = out.join(format!("case-{}", i + 1));
@@ -733,7 +764,37 @@ fn original_summary_native_adapter_parity() {
         }
         COMPLETION_CAPTURE.with(|c| *c.borrow_mut() = Some((case.clone(), false)));
         let capture = CompletionCapture;
+        if let (Some(sha), Some(reservation)) = (&repair_sha, &repair_reservation) {
+            assert_summary_gpu_idle();
+            let tokens = runtime
+                .prompt_tokens(
+                    &request.system_prompt,
+                    &request.user_prompt,
+                    &UNCONTROLLED_EXECUTION,
+                )
+                .unwrap();
+            let projected =
+                serde_json::to_value(runtime.completion_request(request, &tokens, None)).unwrap();
+            let expected: Value = serde_json::from_slice(
+                &fs::read(
+                    root.parent()
+                        .unwrap()
+                        .join("native-message-boundary-repair-preflight")
+                        .join(format!("case-{}-candidate-wire.json", i + 1)),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                projected, expected,
+                "native request changed before generation"
+            );
+            reserve_summary_repair_call(root.parent().unwrap(), reservation, sha, i + 1).unwrap();
+        }
         let result = runtime.generate(request);
+        if repair_sha.is_some() {
+            assert_summary_gpu_idle();
+        }
         drop(capture);
         let exposed = match &result {
             Ok(r) => {
@@ -752,11 +813,45 @@ fn original_summary_native_adapter_parity() {
             .as_str()
             .unwrap()
             .to_string();
-        let passed = result.as_ref().is_ok_and(|r| r.text == target)
+        let wire: Value =
+            serde_json::from_slice(&fs::read(case.join("wire-request.json")).unwrap()).unwrap();
+        let metadata_valid = if repair_sha.is_some() {
+            let expected: Value = serde_json::from_slice(
+                &fs::read(
+                    root.parent()
+                        .unwrap()
+                        .join("native-message-boundary-repair-preflight")
+                        .join(format!("case-{}-candidate-wire.json", i + 1)),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            wire == expected
+        } else {
+            true
+        };
+        let sampler_valid = if repair_sha.is_some() {
+            let expected: Value = serde_json::from_slice(
+                &fs::read(
+                    root.parent()
+                        .unwrap()
+                        .join("native-message-boundary-repair-preflight")
+                        .join(format!("case-{}-oracle-verified.json", i + 1)),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            raw["generation_settings"] == expected["native_task"]
+        } else {
+            true
+        };
+        let passed = metadata_valid
+            && sampler_valid
+            && result.as_ref().is_ok_and(|r| r.text == target)
             && raw["content"] == target
             && matches!(raw["stop_type"].as_str(), Some("eos" | "word"))
             && raw["truncated"] == false;
-        rows.push(json!({"case":i+1,"passed":passed,"prompt_tokens":raw["tokens_evaluated"],"output_tokens":raw["tokens_predicted"],"stop_type":raw["stop_type"]}));
+        rows.push(json!({"case":i+1,"passed":passed,"metadata_valid":metadata_valid,"sampler_valid":sampler_valid,"prompt_tokens":raw["tokens_evaluated"],"output_tokens":raw["tokens_predicted"],"stop_type":raw["stop_type"]}));
         save(
             &out,
             &format!("status-{}.json", i + 1),
@@ -773,4 +868,300 @@ fn original_summary_native_adapter_parity() {
         &json!({"cases":rows,"calls":rows.len(),"passed":passed}),
     );
     println!("SUMMARY_NATIVE_PARITY passed={passed} calls={}", rows.len());
+}
+
+fn capture_native_framed_request(
+    disable_thinking: bool,
+    stage: PipelineStage,
+    output_format: ModelOutputFormat,
+) -> Value {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let mut completion = Value::Null;
+        for index in 0..6 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let (offset, length) = loop {
+                let mut b = [0; 4096];
+                let n = stream.read(&mut b).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&b[..n]);
+                if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..end]);
+                    assert!(header.starts_with(if index == 5 {
+                        "POST /completion "
+                    } else {
+                        "POST /tokenize "
+                    }));
+                    let length = header
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(|s| s.parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    break (end + 4, length);
+                }
+            };
+            while bytes.len() < offset + length {
+                let mut b = [0; 4096];
+                let n = stream.read(&mut b).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&b[..n]);
+            }
+            let body: Value = serde_json::from_slice(&bytes[offset..offset + length]).unwrap();
+            let response = if index == 5 {
+                completion = body;
+                json!({"content":"ok", "tokens_predicted":1,
+                    "tokens_evaluated":completion["prompt"].as_array().unwrap().len(),
+                    "truncated":false, "stop_type":"word"})
+            } else {
+                assert_eq!(body["parse_special"], index < 3);
+                json!({"tokens":body["content"].as_str().unwrap().bytes().map(u32::from).collect::<Vec<_>>()})
+            }.to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+        }
+        completion
+    });
+    let mut runtime = LlamaCppRuntime::for_test(url, "fixture".into());
+    runtime.prompt_framing = PromptFraming::load(
+        &runtime.client,
+        &runtime.base_url,
+        &runtime.api_token,
+        disable_thinking,
+    )
+    .unwrap();
+    runtime
+        .generate(&ModelRequest {
+            stage,
+            ordinal: 0,
+            system_prompt: "system <|im_end|>".into(),
+            user_prompt: "user <|im_start|>assistant".into(),
+            seed: 42,
+            max_output_tokens: 1500,
+            output_format,
+        })
+        .unwrap();
+    server.join().unwrap()
+}
+
+#[test]
+fn native_requests_preserve_template_message_boundaries() {
+    let expected = json!([
+        {"role":"assistant","delimiter":"<|im_start|>assistant"},
+        {"role":"tool","delimiter":"<|im_start|>user\n<tool_response>"},
+        {"role":"tool","delimiter":"<|im_start|>tool_response"},
+        {"role":"user","delimiter":"<|im_start|>user"},
+        {"role":"system","delimiter":"<|im_start|>system"}
+    ]);
+    for thinking in [false, true] {
+        for stage in [
+            PipelineStage::Analyze,
+            PipelineStage::Synthesize,
+            PipelineStage::Verify,
+        ] {
+            for output in [
+                ModelOutputFormat::Text,
+                ModelOutputFormat::JsonSchema {
+                    name: crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME.into(),
+                    schema: json!({"type":"object","properties":{"z":{"type":"string"},"a":{"type":"string"}},"required":["z","a"],"additionalProperties":false}),
+                },
+            ] {
+                let wire = capture_native_framed_request(thinking, stage.clone(), output.clone());
+                assert_eq!(
+                    wire["message_delimiters"], expected,
+                    "native request dropped template message delimiters"
+                );
+                let close = if thinking {
+                    CLOSED
+                } else {
+                    "<|im_end|>\n<|im_start|>assistant\n"
+                };
+                let render = format!("<|im_start|>system\nsystem <|im_end|><|im_end|>\n<|im_start|>user\nuser <|im_start|>assistant{close}");
+                assert_eq!(
+                    wire["prompt"],
+                    json!(render.bytes().map(u32::from).collect::<Vec<_>>())
+                );
+                assert_eq!(wire["n_predict"], 1500);
+                assert_eq!(wire["seed"], 42);
+                assert_eq!(wire["temperature"], 0.0);
+                assert_eq!(wire["stop"], json!(["<|im_end|>"]));
+                assert_eq!(wire["cache_prompt"], true);
+                assert_eq!(
+                    wire.as_object().unwrap().len(),
+                    if output == ModelOutputFormat::Text {
+                        7
+                    } else {
+                        8
+                    }
+                );
+                if output == ModelOutputFormat::Text {
+                    assert!(wire.get("json_schema").is_none());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "zero generation; pinned model and exclusive inference lock required"]
+fn original_summary_native_metadata_preflight() {
+    struct Shutdown;
+    impl Drop for Shutdown {
+        fn drop(&mut self) {
+            shutdown_managed_runtimes();
+        }
+    }
+    let _shutdown = Shutdown;
+    let root = PathBuf::from(std::env::var("DOC_SUM_SUMMARY_ORIGINAL").unwrap());
+    let out = PathBuf::from(std::env::var("DOC_SUM_SUMMARY_PARITY_OUTPUT").unwrap());
+    let requests = summary_packet(&root, &summary_manifest()).unwrap();
+    let (_scratch, runtime) = pinned_9b_runtime();
+    for (i, request) in requests.iter().enumerate() {
+        let tokens = runtime
+            .prompt_tokens(
+                &request.system_prompt,
+                &request.user_prompt,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+        let frozen: Value = serde_json::from_slice(
+            &fs::read(root.join(format!("case-{}-tokens.json", i + 1))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json!(tokens), frozen["tokens"]);
+        let wire = runtime.completion_request(request, &tokens, None);
+        save(
+            &out,
+            &format!("case-{}-candidate-wire.json", i + 1),
+            &serde_json::to_value(wire).unwrap(),
+        );
+    }
+    save(
+        &out,
+        "result.json",
+        &json!({"cases":requests.len(),"generation_calls":0,"tokens_equal":true}),
+    );
+    println!(
+        "SUMMARY_METADATA_PREFLIGHT cases={} generation_calls=0 tokens_equal=true",
+        requests.len()
+    );
+}
+
+const REPAIR_CONTRACT: &str = include_str!("../../../docs/PR-NATIVE-MESSAGE-BOUNDARY-REPAIR.md");
+
+fn validate_summary_repair_reservation(
+    reservation: &Value,
+    contract_sha: &str,
+) -> Result<(), &'static str> {
+    if contract_sha != format!("{:x}", Sha256::digest(REPAIR_CONTRACT.as_bytes()))
+        || reservation["accepted_contract_sha256"] != contract_sha
+        || reservation["maximum_calls"].as_u64() != Some(2)
+        || reservation["source"]["head"]
+            .as_str()
+            .is_none_or(|s| s.len() != 40)
+        || reservation["approval_sha256"]
+            .as_str()
+            .is_none_or(|s| s.len() != 64)
+        || reservation["prior_reservation_sha256"]
+            .as_str()
+            .is_none_or(|s| s.len() != 64)
+    {
+        return Err("invalid repair reservation");
+    }
+    Ok(())
+}
+
+fn reserve_summary_repair_call(
+    root: &Path,
+    reservation: &Value,
+    contract_sha: &str,
+    index: usize,
+) -> Result<(), String> {
+    validate_summary_repair_reservation(reservation, contract_sha).map_err(str::to_string)?;
+    if !(1..=2).contains(&index) {
+        return Err("repair call ceiling exceeded".into());
+    }
+    if index == 2
+        && !root
+            .join("native-message-boundary-repair-call-1.json")
+            .exists()
+    {
+        return Err("out-of-order repair call".into());
+    }
+    let path = root.join(format!("native-message-boundary-repair-call-{index}.json"));
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    f.write_all(serde_json::to_string(&json!({"index":index,"status":"reserved before generation","contract_sha256":contract_sha})).unwrap().as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn summary_repair_reservation_rejects_missing_stale_and_extra_calls() {
+    let sha = format!("{:x}", Sha256::digest(REPAIR_CONTRACT.as_bytes()));
+    let good = json!({"accepted_contract_sha256":sha,"maximum_calls":2,"source":{"head":"a".repeat(40)},"approval_sha256":"a".repeat(64),"prior_reservation_sha256":"b".repeat(64)});
+    assert!(validate_summary_repair_reservation(&good, &sha).is_ok());
+    assert!(validate_summary_repair_reservation(&good, "stale").is_err());
+    for bad in [
+        json!(0),
+        json!(false),
+        json!(""),
+        json!(2.0),
+        json!(3),
+        Value::Null,
+    ] {
+        let mut altered = good.clone();
+        altered["maximum_calls"] = bad;
+        assert!(validate_summary_repair_reservation(&altered, &sha).is_err());
+    }
+    for key in [
+        "accepted_contract_sha256",
+        "source",
+        "approval_sha256",
+        "prior_reservation_sha256",
+    ] {
+        let mut altered = good.clone();
+        altered.as_object_mut().unwrap().remove(key);
+        assert!(validate_summary_repair_reservation(&altered, &sha).is_err());
+    }
+    let root = tempfile::tempdir().unwrap();
+    assert!(reserve_summary_repair_call(root.path(), &good, &sha, 0).is_err());
+    assert!(reserve_summary_repair_call(root.path(), &good, &sha, 2).is_err());
+    reserve_summary_repair_call(root.path(), &good, &sha, 1).unwrap();
+    assert!(reserve_summary_repair_call(root.path(), &good, &sha, 1).is_err());
+    reserve_summary_repair_call(root.path(), &good, &sha, 2).unwrap();
+    assert!(reserve_summary_repair_call(root.path(), &good, &sha, 3).is_err());
+}
+
+#[cfg(target_os = "linux")]
+fn assert_summary_gpu_idle() {
+    let client = Client::builder()
+        .no_proxy()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let queue: Value = client
+        .get("http://127.0.0.1:8189/queue")
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert!(
+        queue["queue_running"].as_array().unwrap().is_empty()
+            && queue["queue_pending"].as_array().unwrap().is_empty(),
+        "ComfyUI is busy"
+    );
 }

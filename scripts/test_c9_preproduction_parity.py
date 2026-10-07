@@ -93,5 +93,37 @@ class ReceiptTests(unittest.TestCase):
                     parity.reserve_gateway(root, {'head': 'current'}, root / 'second')
 
 
+    def test_repair_approval_binds_source_contract_history_and_budget(self):
+        source = {'head': 'current', 'files': {'owner': 'hash'}}
+        packet = Path('/durable/packet')
+        good = {'operator_message': 'i accept production repair', 'proposal_sha256': parity.REPAIR_PROPOSAL_SHA,
+                'maximum_calls': 2, 'accepted_contract_sha256': 'hash', 'source': source,
+                'prior_reservation_sha256': 'hash', 'preflight_hashes': {'oracle': 'frozen'}}
+        with mock.patch.object(parity, 'sha', return_value='hash'), mock.patch.object(parity, 'repair_preflight_hashes', return_value={'oracle': 'frozen'}):
+            parity.validate_repair_approval(good, source, packet)
+            for key, wrong in [('operator_message', ''), ('proposal_sha256', 'changed'),
+                               ('maximum_calls', 0), ('maximum_calls', False), ('maximum_calls', ''),
+                               ('maximum_calls', 2.0), ('maximum_calls', 3),
+                               ('accepted_contract_sha256', 'changed'), ('source', {'head':'old'}),
+                               ('prior_reservation_sha256', 'changed'), ('preflight_hashes', {})]:
+                bad=copy.deepcopy(good);bad[key]=wrong
+                with self.subTest(key=key,wrong=wrong), self.assertRaises(ValueError):
+                    parity.validate_repair_approval(bad,source,packet)
+            for key in good:
+                bad=copy.deepcopy(good);del bad[key]
+                with self.subTest(missing=key),self.assertRaises(ValueError):
+                    parity.validate_repair_approval(bad,source,packet)
+
+    def test_repair_cannot_reset_budget_by_renaming_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            approval=root/'approval.json';approval.write_text('{}')
+            value={'accepted_contract_sha256':'hash','maximum_calls':2,'source':{'head':'current'}}
+            with mock.patch.object(parity,'validate_repair_approval',return_value=value):
+                parity.reserve_summary_repair(root/'packet',approval,{'head':'current'},root/'first')
+                with self.assertRaises(FileExistsError):
+                    parity.reserve_summary_repair(root/'packet',approval,{'head':'current'},root/'second')
+
+
 if __name__ == '__main__':
     unittest.main()
