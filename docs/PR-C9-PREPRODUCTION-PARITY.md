@@ -117,3 +117,57 @@ Contract and evidence preparation only. The original C9 packet was copied with h
 ## Gap audit
 
 NOT DONE. Contract accepted; lane implementation, mandatory native framing proof/correction, exact production projection/preflight, live parity and review remain. The causal porting difference is unproven. Earlier synthesis provenance remains an explicitly tracked recovery task. The faithful-drafting v2 lane waits.
+
+
+## Post-investigation amendment: original excerpt restoration (ACCEPTED)
+
+Status: ACCEPTED by the operator in this session: "Accept the restoration amendment". Acceptance precedes the semantic implementation. The accepted divergence clause permits restoring demonstrated behavior, but its stop rule also requires a revised contract before changing the representation. This amendment makes the change from segment-only, per-dimension sentence requests to the original whole-claim, joint excerpt request explicit. Native framing was already corrected under the original acceptance; no semantic restoration has been applied.
+
+### New evidence and root cause
+
+On the same gateway, model, labels and complete original input set:
+
+| Projection | Calls | Exact decision matches | Adjudicated wrong approvals |
+| --- | ---: | ---: | ---: |
+| Current production owners at `6a0438b9e860625605463c4bd41ccd0c087f5475` | 120 | 26/30 | 1 |
+| Exact original experiment request bridge | 30 | 30/30 | 0 |
+| Historical full-excerpt Rust at `3e16b954d426461fc2d6ff25c3861a63b587d7d0` | 30 | 30/30 | 0 |
+| Historical segment Rust at `080197280b03746ce931d0b120c79da2b1aa2304` | 30 | 28/30 | 1 |
+
+The passing full-excerpt Rust requests have identical system strings, user strings and schema values to the original experiment on all 30 cases. Their historical decoder serializer was exercised separately; JSON object keyword order differs, so this was measured rather than assumed equivalent. The historical adapters append tests only; every production byte at each milestone is unchanged. Gateway admission and provenance were checked by their real owners. The historical Rust parser and shared classifier produced each reported verdict.
+
+The adjacent effective projection change is at `0801972:src-tauri/src/pipeline/summary/comparisons.rs`: the selection instruction at line 14, the segment catalog at lines 172-183, catalog construction at lines 220-221, and the supplied segment lists at lines 270-271 replace the earlier bounded excerpt choices. The core claim, quotation, clause strings and their associations are equal in both projections. Our rewrite assumed that exact copies of coarser pieces would preserve C9's decisions. The live comparison disproves that assumption: the segment version newly approves the adjudicated equipment claim and changes the unresolved invoice case. The latter is an enum-parity failure, not an independently established unsafe approval. The equipment claim's temporary-equipment restriction appears in a separate lead-in piece that its response did not select.
+
+The current version also rejects two faithful claims and approves a different faulty equipment claim. Those later effects are non-monotonic; this evidence does not attribute each to a particular later change. Restoring the complete demonstrated projection avoids inventing a hybrid of unqualified revisions.
+
+Evidence aliases are under `c9-preproduction-parity-20261007`. Hashes are recorded in `parity-investigation-result.json`; exact request differences are in `historical-segment-projection-diff.json`. Native before/after is a separate result: all 30 original renderings and token arrays match after restoring the closed-thinking boundary, with zero generation calls.
+
+### Required change surface
+
+- Restore `comparisons.rs`'s demonstrated bounded excerpt catalog, original instructions, joint four-dimension schema, whole-claim request construction and positive-preservation aggregation from the passing Rust milestone. Each enum value remains an exact owned substring; no free copied quotes, fuzzy matching, guessed source association or narrowed source text.
+- Keep the ordinary-build qualification gate, current runtime capability checks, complete-input validation and preflight of every planned request before generation. Keep cancellation, ordinal ownership, gateway persistence/provenance and saved-result validation. Route joint responses through the shared classifier. Use a distinct internal protocol identity so persisted request owners cannot replay responses from the segment format.
+- Remove superseded segment sentence/sub-clause splitting, conjunction and whole-sentence fallbacks, supplied segment-list projection, per-dimension fan-out and relation-alternative schema, parent-sentence planning/context projection and their obsolete test adapters. Retain meaningful ownership, parser, relation, cancellation, admission and boundary regressions. Preserve the immutable evidence for every retired trial.
+- Update the parity adapter, scorer and receipt validator to the restored one-call-per-original-claim projection. Bind it to unchanged original inputs, labels, exact request strings, schema values and historical decoder ordering. Add a deterministic fail-before/pass-after regression for the public equipment case and all original request projections. Do not convert historical responses into another representation.
+- Keep all existing admission ceilings. Restored choices are at most 240 characters each, 8192 values per enum, four selections per side per dimension, with the existing complete-input and runtime schema-byte limits. Excerpt enumeration can hit the schema limit before the input limit. Over-limit claims are rejected before inference; no automatic coarse-segment fallback, cap increase, truncation or whole-document fallback. Issue #124 remains separate.
+
+### Explicit non-scope and blockers
+
+No production activation, PR116 merge/hold release, v2 drafting, new prompt or evidence protocol, gateway deployment, model change, automatic retry, unseen corpus, public delivery schema or database migration. No claim that the frozen diagnostic pass proves larger summaries, A/B qualification or production readiness. Restoring original behavior has an admission-capacity cost; that is recorded rather than hidden with a new fallback.
+
+### Verification and budget
+
+1. Commit the accepted amendment separately before the semantic implementation.
+2. Add the frozen projection regression, demonstrate its expected failure on the current candidate, and restore the originating owners. Re-run the same regression, adjacent planner/parser/classifier tests, ordinary-build hold tests, formatting and strict lint. Retain both sides of admission and invalid-relation boundaries.
+3. Obtain the exact corrected-head native framing receipt with zero generation, then preflight every original gateway request with the real owner. Freeze every source, input, label and runtime hash.
+4. Run one corrected-production confirmation through the real planner, gateway runtime, parser and classifier: exactly 30 calls on unchanged cases, within the previously allowed 120-call correction maximum. No rerun after divergence. Require 30/30 exact enums, no adjudicated wrong approvals and all 13 adjudicated faithful approvals. Report passage selections, containment, relation differences, response sizes and timing separately.
+5. After a pass, perform the accepted zero-generation A/B comparison and admission report. Expose differing claim/source sizes, multiple rules and omitted exclusions. Do not infer readiness from the smaller diagnostic corpus.
+
+Calls already used: 210 of the existing 570 ceiling. The proposed correction uses 30 more, for 240 total. Native rendering and A/B inventory use zero generation. Unneeded historical and native generation branches remain unspent.
+
+### Implementation summary and cold diff audit
+
+Only this accepted amendment is added after the completed investigation. Native framing repair and the existing qualification lane remain at their separately tested commit. The diagnostic worktrees contain appended test-only export/replay adapters; source equality is enforced in each frozen receipt. No current verifier semantic behavior has changed.
+
+### Gap audit
+
+NOT DONE. Semantic restoration, its failing/passing regression, corrected-head live confirmation and review remain. Operator acceptance has been recorded for this explicit representation amendment. PR116 remains held and v2 deferred.
