@@ -1,5 +1,7 @@
 # Accepted C9 per sentence verification contract
 
+Status: SUPERSEDED by the accepted original excerpt restoration in [PR-C9-PREPRODUCTION-PARITY.md](PR-C9-PREPRODUCTION-PARITY.md), implemented at eec58548a632ade9666fe4347eaccf639817753c. The acceptance and results below are historical records, not the current protocol.
+
 Status: ACCEPTED WITH AMENDMENT. On 2026-10-06 the operator accepted the published contract with a higher call limit, then explicitly selected "128 calls / 32 sentences (recommended)". This separate contract commit records that acceptance before implementation. The amendment changes only the C9 comparison-call ceiling; the qualification and operator release holds remain.
 
 This proposal follows [issuecomment-6020285805](https://github.com/canfieldjuan/document-summarizer/pull/116#issuecomment-6020285805). It supersedes the uncommitted proposal in issuecomment-6019175152, which incorrectly retained the failed trial's replacement instruction. That instruction is excluded here. The failed trial and its evidence remain preserved.

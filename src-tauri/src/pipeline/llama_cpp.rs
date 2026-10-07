@@ -45,6 +45,7 @@ pub struct GgufRuntimeConfig {
     pub expected_server_digest: String,
     pub expected_runtime_libraries: &'static [QualifiedRuntimeFile],
     pub context_tokens: u32,
+    pub disable_thinking: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,14 +389,15 @@ impl LlamaCppRuntime {
             let _ = child.wait();
             return Err(error);
         }
-        let prompt_framing = match PromptFraming::load(&client, &base_url, &api_token) {
-            Ok(prompt_framing) => prompt_framing,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
+        let prompt_framing =
+            match PromptFraming::load(&client, &base_url, &api_token, config.disable_thinking) {
+                Ok(prompt_framing) => prompt_framing,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
         let model_identity_guard = ModelIdentityGuard {
             path: config.model_path,
             file: model_file,
@@ -580,18 +582,21 @@ impl LlamaCppRuntime {
         schema: Option<DecoderSchema>,
         timeout: Duration,
     ) -> Result<CompletionResponse, ModelRuntimeFailure> {
+        let payload = CompletionRequest {
+            prompt,
+            n_predict: request.max_output_tokens,
+            temperature: 0.0,
+            seed: request.seed,
+            stop: ["<|im_end|>"],
+            cache_prompt: true,
+            json_schema: schema,
+        };
+        #[cfg(test)]
+        framing_tests::capture_completion_request(&payload);
         let response = self
             .authorize(self.client.post(self.endpoint("/completion")))
             .timeout(timeout)
-            .json(&CompletionRequest {
-                prompt,
-                n_predict: request.max_output_tokens,
-                temperature: 0.0,
-                seed: request.seed,
-                stop: ["<|im_end|>"],
-                cache_prompt: true,
-                json_schema: schema,
-            })
+            .json(&payload)
             .send()
             .map_err(|_| failure("MODEL_RUNTIME_UNAVAILABLE", "GGUF generation failed", true))?;
         decode_bounded(response, MAX_RESPONSE_BYTES)
@@ -1447,7 +1452,12 @@ fn create_private_api_key_file(
 }
 
 impl PromptFraming {
-    fn load(client: &Client, base_url: &str, token: &str) -> Result<Self, ModelRuntimeFailure> {
+    fn load(
+        client: &Client,
+        base_url: &str,
+        token: &str,
+        disable_thinking: bool,
+    ) -> Result<Self, ModelRuntimeFailure> {
         let system_open = tokenize_text(
             client,
             base_url,
@@ -1468,7 +1478,11 @@ impl PromptFraming {
             client,
             base_url,
             token,
-            "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            if disable_thinking {
+                "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            } else {
+                "<|im_end|>\n<|im_start|>assistant\n"
+            },
             true,
             HEALTH_TIMEOUT,
         )?;
@@ -1560,6 +1574,7 @@ fn runtime_cache_key(config: &GgufRuntimeConfig) -> Result<String, ModelRuntimeF
             .to_be_bytes(),
     );
     hasher.update(config.context_tokens.to_be_bytes());
+    hasher.update([u8::from(config.disable_thinking)]);
     hasher.update(config.expected_server_digest.as_bytes());
     for library in config.expected_runtime_libraries {
         validate_runtime_file_name(library.file_name)?;
@@ -2020,6 +2035,8 @@ fn decode_bounded<T: for<'de> Deserialize<'de>>(
             true,
         ));
     }
+    #[cfg(test)]
+    framing_tests::capture_completion_response(&bytes);
     serde_json::from_slice(&bytes).map_err(|_| {
         failure(
             "MODEL_RESPONSE_INVALID",
@@ -2988,6 +3005,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: LIBRARIES,
             context_tokens: 8_192,
+            disable_thinking: false,
         };
         let exact = runtime_cache_key(&config).unwrap();
         assert_eq!(runtime_cache_key(&config).unwrap(), exact);
@@ -3010,6 +3028,14 @@ mod tests {
         assert_ne!(
             runtime_cache_key(&GgufRuntimeConfig {
                 runtime_parent: PathBuf::from("/other-runtime"),
+                ..config.clone()
+            })
+            .unwrap(),
+            exact
+        );
+        assert_ne!(
+            runtime_cache_key(&GgufRuntimeConfig {
+                disable_thinking: true,
                 ..config.clone()
             })
             .unwrap(),
@@ -3140,6 +3166,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: &[],
             context_tokens: 8_192,
+            disable_thinking: false,
         };
         let mut runtime =
             LlamaCppRuntime::for_test("http://127.0.0.1:1".to_string(), "secret".to_string());
@@ -3177,6 +3204,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: &[],
             context_tokens: 8_192,
+            disable_thinking: false,
         };
         let mut child = Command::new("true").spawn().unwrap();
         child.wait().unwrap();

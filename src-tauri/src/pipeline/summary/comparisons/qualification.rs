@@ -115,6 +115,7 @@ pub(super) fn admitted_runtime(
             expected_server_digest: QUALIFIED_LLAMA_SERVER_DIGEST.into(),
             expected_runtime_libraries: JACK_LLAMA_CPP_LIBRARIES,
             context_tokens: 32768,
+            disable_thinking: true,
         })
         .unwrap()
     }

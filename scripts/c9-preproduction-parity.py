@@ -192,16 +192,66 @@ def reserve_gateway(packet, source, output):
         'phase': 'corrected-production', **budget})
 
 
+def summary_lane(args, source):
+    require(args.output is not None and args.gguf is not None and args.server is not None,
+            'summary output/model/server are required')
+    m = read(REPO / MANIFEST_PATH)['additional_tasks'][0]
+    require(sha(args.gguf) == m['model_sha256'] and sha(args.server) == m['server_sha256'],
+            'native summary runtime pin changed')
+    require(sha(args.packet / 'execution.json') == m['execution_sha256'], 'summary freeze changed')
+    out = args.output.resolve()
+    require(not out.is_relative_to(REPO) and '.codex/worktrees' not in str(out), 'durable output required')
+    require(not out.exists(), 'summary output already exists; no retry')
+    require(not (args.packet.parent / 'native-summary-parity-generation-reservation.json').exists(), 'summary budget already reserved')
+    with args.lock.open('r+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        out.mkdir(parents=True, mode=0o700)
+        out.parent.chmod(0o700)
+        save(out / 'freeze.json', {'source':source, 'task':m, 'generation_ceiling':2})
+        env = {k:v for k,v in os.environ.items() if not k.startswith(('DOC_SUM_', 'LLAMA_ARG_'))}
+        env.update(DOC_SUM_SUMMARY_ORIGINAL=str(args.packet.resolve()),
+                   DOC_SUM_SUMMARY_PARITY_OUTPUT=str(out), DOC_SUM_QUALIFICATION_GGUF=str(args.gguf),
+                   DOC_SUM_LLAMA_SERVER_PATH=str(args.server))
+        test = 'pipeline::llama_cpp::framing_tests::original_summary_native_adapter_parity'
+        cmd = ['cargo','test','--locked','--all-features','--lib',test,'--','--exact','--ignored','--nocapture','--test-threads=1']
+        with (out / 'run.log').open('x') as log:
+            proc = subprocess.Popen(cmd,cwd=REPO / 'src-tauri',env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            for line in proc.stdout:
+                log.write(line);log.flush()
+                if line.startswith(('SUMMARY_', 'test result:', 'error:', "thread '")):
+                    print(line.strip(),flush=True)
+            code=proc.wait()
+        save(out / 'exit.json', {'code':code})
+        if code:
+            print(f'Native summary check exited {code}; stopped at {out}',flush=True)
+            return code
+        result=read(out / 'results.json') if (out / 'results.json').exists() else {'passed':False,'calls':0}
+        require(type(result['calls']) is int and 0 <= result['calls'] <= 2, 'summary budget exceeded')
+        require(not result['passed'] or (result['calls']==2 and len(result.get('cases',[]))==2 and all(c['passed'] for c in result['cases'])), 'incomplete summary cannot pass')
+        require(tree() == source, 'source changed during native summary parity')
+        receipt={'version':1,'phase':'native-summary','at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                 'source':source,'task':m,'passed':result['passed'],'actual_calls':result['calls'],
+                 'artifacts':{str(f.relative_to(out)):sha(f) for f in out.rglob('*') if f.is_file()}}
+        save(out / 'receipt.json',receipt)
+        print(json.dumps({'phase':'native-summary','passed':receipt['passed'],'actual_calls':receipt['actual_calls'],'receipt':str(out / 'receipt.json')}),flush=True)
+        return 0
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--phase', choices=['native', 'preflight', 'gateway'], required=True)
-    for key in ['packet', 'deployment', 'model', 'settings', 'lock']:
+    p.add_argument('--phase', choices=['native', 'preflight', 'gateway', 'summary'], required=True)
+    for key in ['packet', 'lock']:
         p.add_argument('--' + key, type=Path, required=True)
+    for key in ['deployment', 'model', 'settings']:
+        p.add_argument('--' + key, type=Path)
     for key in ['output', 'verify', 'native-receipt', 'gguf', 'server']:
         p.add_argument('--' + key, type=Path)
     args = p.parse_args()
     os.umask(0o077)
     source = tree()
+    if args.phase == 'summary':
+        return summary_lane(args, source)
+    require(all(getattr(args,k) is not None for k in ['deployment','model','settings']), 'gateway receipts/settings required')
     inputs = baseline(args.packet)
     with contextlib.ExitStack() as stack:
         # Preflight and receipt inspection cannot generate or change GPU residency.

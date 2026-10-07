@@ -1,6 +1,6 @@
 # Preproduction C9 parity contract
 
-## Pre-production inventory (completed before this accepted revision)
+## Pre-production inventory at acceptance
 
 The unchanged original native C9 packet, its runner, settings, templates, token requests and raw results are retained under alias `original-c9`; its manifest SHA256 is `731b18c54a45f34ada58a8964fd0e599eecfcdd4d3a2ae1e6f15a245b01cca4c`. The inventory receipt `preproduction-inventory.json` has SHA256 `56b2715e5b977c7a85c42dca70dac40357f0b612b86734d7901c495ffa485836`.
 
@@ -14,7 +14,7 @@ The unchanged original native C9 packet, its runner, settings, templates, token 
 | Application gate | Standalone experiment | Candidate enabled only in test binaries | Shared owners exercised in ignored test; ordinary-build gate stays closed |
 | Earlier synthesis | Whole contracts, freeform 350-word brief, 1500 output tokens; retained summaries and ratings | General source-cited synthesis is a different task/protocol | Private inventory retained by alias/hash; no complete hashed request/runtime freeze or independent acceptance gold recovered, so no synthesis replay admitted |
 
-The earlier synthesis inventory retains 387 files by alias/hash outside worktrees. Its runner saves summary text and metrics but not complete raw chat responses or rendered token boundaries. Missing historical provenance cannot be reconstructed as fact. This lane records that gap and budgets no synthesis calls.
+Later recovery and fresh reproduction supplement this historical inventory; see [the accepted native summary parity amendment](PR-NATIVE-SUMMARY-PARITY.md). The earlier synthesis inventory retains 387 files by alias/hash outside worktrees. Its runner saves summary text and metrics but not complete raw chat responses or rendered token boundaries. Missing historical provenance cannot be reconstructed as fact. This lane records that gap and budgets no synthesis calls.
 
 Standing rule: every future C9 or General contract must open with this inventory: affected validated experiments, settings, runtime, framing, prompts and results; every departure with evidence; and its parity test. Prepare the inventory before writing the contract. A contract without it is not ready for acceptance.
 
@@ -116,12 +116,12 @@ Contract and evidence preparation only. The original C9 packet was copied with h
 
 ## Gap audit
 
-NOT DONE. Contract accepted; lane implementation, mandatory native framing proof/correction, exact production projection/preflight, live parity and review remain. The causal porting difference is unproven. Earlier synthesis provenance remains an explicitly tracked recovery task. The faithful-drafting v2 lane waits.
+Diagnostic parity is complete at the restoration milestone recorded below. Full-document admission, native profile scope correction, unseen qualification and the operator hold remain NOT DONE. The faithful-drafting v2 lane waits.
 
 
 ## Post-investigation amendment: original excerpt restoration (ACCEPTED)
 
-Status: ACCEPTED by the operator in this session: "Accept the restoration amendment". Acceptance precedes the semantic implementation. The accepted divergence clause permits restoring demonstrated behavior, but its stop rule also requires a revised contract before changing the representation. This amendment makes the change from segment-only, per-dimension sentence requests to the original whole-claim, joint excerpt request explicit. Native framing was already corrected under the original acceptance; no semantic restoration has been applied.
+Status: ACCEPTED by the operator in this session: "Accept the restoration amendment". Acceptance precedes the semantic implementation. The accepted divergence clause permits restoring demonstrated behavior, but its stop rule also requires a revised contract before changing the representation. This amendment makes the change from segment-only, per-dimension sentence requests to the original whole-claim, joint excerpt request explicit. The restoration was implemented at eec58548a632ade9666fe4347eaccf639817753c. Native framing was measured separately; its per-profile scope correction is recorded below.
 
 ### New evidence and root cause
 
@@ -166,11 +166,20 @@ Calls already used: 210 of the existing 570 ceiling. The proposed correction use
 
 ### Implementation summary and cold diff audit
 
-Only this accepted amendment is added after the completed investigation. Native framing repair and the existing qualification lane remain at their separately tested commit. The diagnostic worktrees contain appended test-only export/replay adapters; source equality is enforced in each frozen receipt. No current verifier semantic behavior has changed.
+Only this accepted amendment is added after the completed investigation. Native framing repair and the existing qualification lane remain at their separately tested commit. The diagnostic worktrees contain appended test-only export/replay adapters; source equality is enforced in each frozen receipt. The production C9 owner now uses the restored joint excerpt protocol; the former segment/per-dimension design is superseded. Ordinary builds retain the qualification gate.
 
 ### Gap audit
 
-NOT DONE. Semantic restoration, its failing/passing regression, corrected-head live confirmation and review remain. Operator acceptance has been recorded for this explicit representation amendment. PR116 remains held and v2 deferred.
+DONE for the bounded restoration diagnostic at eec58548a632ade9666fe4347eaccf639817753c: the origin projection regression failed before and passed after, and actual gateway execution matched 30/30 verdicts, with 29/29 adjudicated cases and one unresolved label. Relation equality was 111/120; passage containment was 227/250, so identical rationale is not claimed. Native framing/token equality covered all 30 cases with zero generation. Native semantic verdict parity was not measured.
+
+Evidence aliases under c9-preproduction-parity-20261007:
+- native-restored-tokenizer/receipt.json: SHA256 b73b67e59e45684f3286aef6c94374570c9ce5b06de940170173cb1f27cf2376.
+- gateway-restored/receipt.json: SHA256 54977626b64ee78505f49d26e07b99c2d1e5655bcba8c67fc0eb11bc61e3cd47.
+- restored-public-admission/public-admission.json: SHA256 36d966389fd06954bf77eb0712b78a37ded0fef89fe01032b61c68000ecc7251.
+- restoration-cold-diff-audit.json: SHA256 9761077dc6246f0076c5d78beaaeecd099f38e6bb65c0921244c6034d750b9a8.
+- restoration-fail-before.log: SHA256 b68f34eeb7801448caf189591ffdaed243038dcefb74ff698fed6201833cdf4d.
+
+NOT DONE for full-document qualification: both A/B inputs return VERIFICATION_INPUT_TOO_LARGE before generation. The proven packet covers governing clauses of 138 through 291 characters and combined claim/source inputs of 199 through 467 characters, not full-document summary sections. Full-document admission is new design requiring separate operator acceptance; this contract authorizes no cap increase, shortening or coarse fallback. Later test-only continuation correction 43d3fca changed no production bytes and does not constitute a new live run. Native profile scope, unseen qualification and the operator hold remain. PR116 stays held; v2 waits.
 
 ## Native profile framing correction contract
 
@@ -186,4 +195,4 @@ Verification: fail-first echo-tokenizer regression for an unflagged profile; fla
 
 Inventory per profile: Jack Qwen 3.8 27B native remains open (disable_thinking=false); the qualified Ollama profile is not a native-framing consumer and retains false in its catalog record; pinned Qwen3.5 9B C9/native-summary qualification uses the closed block (true). This imports only the owner from PR100, not its preset promotion or default selection. Full-document admission and operator qualification hold remain unresolved.
 
-Implementation summary: pending. Cold diff audit: pending. Gap audit: NOT DONE until the origin regression passes, the class fix is published and its review thread is reconciled.
+Implementation summary: the profile flag now reaches the native framing loader and cache identity; existing presets remain false and pinned 9B qualification uses true. The unflagged framing regression failed before and both modes pass after. Adjacent native tests pass 36 with 2 opt-in tests ignored; profile tests pass 21; comparison tests pass 18 with 2 ignored; strict clippy and formatting pass. One intermittent lease-suite failure did not reproduce in isolation or the traced suite; its evidence is retained as an unresolved test-isolation risk. Cold diff audit traces the flag through every constructor and removes unconditional framing. Gap audit: source correction verified; publication, thread reconciliation and exact-head native parity remain pending.

@@ -1,5 +1,7 @@
 # C9: complete segments and one constrained dimension per request
 
+Status: SUPERSEDED by the accepted original excerpt restoration in [PR-C9-PREPRODUCTION-PARITY.md](PR-C9-PREPRODUCTION-PARITY.md), implemented at eec58548a632ade9666fe4347eaccf639817753c. The acceptance and results below are historical records, not the current protocol.
+
 Status: ACCEPTED by Juan in this chat on October 5, 2026 (America/Chicago).
 The operator accepted revision `05dd213` with the exact reply: "Accept the revised
 contract". This separate acceptance commit precedes every production/test change.

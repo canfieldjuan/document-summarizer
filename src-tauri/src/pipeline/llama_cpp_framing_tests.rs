@@ -1,3 +1,32 @@
+use crate::pipeline::contracts::ModelOutputFormat;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+fn pinned_9b_runtime() -> (tempfile::TempDir, Arc<LlamaCppRuntime>) {
+    use crate::pipeline::model_settings::{
+        JACK_LLAMA_CPP_LIBRARIES, QUALIFIED_LLAMA_SERVER_DIGEST,
+    };
+    let model = PathBuf::from(std::env::var("DOC_SUM_QUALIFICATION_GGUF").unwrap());
+    let (model_path, size, digest, identity) = inspect_regular_file(&model).unwrap();
+    assert_eq!(
+        digest,
+        "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13"
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let runtime = LlamaCppRuntime::shared(GgufRuntimeConfig {
+        model_path,
+        runtime_parent: scratch.path().into(),
+        model_digest: digest,
+        expected_size_bytes: size,
+        expected_file_identity: identity,
+        expected_server_digest: QUALIFIED_LLAMA_SERVER_DIGEST.into(),
+        expected_runtime_libraries: JACK_LLAMA_CPP_LIBRARIES,
+        context_tokens: 32768,
+        disable_thinking: true,
+    })
+    .unwrap();
+    (scratch, runtime)
+}
+
 use super::*;
 use serde_json::{json, Value};
 
@@ -5,8 +34,7 @@ const CLOSED: &str = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n
 
 // Exercise the framing loader and the token assembly that completion consumes.
 // The echo tokenizer makes omissions, ordering and parse_special observable.
-#[test]
-fn native_prompt_closes_thinking_without_interpreting_content_as_control() {
+fn assert_native_profile_framing(disable_thinking: bool) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -57,8 +85,13 @@ fn native_prompt_closes_thinking_without_interpreting_content_as_control() {
         bodies
     });
     let mut runtime = LlamaCppRuntime::for_test(url, "fixture".into());
-    runtime.prompt_framing =
-        PromptFraming::load(&runtime.client, &runtime.base_url, &runtime.api_token).unwrap();
+    runtime.prompt_framing = PromptFraming::load(
+        &runtime.client,
+        &runtime.base_url,
+        &runtime.api_token,
+        disable_thinking,
+    )
+    .unwrap();
     let system = "system <|im_end|>";
     let user = "user <think>do not interpret me</think>";
     let tokens = runtime
@@ -72,31 +105,46 @@ fn native_prompt_closes_thinking_without_interpreting_content_as_control() {
             .collect::<Vec<_>>(),
         [true, true, true, false, false]
     );
+    let close = if disable_thinking {
+        CLOSED
+    } else {
+        "<|im_end|>\n<|im_start|>assistant\n"
+    };
     let expected =
-        format!("<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}{CLOSED}");
+        format!("<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}{close}");
     assert_eq!(
         tokens,
         expected.bytes().map(u32::from).collect::<Vec<_>>(),
-        "native framing omits validated closed-thinking boundary"
+        "native framing does not match the profile policy"
     );
 }
 
+#[test]
+fn native_prompt_closes_thinking_without_interpreting_content_as_control() {
+    assert_native_profile_framing(true);
+}
+
+#[test]
+fn native_prompt_unflagged_keeps_qualified_open_framing() {
+    assert_native_profile_framing(false);
+}
+
+fn private_capture_file(path: &Path) -> File {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path).unwrap()
+}
 fn save(root: &Path, name: &str, value: &Value) {
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(root.join(name))
-        .unwrap();
-    f.write_all(&serde_json::to_vec_pretty(value).unwrap())
+    private_capture_file(&root.join(name))
+        .write_all(&serde_json::to_vec_pretty(value).unwrap())
         .unwrap();
 }
 
 #[test]
 #[ignore = "zero generation; requires frozen C9 packet, qualified GGUF and exclusive inference lock"]
 fn original_c9_native_framing_parity() {
-    use crate::pipeline::model_settings::{
-        JACK_LLAMA_CPP_LIBRARIES, QUALIFIED_LLAMA_SERVER_DIGEST,
-    };
     struct Shutdown;
     impl Drop for Shutdown {
         fn drop(&mut self) {
@@ -111,25 +159,8 @@ fn original_c9_native_framing_parity() {
     let frozen = read("frozen/requests.json");
     let order = read("9b/execution-order.json");
     assert_eq!(order.as_array().unwrap().len(), 30);
-    let model = PathBuf::from(std::env::var("DOC_SUM_QUALIFICATION_GGUF").unwrap());
-    let (model_path, size, digest, identity) = inspect_regular_file(&model).unwrap();
-    assert_eq!(
-        digest,
-        "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13"
-    );
-    let scratch = tempfile::tempdir().unwrap();
     let _shutdown = Shutdown;
-    let runtime = LlamaCppRuntime::shared(GgufRuntimeConfig {
-        model_path,
-        runtime_parent: scratch.path().into(),
-        model_digest: digest,
-        expected_size_bytes: size,
-        expected_file_identity: identity,
-        expected_server_digest: QUALIFIED_LLAMA_SERVER_DIGEST.into(),
-        expected_runtime_libraries: JACK_LLAMA_CPP_LIBRARIES,
-        context_tokens: 32768,
-    })
-    .unwrap();
+    let (_scratch, runtime) = pinned_9b_runtime();
     let call = |path: &str, body: Value| -> Value {
         runtime
             .authorize(runtime.client.post(runtime.endpoint(path)))
@@ -217,4 +248,437 @@ fn original_c9_native_framing_parity() {
         passed,
         "native framing omits validated closed-thinking boundary"
     );
+}
+
+// Capture is enabled only by the opted-in parity test, on its calling thread.
+thread_local! {
+    static COMPLETION_CAPTURE: std::cell::RefCell<Option<(PathBuf, bool)>> = const { std::cell::RefCell::new(None) };
+}
+struct CompletionCapture;
+impl Drop for CompletionCapture {
+    fn drop(&mut self) {
+        COMPLETION_CAPTURE.with(|c| *c.borrow_mut() = None);
+    }
+}
+pub(super) fn capture_completion_request(payload: &impl Serialize) {
+    COMPLETION_CAPTURE.with(|c| {
+        if let Some((root, pending)) = c.borrow_mut().as_mut() {
+            save(
+                root,
+                "wire-request.json",
+                &serde_json::to_value(payload).unwrap(),
+            );
+            *pending = true;
+        }
+    });
+}
+pub(super) fn capture_completion_response(bytes: &[u8]) {
+    COMPLETION_CAPTURE.with(|c| {
+        if let Some((root, pending)) = c.borrow_mut().as_mut() {
+            if *pending {
+                let mut f = private_capture_file(&root.join("response.raw.json"));
+                f.write_all(bytes).unwrap();
+                *pending = false;
+            }
+        }
+    });
+}
+fn summary_manifest() -> Value {
+    let registry: Value = serde_json::from_str(include_str!(
+        "summary/comparisons/fixtures/c9-parity-manifest.json"
+    ))
+    .unwrap();
+    registry["additional_tasks"][0].clone()
+}
+fn summary_packet(root: &Path, manifest: &Value) -> Result<Vec<ModelRequest>, String> {
+    let check = |ok: bool, message: &str| if ok { Ok(()) } else { Err(message.to_string()) };
+    check(
+        manifest["task"] == "native-summary-parity" && manifest["call_ceiling"] == 2,
+        "task/budget changed",
+    )?;
+    check(
+        manifest["context"] == 32768
+            && manifest["seed"] == 4294967295_u64
+            && manifest["max_output_tokens"] == 1500,
+        "effective settings changed",
+    )?;
+    check(
+        manifest["model_sha256"]
+            == "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13"
+            && manifest["server_sha256"]
+                == crate::pipeline::model_settings::QUALIFIED_LLAMA_SERVER_DIGEST,
+        "runtime pin changed",
+    )?;
+    let hash = |b: &[u8]| format!("{:x}", Sha256::digest(b));
+    let execution = fs::read(root.join("execution.json")).map_err(|e| e.to_string())?;
+    check(
+        hash(&execution) == manifest["execution_sha256"],
+        "execution freeze changed",
+    )?;
+    let cases = manifest["cases"].as_array().ok_or("missing cases")?;
+    check(cases.len() == 2, "missing/extra cases")?;
+    let mut requests = Vec::new();
+    for (i, case) in cases.iter().enumerate() {
+        check(
+            case["case"] == i + 1 && case["alias"] == format!("synthesis-{}", i + 1),
+            "duplicate/reordered case",
+        )?;
+        let files = case["files"].as_object().ok_or("missing files")?;
+        check(files.len() == 6, "missing file freeze")?;
+        for kind in [
+            "request",
+            "wire-request",
+            "response.raw",
+            "template",
+            "tokens",
+            "props",
+        ] {
+            let name = format!("case-{}-{kind}.json", i + 1);
+            let bytes = fs::read(root.join(&name)).map_err(|e| e.to_string())?;
+            check(
+                hash(&bytes) == *files.get(&name).ok_or("missing file hash")?,
+                "artifact hash changed",
+            )?;
+        }
+        let read = |kind: &str| -> Result<Value, String> {
+            serde_json::from_slice(
+                &fs::read(root.join(format!("case-{}-{kind}.json", i + 1)))
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        };
+        let request = read("request")?;
+        check(
+            request["temperature"] == 0.0
+                && request["max_tokens"] == 1500
+                && request.get("seed").is_none()
+                && request["stream"] == false,
+            "baseline settings changed",
+        )?;
+        let messages = request["messages"].as_array().ok_or("missing messages")?;
+        check(
+            messages.len() == 2 && messages[0]["role"] == "system" && messages[1]["role"] == "user",
+            "message projection changed",
+        )?;
+        let response = read("response.raw")?;
+        let text = response["choices"][0]["message"]["content"]
+            .as_str()
+            .ok_or("missing output target")?;
+        check(
+            hash(text.as_bytes()) == case["output_sha256"]
+                && response["choices"][0]["finish_reason"] == "stop",
+            "output target changed",
+        )?;
+        requests.push(ModelRequest {
+            stage: PipelineStage::Synthesize,
+            ordinal: i as u32,
+            system_prompt: messages[0]["content"]
+                .as_str()
+                .ok_or("missing system")?
+                .into(),
+            user_prompt: messages[1]["content"]
+                .as_str()
+                .ok_or("missing user")?
+                .into(),
+            seed: 4294967295,
+            max_output_tokens: 1500,
+            output_format: ModelOutputFormat::Text,
+        });
+    }
+    Ok(requests)
+}
+#[test]
+fn native_summary_registry_rejects_budget_settings_and_case_drift() {
+    let root = tempfile::tempdir().unwrap();
+    let mut m = summary_manifest();
+    let hash = |b: &[u8]| format!("{:x}", Sha256::digest(b));
+    fs::write(root.path().join("execution.json"), b"{}").unwrap();
+    m["execution_sha256"] = json!(hash(b"{}"));
+    for i in 0..2 {
+        let request = json!({"temperature":0.0,"max_tokens":1500,"stream":false,"messages":[{"role":"system","content":"system"},{"role":"user","content":"user"}]});
+        let response = json!({"choices":[{"finish_reason":"stop","message":{"content":"target"}}]});
+        m["cases"][i]["output_sha256"] = json!(hash(b"target"));
+        for kind in [
+            "request",
+            "wire-request",
+            "response.raw",
+            "template",
+            "tokens",
+            "props",
+        ] {
+            let data = if kind == "request" {
+                request.clone()
+            } else if kind == "response.raw" {
+                response.clone()
+            } else {
+                json!({})
+            };
+            let bytes = serde_json::to_vec(&data).unwrap();
+            let name = format!("case-{}-{kind}.json", i + 1);
+            fs::write(root.path().join(&name), &bytes).unwrap();
+            m["cases"][i]["files"][&name] = json!(hash(&bytes));
+        }
+    }
+    assert_eq!(summary_packet(root.path(), &m).unwrap().len(), 2);
+    for (key, bad) in [
+        ("call_ceiling", json!(0)),
+        ("call_ceiling", json!(3)),
+        ("context", json!(8192)),
+        ("seed", json!(7)),
+        ("max_output_tokens", json!(2048)),
+        ("model_sha256", json!("wrong")),
+        ("server_sha256", json!("wrong")),
+    ] {
+        let mut altered = m.clone();
+        altered[key] = bad;
+        assert!(
+            summary_packet(root.path(), &altered).is_err(),
+            "accepted changed {key}"
+        );
+    }
+    for cases in [
+        json!([]),
+        json!([m["cases"][0].clone()]),
+        json!([m["cases"][0].clone(), m["cases"][0].clone()]),
+        json!([
+            m["cases"][0].clone(),
+            m["cases"][1].clone(),
+            m["cases"][1].clone()
+        ]),
+    ] {
+        let mut altered = m.clone();
+        altered["cases"] = cases;
+        assert!(summary_packet(root.path(), &altered).is_err());
+    }
+    for key in ["output_sha256", "files"] {
+        let mut altered = m.clone();
+        altered["cases"][0][key] = json!("wrong");
+        assert!(summary_packet(root.path(), &altered).is_err());
+    }
+    for kind in [
+        "request",
+        "wire-request",
+        "response.raw",
+        "template",
+        "tokens",
+        "props",
+    ] {
+        let name = format!("case-1-{kind}.json");
+        let bytes = fs::read(root.path().join(&name)).unwrap();
+        fs::write(root.path().join(&name), b"changed").unwrap();
+        assert!(summary_packet(root.path(), &m).is_err());
+        fs::write(root.path().join(&name), bytes).unwrap();
+    }
+}
+#[test]
+#[ignore = "accepted two-call summary parity; frozen packet, exclusive inference lock and pinned GGUF required"]
+fn original_summary_native_adapter_parity() {
+    struct Shutdown;
+    impl Drop for Shutdown {
+        fn drop(&mut self) {
+            shutdown_managed_runtimes();
+        }
+    }
+    let _shutdown = Shutdown;
+    let root = PathBuf::from(std::env::var("DOC_SUM_SUMMARY_ORIGINAL").unwrap());
+    let out = PathBuf::from(std::env::var("DOC_SUM_SUMMARY_PARITY_OUTPUT").unwrap());
+    let m = summary_manifest();
+    let requests = summary_packet(&root, &m).unwrap();
+    let (_scratch, runtime) = pinned_9b_runtime();
+    let call = |path: &str, body: Option<Value>| -> Value {
+        let request = if let Some(body) = body {
+            runtime.client.post(runtime.endpoint(path)).json(&body)
+        } else {
+            runtime.client.get(runtime.endpoint(path))
+        };
+        runtime
+            .authorize(request)
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap()
+    };
+    let props = call("/props", None);
+    save(&out, "props.json", &props);
+    let read = |case: usize, kind: &str| -> Value {
+        serde_json::from_slice(&fs::read(root.join(format!("case-{case}-{kind}.json"))).unwrap())
+            .unwrap()
+    };
+    let mut mismatches = Vec::new();
+    for key in [
+        "seed",
+        "dynatemp_range",
+        "dynatemp_exponent",
+        "top_k",
+        "top_p",
+        "min_p",
+        "top_n_sigma",
+        "xtc_probability",
+        "xtc_threshold",
+        "typical_p",
+        "repeat_last_n",
+        "repeat_penalty",
+        "presence_penalty",
+        "frequency_penalty",
+        "dry_multiplier",
+        "dry_base",
+        "dry_allowed_length",
+        "dry_penalty_last_n",
+        "mirostat",
+        "mirostat_tau",
+        "mirostat_eta",
+        "adaptive_target",
+        "adaptive_decay",
+        "ignore_eos",
+        "n_keep",
+        "n_discard",
+        "n_probs",
+        "min_keep",
+        "samplers",
+        "speculative.types",
+        "backend_sampling",
+        "lora",
+    ] {
+        let old = read(1, "props")["default_generation_settings"]["params"][key].clone();
+        let current = props["default_generation_settings"]["params"][key].clone();
+        if old.is_null() || current.is_null() || old != current {
+            mismatches.push(json!({"key":key,"baseline":old,"current":current}));
+        }
+    }
+    let mut framed = Vec::new();
+    let detokenize = |tokens: &[u32]| {
+        call("/detokenize", Some(json!({"tokens":tokens})))["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let open = detokenize(&runtime.prompt_framing.system_open);
+    let middle = detokenize(&runtime.prompt_framing.system_close_user_open);
+    let close = detokenize(&runtime.prompt_framing.user_close_assistant_open);
+    for (i, request) in requests.iter().enumerate() {
+        let tokens = runtime
+            .prompt_tokens(
+                &request.system_prompt,
+                &request.user_prompt,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+        let text = format!(
+            "{open}{}{middle}{}{close}",
+            request.system_prompt, request.user_prompt
+        );
+        let template = call(
+            "/apply-template",
+            Some(
+                json!({"messages":[{"role":"system","content":request.system_prompt},{"role":"user","content":request.user_prompt}],"add_generation_prompt":true,"chat_template_kwargs":{"enable_thinking":false}}),
+            ),
+        );
+        let same = text == read(i + 1, "template")["prompt"]
+            && template == read(i + 1, "template")
+            && json!(tokens) == read(i + 1, "tokens")["tokens"];
+        let admitted = runtime.preflight_request(request).is_ok();
+        save(
+            &out,
+            &format!("framing-{}.json", i + 1),
+            &json!({"case":i+1,"render":text,"tokens":tokens,"same":same,"admitted":admitted}),
+        );
+        framed.push(json!({"case":i+1,"same":same,"admitted":admitted}));
+    }
+    let ready = mismatches.is_empty()
+        && framed
+            .iter()
+            .all(|f| f["same"] == true && f["admitted"] == true);
+    save(
+        &out,
+        "preflight.json",
+        &json!({"ready":ready,"framing":framed,"sampler_mismatches":mismatches,"generation_calls":0}),
+    );
+    if !ready {
+        println!("SUMMARY_NATIVE_PARITY stopped_before_generation=true calls=0");
+        return;
+    }
+    let owner = runtime.owner.as_ref().unwrap();
+    let pid = owner.child.lock().unwrap().id();
+    let exe = fs::read(format!("/proc/{pid}/exe")).unwrap();
+    assert_eq!(format!("{:x}", Sha256::digest(&exe)), m["server_sha256"]);
+    let maps = fs::read_to_string(format!("/proc/{pid}/maps")).unwrap();
+    let mut libraries = serde_json::Map::new();
+    for library in crate::pipeline::model_settings::JACK_LLAMA_CPP_LIBRARIES {
+        let path = owner
+            ._runtime_library_directory
+            .path()
+            .join(library.file_name);
+        let bytes = fs::read(&path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        assert_eq!(digest, library.digest);
+        libraries.insert(
+            library.file_name.into(),
+            json!({"sha256":digest,"mapped":maps.contains(library.file_name)}),
+        );
+    }
+    save(&out, "runtime-libraries.json", &Value::Object(libraries));
+    save(
+        &out,
+        "process.json",
+        &json!({"pid":pid,"maps":maps,"server_sha256":m["server_sha256"],"model_sha256":m["model_sha256"],"context":32768,"disable_thinking":true}),
+    );
+    // The fixed reservation lives beside all outputs. Renaming the run cannot reset it.
+    save(
+        root.parent().unwrap(),
+        "native-summary-parity-generation-reservation.json",
+        &json!({"maximum_calls":2,"manifest":m,"output":out}),
+    );
+    let mut rows = Vec::new();
+    for (i, request) in requests.iter().enumerate() {
+        let case = out.join(format!("case-{}", i + 1));
+        fs::create_dir(&case).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&case, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        COMPLETION_CAPTURE.with(|c| *c.borrow_mut() = Some((case.clone(), false)));
+        let capture = CompletionCapture;
+        let result = runtime.generate(request);
+        drop(capture);
+        let exposed = match &result {
+            Ok(r) => {
+                json!({"text":r.text,"runtime_id":r.runtime_id,"model_id":r.model_id,"request_attempts":r.request_attempts})
+            }
+            Err(e) => {
+                json!({"code":e.code,"message":e.message,"recoverable":e.recoverable,"request_attempts":e.request_attempts})
+            }
+        };
+        save(&case, "adapter-result.json", &exposed);
+        let raw: Value = fs::read(case.join("response.raw.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or(Value::Null);
+        let target = read(i + 1, "response.raw")["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let passed = result.as_ref().is_ok_and(|r| r.text == target)
+            && raw["content"] == target
+            && matches!(raw["stop_type"].as_str(), Some("eos" | "word"))
+            && raw["truncated"] == false;
+        rows.push(json!({"case":i+1,"passed":passed,"prompt_tokens":raw["tokens_evaluated"],"output_tokens":raw["tokens_predicted"],"stop_type":raw["stop_type"]}));
+        save(
+            &out,
+            &format!("status-{}.json", i + 1),
+            &json!({"cases":rows,"calls":rows.len(),"passed":passed}),
+        );
+        if !passed {
+            break;
+        }
+    }
+    let passed = rows.len() == 2 && rows.iter().all(|r| r["passed"] == true);
+    save(
+        &out,
+        "results.json",
+        &json!({"cases":rows,"calls":rows.len(),"passed":passed}),
+    );
+    println!("SUMMARY_NATIVE_PARITY passed={passed} calls={}", rows.len());
 }

@@ -721,5 +721,5 @@ fn joint_executor_rejects_empty_mixed_duplicate_and_rebound_claim_plans() {
 
 #[path = "parity.rs"]
 mod parity;
-#[path = "sentence_run.rs"]
-mod sentence_run;
+#[path = "qualification.rs"]
+mod qualification;

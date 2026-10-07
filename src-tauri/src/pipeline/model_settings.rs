@@ -65,6 +65,7 @@ struct QualifiedProfile {
     runtime_binary_digest: Option<&'static str>,
     runtime_libraries: &'static [QualifiedRuntimeFile],
     label: &'static str,
+    disable_thinking: bool,
 }
 
 // Qualifications are exact-digest evidence, not name-based capability guesses.
@@ -84,6 +85,7 @@ const QUALIFIED_PROFILES: &[QualifiedProfile] = &[
         runtime_binary_digest: None,
         runtime_libraries: &[],
         label: "Qwen 3 30B-A3B",
+        disable_thinking: false,
     },
     QualifiedProfile {
         profile_id: "jack-qwen38-27b-iq2m-v1",
@@ -99,6 +101,7 @@ const QUALIFIED_PROFILES: &[QualifiedProfile] = &[
         runtime_binary_digest: Some(QUALIFIED_LLAMA_SERVER_DIGEST),
         runtime_libraries: JACK_LLAMA_CPP_LIBRARIES,
         label: "Jack Qwen 3.8 27B Coder (12 GB)",
+        disable_thinking: false,
     },
 ];
 
@@ -1367,6 +1370,7 @@ fn stage_runtime(
                     expected_server_digest: server_digest.to_string(),
                     expected_runtime_libraries: profile.runtime_libraries,
                     context_tokens: snapshot.context_tokens,
+                    disable_thinking: profile.disable_thinking,
                 },
             )?))
         }
@@ -2061,6 +2065,7 @@ mod tests {
             runtime_binary_digest: None,
             runtime_libraries: &[],
             label: "Ollama fixture",
+            disable_thinking: false,
         };
         const DIRECT: QualifiedProfile = QualifiedProfile {
             profile_id: "same-digest-direct",
@@ -2169,6 +2174,7 @@ mod tests {
             runtime_binary_digest: None,
             runtime_libraries: &[],
             label: "Small analysis candidate",
+            disable_thinking: false,
         };
         const PROFILES: &[QualifiedProfile] = &[QUALIFIED_PROFILES[0], SMALL];
         let baseline = descriptor(

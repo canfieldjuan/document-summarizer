@@ -5559,18 +5559,8 @@ fn fixture_claim_groups(item_count: usize, claim_count: usize) -> Vec<Vec<usize>
 fn fixture_verification_prompt(text: &str) -> serde_json::Result<VerificationPrompt> {
     let mut wire: Value = serde_json::from_str(text)?;
     if let Some(object) = wire.as_object_mut() {
-        // Shared scripted-verdict fixtures consume the claim projection for
-        // both the ledger and dimension protocols. Decoder catalogs/dimension
-        // are tested by the comparison fixtures, not VerificationPrompt.
-        for key in [
-            "clause_contexts",
-            "source_segments",
-            "claim_segments",
-            "dimension",
-            "parent_claim_context",
-        ] {
-            object.remove(key);
-        }
+        // The current projection interns full clauses outside typed claims.
+        object.remove("clause_contexts");
     }
     if let Some(claims) = wire["claims"].as_array_mut() {
         for claim in claims {

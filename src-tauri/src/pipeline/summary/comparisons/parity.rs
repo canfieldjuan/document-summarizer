@@ -1,6 +1,6 @@
 //! Original experiment inputs through the actual production planner/classifier.
 use super::*;
-use sentence_run::{admitted_runtime, request_value, save};
+use qualification::{admitted_runtime, request_value, save};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

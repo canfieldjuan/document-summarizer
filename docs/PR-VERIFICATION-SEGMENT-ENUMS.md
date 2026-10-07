@@ -1,5 +1,7 @@
 # Bounded segment-text enums for General verification
 
+Status: SUPERSEDED by the accepted original excerpt restoration in [PR-C9-PREPRODUCTION-PARITY.md](PR-C9-PREPRODUCTION-PARITY.md), implemented at eec58548a632ade9666fe4347eaccf639817753c. The acceptance and results below are historical records, not the current protocol.
+
 Status: design accepted by Codex in response to the operator's clarified
 recommendation. Contract commit `5adaa3b` preceded implementation. The local
 candidate and focused proof are now complete; actual runtime boundaries and
