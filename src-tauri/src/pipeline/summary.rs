@@ -11952,8 +11952,8 @@ mod tests {
             SummaryPresentationMode::Coherent
         );
         assert_eq!(runtime.synthesis_calls.load(Ordering::SeqCst), 1);
-        // One ledger request plus all four comparison dimensions; no retry.
-        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 5);
+        // One ledger request plus one joint comparison request; no retry.
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
         assert_eq!(verified.synthesis_attempt_ordinal, 0);
         assert_eq!(verified.claims, vec![synthesized.claims[0].clone()]);
         assert_eq!(verified.claim_verifications.len(), synthesized.claims.len());
@@ -12774,8 +12774,8 @@ mod tests {
         let synthesized = get_synthesized_document(&conn, &run_id).unwrap().unwrap();
         let verified = get_verified_document(&conn, &run_id).unwrap().unwrap();
         assert_eq!(runtime.synthesis_calls.load(Ordering::SeqCst), 1);
-        // One ledger request plus all four comparison dimensions; no retry.
-        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 5);
+        // One ledger request plus one joint comparison request; no retry.
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
         assert_eq!(verified.synthesis_attempt_ordinal, 0);
         assert_eq!(verified.claims, vec![synthesized.claims[0].clone()]);
         assert_eq!(verified.claim_verifications.len(), synthesized.claims.len());
@@ -12824,8 +12824,8 @@ mod tests {
             .unwrap()
             .expect("the failed verification attempt must remain auditable");
         assert_eq!(runtime.synthesis_calls.load(Ordering::SeqCst), 1);
-        // One ledger request plus all four comparison dimensions; no retry.
-        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 5);
+        // One ledger request plus one joint comparison request; no retry.
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
         assert_eq!(verified.claims, vec![synthesized.claims[0].clone()]);
         assert!(verified.summary_claims.is_empty());
         assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
@@ -12861,8 +12861,8 @@ mod tests {
             .iter()
             .any(|warning| warning.code == "SEMANTIC_CLAIMS_WITHHELD"));
         assert!(get_summary_artifact(&conn, &run_id).unwrap().is_none());
-        // One ledger request plus all four comparison dimensions; no retry.
-        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 5);
+        // One ledger request plus one joint comparison request; no retry.
+        assert_eq!(runtime.verification_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

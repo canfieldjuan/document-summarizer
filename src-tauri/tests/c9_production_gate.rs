@@ -76,8 +76,8 @@ impl ModelRuntime for Runtime {
             }
             PipelineStage::Synthesize => panic!("unqualified synthesis reached runtime"),
             PipelineStage::Verify => {
-                assert_ne!(
-                    name, "document_claim_comparisons_v4",
+                assert!(
+                    !name.starts_with("document_claim_comparisons_"),
                     "unqualified comparison reached runtime"
                 );
                 json!({"verdicts": prompt["claims"].as_array().unwrap().iter().map(|c| json!({"claim_id": c["claim_id"], "verdict": if self.reject_claims { "unsupported" } else { "supported" }})).collect::<Vec<_>>()})

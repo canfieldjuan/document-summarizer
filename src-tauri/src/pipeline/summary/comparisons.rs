@@ -1,27 +1,25 @@
 //! Bounded, source-owned C9 comparisons for General prose verification.
 use super::*;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 pub(super) const SCHEMA_NAME: &str = crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME;
 const MAX_INPUT_CHARACTERS: usize = 4096;
+const MAX_ENUM_VALUES: usize = 8192;
 const MAX_SPAN_CHARACTERS: usize = 240;
 const MAX_SPANS: usize = 4;
-const MAX_COMPARISON_CALLS: usize = 128;
 const DIMENSIONS: [&str; 4] = ["stage", "conditions", "qualifiers", "scope"];
-const DIMENSION_DEFINITIONS: [&str; 4] = [
-    "Stage means the event or lifecycle point to which the claim assigns an action or consequence.",
-    "Conditions means prerequisites, exceptions or contingencies governing the proposition the claim asserts.",
-    "Qualifiers means negation, modality, time-unit or other restrictions on the asserted relationship.",
-    "Scope means the actors, objects or classes included or excluded by that proposition, including an explicitly included class omitted by a narrower summary.",
-];
 const INSTRUCTION: &str = r#"Compare the claim with its cited quotation interpreted in the complete governing clause.
-Return exactly one JSON comparison object containing source_spans, claim_spans, and relation for the requested dimension only.
-Choose source_spans from source_segments and claim_spans from claim_segments. Each selection must be one complete supplied segment string, exactly. Do not shorten, join or paraphrase segments. Interpret each selected piece in the complete governing clause, including restrictions in neighboring pieces. Then assign its relation.
+Return exactly one JSON object with verdicts containing one item with claim_id and comparisons.
+The comparisons object must contain stage, conditions, qualifiers, and scope. Do not choose a subset.
+For each dimension copy source_spans from the supplied full_clause and claim_spans from the claim text, exactly. Do not paraphrase these spans. Then assign its relation.
+Stage means the event or lifecycle point to which the claim assigns an action or consequence.
+Conditions means prerequisites, exceptions or contingencies governing the proposition the claim asserts.
+Qualifiers means negation, modality, time-unit or other restrictions on the asserted relationship.
+Scope means the actors, objects or classes included or excluded by that proposition, including an explicitly included class omitted by a narrower summary.
 Assess only what governs the proposition asserted by the claim. A summary need not repeat distinct, unrelated facts from the surrounding clause. Equivalent faithful wording is preserved.
 Use preserved when the claim retains the applicable meaning; changed when it assigns a different meaning; omitted when it drops an applicable restriction or included scope; uncertain when the relationship cannot be established; not_applicable only when that dimension does not apply to this proposition.
 Preserved and changed require spans on both sides. Omitted requires source spans and may have no claim span. Uncertain requires at least one side. Not_applicable requires both span lists empty. An empty list is not a substitute for inspecting that dimension.
-The application derives the overall verdict from all four comparisons. Do not emit an overall verdict, extra fields, reasoning text or prose."#;
+The application derives the overall verdict from these comparisons. Do not emit an overall verdict, extra fields, reasoning text or prose."#;
 
 pub(super) fn applies(profile: SummaryProfile, synthesized: &SynthesizedDocument) -> bool {
     profile == SummaryProfile::General
@@ -80,7 +78,6 @@ fn invalid_response() -> PipelineFailure {
 // Python C9 uses Unicode \w+|[^\w\s]: letters, numbers and underscore form
 // words; combining marks and punctuation are individual tokens. Keep source
 // byte boundaries as well as Unicode scalar counts; never normalize text.
-#[cfg(test)]
 fn word_character(c: char) -> bool {
     c == '_'
         || matches!(
@@ -100,131 +97,32 @@ fn whitespace(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
 }
 
-fn trimmed_range(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
-    let piece = &text[start..end];
-    let left = start + piece.len() - piece.trim_start_matches(whitespace).len();
-    let right = start + piece.trim_end_matches(whitespace).len();
-    (left < right).then_some((left, right))
-}
-
-fn sentence_ranges(text: &str) -> Vec<(usize, usize)> {
-    let mut sentences = Vec::new();
-    let mut start = 0;
-    for (offset, c) in text.char_indices() {
-        if offset < start {
-            continue;
-        }
-        let class = analysis_sentence_break(c);
-        if !matches!(class, SentenceBreak::ATerm | SentenceBreak::STerm) {
-            continue;
-        }
-        let mut end = offset + c.len_utf8();
-        while let Some(closer) = text[end..].chars().next().filter(|c| {
-            is_analysis_sentence_closer(*c)
-                || matches!(
-                    analysis_sentence_break(*c),
-                    SentenceBreak::ATerm | SentenceBreak::STerm
-                )
-        }) {
-            end += closer.len_utf8();
-        }
-        if class == SentenceBreak::ATerm
-            && text[end..].chars().next().is_some_and(|c| !whitespace(c))
-        {
-            continue;
-        }
-        if analysis_sentence_boundary(text, start, end, text.len(), false) {
-            sentences.push((start, end));
-            start = end;
-        }
-    }
-    if start < text.len() {
-        sentences.push((start, text.len()));
-    }
-    sentences
-        .into_iter()
-        .filter_map(|(start, end)| trimmed_range(text, start, end))
-        .collect()
-}
-
-fn segment_ranges(text: &str) -> Result<Vec<(usize, usize)>, PipelineFailure> {
-    let mut pieces = Vec::new();
-    for (mut start, end) in sentence_ranges(text) {
-        if text[start..end].chars().count() <= MAX_SPAN_CHARACTERS {
-            pieces.push((start, end));
-            continue;
-        }
-        let sentence = (start, end);
-        let first_piece = pieces.len();
-        let mut primary = Vec::new();
-        let mut fallback = Vec::new();
-        for (offset, c) in text[start..end].char_indices() {
-            let position = start + offset;
-            let next = position + c.len_utf8();
-            let after = &text[next..end];
-            let followed_by_space = after.chars().next().is_some_and(whitespace);
-            if (matches!(c, ';' | '\u{61b}' | ':' | '\u{ff1a}') && followed_by_space)
-                || (c == '\n'
-                    && after
-                        .trim_start_matches([' ', '\t', '\r'])
-                        .starts_with('\n'))
-            {
-                primary.push(next);
-            }
-            if c == ',' && followed_by_space {
-                fallback.push(next);
-            }
-            if position > start && text[..position].chars().next_back().is_some_and(whitespace) {
-                let tail = &text[position..end];
-                let word_end = tail
-                    .find(|c: char| !c.is_alphabetic())
-                    .unwrap_or(tail.len());
-                let word = &tail[..word_end];
-                if ["and", "or", "but", "nor"]
-                    .iter()
-                    .any(|w| word.eq_ignore_ascii_case(w))
-                    && tail[word_end..]
-                        .chars()
-                        .next()
-                        .is_none_or(|c| whitespace(c) || (c.is_ascii_punctuation() && c != '_'))
-                {
-                    fallback.push(position);
-                }
-            }
-        }
-        while start < end {
-            if text[start..end].chars().count() <= MAX_SPAN_CHARACTERS {
-                pieces.push((start, end));
-                break;
-            }
-            let choose = |cuts: &[usize]| {
-                cuts.iter()
-                    .copied()
-                    .filter(|&cut| cut > start)
-                    .filter_map(|cut| trimmed_range(text, start, cut).map(|range| (cut, range)))
-                    .take_while(|(_, range)| {
-                        text[range.0..range.1].chars().count() <= MAX_SPAN_CHARACTERS
-                    })
-                    .last()
-            };
-            if let Some((cut, range)) = choose(&primary).or_else(|| choose(&fallback)) {
-                pieces.push(range);
-                start = trimmed_range(text, cut, end).map_or(end, |(left, _)| left);
-            } else {
-                pieces.truncate(first_piece);
-                pieces.push(sentence);
-                break;
-            }
-        }
-    }
-    Ok(pieces)
-}
-
-fn segment_catalog(texts: &[&str]) -> Result<BTreeSet<String>, PipelineFailure> {
+fn span_catalog(texts: &[&str]) -> Result<BTreeSet<String>, PipelineFailure> {
     let mut values = BTreeSet::new();
     for text in texts {
-        for (start, end) in segment_ranges(text)? {
-            values.insert(text[start..end].to_string());
+        let mut tokens: Vec<(usize, usize, usize, usize)> = Vec::new();
+        let mut previous_word = false;
+        for (position, (byte, c)) in text.char_indices().enumerate() {
+            let word = word_character(c);
+            if word && previous_word {
+                let last = tokens.last_mut().expect("preceding word token");
+                last.1 = byte + c.len_utf8();
+                last.3 = position + 1;
+            } else if !whitespace(c) {
+                tokens.push((byte, byte + c.len_utf8(), position, position + 1));
+            }
+            previous_word = word;
+        }
+        for (index, start) in tokens.iter().enumerate() {
+            for end in &tokens[index..] {
+                if end.3 - start.2 > MAX_SPAN_CHARACTERS {
+                    break;
+                }
+                values.insert(text[start.0..end.1].to_string());
+                if values.len() > MAX_ENUM_VALUES {
+                    return Err(too_large());
+                }
+            }
         }
     }
     if values.is_empty() {
@@ -235,101 +133,68 @@ fn segment_catalog(texts: &[&str]) -> Result<BTreeSet<String>, PipelineFailure> 
 
 #[derive(Debug, Clone)]
 pub(super) struct Prepared {
-    dimension: usize,
-    claim_id: String,
+    claim: CitedClaim,
     pub(super) schema: Value,
     source_spans: BTreeSet<String>,
     claim_spans: BTreeSet<String>,
-    sentence: Option<SentenceAssociation>,
-}
-
-#[derive(Debug)]
-struct ParentSentences {
-    claim: CitedClaim,
-    ranges: Vec<(usize, usize)>,
-}
-
-#[derive(Debug, Clone)]
-struct SentenceAssociation {
-    document: Arc<Vec<ParentSentences>>,
-    parent: usize,
-    ordinal: usize,
-}
-
-impl ParentSentences {
-    fn sentence_claim(&self, parent: usize, ordinal: usize) -> CitedClaim {
-        let (start, end) = self.ranges[ordinal];
-        CitedClaim {
-            claim_id: format!("c9-sentence-{parent}-{ordinal}"),
-            text: self.claim.text[start..end].to_string(),
-            evidence_ids: self.claim.evidence_ids.clone(),
-        }
-    }
-}
-
-fn ensure_comparison_call_count(count: usize) -> Result<(), PipelineFailure> {
-    if !(1..=MAX_COMPARISON_CALLS).contains(&count) {
-        return Err(stage_failure(
-            PipelineStage::Verify,
-            "VERIFICATION_PLAN_TOO_LARGE",
-            "C9 requires a nonempty document plan within its comparison-call limit",
-            false,
-        ));
-    }
-    Ok(())
 }
 
 fn strict_object(properties: Value, required: &[&str]) -> Value {
     json!({"type":"object", "properties":properties, "required":required, "additionalProperties":false})
 }
 
-fn owned_sources(input: &PromptVerificationClaim) -> Result<Vec<&str>, PipelineFailure> {
-    if input.text.trim().is_empty() || input.evidence.is_empty() {
-        return Err(invalid_input());
-    }
-    let mut seen = HashSet::new();
-    let mut sources = Vec::new();
-    for evidence in &input.evidence {
-        let source = evidence.full_clause.as_deref().ok_or_else(invalid_input)?;
-        if source.trim().is_empty()
-            || evidence.exact_quote.trim().is_empty()
-            || !source.contains(&evidence.exact_quote)
-        {
-            return Err(invalid_input());
-        }
-        if seen.insert(source) {
-            sources.push(source);
-        }
-    }
-    if input.text.chars().count() + sources.iter().map(|s| s.chars().count()).sum::<usize>()
-        > MAX_INPUT_CHARACTERS
-    {
-        return Err(too_large());
-    }
-    Ok(sources)
-}
-
 impl Prepared {
     fn new(input: &PromptVerificationClaim, schema_limit: usize) -> Result<Self, PipelineFailure> {
-        let sources = owned_sources(input)?;
-        let source_spans = segment_catalog(&sources)?;
-        let claim_spans = segment_catalog(&[&input.text])?;
-        let choices: Vec<_> = Relation::ALL
+        if input.text.trim().is_empty() || input.evidence.is_empty() {
+            return Err(invalid_input());
+        }
+        let mut seen = HashSet::new();
+        let mut sources = Vec::new();
+        for evidence in &input.evidence {
+            let source = evidence.full_clause.as_deref().ok_or_else(invalid_input)?;
+            if source.trim().is_empty()
+                || evidence.exact_quote.trim().is_empty()
+                || !source.contains(&evidence.exact_quote)
+            {
+                return Err(invalid_input());
+            }
+            if seen.insert(source) {
+                sources.push(source);
+            }
+        }
+        if input.text.chars().count() + sources.iter().map(|s| s.chars().count()).sum::<usize>()
+            > MAX_INPUT_CHARACTERS
+        {
+            return Err(too_large());
+        }
+        let source_spans = span_catalog(&sources)?;
+        let claim_spans = span_catalog(&[&input.text])?;
+        let comparison = strict_object(
+            json!({
+                "source_spans":{"type":"array", "items":{"$ref":"#/$defs/source_span"}, "minItems":0,"maxItems":MAX_SPANS},
+                "claim_spans":{"type":"array", "items":{"$ref":"#/$defs/claim_span"}, "minItems":0,"maxItems":MAX_SPANS},
+                "relation":{"type":"string","enum":["preserved","changed","omitted","uncertain","not_applicable"]}
+            }),
+            &["source_spans", "claim_spans", "relation"],
+        );
+        let dimensions: serde_json::Map<String, Value> = DIMENSIONS
             .iter()
-            .flat_map(|relation| {
-                relation.shapes().iter().map(move |&(source, claim)| strict_object(json!({
-                "source_spans":{"type":"array", "items":{"$ref":"#/$defs/source_span"},
-                    "minItems":usize::from(source), "maxItems":if source {MAX_SPANS} else {0}},
-                "claim_spans":{"type":"array", "items":{"$ref":"#/$defs/claim_span"},
-                    "minItems":usize::from(claim), "maxItems":if claim {MAX_SPANS} else {0}},
-                "relation":{"type":"string", "enum":[relation]}
-            }), &["source_spans", "claim_spans", "relation"]))
-            })
+            .map(|name| (name.to_string(), comparison.clone()))
             .collect();
-        let schema = json!({"anyOf":choices, "$defs":{
+        let mut schema = strict_object(
+            json!({"verdicts":{
+                "type":"array","minItems":1,"maxItems":1,
+                "items":strict_object(json!({
+                    "claim_id":{"type":"string","enum":["k1"]},
+                    "comparisons":strict_object(Value::Object(dimensions), &DIMENSIONS)
+                }), &["claim_id","comparisons"])
+            }}),
+            &["verdicts"],
+        );
+        schema["$defs"] = json!({
             "source_span":{"type":"string","enum":source_spans},
             "claim_span":{"type":"string","enum":claim_spans}
-        }});
+        });
         let limit = schema_limit.min(crate::pipeline::contracts::MAX_CLAIM_COMPARISON_SCHEMA_BYTES);
         if serde_json::to_vec(&schema)
             .map_err(|_| invalid_input())?
@@ -339,66 +204,117 @@ impl Prepared {
             return Err(too_large());
         }
         Ok(Self {
-            dimension: 0,
-            claim_id: input.claim_id.clone(),
+            claim: CitedClaim {
+                claim_id: input.claim_id.clone(),
+                text: input.text.clone(),
+                evidence_ids: input
+                    .evidence
+                    .iter()
+                    .map(|e| e.evidence_id.clone())
+                    .collect(),
+            },
             schema,
             source_spans,
             claim_spans,
-            sentence: None,
         })
     }
 
-    fn prompt(
+    pub(super) fn parse(
         &self,
-        input: &PromptVerificationClaim,
-    ) -> Result<(String, identifiers::RequestIds), PipelineFailure> {
-        let (wire, ids) = identifiers::verification_prompt(std::slice::from_ref(input))
-            .map_err(|_| invalid_input())?;
-        let mut value: Value = serde_json::from_str(&wire).map_err(|_| invalid_input())?;
-        value["dimension"] = json!(DIMENSIONS[self.dimension]);
-        value["source_segments"] = json!(self.source_spans);
-        value["claim_segments"] = json!(self.claim_spans);
-        if let Some(sentence) = &self.sentence {
-            value["parent_claim_context"] = json!(sentence.document[sentence.parent].claim.text);
-        }
-        Ok((
-            serde_json::to_string(&value).map_err(|_| invalid_input())?,
-            ids,
-        ))
-    }
-
-    fn parse(&self, response: &str) -> Result<Comparison, PipelineFailure> {
-        let comparison: Comparison =
-            serde_json::from_str(response).map_err(|_| invalid_response())?;
-        if comparison.source_spans.len() > MAX_SPANS
-            || comparison.claim_spans.len() > MAX_SPANS
-            || comparison
-                .source_spans
-                .iter()
-                .any(|s| !self.source_spans.contains(s))
-            || comparison
-                .claim_spans
-                .iter()
-                .any(|s| !self.claim_spans.contains(s))
-            || !comparison.relation.shapes().contains(&(
-                !comparison.source_spans.is_empty(),
-                !comparison.claim_spans.is_empty(),
-            ))
-        {
+        response: &str,
+        claim: &CitedClaim,
+    ) -> Result<ClaimVerification, PipelineFailure> {
+        if claim != &self.claim {
             return Err(invalid_response());
         }
-        Ok(comparison)
+        let response: Response = serde_json::from_str(response).map_err(|_| invalid_response())?;
+        let [verdict] = response.verdicts.as_slice() else {
+            return Err(invalid_response());
+        };
+        if verdict.claim_id != "k1" {
+            return Err(invalid_response());
+        }
+        let mut changed = false;
+        let mut uncertain = false;
+        let mut preserved = false;
+        for comparison in verdict.comparisons.all() {
+            if !comparison.owned_by(self) || !comparison.relation_valid() {
+                return Err(invalid_response());
+            }
+            changed |= matches!(comparison.relation, Relation::Changed | Relation::Omitted);
+            uncertain |= comparison.relation == Relation::Uncertain;
+            preserved |= comparison.relation == Relation::Preserved;
+        }
+        Ok(ClaimVerification {
+            claim_id: claim.claim_id.clone(),
+            evidence_ids: claim.evidence_ids.clone(),
+            verdict: if changed {
+                ClaimVerdict::Unsupported
+            } else if uncertain || !preserved {
+                ClaimVerdict::Ambiguous
+            } else {
+                ClaimVerdict::Supported
+            },
+        })
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Response {
+    verdicts: Vec<ComparisonVerdict>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComparisonVerdict {
+    claim_id: String,
+    comparisons: Comparisons,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Comparisons {
+    stage: Comparison,
+    conditions: Comparison,
+    qualifiers: Comparison,
+    scope: Comparison,
+}
+impl Comparisons {
+    fn all(&self) -> [&Comparison; 4] {
+        [&self.stage, &self.conditions, &self.qualifiers, &self.scope]
+    }
+}
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Comparison {
     source_spans: Vec<String>,
     claim_spans: Vec<String>,
     relation: Relation,
 }
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+impl Comparison {
+    fn owned_by(&self, prepared: &Prepared) -> bool {
+        self.source_spans.len() <= MAX_SPANS
+            && self.claim_spans.len() <= MAX_SPANS
+            && self
+                .source_spans
+                .iter()
+                .all(|s| prepared.source_spans.contains(s))
+            && self
+                .claim_spans
+                .iter()
+                .all(|s| prepared.claim_spans.contains(s))
+    }
+    fn relation_valid(&self) -> bool {
+        let source = !self.source_spans.is_empty();
+        let target = !self.claim_spans.is_empty();
+        match self.relation {
+            Relation::Preserved | Relation::Changed => source && target,
+            Relation::Omitted => source,
+            Relation::Uncertain => source || target,
+            Relation::NotApplicable => !source && !target,
+        }
+    }
+}
+#[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Relation {
     Preserved,
@@ -406,103 +322,6 @@ enum Relation {
     Omitted,
     Uncertain,
     NotApplicable,
-}
-impl Relation {
-    const ALL: [Self; 5] = [
-        Self::Preserved,
-        Self::Changed,
-        Self::Omitted,
-        Self::Uncertain,
-        Self::NotApplicable,
-    ];
-    fn shapes(&self) -> &'static [(bool, bool)] {
-        match self {
-            Self::Preserved | Self::Changed => &[(true, true)],
-            Self::Omitted => &[(true, false), (true, true)],
-            Self::Uncertain => &[(false, true), (true, false), (true, true)],
-            Self::NotApplicable => &[(false, false)],
-        }
-    }
-}
-
-fn aggregate(comparisons: &[Comparison; 4]) -> ClaimVerdict {
-    if comparisons
-        .iter()
-        .any(|c| matches!(c.relation, Relation::Changed | Relation::Omitted))
-    {
-        ClaimVerdict::Unsupported
-    } else if comparisons
-        .iter()
-        .any(|c| c.relation == Relation::Uncertain)
-        || !comparisons
-            .iter()
-            .any(|c| c.relation == Relation::Preserved)
-    {
-        ClaimVerdict::Ambiguous
-    } else {
-        ClaimVerdict::Supported
-    }
-}
-
-fn validate_plan(
-    batches: &[VerificationBatch],
-) -> Result<Arc<Vec<ParentSentences>>, PipelineFailure> {
-    ensure_comparison_call_count(batches.len())?;
-    let document = batches[0]
-        .comparison
-        .as_ref()
-        .and_then(|p| p.sentence.as_ref())
-        .ok_or_else(invalid_input)?
-        .document
-        .clone();
-    let mut seen = HashSet::new();
-    let mut offset = 0;
-    for (parent_index, parent) in document.iter().enumerate() {
-        if !seen.insert(&parent.claim.claim_id)
-            || parent.ranges.is_empty()
-            || parent.ranges != sentence_ranges(&parent.claim.text)
-        {
-            return Err(invalid_input());
-        }
-        for ordinal in 0..parent.ranges.len() {
-            let claim = parent.sentence_claim(parent_index, ordinal);
-            for dimension in 0..DIMENSIONS.len() {
-                let batch = batches.get(offset).ok_or_else(invalid_input)?;
-                let [owned] = batch.claims.as_slice() else {
-                    return Err(invalid_input());
-                };
-                let prepared = batch.comparison.as_ref().ok_or_else(invalid_input)?;
-                let association = prepared.sentence.as_ref().ok_or_else(invalid_input)?;
-                if !Arc::ptr_eq(&association.document, &document)
-                    || association.parent != parent_index
-                    || association.ordinal != ordinal
-                    || prepared.dimension != dimension
-                    || prepared.claim_id != claim.claim_id
-                    || owned != &claim
-                {
-                    return Err(invalid_input());
-                }
-                offset += 1;
-            }
-        }
-    }
-    if offset != batches.len() {
-        return Err(invalid_input());
-    }
-    Ok(document)
-}
-
-fn aggregate_parent(sentences: &[ClaimVerdict]) -> Result<ClaimVerdict, PipelineFailure> {
-    if sentences.is_empty() {
-        return Err(invalid_response());
-    }
-    Ok(if sentences.contains(&ClaimVerdict::Unsupported) {
-        ClaimVerdict::Unsupported
-    } else if sentences.contains(&ClaimVerdict::Ambiguous) {
-        ClaimVerdict::Ambiguous
-    } else {
-        ClaimVerdict::Supported
-    })
 }
 
 pub(super) fn classify(
@@ -512,9 +331,18 @@ pub(super) fn classify(
     next_ordinal: &mut u32,
     control: &dyn ExecutionControl,
 ) -> Result<Vec<ClaimVerification>, PipelineFailure> {
-    let document = validate_plan(&batches)?;
+    require_candidate_enabled()?;
+    ensure_verification_batch_count(batches.len())?;
+    let mut seen = HashSet::new();
     let mut admission_ordinal = *next_ordinal;
     for batch in &batches {
+        let [claim] = batch.claims.as_slice() else {
+            return Err(invalid_input());
+        };
+        let prepared = batch.comparison.as_ref().ok_or_else(invalid_input)?;
+        if claim != &prepared.claim || !seen.insert(&claim.claim_id) {
+            return Err(invalid_input());
+        }
         cancellation_checkpoint(control, PipelineStage::Verify)?;
         let ordinal = reserve_model_request_ordinal(&mut admission_ordinal, PipelineStage::Verify)?;
         runtime
@@ -524,43 +352,25 @@ pub(super) fn classify(
             })?;
     }
     let mut verdicts = Vec::new();
-    for group in batches.as_chunks::<{ DIMENSIONS.len() }>().0 {
-        let mut selected = Vec::new();
-        for batch in group {
-            cancellation_checkpoint(control, PipelineStage::Verify)?;
-            let ordinal = reserve_model_request_ordinal(next_ordinal, PipelineStage::Verify)?;
-            let response =
-                runtime.generate_with_control(&verification_request(batch, ordinal, seed), control);
-            cancellation_checkpoint(control, PipelineStage::Verify)?;
-            let response = response.map_err(|e| {
-                runtime_pipeline_failure(PipelineStage::Verify, "MODEL_VERIFICATION", e)
-            })?;
-            validate_runtime_response(runtime, &response, PipelineStage::Verify)?;
-            selected.push(
-                batch
-                    .comparison
-                    .as_ref()
-                    .ok_or_else(invalid_input)?
-                    .parse(&response.text)?,
-            );
-        }
-        let selected: [Comparison; 4] = selected.try_into().map_err(|_| invalid_response())?;
-        verdicts.push(aggregate(&selected));
+    for batch in &batches {
+        cancellation_checkpoint(control, PipelineStage::Verify)?;
+        let ordinal = reserve_model_request_ordinal(next_ordinal, PipelineStage::Verify)?;
+        let response =
+            runtime.generate_with_control(&verification_request(batch, ordinal, seed), control);
+        cancellation_checkpoint(control, PipelineStage::Verify)?;
+        let response = response.map_err(|e| {
+            runtime_pipeline_failure(PipelineStage::Verify, "MODEL_VERIFICATION", e)
+        })?;
+        validate_runtime_response(runtime, &response, PipelineStage::Verify)?;
+        verdicts.push(
+            batch
+                .comparison
+                .as_ref()
+                .ok_or_else(invalid_input)?
+                .parse(&response.text, &batch.claims[0])?,
+        );
     }
-    let mut start = 0;
-    document
-        .iter()
-        .map(|parent| {
-            let end = start + parent.ranges.len();
-            let verdict = aggregate_parent(&verdicts[start..end])?;
-            start = end;
-            Ok(ClaimVerification {
-                claim_id: parent.claim.claim_id.clone(),
-                evidence_ids: parent.claim.evidence_ids.clone(),
-                verdict,
-            })
-        })
-        .collect()
+    Ok(verdicts)
 }
 
 pub(super) fn plan(
@@ -579,82 +389,52 @@ pub(super) fn plan(
             false,
         ));
     }
-    let mut seen = HashSet::new();
-    let mut parents = Vec::new();
-    for claim in claims {
-        let ranges = sentence_ranges(&claim.text);
-        if ranges.is_empty() || !seen.insert(&claim.claim_id) {
-            return Err(invalid_input());
-        }
-        parents.push(ParentSentences {
-            claim: claim.clone(),
-            ranges,
-        });
-    }
-    let document = Arc::new(parents);
-    ensure_comparison_call_count(
-        document
-            .iter()
-            .map(|p| p.ranges.len())
-            .sum::<usize>()
-            .checked_mul(DIMENSIONS.len())
-            .ok_or_else(too_large)?,
-    )?;
+    ensure_verification_batch_count(claims.len())?;
     let request_limit = verification_request_character_limit(
         runtime.context_tokens(PipelineStage::Verify),
         VERIFICATION_OUTPUT_TOKENS,
     )?;
-    let mut batches = Vec::new();
-    for (parent_index, input) in prompt.claims.iter().enumerate() {
-        let mut input = input.clone();
-        // The source owner may have no larger clause. Keep the exact quotation;
-        // never borrow another claim's context or silently shorten a clause.
-        for evidence in &mut input.evidence {
-            if evidence.full_clause.is_none() {
-                evidence.full_clause = Some(evidence.exact_quote.clone());
+    prompt
+        .claims
+        .iter()
+        .zip(claims)
+        .map(|(input, claim)| {
+            let mut input = input.clone();
+            // The source owner may have no larger clause. Keep the exact quotation;
+            // never borrow another claim's context or silently shorten a clause.
+            for evidence in &mut input.evidence {
+                if evidence.full_clause.is_none() {
+                    evidence.full_clause = Some(evidence.exact_quote.clone());
+                }
             }
-        }
-        // Check the complete parent, so splitting cannot bypass input admission.
-        owned_sources(&input)?;
-        for ordinal in 0..document[parent_index].ranges.len() {
-            let claim = document[parent_index].sentence_claim(parent_index, ordinal);
-            input.claim_id.clone_from(&claim.claim_id);
-            input.text.clone_from(&claim.text);
-            let mut prepared = Prepared::new(
+            let prepared = Prepared::new(
                 &input,
                 runtime.response_schema_byte_limit(PipelineStage::Verify, SCHEMA_NAME),
             )?;
-            prepared.sentence = Some(SentenceAssociation {
-                document: document.clone(),
-                parent: parent_index,
-                ordinal,
-            });
-            for dimension in 0..DIMENSIONS.len() {
-                let mut prepared = prepared.clone();
-                prepared.dimension = dimension;
-                let mut system_prompt = format!("{VERIFICATION_ENTAILMENT_INSTRUCTION}{CLAUSE_VERIFICATION_INSTRUCTION}\n{INSTRUCTION}\nRequested dimension: {}. {}", DIMENSIONS[dimension], DIMENSION_DEFINITIONS[dimension]);
-                if input.source_framing.is_some() {
-                    system_prompt.push_str(SOURCE_FRAMING_VERIFICATION_INSTRUCTION);
-                }
-                let (user_prompt, identifiers) = prepared.prompt(&input)?;
-                let model_facing_characters =
-                    system_prompt.chars().count() + user_prompt.chars().count();
-                if !verification_request_within_bounds(1, model_facing_characters, request_limit) {
-                    return Err(too_large());
-                }
-                batches.push(VerificationBatch {
-                    system_prompt,
-                    user_prompt,
-                    claims: vec![claim.clone()],
-                    identifiers,
-                    comparison: Some(prepared),
-                    #[cfg(test)]
-                    model_facing_characters,
-                });
+            let mut system_prompt = format!(
+                "{VERIFICATION_ENTAILMENT_INSTRUCTION}{CLAUSE_VERIFICATION_INSTRUCTION}\n{INSTRUCTION}"
+            );
+            if input.source_framing.is_some() {
+                system_prompt.push_str(SOURCE_FRAMING_VERIFICATION_INSTRUCTION);
             }
-        }
-    }
-    Ok(batches)
+            let (user_prompt, identifiers) =
+                identifiers::verification_prompt(&[input]).map_err(|_| invalid_input())?;
+            let model_facing_characters =
+                system_prompt.chars().count() + user_prompt.chars().count();
+            if !verification_request_within_bounds(1, model_facing_characters, request_limit) {
+                return Err(too_large());
+            }
+            Ok(VerificationBatch {
+                system_prompt,
+                user_prompt,
+                claims: vec![claim.clone()],
+                identifiers,
+                comparison: Some(prepared),
+                #[cfg(test)]
+                model_facing_characters,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -676,9 +456,10 @@ pub(super) fn fixture_verdict_response(request: &ModelRequest, verdict: ClaimVer
     };
     let source = schema["$defs"]["source_span"]["enum"][0].clone();
     let claim = schema["$defs"]["claim_span"]["enum"][0].clone();
-    json!({"source_spans":[source], "claim_spans":[claim], "relation":match verdict {
-        ClaimVerdict::Supported=>"preserved", ClaimVerdict::Unsupported=>"changed", ClaimVerdict::Ambiguous=>"uncertain"
-    }}).to_string()
+    let comparisons: serde_json::Map<String, Value> = DIMENSIONS.iter().map(|name| (name.to_string(), json!({
+        "source_spans":[source], "claim_spans":[claim], "relation":match verdict { ClaimVerdict::Supported => "preserved", ClaimVerdict::Unsupported => "changed", ClaimVerdict::Ambiguous => "uncertain" }
+    }))).collect();
+    json!({"verdicts":[{"claim_id":"k1","comparisons":comparisons}]}).to_string()
 }
 
 #[cfg(test)]

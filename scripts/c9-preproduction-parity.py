@@ -2,7 +2,7 @@
 """Receipt-bound local C9 qualification. Rust owns requests, parsing and verdicts.
 
 Run with --phase native, preflight or gateway. All receipts and outputs must live
-outside a worktree. Native is zero generation; gateway permits exactly 120 calls.
+outside a worktree. Native is zero generation; gateway permits exactly 30 calls for the accepted restoration.
 An absent/failed/stale receipt cannot be used as acceptance evidence.
 """
 import argparse
@@ -133,19 +133,19 @@ def gpu(args):
 
 
 def validate_receipt(receipt, source, inputs, runtime, required_phase):
-    require(receipt.get('version') == 1, 'receipt version')
+    require(receipt.get('version') == 2, 'receipt version')
     require(receipt.get('phase') == required_phase, 'wrong receipt phase')
     require(receipt.get('passed') is True, 'receipt failed/incomplete')
     require(receipt.get('source') == source, 'stale source receipt')
     require(receipt.get('inputs') == inputs, 'changed input or labels')
     require(receipt.get('runtime') == runtime, 'changed runtime receipt')
     calls = receipt.get('actual_calls')
-    require(type(calls) is int and calls == (120 if required_phase == 'gateway' else 0), 'wrong call count')
+    require(type(calls) is int and calls == (30 if required_phase == 'gateway' else 0), 'wrong call count')
     artifacts = receipt.get('artifacts', {})
     required = {'freeze.json', 'exit.json', 'run.log'}
     if required_phase == 'gateway':
         required |= {'results.json', 'admission.json', 'runtime.json'}
-        required |= {f'{kind}-{i}.json' for kind in ['planned', 'request', 'response', 'provenance'] for i in range(120)}
+        required |= {f'{kind}-{i}.json' for kind in ['planned', 'request', 'response', 'provenance'] for i in range(30)}
         required |= {f'case-{i}.json' for i in range(30)}
         require(receipt.get('native_evidence'), 'missing native parity receipt')
     else:
@@ -169,12 +169,27 @@ def verify_native(receipt, source, inputs, runtime):
     verify_artifacts(path, native)
 
 
+def correction_history(packet):
+    path = packet / 'parity-investigation-result.json'
+    require(sha(path) == '89a2ebae706e55abe9612b1295776ce28ea31064c2e6a44122c73cf53a37ffe9',
+            'accepted investigation changed')
+    prior = read(path)
+    for name, expected in prior['evidence'].items():
+        require(sha(packet / name) == expected, 'investigation evidence changed')
+    require(prior['total_calls'] == 210 and prior['remaining_calls'] == 360, 'prior budget changed')
+    require(sha(packet / 'RESTORATION-AMENDMENT.md') ==
+            '6c725b88e9f65e51705059567a0170f6b71dddf4e0cd909c924c3135117bf3c9',
+            'accepted representation amendment changed')
+    return {'prior_calls': 210, 'planned_calls': 30, 'total_after': 240, 'hard_ceiling': 570}
+
+
 def reserve_gateway(packet, source, output):
-    # Held under the shared inference lock. An interrupted/uncertain attempt
-    # keeps its reservation; a different output directory cannot trigger retry.
-    save(packet / 'production-gateway-reservation.json', {
-        'source': source, 'output': str(output), 'maximum_calls': 120,
-        'phase': 'published-production', 'hard_ceiling': 570})
+    # An interrupted correction keeps its reservation. Never rerun by changing
+    # the output path or overwriting the earlier published-production receipt.
+    budget = correction_history(packet)
+    save(packet / 'correction-gateway-reservation.json', {
+        'source': source, 'output': str(output), 'maximum_calls': 30,
+        'phase': 'corrected-production', **budget})
 
 
 def main():
@@ -206,6 +221,7 @@ def main():
         require(args.output is not None, '--output required')
         out = args.output.resolve()
         require('/.codex/worktrees/' not in str(out) and not out.is_relative_to(REPO), 'evidence must be outside worktree')
+        correction_budget = correction_history(args.packet) if args.phase == 'gateway' else None
         native_evidence = None
         if args.phase == 'gateway':
             require(args.native_receipt is not None, 'mandatory native receipt required')
@@ -217,8 +233,8 @@ def main():
         if args.phase != 'preflight':
             gpu(args)
         save(out / 'freeze.json', {'source': source, 'inputs': inputs, 'runtime': runtime,
-                                  'phase': args.phase, 'seed': 7, 'output_tokens': 4096,
-                                  'context_tokens': 32768, 'planned_calls': 120 if args.phase == 'gateway' else 0})
+                                  'correction_budget': correction_budget, 'phase': args.phase, 'seed': 7, 'output_tokens': 4096,
+                                  'context_tokens': 32768, 'planned_calls': 30 if args.phase == 'gateway' else 0})
         env = {k: v for k, v in os.environ.items() if not k.startswith(('DOC_SUM_', 'LLAMA_ARG_'))}
         env.update(DOC_SUM_C9_PARITY_OUTPUT=str(out), DOC_SUM_C9_ORIGINAL=str(args.packet / 'original-c9'),
                    DOC_SUM_C9_GATEWAY_SETTINGS=str(args.settings),
@@ -233,7 +249,7 @@ def main():
         cmd = ['cargo', 'test', '--locked', '--lib', test, '--', '--exact', '--ignored', '--nocapture', '--test-threads=1']
         if args.phase == 'gateway':
             reserve_gateway(args.packet, source, out)
-        print(json.dumps({'phase': args.phase, 'head': source['head'], 'planned_calls': 120 if args.phase == 'gateway' else 0}), flush=True)
+        print(json.dumps({'phase': args.phase, 'head': source['head'], 'planned_calls': 30 if args.phase == 'gateway' else 0}), flush=True)
         with (out / 'run.log').open('x') as log:
             proc = subprocess.Popen(cmd, cwd=REPO / 'src-tauri', env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             for line in proc.stdout:
@@ -256,7 +272,7 @@ def main():
         else:
             result = read(out / 'admission.json')
             passed, calls = result['admitted'], 0
-        receipt = {'version': 1, 'at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        receipt = {'version': 2, 'at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                    'phase': args.phase, 'passed': passed, 'actual_calls': calls,
                    'source': source, 'inputs': inputs, 'runtime': runtime, 'native_evidence': native_evidence,
                    'artifacts': {str(f.relative_to(out)): sha(f) for f in out.rglob('*') if f.is_file()}}

@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('parity', Path(__file__).with_name('c9-preproduction-parity.py'))
 parity = importlib.util.module_from_spec(spec)
@@ -14,14 +15,14 @@ class ReceiptTests(unittest.TestCase):
         artifacts = {'freeze.json': 'hash', 'exit.json': 'hash', 'run.log': 'hash'}
         if phase == 'gateway':
             artifacts.update({k: 'hash' for k in ['results.json', 'admission.json', 'runtime.json']})
-            artifacts.update({f'{kind}-{i}.json': 'hash' for kind in ['planned', 'request', 'response', 'provenance'] for i in range(120)})
+            artifacts.update({f'{kind}-{i}.json': 'hash' for kind in ['planned', 'request', 'response', 'provenance'] for i in range(30)})
             artifacts.update({f'case-{i}.json': 'hash' for i in range(30)})
         else:
             artifacts['native-framing.json'] = 'hash'
             artifacts.update({f'framing-{i}.json': 'hash' for i in range(30)})
-        return {'version': 1, 'phase': phase, 'passed': True, 'source': {'head': 'current', 'files': {'owner': 'hash'}},
+        return {'version': 2, 'phase': phase, 'passed': True, 'source': {'head': 'current', 'files': {'owner': 'hash'}},
                 'inputs': {'manifest': 'frozen'}, 'runtime': {'deployment': 'frozen'},
-                'actual_calls': 120 if phase == 'gateway' else 0, 'artifacts': artifacts,
+                'actual_calls': 30 if phase == 'gateway' else 0, 'artifacts': artifacts,
                 'native_evidence': {'receipt_path': '/durable/native/receipt.json', 'sha256': 'hash'}}
 
     def check(self, receipt, phase='gateway'):
@@ -47,14 +48,22 @@ class ReceiptTests(unittest.TestCase):
                 self.check(bad)
 
     def test_count_and_partial_artifact_boundaries(self):
-        for count in [0, '', False, -1, 1, 119, 121, 570, None]:
+        for count in [0, '', False, -1, 1, 29, 31, 120, 570, None]:
             bad = self.receipt(); bad['actual_calls'] = count
             with self.subTest(count=count), self.assertRaises(ValueError):
                 self.check(bad)
-        for artifact in ['response-119.json', 'provenance-0.json', 'case-29.json', 'planned-50.json']:
+        for artifact in ['response-29.json', 'provenance-0.json', 'case-29.json', 'planned-15.json']:
             bad = self.receipt(); del bad['artifacts'][artifact]
             with self.subTest(artifact=artifact), self.assertRaises(ValueError):
                 self.check(bad)
+
+    def test_changed_correction_history_rejected_before_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'parity-investigation-result.json').write_text('{}')
+            with self.assertRaises(ValueError):
+                parity.reserve_gateway(root, {'head': 'current'}, root / 'unused')
+            self.assertFalse((root / 'correction-gateway-reservation.json').exists())
 
     def test_tampered_raw_output_and_artifact_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,9 +80,10 @@ class ReceiptTests(unittest.TestCase):
     def test_uncertain_generation_cannot_be_retried_in_a_new_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            parity.reserve_gateway(root, {'head': 'current'}, root / 'first')
-            with self.assertRaises(FileExistsError):
-                parity.reserve_gateway(root, {'head': 'current'}, root / 'second')
+            with mock.patch.object(parity, 'correction_history', return_value={'prior_calls': 210, 'planned_calls': 30}):
+                parity.reserve_gateway(root, {'head': 'current'}, root / 'first')
+                with self.assertRaises(FileExistsError):
+                    parity.reserve_gateway(root, {'head': 'current'}, root / 'second')
 
 
 if __name__ == '__main__':

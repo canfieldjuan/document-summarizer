@@ -210,15 +210,21 @@ fn c9_production_request_requires_comparisons_instead_of_model_verdict() {
     let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
         panic!("verification must require structured output");
     };
-    let choices = schema["anyOf"]
-        .as_array()
-        .expect("dimension must use constrained alternatives");
-    for choice in choices {
+    let item = &schema["properties"]["verdicts"]["items"];
+    assert_eq!(item["required"], json!(["claim_id", "comparisons"]));
+    assert!(item["properties"].get("verdict").is_none());
+    let comparisons = &item["properties"]["comparisons"];
+    assert_eq!(
+        comparisons["required"],
+        json!(["stage", "conditions", "qualifiers", "scope"])
+    );
+    for dimension in ["stage", "conditions", "qualifiers", "scope"] {
+        let shape = &comparisons["properties"][dimension];
         assert_eq!(
-            choice["required"],
+            shape["required"],
             json!(["source_spans", "claim_spans", "relation"])
         );
-        assert!(choice["properties"].get("verdict").is_none());
+        assert!(shape["properties"].get("verdict").is_none());
     }
     let comparison_requests: Vec<_> = requests
         .iter()
@@ -227,15 +233,11 @@ fn c9_production_request_requires_comparisons_instead_of_model_verdict() {
         ModelOutputFormat::JsonSchema { name, .. } if name == comparisons::SCHEMA_NAME)
         })
         .collect();
-    assert_eq!(comparison_requests.len(), 4);
-    for (request, expected) in
-        comparison_requests
-            .iter()
-            .zip(["stage", "conditions", "qualifiers", "scope"])
-    {
-        let input: Value = serde_json::from_str(&request.user_prompt).unwrap();
-        assert_eq!(input["dimension"], expected);
-    }
+    assert_eq!(comparison_requests.len(), 1);
+    let input: Value = serde_json::from_str(&comparison_requests[0].user_prompt).unwrap();
+    assert!(input.get("dimension").is_none());
+    assert!(input.get("source_segments").is_none());
+    assert_eq!(input["claims"].as_array().unwrap().len(), 1);
 }
 
 #[test]
