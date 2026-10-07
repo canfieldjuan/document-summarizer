@@ -30,6 +30,91 @@ fn pinned_9b_runtime() -> (tempfile::TempDir, Arc<LlamaCppRuntime>) {
 use super::*;
 use serde_json::{json, Value};
 
+// Runtime links belong to the owned child's descriptor namespace.
+#[cfg(target_os = "linux")]
+fn captured_library_bytes(path: &Path, child_pid: u32) -> std::io::Result<Vec<u8>> {
+    let target = fs::read_link(path)?;
+    let descriptor = target
+        .to_str()
+        .and_then(|s| s.strip_prefix("/proc/self/fd/"))
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "unexpected runtime library descriptor link",
+            )
+        })?;
+    fs::read(format!("/proc/{child_pid}/fd/{descriptor}"))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_library_capture_reads_owned_child_descriptor() {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let library = directory.path().join("public-library");
+    fs::write(&library, b"public sealed library fixture").unwrap();
+    let original = File::open(&library).unwrap();
+    let descriptor = unsafe { libc::fcntl(original.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 500) };
+    assert!(descriptor >= 500);
+    let inherited = unsafe { File::from_raw_fd(descriptor) };
+    let link = directory.path().join("library-link");
+    std::os::unix::fs::symlink(format!("/proc/self/fd/{descriptor}"), &link).unwrap();
+    let mut command = Command::new("/bin/sleep");
+    command.arg("30");
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(descriptor, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = OwnedChild(command.spawn().unwrap());
+    drop(inherited);
+    assert!(
+        fs::read(&link).is_err(),
+        "parent must not own the inherited descriptor"
+    );
+    assert_eq!(
+        captured_library_bytes(&link, child.0.id())
+            .expect("capture must use owned child namespace"),
+        b"public sealed library fixture"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_library_capture_rejects_non_descriptor_links() {
+    let directory = tempfile::tempdir().unwrap();
+    for (i, target) in [
+        "/proc/self/fd/",
+        "/proc/self/fd/3/../4",
+        "/proc/1/fd/3",
+        "/etc/passwd",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let link = directory.path().join(format!("link-{i}"));
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        assert_eq!(
+            captured_library_bytes(&link, std::process::id())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+}
+
 const CLOSED: &str = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
 
 // Exercise the framing loader and the token assembly that completion consumes.
@@ -610,7 +695,7 @@ fn original_summary_native_adapter_parity() {
             ._runtime_library_directory
             .path()
             .join(library.file_name);
-        let bytes = fs::read(&path).unwrap();
+        let bytes = captured_library_bytes(&path, pid).unwrap();
         let digest = format!("{:x}", Sha256::digest(&bytes));
         assert_eq!(digest, library.digest);
         libraries.insert(
