@@ -846,9 +846,26 @@ pub trait DocumentChunker {
     fn version(&self) -> &'static str;
 }
 
+pub(crate) const CLAIM_COMPARISON_SCHEMA_NAME: &str = "document_claim_comparisons_v5";
+pub(crate) const MAX_CLAIM_COMPARISON_SCHEMA_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_RESPONSE_SCHEMA_BYTES: usize = 64 * 1024;
+
+pub(crate) fn response_schema_byte_limit(name: &str) -> usize {
+    if name == CLAIM_COMPARISON_SCHEMA_NAME {
+        MAX_CLAIM_COMPARISON_SCHEMA_BYTES
+    } else {
+        MAX_RESPONSE_SCHEMA_BYTES
+    }
+}
+
 /// Replaceable local inference boundary. Generic pipeline state and storage do
 /// not depend on a concrete server, model family, or SDK.
 pub trait ModelRuntime: Send + Sync {
+    /// Scopes a pre-run operation's durable identity to this runtime's request
+    /// contract. The default preserves existing operation identities.
+    fn request_owner_contract(&self, operation_contract: &str) -> String {
+        operation_contract.to_string()
+    }
     /// Binds the durable owner of future requests to this worker-local runtime.
     /// Direct runtimes do not require the identity and retain the inert default.
     fn bind_request_owner(&mut self, _owner_id: &str) {}
@@ -886,6 +903,15 @@ pub trait ModelRuntime: Send + Sync {
     }
     fn model_id_for_stage(&self, _stage: PipelineStage) -> &str {
         self.model_id()
+    }
+    /// Whether the runtime task can represent a named response protocol.
+    /// Size limits remain independent of protocol support.
+    fn supports_response_schema(&self, _name: &str) -> bool {
+        true
+    }
+    /// The caller must respect any tighter transport limit before generation.
+    fn response_schema_byte_limit(&self, _stage: PipelineStage, name: &str) -> usize {
+        response_schema_byte_limit(name)
     }
     fn context_tokens(&self, _stage: PipelineStage) -> u32 {
         8_192

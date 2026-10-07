@@ -149,8 +149,46 @@ pub(super) fn verification_prompt(
             item.evidence_id = evidence.local(&item.evidence_id)?;
         }
     }
-    let text =
-        serde_json::to_string(&VerificationPrompt { claims: wire }).map_err(|_| ids.invalid())?;
+    if wire
+        .iter()
+        .flat_map(|claim| &claim.evidence)
+        .all(|item| item.full_clause.is_none())
+    {
+        return serde_json::to_string(&VerificationPrompt { claims: wire })
+            .map(|text| (text, ids))
+            .map_err(|_| {
+                stage_failure(
+                    PipelineStage::Verify,
+                    "MODEL_REQUEST_INVALID",
+                    "Verification serialization failed",
+                    false,
+                )
+            });
+    }
+    // Use the drafting context owner after batching. Only contexts referenced by
+    // this request are emitted, and context IDs never enter the verdict vocabulary.
+    let mut contexts = Vec::new();
+    let mut value = serde_json::to_value(VerificationPrompt {
+        claims: wire.clone(),
+    })
+    .map_err(|_| ids.invalid())?;
+    for (claim, serialized) in wire.iter().zip(value["claims"].as_array_mut().unwrap()) {
+        for (item, serialized) in claim
+            .evidence
+            .iter()
+            .zip(serialized["evidence"].as_array_mut().unwrap())
+        {
+            if let Some(id) =
+                coherent::intern_clause_context(item.full_clause.as_deref(), &mut contexts)
+            {
+                serialized["clause_context_id"] = Value::String(id);
+            }
+        }
+    }
+    if !contexts.is_empty() {
+        value["clause_contexts"] = serde_json::to_value(contexts).map_err(|_| ids.invalid())?;
+    }
+    let text = serde_json::to_string(&value).map_err(|_| ids.invalid())?;
     Ok((text, ids))
 }
 
@@ -205,6 +243,7 @@ mod tests {
                 text: "First.".into(),
                 source_framing: None,
                 evidence: vec![PromptVerificationEvidence {
+                    full_clause: None,
                     evidence_id: "evidence-private-a".into(),
                     exact_quote: "Shared quotation.".into(),
                 }],
@@ -215,10 +254,12 @@ mod tests {
                 source_framing: None,
                 evidence: vec![
                     PromptVerificationEvidence {
+                        full_clause: None,
                         evidence_id: "evidence-private-a".into(),
                         exact_quote: "Shared quotation.".into(),
                     },
                     PromptVerificationEvidence {
+                        full_clause: None,
                         evidence_id: "evidence-private-b".into(),
                         exact_quote: "Other quotation.".into(),
                     },
@@ -265,7 +306,7 @@ mod tests {
         }
         let batch = materialize_verification_batch(claims, durable, 10_752).unwrap();
         assert_eq!(batch.user_prompt, serialized);
-        let exact = VERIFICATION_SYSTEM_PROMPT.chars().count() + serialized.chars().count();
+        let exact = verification_system_prompt(&[]).chars().count() + serialized.chars().count();
         assert_eq!(batch.model_facing_characters, exact);
         assert!(verification_request_within_bounds(2, exact, exact));
         assert!(!verification_request_within_bounds(2, exact, exact - 1));

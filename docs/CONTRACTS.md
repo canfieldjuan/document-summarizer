@@ -563,7 +563,19 @@ source ranges as furniture exclusion. Ordinary prose/forms keep their existing
 segmentation. The complete serialized context counts against the existing
 request budget; clauses are not shortened to fit. Version 11 reloads its original
 sentence-packed catalog. Analysis and verifier behavior are unchanged by F2;
-full-clause verification is a separate change.
+full-clause verification is specified below.
+
+F3 General coherent verification uses the same numbered-clause reconstruction
+as drafting. Each cited exact block/quote can reference its complete governing
+clause and parent lead-ins in a request-local context table. Distinct contexts
+appear once per request; context IDs are neither citation nor verdict IDs.
+Preflight and execution use one builder and budget the complete serialization.
+Clauses are never truncated to fit. Verification must consider payment stages,
+governing conditions, qualifications and scope; partial support cannot pass.
+Existing verdict parsing, withholding, semantic guards and contribution checks
+remain mandatory. No rewriting pass is added. Verification version 11 records
+this policy; completed version-10 artifacts retain their original validation.
+See `PR-SUMMARY-CLAUSE-VERIFICATION.md` for scope and evidence requirements.
 
 Synthesis constructs a catalog of exact source segments from the normalized
 chunks, independent of the analyzed claim ledger. Segments retain canonical
@@ -669,8 +681,37 @@ mode, supported prose claims, ledger claims, their exact evidence and the canoni
 rendered text. The desktop shows coherent paragraphs first and keeps any supported
 ledger claims available as supporting detail.
 
-Current artifacts use synthesis 12.0.0, verification 10.0.0, summary 8.0.0 and
-citation 4.0.0. Completed coherent artifacts from before Contract source
+### General prose comparison verification
+
+This is an unqualified candidate. Ordinary library/application builds, including
+all-feature builds, cannot enable it through runtime capabilities, settings or
+environment. General synthesis uses the verified-source-claim fallback before
+drafting and discloses `COHERENT_SUMMARY_VERIFICATION_UNQUALIFIED`. Pending
+coherent checkpoints stop with `VERIFICATION_NOT_QUALIFIED` before verification
+inference or new artifact completion; completed historical results remain readable.
+Only unit-test/qualification binaries (`cfg(test)`) can exercise the candidate.
+See [the activation gate](PR-C9-QUALIFICATION-GATE.md).
+
+The accepted restoration recovered the demonstrated whole-claim joint protocol. Its frozen 30-case gateway confirmation matched all 30 historical verdicts; 29 adjudicated cases passed and one label remains unresolved. Native evidence for those cases is zero-generation framing/token equality, not native semantic verdict parity. Both public A/B documents still fail admission. See [the parity contract and results](PR-C9-PREPRODUCTION-PARITY.md). PR116 remains held.
+
+Within qualification binaries, General coherent prose from synthesis 12.0.0, 13.0.0 or 14.0.0 uses comparison verification 15.0.0 with internal schema `document_claim_comparisons_v5`. Each claim has one joint request with local ID `k1`, complete deduplicated governing sources and the original exact quotation. Where the source owner has no larger clause, that quotation supplies the context. The response contains all four comparisons: stage, conditions, qualifiers and scope. Source spans, claim spans and relation appear in that order within each comparison. The decoder serializer consumes the originating required arrays; other schemas retain their serialization.
+
+The model selects exact owned token-aligned excerpts from separate source and claim enums. The owner enumerates all such substrings up to 240 Unicode scalar characters; it does not split into coarser sentence pieces. Rust rejects unknown/missing fields, foreign claim IDs, non-catalog passages and invalid relation/span shapes. Changed or omitted meaning derives unsupported; uncertain or no preserved comparison derives ambiguous; otherwise it derives supported. Four empty not-applicable comparisons cannot approve a claim. Exact output ownership constrains passages but does not establish semantic judgment.
+
+Limits remain 4096 Unicode scalar characters across the claim and unique governing sources, 8192 values per enum, and four passages per side per dimension. The compact serialized schema has a 1 MiB native ceiling, subject to the selected runtime's tighter bound; the gateway ceiling is 250000 bytes. Prompt/context and 4096 output-token admission also apply. All planned requests are preflighted before any generation. There is one request per claim and at most 64 batches, not four requests per sentence. Cancellation and unique ordinals apply to every call. Overlapping excerpts can exhaust enum/schema capacity before the complete-input limit; A/B rejection is recorded, not bypassed by truncation, increased caps or coarse fallback. Whole-document fallback policy remains separate under [issue 124](https://github.com/canfieldjuan/document-summarizer/issues/124).
+
+Gateway task version 2 is discovered and its credential-scoped profile validated before use. Version 1 is retained only when version 2 is absent, never when it is advertised but invalid/unavailable. Selected task, context and profile fingerprint persist for resume; version 1 cannot qualify C9. Protocol support and semantic qualification remain separate. Ordinary builds select the unqualified fallback regardless of support.
+
+The current candidate contract is the [accepted original excerpt restoration](PR-C9-PREPRODUCTION-PARITY.md). The segment, per-dimension and per-sentence contracts remain historical records, superseded by it. Diagnostic verdict parity, relation equality and passage containment are reported independently. The unresolved operator hold requires full-document and unseen qualification before merge.
+
+Native thinking framing is a per-profile property. Existing Jack 27B uses its qualified open assistant framing; the pinned 9B qualification configuration explicitly closes thinking. Runtime cache identity includes that policy. No native default or preset is promoted by this correction. The distinct [native summary parity amendment](PR-NATIVE-SUMMARY-PARITY.md) preserves the original freeform inputs and permits at most two synthesis calls after zero-generation equality checks.
+
+General comparison artifacts retain summary 8.0.0 and citation 4.0.0. Completed
+verification-12, verification-11 and verification-10 artifacts remain readable under their saved
+versions. The saved verification shape still contains the derived final verdict
+and citation identity; it does not store the raw model comparisons. Story,
+claim-ledger fallback and older synthesis paths retain their existing verifier
+protocol and version selection. Completed coherent artifacts from before Contract source
 segmentation retain synthesis 8.0.0 with verification 10.0.0 and summary 8.0.0
 compatibility, while an active coherent synthesis-8 checkpoint must regenerate
 before verification. Completed pre-disclosure coherent artifacts retain
@@ -701,6 +742,25 @@ The desktop presents General, Automatic suggestion, Story and Contract before
 source admission. General remains the initial choice. An explicit General,
 Story or Contract selection is sent directly with the start command and does
 not run purpose classification.
+
+### Automatic suggestion request identity
+
+Before suggestion inference, the command gets a durable owner from the exact
+source content hash and the suggestion operation contract scoped by the selected
+runtime's request contract. The runtime owns that scope; the command must not
+infer it from a model name or duplicate task/profile rules. Gateway task2 scopes
+the operation contract with the canonical task-profile digest already used in
+its saved snapshot. A changed task profile gets a separate owner; the same
+profile reuses its owner across reopen and concurrent calls. Direct runtimes and
+gateway task1 preserve the historical unscoped operation key, including existing
+task1 completions when a task2 grant is later revoked.
+
+The existing transactional owner table and gateway semantic-hash conflict check
+remain authoritative. Do not overwrite, delete, re-key or retry conflicting
+ledger rows. Pipeline runs continue to use their run IDs and saved profiles.
+Prompt/schema/sampling changes still require a suggestion-contract revision.
+
+### Automatic suggestion classification
 
 Automatic suggestion is an opt-in selection mode rather than a stored summary
 profile. Before creating a run, the desktop parses, normalizes and interprets
@@ -2934,3 +2994,7 @@ Contract revisions preceded implementation; private content remains local.
 Gap audit: DONE for the lettered-clause correction and local proof. NOT DONE for
 merge until the published head has fresh CI and review. Unpunctuated headings
 remain a follow-up; source preservation is not a generated-summary quality claim.
+
+## C9 and General pre-production inventory
+
+Before writing any C9 or General contract, inventory the affected validated experiments, settings, runtime, framing, prompts and results. Open the contract with that inventory, every evidenced departure and the parity check that covers it. A contract without this inventory is not ready for acceptance. The [accepted parity lane](PR-C9-PREPRODUCTION-PARITY.md) supplies the standing receipt-bound acceptance gate; missing, partial, failed or stale live evidence cannot satisfy it. Native framing and gateway verdict parity are separate requirements. PR116 remains held.

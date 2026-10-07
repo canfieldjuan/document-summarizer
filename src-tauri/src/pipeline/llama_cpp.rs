@@ -3,7 +3,7 @@ use crate::pipeline::contracts::{
     ModelTokenUsage, ModelTransportAttempt, PipelineStage,
 };
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
-use crate::pipeline::model::response_format;
+use crate::pipeline::model::{response_format, DecoderSchema};
 use crate::pipeline::qwen_tokenizer::{request_fits_context, TOKENIZER_FRAMING_RESERVE_TOKENS};
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
@@ -45,6 +45,7 @@ pub struct GgufRuntimeConfig {
     pub expected_server_digest: String,
     pub expected_runtime_libraries: &'static [QualifiedRuntimeFile],
     pub context_tokens: u32,
+    pub disable_thinking: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,14 +389,15 @@ impl LlamaCppRuntime {
             let _ = child.wait();
             return Err(error);
         }
-        let prompt_framing = match PromptFraming::load(&client, &base_url, &api_token) {
-            Ok(prompt_framing) => prompt_framing,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
+        let prompt_framing =
+            match PromptFraming::load(&client, &base_url, &api_token, config.disable_thinking) {
+                Ok(prompt_framing) => prompt_framing,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
         let model_identity_guard = ModelIdentityGuard {
             path: config.model_path,
             file: model_file,
@@ -573,25 +575,38 @@ impl LlamaCppRuntime {
         Ok(tokens)
     }
 
+    fn completion_request<'a>(
+        &'a self,
+        request: &ModelRequest,
+        prompt: &'a [u32],
+        schema: Option<DecoderSchema>,
+    ) -> CompletionRequest<'a> {
+        CompletionRequest {
+            prompt,
+            n_predict: request.max_output_tokens,
+            temperature: 0.0,
+            seed: request.seed,
+            stop: [PromptFraming::MESSAGE_END],
+            cache_prompt: true,
+            message_delimiters: &PromptFraming::MESSAGE_DELIMITERS,
+            json_schema: schema,
+        }
+    }
+
     fn completion(
         &self,
         request: &ModelRequest,
         prompt: &[u32],
-        schema: Option<serde_json::Value>,
+        schema: Option<DecoderSchema>,
         timeout: Duration,
     ) -> Result<CompletionResponse, ModelRuntimeFailure> {
+        let payload = self.completion_request(request, prompt, schema);
+        #[cfg(test)]
+        framing_tests::capture_completion_request(&payload);
         let response = self
             .authorize(self.client.post(self.endpoint("/completion")))
             .timeout(timeout)
-            .json(&CompletionRequest {
-                prompt,
-                n_predict: request.max_output_tokens,
-                temperature: 0.0,
-                seed: request.seed,
-                stop: ["<|im_end|>"],
-                cache_prompt: true,
-                json_schema: schema,
-            })
+            .json(&payload)
             .send()
             .map_err(|_| failure("MODEL_RUNTIME_UNAVAILABLE", "GGUF generation failed", true))?;
         decode_bounded(response, MAX_RESPONSE_BYTES)
@@ -1447,28 +1462,66 @@ fn create_private_api_key_file(
 }
 
 impl PromptFraming {
-    fn load(client: &Client, base_url: &str, token: &str) -> Result<Self, ModelRuntimeFailure> {
+    const MESSAGE_END: &'static str = "<|im_end|>";
+    // Exact ordered metadata from the qualified Qwen chat projector. Control
+    // fragments below use these same role prefixes; content is never scanned.
+    const MESSAGE_DELIMITERS: [MessageDelimiter; 5] = [
+        MessageDelimiter {
+            role: "assistant",
+            delimiter: "<|im_start|>assistant",
+        },
+        MessageDelimiter {
+            role: "tool",
+            delimiter: "<|im_start|>user\n<tool_response>",
+        },
+        MessageDelimiter {
+            role: "tool",
+            delimiter: "<|im_start|>tool_response",
+        },
+        MessageDelimiter {
+            role: "user",
+            delimiter: "<|im_start|>user",
+        },
+        MessageDelimiter {
+            role: "system",
+            delimiter: "<|im_start|>system",
+        },
+    ];
+    fn load(
+        client: &Client,
+        base_url: &str,
+        token: &str,
+        disable_thinking: bool,
+    ) -> Result<Self, ModelRuntimeFailure> {
+        let system_prefix = format!("{}\n", Self::MESSAGE_DELIMITERS[4].delimiter);
+        let user_prefix = format!(
+            "{}\n{}\n",
+            Self::MESSAGE_END,
+            Self::MESSAGE_DELIMITERS[3].delimiter
+        );
+        let mut assistant_prefix = format!(
+            "{}\n{}\n",
+            Self::MESSAGE_END,
+            Self::MESSAGE_DELIMITERS[0].delimiter
+        );
+        if disable_thinking {
+            assistant_prefix.push_str("<think>\n\n</think>\n\n");
+        }
         let system_open = tokenize_text(
             client,
             base_url,
             token,
-            "<|im_start|>system\n",
+            &system_prefix,
             true,
             HEALTH_TIMEOUT,
         )?;
-        let system_close_user_open = tokenize_text(
-            client,
-            base_url,
-            token,
-            "<|im_end|>\n<|im_start|>user\n",
-            true,
-            HEALTH_TIMEOUT,
-        )?;
+        let system_close_user_open =
+            tokenize_text(client, base_url, token, &user_prefix, true, HEALTH_TIMEOUT)?;
         let user_close_assistant_open = tokenize_text(
             client,
             base_url,
             token,
-            "<|im_end|>\n<|im_start|>assistant\n",
+            &assistant_prefix,
             true,
             HEALTH_TIMEOUT,
         )?;
@@ -1560,6 +1613,7 @@ fn runtime_cache_key(config: &GgufRuntimeConfig) -> Result<String, ModelRuntimeF
             .to_be_bytes(),
     );
     hasher.update(config.context_tokens.to_be_bytes());
+    hasher.update([u8::from(config.disable_thinking)]);
     hasher.update(config.expected_server_digest.as_bytes());
     for library in config.expected_runtime_libraries {
         validate_runtime_file_name(library.file_name)?;
@@ -2020,6 +2074,8 @@ fn decode_bounded<T: for<'de> Deserialize<'de>>(
             true,
         ));
     }
+    #[cfg(test)]
+    framing_tests::capture_completion_response(&bytes);
     serde_json::from_slice(&bytes).map_err(|_| {
         failure(
             "MODEL_RESPONSE_INVALID",
@@ -2070,6 +2126,12 @@ struct TokenizeResponse {
 }
 
 #[derive(Serialize)]
+struct MessageDelimiter {
+    role: &'static str,
+    delimiter: &'static str,
+}
+
+#[derive(Serialize)]
 struct CompletionRequest<'a> {
     prompt: &'a [u32],
     n_predict: u32,
@@ -2077,8 +2139,9 @@ struct CompletionRequest<'a> {
     seed: u64,
     stop: [&'a str; 1],
     cache_prompt: bool,
+    message_delimiters: &'a [MessageDelimiter],
     #[serde(skip_serializing_if = "Option::is_none")]
-    json_schema: Option<serde_json::Value>,
+    json_schema: Option<DecoderSchema>,
 }
 
 #[derive(Deserialize)]
@@ -2118,10 +2181,34 @@ struct ModelMeta {
 }
 
 #[cfg(test)]
+#[path = "llama_cpp_framing_tests.rs"]
+mod framing_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::control::CancellationToken;
     use std::io::{Read, Write};
+
+    #[test]
+    fn c9_completion_wire_keeps_declared_property_order() {
+        let output = crate::pipeline::contracts::ModelOutputFormat::JsonSchema {
+            name: crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME.into(),
+            schema: serde_json::json!({"properties":{"a":{},"z":{}},"required":["z","a"]}),
+        };
+        let request = CompletionRequest {
+            prompt: &[1],
+            n_predict: 4096,
+            temperature: 0.0,
+            seed: 7,
+            stop: ["<|im_end|>"],
+            cache_prompt: true,
+            message_delimiters: &PromptFraming::MESSAGE_DELIMITERS,
+            json_schema: response_format(&output).unwrap(),
+        };
+        let wire = serde_json::to_string(&request).unwrap();
+        assert!(wire.find("\"z\":{").unwrap() < wire.find("\"a\":{").unwrap());
+    }
 
     #[test]
     fn tokenizer_preserves_short_timeout_for_uncontrolled_and_worker_requests() {
@@ -2965,6 +3052,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: LIBRARIES,
             context_tokens: 8_192,
+            disable_thinking: false,
         };
         let exact = runtime_cache_key(&config).unwrap();
         assert_eq!(runtime_cache_key(&config).unwrap(), exact);
@@ -2987,6 +3075,14 @@ mod tests {
         assert_ne!(
             runtime_cache_key(&GgufRuntimeConfig {
                 runtime_parent: PathBuf::from("/other-runtime"),
+                ..config.clone()
+            })
+            .unwrap(),
+            exact
+        );
+        assert_ne!(
+            runtime_cache_key(&GgufRuntimeConfig {
+                disable_thinking: true,
                 ..config.clone()
             })
             .unwrap(),
@@ -3117,6 +3213,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: &[],
             context_tokens: 8_192,
+            disable_thinking: false,
         };
         let mut runtime =
             LlamaCppRuntime::for_test("http://127.0.0.1:1".to_string(), "secret".to_string());
@@ -3154,6 +3251,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: &[],
             context_tokens: 8_192,
+            disable_thinking: false,
         };
         let mut child = Command::new("true").spawn().unwrap();
         child.wait().unwrap();

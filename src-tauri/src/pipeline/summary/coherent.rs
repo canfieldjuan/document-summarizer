@@ -8,8 +8,10 @@ mod budget;
 pub(super) mod page_furniture;
 mod semantic_support;
 mod trim;
+mod verification;
 pub(super) mod whole_clauses;
 pub(super) use trim::verify_source_contributions;
+pub(super) use verification::summary_verification_batches;
 
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
 pub(super) const MAX_SUMMARY_CLAIMS: usize = 8;
@@ -159,8 +161,6 @@ struct PromptSourceSegment {
     #[serde(skip_serializing_if = "Option::is_none")]
     source_framing: Option<SourceFraming>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    source_claim: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     contract_clause: Option<ContractClauseReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
     clause_context_id: Option<String>,
@@ -169,14 +169,14 @@ struct PromptSourceSegment {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PromptClauseContext {
+pub(super) struct PromptClauseContext {
     context_id: String,
     full_clause: String,
 }
 
 // Both prompt builders use this request-local owner after choosing their sources.
 // First appearance gives stable IDs; text equality preserves differing conditions.
-fn intern_clause_context(
+pub(super) fn intern_clause_context(
     context: Option<&str>,
     contexts: &mut Vec<PromptClauseContext>,
 ) -> Option<String> {
@@ -2714,7 +2714,6 @@ struct SourceCandidate {
     chunk_ordinal: u32,
     selection_window: Option<usize>,
     source_framing: Option<SourceFraming>,
-    drafting_claim: Option<String>,
     contract_clause: Option<ContractClauseReference>,
     full_clause: Option<String>,
 }
@@ -2788,6 +2787,8 @@ enum FallbackReason {
     IncompleteCatalog,
     RequestTooLarge,
     VerificationRequestTooLarge,
+    VerificationUnavailable,
+    VerificationUnqualified,
     DeliveryCoverage,
     ModelOutputInvalid,
 }
@@ -2796,6 +2797,8 @@ impl FallbackReason {
     fn warning_code(self) -> &'static str {
         match self {
             Self::ModelOutputInvalid => MODEL_OUTPUT_INVALID_WARNING_CODE,
+            Self::VerificationUnavailable => "COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE",
+            Self::VerificationUnqualified => "COHERENT_SUMMARY_VERIFICATION_UNQUALIFIED",
             _ => FALLBACK_WARNING_CODE,
         }
     }
@@ -2810,6 +2813,12 @@ impl FallbackReason {
             }
             Self::VerificationRequestTooLarge => {
                 "The coherent summary does not fit bounded semantic verification; showing verified source claims instead"
+            }
+            Self::VerificationUnavailable => {
+                "The selected model service does not support comparison verification; showing verified source claims instead"
+            }
+            Self::VerificationUnqualified => {
+                "General coherent verification has not passed qualification; showing verified source claims instead"
             }
             Self::ModelOutputInvalid => {
                 "The model's summary output was invalid; showing verified source claims instead"
@@ -2927,6 +2936,15 @@ fn synthesize_with_delivery_coverage(
         cancellation_checkpoint(control, PipelineStage::Synthesize)?;
         Ok(result)
     };
+    if profile == SummaryProfile::General && !comparisons::candidate_enabled() {
+        return finish(fallback_document(
+            runtime,
+            analyzed,
+            chunked,
+            ledger_claims,
+            FallbackReason::VerificationUnqualified,
+        )?);
+    }
     let catalog =
         source_catalog_for_profile(profile, VERSION, chunked, normalized, Some(analyzed))?;
     if incomplete_catalog_requires_fallback(profile, &catalog) {
@@ -3016,6 +3034,18 @@ fn synthesize_with_delivery_coverage(
     } else {
         catalog.clone()
     };
+
+    if profile == SummaryProfile::General
+        && !runtime.supports_response_schema(comparisons::SCHEMA_NAME)
+    {
+        return finish(fallback_document(
+            runtime,
+            analyzed,
+            chunked,
+            ledger_claims,
+            FallbackReason::VerificationUnavailable,
+        )?);
+    }
 
     let (user_prompt, output_schema) = prompt_and_schema(profile, &synthesis_catalog)?;
     if !model_health_checked {
@@ -3564,7 +3594,6 @@ fn source_selection_prompt_and_schema(
                 page_number: candidate.evidence.source_span.page_start,
                 selection_window: candidate.selection_window,
                 source_framing: None,
-                source_claim: None,
                 contract_clause: None,
                 clause_context_id: intern_clause_context(
                     candidate.full_clause.as_deref(),
@@ -5264,7 +5293,6 @@ fn contract_source_catalog(
                 chunk_ordinal: candidate.chunk_ordinal,
                 selection_window: None,
                 source_framing: None,
-                drafting_claim: None,
                 contract_clause,
                 full_clause: None,
             });
@@ -6552,6 +6580,7 @@ pub(super) fn validate_model_output_fallback_boundary(
             || !matches!(
                 synthesized.synthesis_version.as_str(),
                 VERSION
+                    | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
                     | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
                     | PRE_CLAUSE_SYNTHESIS_VERSION
                     | PRE_FURNITURE_SYNTHESIS_VERSION
@@ -6613,6 +6642,7 @@ fn page_balanced_catalog(
         || !matches!(
             version,
             VERSION
+                | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
                 | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
                 | PRE_CLAUSE_SYNTHESIS_VERSION
                 | PRE_FURNITURE_SYNTHESIS_VERSION
@@ -6687,11 +6717,6 @@ fn prompt_and_schema_for_version(
                 selection_window: candidate.selection_window,
                 source_framing: if profile == SummaryProfile::General {
                     candidate.source_framing
-                } else {
-                    None
-                },
-                source_claim: if profile == SummaryProfile::General {
-                    candidate.drafting_claim.clone()
                 } else {
                     None
                 },
@@ -7520,7 +7545,10 @@ fn source_catalog_for_profile(
         profile == SummaryProfile::General
             && matches!(
                 synthesis_version,
-                VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+                VERSION
+                    | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
+                    | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+                    | PRE_CLAUSE_SYNTHESIS_VERSION
             ),
     )?;
     if profile == SummaryProfile::Contract {
@@ -7580,7 +7608,6 @@ fn contract_source_catalog_from_blocks(
                 chunk_ordinal: chunk.ordinal,
                 selection_window: None,
                 source_framing: None,
-                drafting_claim: None,
                 contract_clause: None,
                 full_clause: None,
             });
@@ -7623,7 +7650,9 @@ fn source_catalog_with_furniture_policy(
         .filter(|_| {
             matches!(
                 synthesis_version,
-                VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+                VERSION
+                    | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
+                    | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             )
         })
         .map(|furniture| whole_clauses::Clauses::new(normalized, furniture, analysis_version));
@@ -7738,21 +7767,9 @@ fn source_catalog_with_furniture_policy(
                     false,
                 )
             })?;
-            let drafting_claim = analyzed
-                .into_iter()
-                .flat_map(|document| &document.chunks)
-                .flat_map(|chunk| &chunk.evidence)
-                .find(|evidence| {
-                    evidence.block_id == source.block_id
-                        && evidence.exact_quote == source.exact_quote
-                })
-                .map(|evidence| evidence.claim_text.clone())
-                .filter(|claim| claim != &source.exact_quote)
-                .filter(|_| source_framing.is_none());
             let full_clause = clauses
                 .as_ref()
-                .and_then(|clauses| clauses.context(&source.block_id, &source.exact_quote))
-                .filter(|context| context != &source.exact_quote);
+                .and_then(|clauses| clauses.context(&source.block_id, &source.exact_quote));
             candidates.push(SourceCandidate {
                 request_id: format!("s{ordinal}"),
                 evidence: EvidenceItem {
@@ -7766,7 +7783,6 @@ fn source_catalog_with_furniture_policy(
                 chunk_ordinal: chunk.ordinal,
                 selection_window: None,
                 source_framing,
-                drafting_claim,
                 contract_clause: None,
                 full_clause,
             });
@@ -7800,7 +7816,10 @@ pub(super) fn validate_for_runtime(
     let expected = (profile == SummaryProfile::General
         && matches!(
             synthesized.synthesis_version.as_str(),
-            VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+            VERSION
+                | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
+                | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+                | PRE_CLAUSE_SYNTHESIS_VERSION
         ))
     .then(|| {
         page_furniture::Furniture::for_synthesis_version(normalized, &synthesized.synthesis_version)
@@ -7814,6 +7833,17 @@ pub(super) fn validate_for_runtime(
         .collect::<Vec<_>>();
     if actual != expected.as_ref().into_iter().collect::<Vec<_>>() {
         return Err(invalid_document());
+    }
+    if has_fallback_warning(synthesized, FallbackReason::VerificationUnqualified) {
+        if profile != SummaryProfile::General
+            || synthesized.synthesis_version != VERSION
+            || synthesized.presentation_mode != SummaryPresentationMode::ClaimLedgerFallback
+        {
+            return Err(invalid_document());
+        }
+        // Qualification admission precedes catalog construction and budgeting.
+        // Validate the fallback's owned evidence without re-entering C9 planning.
+        return validate_content(synthesized, analyzed, chunked, normalized);
     }
     let catalog = source_catalog_for_profile(
         profile,
@@ -7857,6 +7887,15 @@ pub(super) fn validate_for_runtime(
                     synthesized,
                     FallbackReason::VerificationRequestTooLarge,
                 )
+                || (profile == SummaryProfile::General
+                    && matches!(
+                        synthesized.synthesis_version.as_str(),
+                        VERSION | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
+                    )
+                    && has_fallback_warning(
+                        synthesized,
+                        FallbackReason::VerificationUnavailable,
+                    ))
                 || has_fallback_warning(synthesized, FallbackReason::DeliveryCoverage)
                 || (profile == SummaryProfile::General
                     && has_fallback_warning(synthesized, FallbackReason::ModelOutputInvalid)) => {}
@@ -7959,7 +7998,10 @@ pub(super) fn validate_content(
     if !supplied.is_empty()
         && (!matches!(
             synthesized.synthesis_version.as_str(),
-            VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+            VERSION
+                | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
+                | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+                | PRE_CLAUSE_SYNTHESIS_VERSION
         ) || supplied
             != page_furniture::Furniture::for_synthesis_version(
                 normalized,
@@ -7985,7 +8027,9 @@ pub(super) fn validate_content(
                 || synthesized.warnings.iter().any(|warning| {
                     matches!(
                         warning.code.as_str(),
-                        FALLBACK_WARNING_CODE | MODEL_OUTPUT_INVALID_WARNING_CODE
+                        FALLBACK_WARNING_CODE
+                            | MODEL_OUTPUT_INVALID_WARNING_CODE
+                            | "COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE"
                     )
                 })
             {
@@ -8000,7 +8044,10 @@ pub(super) fn validate_content(
             )?;
             let general_catalog = (matches!(
                 synthesized.synthesis_version.as_str(),
-                VERSION | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION | PRE_CLAUSE_SYNTHESIS_VERSION
+                VERSION
+                    | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
+                    | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
+                    | PRE_CLAUSE_SYNTHESIS_VERSION
             ))
             .then(|| {
                 source_catalog_for_profile(
@@ -8075,7 +8122,10 @@ fn fallback_warning(synthesized: &SynthesizedDocument) -> Option<&PipelineWarnin
     let mut warnings = synthesized.warnings.iter().filter(|warning| {
         matches!(
             warning.code.as_str(),
-            FALLBACK_WARNING_CODE | MODEL_OUTPUT_INVALID_WARNING_CODE
+            FALLBACK_WARNING_CODE
+                | MODEL_OUTPUT_INVALID_WARNING_CODE
+                | "COHERENT_SUMMARY_VERIFICATION_UNAVAILABLE"
+                | "COHERENT_SUMMARY_VERIFICATION_UNQUALIFIED"
         )
     });
     let warning = warnings.next()?;
@@ -8083,6 +8133,8 @@ fn fallback_warning(synthesized: &SynthesizedDocument) -> Option<&PipelineWarnin
         FallbackReason::IncompleteCatalog,
         FallbackReason::RequestTooLarge,
         FallbackReason::VerificationRequestTooLarge,
+        FallbackReason::VerificationUnavailable,
+        FallbackReason::VerificationUnqualified,
         FallbackReason::DeliveryCoverage,
         FallbackReason::ModelOutputInvalid,
     ]
@@ -8095,6 +8147,7 @@ fn fallback_warning(synthesized: &SynthesizedDocument) -> Option<&PipelineWarnin
             || matches!(
                 synthesized.synthesis_version.as_str(),
                 VERSION
+                    | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
                     | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
                     | PRE_CLAUSE_SYNTHESIS_VERSION
                     | PRE_FURNITURE_SYNTHESIS_VERSION
@@ -8120,6 +8173,118 @@ mod tests {
     };
     use crate::pipeline::model::OllamaRuntime;
     use std::sync::Mutex;
+
+    #[test]
+    fn whole_clause_verification_admission_keeps_governing_context() {
+        struct Capture(Mutex<Vec<ModelRequest>>);
+        impl ModelRuntime for Capture {
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+            fn runtime_id(&self) -> &str {
+                "capture"
+            }
+            fn model_id(&self) -> &str {
+                "capture"
+            }
+            fn context_tokens(&self, _: PipelineStage) -> u32 {
+                32_768
+            }
+            fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                panic!("admission must not generate")
+            }
+            fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+                self.0.lock().unwrap().push(request.clone());
+                Ok(())
+            }
+        }
+        let (mut normalized, mut chunked) = contract_documents();
+        set_furniture_fixture(&mut normalized, &mut chunked, |n| match n {
+            1 => "10.2 Substantial Completion\nPayment requires acceptance.".into(),
+            2 => "Such payment releases retained funds except for incomplete work.".into(),
+            3 => "The owner must approve the release in writing.".into(),
+            _ => format!("11. Insurance\nCoverage applies to phase {n}."),
+        });
+        let catalog = source_catalog_for_profile(
+            SummaryProfile::General,
+            VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
+        let evidence = catalog
+            .candidates
+            .iter()
+            .take(3)
+            .map(|c| c.evidence.clone())
+            .collect::<Vec<_>>();
+        let ledger = CitedClaim {
+            claim_id: "ledger".into(),
+            text: "Payment requires acceptance.".into(),
+            evidence_ids: vec![evidence[0].evidence_id.clone()],
+        };
+        let analyzed = AnalyzedDocument {
+            document_id: normalized.document_id.clone(),
+            analysis_version: ANALYSIS_VERSION.into(),
+            runtime_id: "capture".into(),
+            model_id: "capture".into(),
+            chunks: vec![ChunkAnalysis {
+                chunk_id: chunked.chunks[0].chunk_id.clone(),
+                summary_text: String::new(),
+                source_spans: evidence.iter().map(|e| e.source_span.clone()).collect(),
+                evidence: evidence.clone(),
+            }],
+            omissions: vec![],
+            inspected_pages: vec![],
+            warnings: vec![],
+        };
+        let synthesized = SynthesizedDocument {
+            contract_extraction: None,
+            document_id: normalized.document_id.clone(), synthesis_version: VERSION.into(),
+            runtime_id: "capture".into(), model_id: "capture".into(),
+            presentation_mode: SummaryPresentationMode::Coherent, summary_text: String::new(),
+            source_chunk_ids: vec![chunked.chunks[0].chunk_id.clone()],
+            summary_claims: vec![CitedClaim { claim_id: "prose".into(),
+                text: "At substantial completion, payment releases retained funds except for incomplete work, with the owner's written approval.".into(),
+                evidence_ids: evidence[1..].iter().map(|e| e.evidence_id.clone()).collect() }],
+            synthesis_evidence: evidence, claims: vec![ledger], warnings: vec![],
+        };
+        let runtime = Capture(Mutex::new(vec![]));
+        assert!(!coherent_verification_exceeds_runtime_context(
+            SummaryProfile::General,
+            &runtime,
+            &synthesized,
+            &analyzed,
+            &normalized,
+            7
+        )
+        .unwrap());
+        let requests = runtime.0.lock().unwrap();
+        let request = requests.last().unwrap();
+        let wire: Value = serde_json::from_str(&request.user_prompt).unwrap();
+        assert_eq!(
+            wire["clause_contexts"].as_array().map_or(0, Vec::len),
+            1,
+            "clause context missing from verification request"
+        );
+        let context = &wire["clause_contexts"][0];
+        assert!(context["full_clause"]
+            .as_str()
+            .unwrap()
+            .starts_with("10.2 Substantial Completion"));
+        assert!(!context["full_clause"]
+            .as_str()
+            .unwrap()
+            .contains("11. Insurance"));
+        for item in wire["claims"][0]["evidence"].as_array().unwrap() {
+            assert_eq!(item["clause_context_id"], context["context_id"]);
+            assert!(!item["exact_quote"]
+                .as_str()
+                .unwrap()
+                .contains("Substantial Completion"));
+        }
+    }
 
     #[test]
     fn whole_clause_three_fragments_serialize_one_context() {
@@ -8619,6 +8784,7 @@ mod tests {
         for version in [
             PRE_CLAUSE_SYNTHESIS_VERSION,
             PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION,
+            PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION,
             VERSION,
         ] {
             let catalog = source_catalog_for_profile(
@@ -8635,19 +8801,25 @@ mod tests {
                 .map(|c| c.evidence.exact_quote.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert_eq!(quotes.contains("Exhibit 10.25"), version != VERSION);
+            assert_eq!(
+                quotes.contains("Exhibit 10.25"),
+                !matches!(version, VERSION | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION)
+            );
             assert_eq!(
                 quotes.contains("Public Service Agreement Page"),
-                version != VERSION
+                !matches!(version, VERSION | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION)
             );
             assert!(quotes.contains("Client shall pay after acceptance."));
             let warning =
                 page_furniture::Furniture::for_synthesis_version(&normalized, version).warning();
-            assert_eq!(warning.is_some(), version == VERSION);
+            assert_eq!(
+                warning.is_some(),
+                matches!(version, VERSION | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION)
+            );
         }
     }
 
-    fn set_furniture_fixture(
+    pub(super) fn set_furniture_fixture(
         normalized: &mut NormalizedDocument,
         chunked: &mut ChunkedDocument,
         source: impl Fn(u32) -> String,
@@ -10739,7 +10911,6 @@ mod tests {
             chunk_ordinal: page - 1,
             selection_window: None,
             source_framing: None,
-            drafting_claim: Some(format!("Source statement {page}.")),
             contract_clause: None,
             full_clause: None,
         }
@@ -13681,7 +13852,6 @@ mod tests {
                         &format!("story-evidence-{}", index + 1),
                         page,
                     );
-                    source.drafting_claim = None;
                     source.evidence.claim_text = (*line).to_string();
                     source.evidence.exact_quote = (*line).to_string();
                     source
@@ -13703,7 +13873,6 @@ mod tests {
                         &format!("contract-evidence-{}", index + 1),
                         page,
                     );
-                    source.drafting_claim = None;
                     source.evidence.claim_text = (*line).to_string();
                     source.evidence.exact_quote = (*line).to_string();
                     source
@@ -13729,7 +13898,6 @@ mod tests {
                             &format!("contract-evidence-{ordinal}"),
                             page,
                         );
-                        source.drafting_claim = None;
                         source.evidence.claim_text = (*line).to_string();
                         source.evidence.exact_quote = (*line).to_string();
                         source
@@ -13738,7 +13906,7 @@ mod tests {
         catalog
     }
 
-    fn contract_documents() -> (NormalizedDocument, ChunkedDocument) {
+    pub(super) fn contract_documents() -> (NormalizedDocument, ChunkedDocument) {
         let pages = CONTRACT_SOURCE_LINES
             .iter()
             .enumerate()
@@ -13793,6 +13961,64 @@ mod tests {
             warnings: Vec::new(),
         };
         (normalized, chunked)
+    }
+
+    #[test]
+    fn source_catalog_never_uses_extracted_drafts() {
+        let (normalized, chunked) = contract_documents();
+        for version in [VERSION, PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION] {
+            let original =
+                source_catalog_for_synthesis_version(version, &chunked, &normalized, None).unwrap();
+            let (expected_prompt, expected_schema) =
+                prompt_and_schema_for_version(SummaryProfile::General, version, &original).unwrap();
+            for words in [1, 55, 300] {
+                let evidence = original
+                    .candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        let mut evidence = candidate.evidence.clone();
+                        evidence.claim_text = if index % 2 == 0 {
+                            format!("Draft {}.", "guidance ".repeat(words))
+                        } else {
+                            evidence.exact_quote.clone()
+                        };
+                        evidence
+                    })
+                    .collect();
+                let analyzed = AnalyzedDocument {
+                    document_id: normalized.document_id.clone(),
+                    analysis_version: ANALYSIS_VERSION.into(),
+                    runtime_id: "test-runtime".into(),
+                    model_id: "test-model".into(),
+                    chunks: vec![ChunkAnalysis {
+                        chunk_id: chunked.chunks[0].chunk_id.clone(),
+                        summary_text: "Generated drafting guidance.".into(),
+                        source_spans: chunked.chunks[0].source_spans.clone(),
+                        evidence,
+                    }],
+                    warnings: Vec::new(),
+                    omissions: Vec::new(),
+                    inspected_pages: Vec::new(),
+                };
+                let current = source_catalog_for_synthesis_version(
+                    version,
+                    &chunked,
+                    &normalized,
+                    Some(&analyzed),
+                )
+                .unwrap();
+                let (prompt, schema) =
+                    prompt_and_schema_for_version(SummaryProfile::General, version, &current)
+                        .unwrap();
+                assert_eq!(
+                    prompt, expected_prompt,
+                    "drafts cannot alter the source request"
+                );
+                assert_eq!(schema, expected_schema);
+                assert_eq!(current.candidates, original.candidates);
+            }
+        }
     }
 
     #[test]
@@ -13957,7 +14183,13 @@ mod tests {
             warnings: Vec::new(),
         };
 
-        let catalog = source_catalog(&chunked, &normalized, None).unwrap();
+        let catalog = source_catalog_for_synthesis_version(
+            PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION,
+            &chunked,
+            &normalized,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             catalog
                 .candidates
@@ -14035,7 +14267,13 @@ mod tests {
             omissions: Vec::new(),
             inspected_pages: vec![1, 2, 3, 4],
         };
-        let enriched = source_catalog(&chunked, &normalized, Some(&analyzed)).unwrap();
+        let enriched = source_catalog_for_synthesis_version(
+            PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION,
+            &chunked,
+            &normalized,
+            Some(&analyzed),
+        )
+        .unwrap();
         assert_eq!(
             enriched
                 .candidates
@@ -14058,15 +14296,10 @@ mod tests {
                 candidate.evidence.claim_text,
                 candidate.evidence.exact_quote
             );
-            assert!(candidate.drafting_claim.is_none());
         }
         for candidate in &enriched.candidates[4..] {
             assert_eq!(candidate.source_framing, None);
         }
-        assert_eq!(
-            enriched.candidates[6].drafting_claim.as_deref(),
-            Some("Later extracted claim.")
-        );
         let verification_evidence = enriched
             .candidates
             .iter()
@@ -14095,7 +14328,12 @@ mod tests {
             &normalized,
         )
         .is_empty());
-        let (prompt, _) = prompt_and_schema(SummaryProfile::General, &enriched).unwrap();
+        let (prompt, _) = prompt_and_schema_for_version(
+            SummaryProfile::General,
+            PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION,
+            &enriched,
+        )
+        .unwrap();
         let prompt: Value = serde_json::from_str(&prompt).unwrap();
         for source in &prompt["source_segments"].as_array().unwrap()[..4] {
             assert_eq!(source["source_framing"], "problem");
@@ -14104,10 +14342,11 @@ mod tests {
         for source in &prompt["source_segments"].as_array().unwrap()[4..] {
             assert!(source.get("source_framing").is_none());
         }
-        assert_eq!(
-            prompt["source_segments"][6]["source_claim"],
-            "Later extracted claim."
-        );
+        assert!(prompt["source_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|source| source.get("source_claim").is_none()));
     }
 
     #[test]
@@ -15025,7 +15264,6 @@ mod tests {
             "Common Problems\n\nEmployees paid a piece rate may fall below the minimum wage."
                 .into();
         catalog.candidates[1].source_framing = Some(SourceFraming::Problem);
-        catalog.candidates[1].drafting_claim = None;
         let (general_prompt, general_schema) =
             prompt_and_schema(SummaryProfile::General, &catalog).unwrap();
         let (story_prompt, story_schema) =
@@ -15033,10 +15271,7 @@ mod tests {
         let (contract_prompt, contract_schema) =
             prompt_and_schema(SummaryProfile::Contract, &catalog).unwrap();
         let prompt: Value = serde_json::from_str(&general_prompt).unwrap();
-        assert_eq!(
-            prompt["source_segments"][0]["source_claim"],
-            "Source statement 1."
-        );
+        assert!(prompt["source_segments"][0].get("source_claim").is_none());
         assert_eq!(prompt["source_segments"][1]["source_framing"], "problem");
         for specialized_prompt in [&story_prompt, &contract_prompt] {
             let prompt: Value = serde_json::from_str(specialized_prompt).unwrap();

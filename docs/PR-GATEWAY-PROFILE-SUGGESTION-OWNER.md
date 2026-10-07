@@ -17,9 +17,8 @@ the application has a legitimate pre-run inference operation. A correct fix must
    pre-run profile suggestions without inventing placeholder pipeline history;
 2. migrate every schema-v17 gateway request to the corresponding pipeline-run owner without
    changing request identity, state, completion, acknowledgement, or provenance;
-3. allocate profile-suggestion owners transactionally from the exact source content hash and an
-   explicit version of the prompt/schema/sampling contract, so repeats and concurrent callers reuse
-   one identity while contract or content changes receive a new identity;
+3. allocate profile-suggestion owners transactionally according to the canonical
+   [Automatic suggestion request identity](CONTRACTS.md#automatic-suggestion-request-identity) contract;
 4. bind that owner before profile-suggestion preflight or generation, including the expanded retry,
    while retaining inert binding for direct runtimes;
 5. keep pipeline workers bound to their authoritative run IDs through the same generalized runtime
@@ -49,9 +48,8 @@ Acceptance criteria:
   foreign-key target from the matching pipeline run to the matching immutable request owner.
 - Initialization and every later `pipeline_runs` insert create exactly one `pipeline_run` owner with
   the same ID, and schema validation rejects missing or misattributed owners.
-- The profile-suggestion owner store returns one stable owner for the same valid lowercase SHA-256
-  content hash and suggestion-contract version across reopen and concurrent calls; a changed hash or
-  version returns a different owner.
+- Suggestion owner reuse and isolation obey the
+  [canonical identity contract](CONTRACTS.md#automatic-suggestion-request-identity).
 - Invalid hashes, empty/oversized contract versions, nonexistent owners, and owner-kind mismatches
   fail closed at the storage boundary.
 - `ModelRuntime::bind_run` remains available to existing workers and delegates to a default inert
@@ -93,9 +91,8 @@ the versioned classifier contract, binds it, and then runs the existing health/c
 - Suggestion ownership is created for direct runtimes too. Identity belongs to the application
   operation, not the selected backend, and this makes a later gateway selection atomic rather than
   conditional on runtime-specific type inspection.
-- Reopening the same content under the same classifier contract may reuse an acknowledged gateway
-  completion. Changing prompts, schema, sampling, seeds, or output semantics requires incrementing
-  the suggestion-contract version.
+- Replay compatibility and contract revision follow the
+  [canonical identity contract](CONTRACTS.md#automatic-suggestion-request-identity).
 - No suggestion result is added to pipeline history. The durable rows contain only hashes, contract
   identity, timestamps, and gateway protocol state—not source text.
 

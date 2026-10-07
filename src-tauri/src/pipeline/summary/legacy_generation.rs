@@ -329,6 +329,7 @@ fn conservative_verification_claim_fits(
         evidence: evidence
             .iter()
             .map(|item| PromptVerificationEvidence {
+                full_clause: None,
                 evidence_id: item.evidence_id.clone(),
                 exact_quote: item.exact_quote.clone(),
             })
@@ -342,7 +343,7 @@ fn conservative_verification_claim_fits(
             false,
         )
     })?;
-    let model_facing_characters = VERIFICATION_SYSTEM_PROMPT
+    let model_facing_characters = verification_system_prompt(&[])
         .chars()
         .count()
         .checked_add(user_prompt.chars().count())
