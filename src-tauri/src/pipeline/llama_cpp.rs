@@ -2118,6 +2118,10 @@ struct ModelMeta {
 }
 
 #[cfg(test)]
+#[path = "llama_cpp_framing_tests.rs"]
+mod framing_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::control::CancellationToken;
