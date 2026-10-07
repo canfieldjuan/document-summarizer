@@ -171,3 +171,19 @@ Only this accepted amendment is added after the completed investigation. Native 
 ### Gap audit
 
 NOT DONE. Semantic restoration, its failing/passing regression, corrected-head live confirmation and review remain. Operator acceptance has been recorded for this explicit representation amendment. PR116 remains held and v2 deferred.
+
+## Native profile framing correction contract
+
+The operator directed reconciliation of the open review threads on 2026-10-07. This correction addresses discussion_r4208609925 without expanding the parity experiment.
+
+Root cause: my commit 6a0438b9e860625605463c4bd41ccd0c087f5475 placed the proven 9B closed-thinking boundary into the sole shared native framing loader. Every native stage consumes it, including the previously qualified Jack 27B profile. The C9 cfg(test) gate does not scope native framing.
+
+Required surface: reuse the per-profile disable_thinking owner already implemented in PR100 commit d5feab50e8e5ffacdd01f45f3c074deb9499f315. Carry the property from QualifiedProfile to GgufRuntimeConfig, into PromptFraming::load and the runtime cache key. Existing ordinary profiles retain false and their original open assistant boundary; only the pinned 9B qualification configuration uses true and the validated closed block. Remove unconditional closed framing rather than adding a stage filter. Keep both profiles isolated in the runtime cache.
+
+Explicit non-scope: no preset/default change, no new qualified model, no global thinking change, no verifier or source-selection change, no admission cap increase, no Story/Contract behavior change, no dependency/API/storage change. The public native runtime configuration gains the profile flag required by the existing owner; all construction sites must supply it.
+
+Verification: fail-first echo-tokenizer regression for an unflagged profile; flagged profile retains the exact closed boundary and literal content stays non-control. Cache-key regression must separate the two modes. Test model-profile propagation and every configuration constructor. Run adjacent native/profile tests, formatting and strict clippy. The native summary amendment separately requires zero-generation real token equality and at most two calls; no inference is spent on this correction's unit tests.
+
+Inventory per profile: Jack Qwen 3.8 27B native remains open (disable_thinking=false); the qualified Ollama profile is not a native-framing consumer and retains false in its catalog record; pinned Qwen3.5 9B C9/native-summary qualification uses the closed block (true). This imports only the owner from PR100, not its preset promotion or default selection. Full-document admission and operator qualification hold remain unresolved.
+
+Implementation summary: pending. Cold diff audit: pending. Gap audit: NOT DONE until the origin regression passes, the class fix is published and its review thread is reconciled.
