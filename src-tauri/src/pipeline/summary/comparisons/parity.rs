@@ -194,6 +194,32 @@ fn original_manifest_and_production_projection_are_complete() {
 }
 
 #[test]
+fn parity_restores_original_joint_excerpt_requests() {
+    let m = manifest();
+    let f = fixture();
+    for record in records(&m, &f).unwrap() {
+        let (prompt, claims) = input(&record);
+        let batches = plan(&Runtime::default(), &prompt, &claims, 8).unwrap();
+        assert_eq!(
+            batches.len(),
+            1,
+            "original joint C9 projection required: {}",
+            record["case"]
+        );
+        let request = verification_request(&batches[0], 0, 7);
+        assert_eq!(request.system_prompt, f["system_prompt"].as_str().unwrap());
+        assert_eq!(
+            request.user_prompt,
+            serde_json::to_string(&record["user_prompt"]).unwrap()
+        );
+        assert_eq!(
+            hash(&serde_json::to_vec(&batches[0].comparison.as_ref().unwrap().schema).unwrap()),
+            record["schema_sha256"]
+        );
+    }
+}
+
+#[test]
 fn parity_manifest_rejects_missing_duplicate_and_altered_evidence() {
     let m = manifest();
     let f = fixture();
