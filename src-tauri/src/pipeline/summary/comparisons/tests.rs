@@ -2008,3 +2008,6 @@ fn sentence_uncertainty_and_not_applicable_cannot_be_rescued_by_siblings() {
 
 #[path = "sentence_run.rs"]
 mod sentence_run;
+
+#[path = "parity.rs"]
+mod parity;

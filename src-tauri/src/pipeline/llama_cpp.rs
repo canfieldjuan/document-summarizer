@@ -1468,7 +1468,7 @@ impl PromptFraming {
             client,
             base_url,
             token,
-            "<|im_end|>\n<|im_start|>assistant\n",
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             true,
             HEALTH_TIMEOUT,
         )?;

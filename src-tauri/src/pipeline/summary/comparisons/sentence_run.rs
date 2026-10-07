@@ -18,7 +18,7 @@ fn planned(
     )
 }
 
-fn request_value(r: &ModelRequest) -> Value {
+pub(super) fn request_value(r: &ModelRequest) -> Value {
     let ModelOutputFormat::JsonSchema { name, schema } = &r.output_format else {
         panic!("schema required")
     };
@@ -27,7 +27,7 @@ fn request_value(r: &ModelRequest) -> Value {
         "decoder_schema_json":serde_json::to_string(&crate::pipeline::model::response_format(&r.output_format).unwrap().unwrap()).unwrap()})
 }
 
-fn save(path: &Path, value: &Value) {
+pub(super) fn save(path: &Path, value: &Value) {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -367,7 +367,11 @@ impl ModelRuntime for RecordingRuntime {
     }
 }
 
-fn admitted_runtime(out: &Path, route: &str, runtime_parent: &Path) -> Arc<dyn ModelRuntime> {
+pub(super) fn admitted_runtime(
+    out: &Path,
+    route: &str,
+    runtime_parent: &Path,
+) -> Arc<dyn ModelRuntime> {
     if route == "gateway" {
         use crate::pipeline::{
             db, gateway_client::GatewayClientConfig, gateway_runtime::GatewayRuntime,
