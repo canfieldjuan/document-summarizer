@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import ssl
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -24,11 +25,37 @@ SUMMARY_MANIFEST_PATH = Path('src-tauri/src/pipeline/summary/comparisons/fixture
 SUMMARY_MANIFEST_SHA = '5ed3e4c777eb6dd6da0f2c8cf03d3b084f11969f04e7f65ae99af11ebe8fd4cc'
 TEST = 'pipeline::summary::comparisons::tests::parity::original_c9_production_gateway_parity'
 NATIVE_TEST = 'pipeline::llama_cpp::framing_tests::original_c9_native_framing_parity'
+EVIDENCE_ROOTS = (Path.home() / 'Desktop/codex-evidence/document-summarizer',
+                  Path.home() / 'Desktop/doc-classify-corpus/heldout')
 
 
 def require(value, message):
     if not value:
         raise ValueError(message)
+
+
+def prepare_evidence_output(path):
+    """Prepare only this run's new leaf; existing evidence is never reused."""
+    require(not path.exists() and not path.is_symlink(), 'output already exists; no retry')
+    out = path.resolve()
+    require(not out.is_relative_to(REPO) and '.codex/worktrees' not in str(out),
+            'durable output required outside worktrees')
+    require(any(out != root.resolve() and out.is_relative_to(root.resolve())
+                for root in EVIDENCE_ROOTS), 'output must be beneath a durable evidence namespace')
+    parent = out.parent.stat()  # Missing parents are refused, never created.
+    require(stat.S_ISDIR(parent.st_mode) and parent.st_uid == os.getuid()
+            and stat.S_IMODE(parent.st_mode) == 0o700,
+            'output parent must be an existing user-owned directory with mode 0700')
+    out.mkdir(mode=0o700)  # Exclusive create also refuses a concurrent existing leaf.
+    try:
+        out.chmod(0o700)  # Only the newly owned leaf; exact mode even under a restrictive umask.
+    except OSError:
+        try:
+            out.rmdir()  # Empty owned leaf only; never recursive cleanup.
+        except OSError:
+            pass  # Preserve unexpected contents and propagate the original preparation error.
+        raise
+    return out
 
 
 def sha(path):
@@ -252,9 +279,6 @@ def summary_lane(args, source):
     require(sha(args.gguf) == m['model_sha256'] and sha(args.server) == m['server_sha256'],
             'native summary runtime pin changed')
     require(sha(args.packet / 'execution.json') == m['execution_sha256'], 'summary freeze changed')
-    out = args.output.resolve()
-    require(not out.is_relative_to(REPO) and '.codex/worktrees' not in str(out), 'durable output required')
-    require(not out.exists(), 'summary output already exists; no retry')
     repair = getattr(args, 'repair_acceptance', None)
     if repair:
         validate_repair_approval(read(repair), source, args.packet)
@@ -264,8 +288,7 @@ def summary_lane(args, source):
         require(not (args.packet.parent / 'native-summary-parity-generation-reservation.json').exists(), 'summary budget already reserved')
     with args.lock.open('r+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        out.mkdir(parents=True, mode=0o700)
-        out.parent.chmod(0o700)
+        out = prepare_evidence_output(args.output)
         save(out / 'freeze.json', {'source':source, 'task':m, 'generation_ceiling':2})
         env = {k:v for k,v in os.environ.items() if not k.startswith(('DOC_SUM_', 'LLAMA_ARG_'))}
         env.update(DOC_SUM_SUMMARY_ORIGINAL=str(args.packet.resolve()),
@@ -333,8 +356,6 @@ def main():
             print('Receipt accepted for exact source, inputs and runtime')
             return 0
         require(args.output is not None, '--output required')
-        out = args.output.resolve()
-        require('/.codex/worktrees/' not in str(out) and not out.is_relative_to(REPO), 'evidence must be outside worktree')
         correction_budget = correction_history(args.packet) if args.phase == 'gateway' else None
         native_evidence = None
         if args.phase == 'gateway':
@@ -343,7 +364,7 @@ def main():
             validate_receipt(native, source, inputs, runtime, 'native')
             verify_artifacts(args.native_receipt, native)
             native_evidence = {'receipt_path': str(args.native_receipt.resolve()), 'sha256': sha(args.native_receipt)}
-        out.mkdir(mode=0o700)  # Existing evidence is never reused or overwritten.
+        out = prepare_evidence_output(args.output)
         if args.phase != 'preflight':
             gpu(args)
         save(out / 'freeze.json', {'source': source, 'inputs': inputs, 'runtime': runtime,
