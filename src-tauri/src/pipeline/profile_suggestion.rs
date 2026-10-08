@@ -350,7 +350,7 @@ mod tests {
         ModelResponse, NormalizedBlock, NormalizedBlockKind, NormalizedPage, SourceSpan,
         SourceType, StructureNodeKind, StructurePage,
     };
-    use crate::pipeline::model::OllamaRuntime;
+    use crate::pipeline::live_runtime::configured_live_runtime;
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -633,10 +633,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires configured Ollama; prints synthetic non-private profile suggestions"]
+    #[ignore = "requires explicit model settings or DOC_SUM_QUALIFICATION_GGUF; prints synthetic profile suggestions"]
     fn live_profile_suggestions_distinguish_dominant_purpose_counterexamples() {
-        let runtime = OllamaRuntime::from_environment().expect("Ollama runtime should configure");
-        runtime.health().expect("Ollama should be available");
+        let database = tempfile::NamedTempFile::new().expect("isolated acceptance database");
+        let (runtime, _runtime_directory) = configured_live_runtime(database.path());
+        runtime
+            .health()
+            .expect("selected model should be available");
         let fixtures = [
             (
                 "agreement",
@@ -672,7 +675,7 @@ mod tests {
         for (name, text, expected_purpose, expected_profile) in fixtures {
             let (normalized, structured) = documents(&[text.into()], &[]);
             let result =
-                suggest_summary_profile(&runtime, &normalized, &structured, "fixture-hash")
+                suggest_summary_profile(runtime.as_ref(), &normalized, &structured, "fixture-hash")
                     .unwrap_or_else(|error| panic!("{name} suggestion failed: {error}"));
             println!("PROFILE_SUGGESTION {name}: {result:?}");
             assert_eq!(result.document_purpose, expected_purpose, "{name}");

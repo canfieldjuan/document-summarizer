@@ -68,3 +68,17 @@ Prepared contract and composition packet only. No tracked edits, implementation 
 ## 8. Gap audit
 
 DONE for contract preparation; NOT DONE for implementation or qualification. Pending: explicit offline acceptance, acceptance commit, isolated selective port, fail-before/pass-after probes and lint, candidate request-departure report, independent review, then a separately accepted live contract. Existing holds remain open.
+
+## Offline implementation record
+
+The accepted integration surface is implemented locally on a separate codex/native-profile-integration branch. No PR100 commits were imported. Existing native framing, native_profile_config projection, production coherent/classifier prefixes, C9 owner and legacy release wrapper remain unchanged; production changes are the declared catalog/default/descriptor port.
+
+Reproduce/isolate/explain: the base fresh-settings probe selected 30B, not the requested 9B; the office recorder discarded MODEL_CONTEXT_EXCEEDED through its inherited no-op preflight (original recorder 494e51bc); the coherent recorder substituted wrapper identity through inherited stage defaults (85ff3b39). The latter two are test-adapter forwarding defects, not evidence of model insufficiency. Three public local probes reproduced them before their forwarding fixes. The coherent fixture was generalized only enough to exercise the unchanged forwarding methods before fixing them.
+
+Fix/prove/prevent regression: selectively port current-head profile/helper content, remove the office duplicate selector, forward preflight and concrete stage/profile identity at the recorder owners, preserve current native owner and existing preflight. The same three probes pass after; negative runtime/model responses remain rejected. Focused model_settings:27passed; office:5passed/3ignored; profile_suggestion:6passed/1ignored; coherent regression passed. Format, strict all-target/all-feature clippy and frontend build pass. No ignored live tests ran. Raw logs use durable public alias native-profile-integration-contract-20261007; their hashes and per-file cold audit are in offline-verification.json.
+
+Own implementation error: the first caller replacement hit a deterministic FixtureRuntime rather than the selected live Box runtime, causing compile errors. Fixed those exact two call sites before the passing checks; no production change or review-round patch was involved. Fresh worktree compilation also required building dist first; that setup failure did not execute a regression probe.
+
+boundary-probe: context None/0/32767 rejected,32768/32769/262144 admitted at pinned32768; wrong digest/family/runtime rejected; saved selections unchanged; both preflight acceptance/rejection propagated; foreign response runtime/model rejected on all three stages. effect-trace: selected9B default | catalog/default and native_profile_config | default/identity/context/metadata/projection tests passed, while production native and planner owners remained byte unchanged.
+
+Gap audit: NOT DONE. Private-name marker recovery blocks publication; no empty-denylist success is accepted. The original 13-request archived planner replay needs the explicitly proposed adapter surface before it is implemented. Independent review/CI and all native/C9/fidelity/unseen/operator qualification holds remain. Catalog admission is not qualification; no model calls or GPU changes occurred.
