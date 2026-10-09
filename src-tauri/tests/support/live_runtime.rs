@@ -46,7 +46,7 @@ pub fn configured_live_runtime(
     (runtime, Some(directory))
 }
 
-fn isolated_runtime_directory() -> tempfile::TempDir {
+pub(crate) fn isolated_runtime_directory() -> tempfile::TempDir {
     let mut builder = tempfile::Builder::new();
     builder.prefix("docsum-accept-");
     #[cfg(unix)]
