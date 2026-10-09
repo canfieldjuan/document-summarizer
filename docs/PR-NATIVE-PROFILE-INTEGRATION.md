@@ -185,3 +185,11 @@ Before Synthesize: an independent reviewer must record dated source criteria and
 ## Accepted tokenizer observation amendment
 
 Operator accepted native-stage-qualification-contract-20261009/tokenizer-observation-amendment/CONTRACT.md SHA256 95bcac0faef5d595db83bb4caf8cf1a06e8a04149c6d176baa367bd463a7e231 with "yes". The only added seam is test-only send-attempt observation in tokenize_text; successful response capture remains separate. Independent reconciliation is PENDING before that hook or live qualification. Production behavior and the existing41 completion/128 delegated preflight/30-minute budgets remain unchanged. Existing revision-1 offline driver work remains authorized; all PR116 holds remain.
+
+## Tokenizer observation amendment: offline proof
+
+Independent reconciliation in issuecomment-6088621266 cleared the accepted amendment95bcac0f before the send-point hook. The hook is cfg(test)-only at tokenize_text; the endpoint-scoped observer covers supervisor and request threads and separates attempted sends from production-typed decoded responses. The disabled fast path takes no mutex. Prior decoder-only counting is no longer the attempt-total owner.
+
+The rejected-request regression fails with the hook removed and passes restored (one actual/observed send, zero decoded responses). My intermediate field-presence approximation counted a wrong-type tokens response as decoded; its probe failed before and passes using the production TokenizeResponse type. The default parallel run, including existing timeout/cancellation checks, passes8 tests; the fresh private export passes9 targeted probes. Formatting and strict Clippy pass. The production tokenize_text function is byte-identical after stripping the cfg(test) hook; the empty diff is retained in the receipt.
+
+Public alias native-stage-qualification-contract-20261009/tokenizer-observation-amendment/implementation-receipt.json SHA256 a7017c1265044faa160cbcf163cf060d4187c8876cb8206aef4ed309e61ba9b8. The receipt binds operator/independent acceptance, both failure classes, pass logs, the production diff and source hashes. No native runtime, completion or fresh invocation occurred. The existing41/128/30-minute budget and every PR116 hold remain. NOT DONE: completed combined-driver freeze/admission, live stages, fresh-source approval and independent result signoff.

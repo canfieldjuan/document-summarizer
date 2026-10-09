@@ -1551,6 +1551,8 @@ fn tokenize_text(
     parse_special: bool,
     timeout: Duration,
 ) -> Result<Vec<u32>, ModelRuntimeFailure> {
+    #[cfg(test)]
+    framing_tests::capture_tokenizer_send(base_url, parse_special);
     let response = client
         .post(format!("{base_url}/tokenize"))
         .bearer_auth(token)
@@ -2182,7 +2184,7 @@ struct ModelMeta {
 
 #[cfg(test)]
 #[path = "llama_cpp_framing_tests.rs"]
-mod framing_tests;
+pub(crate) mod framing_tests;
 
 #[cfg(test)]
 mod tests {
