@@ -4,12 +4,7 @@ use crate::pipeline::contracts::ModelProfileSnapshot;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-mod live_runtime {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/support/live_runtime.rs"
-    ));
-}
+use crate::pipeline::live_runtime;
 
 const NATIVE_9B_DIGEST: &str = "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13";
 

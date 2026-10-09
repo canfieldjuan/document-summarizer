@@ -1,6 +1,7 @@
 //! Original experiment inputs through the actual production planner/classifier.
 use super::*;
 use crate::pipeline::contracts::ModelProfileSnapshot;
+use crate::pipeline::live_runtime::QualificationBudget;
 use qualification::{admitted_runtime, request_value, save};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -183,6 +184,67 @@ fn score(m: &Value, rows: &[Value]) -> bool {
             .all(|(row, label)| row["case"] == label["case"] && row["passed"] == true)
 }
 
+fn native_baseline() -> Value {
+    let text = include_str!("fixtures/c9-native-baseline.json");
+    assert_eq!(
+        hash(text.as_bytes()),
+        "3351e2bc357853ec389e13220e63497363c4ba404c8c87232784e20564656a2e"
+    );
+    serde_json::from_str(text).unwrap()
+}
+
+fn baseline_difference(
+    label: &Value,
+    record: &Value,
+    prepared: &[Prepared],
+    current: &Value,
+) -> Value {
+    let baseline = native_baseline();
+    let saved = baseline["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["case"] == label["case"])
+        .unwrap();
+    let decoded = prepared[0]
+        .parse(saved["response"].as_str().unwrap(), &prepared[0].claim)
+        .unwrap();
+    let reference = observation(
+        label,
+        record,
+        prepared,
+        &[json!({"text":saved["response"]})],
+        Some(decoded.verdict),
+    );
+    let mut differences = Vec::new();
+    for (old, new) in reference["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(current["relations"].as_array().unwrap())
+    {
+        let passages: Vec<_> = old["passages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(new["passages"].as_array().unwrap())
+            .enumerate()
+            .map(|(occurrence, (old, new))| {
+                assert_eq!(old["side"], new["side"]);
+                assert_eq!(old["reference"], new["reference"]);
+                let was = old["contained_in_selected_piece"].as_bool().unwrap();
+                let now = new["contained_in_selected_piece"].as_bool().unwrap();
+                json!({"occurrence":occurrence,"side":old["side"],"reference":old["reference"],
+                    "baseline_contained":was,"current_contained":now,"change": match (was, now) {
+                        (true,false)=>"loss", (false,true)=>"improvement", _=>"unchanged" }})
+            })
+            .collect();
+        differences.push(json!({"dimension":old["dimension"],"baseline_relation":old["actual_relation"],
+            "current_relation":new["actual_relation"],"relation_equal_to_baseline":old["actual_relation"]==new["actual_relation"],"passages":passages}));
+    }
+    json!({"baseline_result_sha256":baseline["baseline_result_sha256"],"diagnostic_only":true,"dimensions":differences})
+}
+
 #[test]
 fn original_manifest_and_production_projection_are_complete() {
     let m = manifest();
@@ -317,10 +379,85 @@ struct Recording {
     allowed: Vec<ModelRequest>,
     output: PathBuf,
     responses: Mutex<Vec<Value>>,
-    owner: String,
-    deployment: String,
-    policy: u32,
-    process: Value,
+    provenance: Provenance,
+}
+
+enum Provenance {
+    Gateway {
+        owner: String,
+        deployment: String,
+        policy: u32,
+        process: Value,
+    },
+    Native {
+        snapshot: Box<ModelProfileSnapshot>,
+    },
+}
+
+impl Recording {
+    fn native_snapshot_check(&self) -> Result<(), ModelRuntimeFailure> {
+        if let Provenance::Native { snapshot } = &self.provenance {
+            if self.inner.profile_snapshot().as_ref() != Some(snapshot.as_ref()) {
+                return Err(native_provenance_failure("selected snapshot changed"));
+            }
+        }
+        Ok(())
+    }
+    fn native_response_check(
+        &self,
+        r: &ModelRequest,
+        v: &ModelResponse,
+    ) -> Result<(), ModelRuntimeFailure> {
+        use crate::pipeline::contracts::{ModelRuntimeKind, ModelTransportAttempt};
+        self.native_snapshot_check()?;
+        let Provenance::Native { snapshot } = &self.provenance else {
+            return Ok(());
+        };
+        let selected = if r.stage == PipelineStage::Verify {
+            &snapshot.verification
+        } else {
+            &snapshot.analysis
+        };
+        if selected.runtime_kind != ModelRuntimeKind::LlamaCppGguf
+            || v.runtime_id != self.inner.runtime_id_for_stage(r.stage.clone())
+            || v.runtime_id != "llama.cpp-qwen-gguf"
+            || v.model_id != self.inner.model_id_for_stage(r.stage.clone())
+            || v.model_id != selected.model_digest
+            || self.inner.context_tokens(r.stage.clone()) != selected.context_tokens
+        {
+            return Err(native_provenance_failure(
+                "response or stage identity differs",
+            ));
+        }
+        let [attempt] = v.request_attempts.as_slice() else {
+            return Err(native_provenance_failure(
+                "exactly one native attempt required",
+            ));
+        };
+        if attempt.stage != r.stage
+            || attempt.request_ordinal != r.ordinal
+            || attempt.attempt_ordinal != 0
+            || attempt.transport_attempt != ModelTransportAttempt::Primary
+            || !attempt.succeeded
+            || attempt.configured_output_tokens != r.max_output_tokens
+            || attempt.provider_usage.prompt_tokens.is_none()
+            || !matches!(attempt.provider_usage.completion_tokens, Some(n) if n <= u64::from(r.max_output_tokens))
+        {
+            return Err(native_provenance_failure(
+                "native attempt diagnostics differ",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn native_provenance_failure(message: &str) -> ModelRuntimeFailure {
+    ModelRuntimeFailure {
+        code: "QUALIFICATION_NATIVE_PROVENANCE_INVALID".into(),
+        message: message.into(),
+        recoverable: false,
+        request_attempts: vec![],
+    }
 }
 
 fn gateway_process() -> Value {
@@ -366,18 +503,28 @@ impl ModelRuntime for Recording {
     ) -> Result<ModelResponse, ModelRuntimeFailure> {
         let mut rows = self.responses.lock().unwrap();
         let i = rows.len();
-        assert_eq!(self.allowed.get(i), Some(r), "changed/extra request");
-        assert_eq!(
-            gateway_process(),
-            self.process,
-            "gateway process changed before request"
-        );
+        if self.allowed.get(i) != Some(r) {
+            return Err(ModelRuntimeFailure {
+                code: "QUALIFICATION_REQUEST_CHANGED".into(),
+                message: "changed/extra request".into(),
+                recoverable: false,
+                request_attempts: vec![],
+            });
+        }
+        self.native_snapshot_check()?;
+        if let Provenance::Gateway { process, .. } = &self.provenance {
+            assert_eq!(
+                &gateway_process(),
+                process,
+                "gateway process changed before request"
+            );
+        }
         save(
             &self.output.join(format!("request-{i}.json")),
             &request_value(r),
         );
         let started = std::time::Instant::now();
-        let result = self.inner.generate_with_control(r, c);
+        let mut result = self.inner.generate_with_control(r, c);
         let mut row = match &result {
             Ok(v) => {
                 json!({"text":v.text,"runtime_id":v.runtime_id,"model_id":v.model_id,"request_attempts":v.request_attempts,"output_bytes":v.text.len(),"output_characters":v.text.chars().count()})
@@ -388,21 +535,30 @@ impl ModelRuntime for Recording {
         };
         row["milliseconds"] = json!(started.elapsed().as_millis());
         row["ordinal"] = json!(r.ordinal);
-        save(&self.output.join(format!("response-{i}.json")), &row);
-        rows.push(row);
-        assert_eq!(
-            gateway_process(),
-            self.process,
-            "gateway process changed during request"
-        );
-        if let Ok(response) = &result {
+        if let Provenance::Gateway { process, .. } = &self.provenance {
+            assert_eq!(
+                &gateway_process(),
+                process,
+                "gateway process changed during request"
+            );
+        }
+        if let (
+            Provenance::Gateway {
+                owner,
+                deployment,
+                policy,
+                ..
+            },
+            Ok(response),
+        ) = (&self.provenance, &result)
+        {
             use crate::pipeline::gateway_store::{load_request, GatewayRequestKey};
             let conn =
                 rusqlite::Connection::open(self.output.join("gateway-ledger.sqlite")).unwrap();
             let completion = load_request(
                 &conn,
                 &GatewayRequestKey {
-                    owner_id: self.owner.clone(),
+                    owner_id: owner.clone(),
                     stage: r.stage.clone(),
                     ordinal: r.ordinal,
                 },
@@ -411,20 +567,38 @@ impl ModelRuntime for Recording {
             .unwrap()
             .completion
             .unwrap();
-            assert_eq!(
-                completion.deployment_id, self.deployment,
-                "deployment changed"
-            );
-            assert_eq!(
-                completion.task_policy_version, self.policy,
-                "policy changed"
-            );
+            assert_eq!(&completion.deployment_id, deployment, "deployment changed");
+            assert_eq!(completion.task_policy_version, *policy, "policy changed");
             assert_eq!(completion.content, response.text, "stored response differs");
             save(
                 &self.output.join(format!("provenance-{i}.json")),
                 &serde_json::to_value(completion).unwrap(),
             );
         }
+        if let Provenance::Native { snapshot } = &self.provenance {
+            let checked = self.native_snapshot_check().and_then(|()| match &result {
+                Ok(response) => self.native_response_check(r, response),
+                Err(_) => Ok(()),
+            });
+            row["provenance_valid"] = json!(checked.is_ok());
+            save(
+                &self.output.join(format!("provenance-{i}.json")),
+                &json!({"route":"native","snapshot":snapshot,"valid":checked.is_ok(),
+                    "error":checked.as_ref().err().map(|e| &e.message),
+                    "finish_status":"successful responses are admitted by the native runtime's EOS/word and token-accounting checks; raw stop type is not exposed"}),
+            );
+            if let Err(mut error) = checked {
+                row["error"] = json!(error.code);
+                row["message"] = json!(error.message);
+                error.request_attempts = match &result {
+                    Ok(v) => v.request_attempts.clone(),
+                    Err(e) => e.request_attempts.clone(),
+                };
+                result = Err(error);
+            }
+        }
+        save(&self.output.join(format!("response-{i}.json")), &row);
+        rows.push(row);
         result
     }
     fn health(&self) -> Result<(), ModelRuntimeFailure> {
@@ -463,17 +637,38 @@ impl ModelRuntime for Recording {
 #[ignore = "accepted parity contract, frozen receipt and exclusive inference lock; exactly 30 calls"]
 fn original_c9_production_gateway_parity() {
     let out = PathBuf::from(std::env::var("DOC_SUM_C9_PARITY_OUTPUT").unwrap());
+    let (inner, _directory) = admitted_runtime(&out, "gateway");
+    let identity: Value =
+        serde_json::from_slice(&std::fs::read(out.join("runtime.json")).unwrap()).unwrap();
+    let provenance = Provenance::Gateway {
+        owner: identity["fresh_owner"].as_str().unwrap().into(),
+        deployment: std::env::var("DOC_SUM_C9_DEPLOYMENT").unwrap(),
+        policy: std::env::var("DOC_SUM_C9_POLICY").unwrap().parse().unwrap(),
+        process: serde_json::from_str(&std::env::var("DOC_SUM_C9_PROCESS").unwrap()).unwrap(),
+    };
+    c9_phase(out, inner, provenance, None);
+}
+
+fn c9_phase(
+    out: PathBuf,
+    inner: Arc<dyn ModelRuntime>,
+    provenance: Provenance,
+    budget: Option<&Arc<QualificationBudget>>,
+) -> bool {
     let m = manifest();
     let records = records(&m, &fixture()).unwrap();
-    let (inner, _directory) = admitted_runtime(&out, "gateway");
+    let admission_runtime: Arc<dyn ModelRuntime> = budget.map_or_else(
+        || inner.clone(),
+        |budget| Arc::new(budget.wrap(inner.clone())),
+    );
     let mut plans = Vec::new();
     let mut allowed = Vec::new();
     let mut costs = Vec::new();
     for record in &records {
-        let batches = projection(record, inner.as_ref());
+        let batches = projection(record, admission_runtime.as_ref());
         for batch in &batches {
             let r = verification_request(batch, allowed.len() as u32, 7);
-            let admit = inner.preflight_request(&r);
+            let admit = admission_runtime.preflight_request(&r);
             costs.push(json!({"case":record["case"],"ordinal":r.ordinal,"admitted":admit.is_ok(),"error":admit.err().map(|e|e.code)}));
             save(
                 &out.join(format!("planned-{}.json", r.ordinal)),
@@ -490,20 +685,20 @@ fn original_c9_production_gateway_parity() {
     );
     assert!(admitted, "stop before generation on admission failure");
     if std::env::var("DOC_SUM_C9_BOUNDARIES_ONLY").as_deref() == Ok("1") {
-        return;
+        return admitted;
     }
-    let identity: Value =
-        serde_json::from_slice(&std::fs::read(out.join("runtime.json")).unwrap()).unwrap();
-    let runtime = Recording {
+    let native = matches!(provenance, Provenance::Native { .. });
+    let runtime = Arc::new(Recording {
         inner,
         allowed,
         output: out.clone(),
         responses: Mutex::new(Vec::new()),
-        owner: identity["fresh_owner"].as_str().unwrap().into(),
-        deployment: std::env::var("DOC_SUM_C9_DEPLOYMENT").unwrap(),
-        policy: std::env::var("DOC_SUM_C9_POLICY").unwrap().parse().unwrap(),
-        process: serde_json::from_str(&std::env::var("DOC_SUM_C9_PROCESS").unwrap()).unwrap(),
-    };
+        provenance,
+    });
+    let dispatch: Arc<dyn ModelRuntime> = budget.map_or_else(
+        || runtime.clone() as Arc<dyn ModelRuntime>,
+        |budget| Arc::new(budget.wrap(runtime.clone())),
+    );
     let mut ordinal = 0;
     let mut observations = Vec::new();
     for ((label, record), batches) in m["cases"]
@@ -519,7 +714,7 @@ fn original_c9_production_gateway_parity() {
             .collect();
         let start = runtime.responses.lock().unwrap().len();
         let result = classify_verification_batches(
-            &runtime,
+            dispatch.as_ref(),
             batches,
             7,
             &mut ordinal,
@@ -531,7 +726,10 @@ fn original_c9_production_gateway_parity() {
             .and_then(|v| v.first())
             .map(|v| v.verdict.clone());
         let responses = runtime.responses.lock().unwrap();
-        let row = observation(label, record, &prepared, &responses[start..], actual);
+        let mut row = observation(label, record, &prepared, &responses[start..], actual);
+        if native {
+            row["baseline_comparison"] = baseline_difference(label, record, &prepared, &row);
+        }
         save(
             &out.join(format!(
                 "case-{}.json",
@@ -543,18 +741,32 @@ fn original_c9_production_gateway_parity() {
             "C9_PARITY_CASE {}",
             json!({"case":label["case"],"actual":row["actual_verdict"],"expected":row["expected_verdict"],"passed":row["passed"]})
         );
+        let failed_case = row["passed"] != true;
         observations.push(row);
-        if result.is_err() {
+        if let Some(budget) = budget {
+            if result.is_err() || failed_case {
+                budget.stop("C9_CASE_FAILED");
+            }
+        }
+        if result.is_err() || (native && failed_case) {
             break;
         }
     }
     let calls = runtime.responses.lock().unwrap().len();
     let passed = score(&m, &observations) && calls == 30;
-    save(
-        &out.join("results.json"),
-        &json!({"gateway_parity_passed":passed,"actual_calls":calls,"cases":observations,"manifest_sha256":MANIFEST_SHA}),
-    );
+    let mut result =
+        json!({"actual_calls":calls,"cases":observations,"manifest_sha256":MANIFEST_SHA});
+    result[if native {
+        "native_parity_passed"
+    } else {
+        "gateway_parity_passed"
+    }] = json!(passed);
+    if let Some(budget) = budget {
+        result["shared_budget"] = budget.observation();
+    }
+    save(&out.join("results.json"), &result);
     println!("C9_PARITY_RESULT calls={calls} passed={passed}");
+    passed
 }
 
 #[test]
@@ -592,10 +804,9 @@ fn qualification_recorder_forwards_selected_stage_identity() {
         allowed: vec![],
         output: output.path().into(),
         responses: Mutex::new(vec![]),
-        owner: "unused".into(),
-        deployment: "unused".into(),
-        policy: 0,
-        process: Value::Null,
+        provenance: Provenance::Native {
+            snapshot: Box::new(SelectedRuntime.profile_snapshot().unwrap()),
+        },
     };
     assert_eq!(
         recorder.runtime_id_for_stage(PipelineStage::Verify),
@@ -611,14 +822,363 @@ fn qualification_recorder_forwards_selected_stage_identity() {
     );
 }
 
+struct NativeRecorderProbe;
+impl ModelRuntime for NativeRecorderProbe {
+    fn generate(&self, r: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+        use crate::pipeline::contracts::{
+            ModelRequestAttemptDiagnostic, ModelTokenUsage, ModelTransportAttempt,
+        };
+        Ok(ModelResponse {
+            text: "{}".into(),
+            runtime_id: self.runtime_id().into(),
+            model_id: self.model_id().into(),
+            request_attempts: vec![ModelRequestAttemptDiagnostic {
+                stage: r.stage.clone(),
+                request_ordinal: r.ordinal,
+                attempt_ordinal: 0,
+                transport_attempt: ModelTransportAttempt::Primary,
+                elapsed_milliseconds: 1,
+                configured_output_tokens: r.max_output_tokens,
+                succeeded: true,
+                provider_usage: ModelTokenUsage {
+                    prompt_tokens: Some(4),
+                    completion_tokens: Some(1),
+                    total_tokens: Some(5),
+                },
+            }],
+        })
+    }
+    fn health(&self) -> Result<(), ModelRuntimeFailure> {
+        Ok(())
+    }
+    fn runtime_id(&self) -> &str {
+        "llama.cpp-qwen-gguf"
+    }
+    fn model_id(&self) -> &str {
+        "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13"
+    }
+    fn context_tokens(&self, _: PipelineStage) -> u32 {
+        32768
+    }
+    fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+        let mut snapshot: ModelProfileSnapshot =
+            serde_json::from_value(qualification::data()["documents"][0]["profile"].clone())
+                .unwrap();
+        for stage in [&mut snapshot.analysis, &mut snapshot.verification] {
+            stage.runtime_kind = crate::pipeline::contracts::ModelRuntimeKind::LlamaCppGguf;
+            stage.model_digest = self.model_id().into();
+        }
+        Some(snapshot)
+    }
+}
+
+#[test]
+fn native_recorder_accepts_owned_single_attempt() {
+    let output = tempfile::tempdir().unwrap();
+    let r = verification_request(
+        &projection(
+            &records(&manifest(), &fixture()).unwrap()[0],
+            &Runtime::default(),
+        )[0],
+        0,
+        7,
+    );
+    let recorder = Recording {
+        inner: Arc::new(NativeRecorderProbe),
+        allowed: vec![r.clone()],
+        output: output.path().into(),
+        responses: Mutex::new(vec![]),
+        provenance: Provenance::Native {
+            snapshot: Box::new(NativeRecorderProbe.profile_snapshot().unwrap()),
+        },
+    };
+    let response = recorder
+        .generate(&r)
+        .expect("native provenance must not require a gateway process or ledger");
+    assert_eq!(response.request_attempts.len(), 1);
+    assert_eq!(recorder.responses.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn native_recorder_rejects_unowned_missing_mixed_and_extra_attempts() {
+    use crate::pipeline::contracts::ModelTransportAttempt;
+    let output = tempfile::tempdir().unwrap();
+    let r = verification_request(
+        &projection(
+            &records(&manifest(), &fixture()).unwrap()[0],
+            &Runtime::default(),
+        )[0],
+        0,
+        7,
+    );
+    let recorder = Recording {
+        inner: Arc::new(NativeRecorderProbe),
+        allowed: vec![r.clone()],
+        output: output.path().into(),
+        responses: Mutex::new(vec![]),
+        provenance: Provenance::Native {
+            snapshot: Box::new(NativeRecorderProbe.profile_snapshot().unwrap()),
+        },
+    };
+    let response = NativeRecorderProbe.generate(&r).unwrap();
+    assert!(recorder.native_response_check(&r, &response).is_ok());
+    for mutation in 0..13 {
+        let mut changed = response.clone();
+        match mutation {
+            0 => changed.request_attempts.clear(),
+            1 => changed
+                .request_attempts
+                .push(changed.request_attempts[0].clone()),
+            2 => changed.runtime_id = "other-runtime".into(),
+            3 => changed.model_id = "other-model".into(),
+            4 => changed.request_attempts[0].stage = PipelineStage::Analyze,
+            5 => changed.request_attempts[0].request_ordinal += 1,
+            6 => changed.request_attempts[0].attempt_ordinal = 1,
+            7 => {
+                changed.request_attempts[0].transport_attempt =
+                    ModelTransportAttempt::SchemaFallbackRetry
+            }
+            8 => changed.request_attempts[0].succeeded = false,
+            9 => changed.request_attempts[0].configured_output_tokens += 1,
+            10 => changed.request_attempts[0].provider_usage.prompt_tokens = None,
+            11 => changed.request_attempts[0].provider_usage.completion_tokens = None,
+            12 => {
+                changed.request_attempts[0].provider_usage.completion_tokens =
+                    Some(u64::from(r.max_output_tokens) + 1)
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            recorder
+                .native_response_check(&r, &changed)
+                .unwrap_err()
+                .code,
+            "QUALIFICATION_NATIVE_PROVENANCE_INVALID",
+            "mutation {mutation}"
+        );
+    }
+    let mut boundary = response.clone();
+    boundary.request_attempts[0]
+        .provider_usage
+        .completion_tokens = Some(u64::from(r.max_output_tokens));
+    assert!(recorder.native_response_check(&r, &boundary).is_ok());
+    // The production owner permits usage without an optional provider total.
+    boundary.request_attempts[0].provider_usage.total_tokens = None;
+    assert!(recorder.native_response_check(&r, &boundary).is_ok());
+    let mut snapshot = NativeRecorderProbe.profile_snapshot().unwrap();
+    snapshot.verification.context_tokens -= 1;
+    let drifted = Recording {
+        provenance: Provenance::Native {
+            snapshot: Box::new(snapshot),
+        },
+        ..recorder
+    };
+    assert!(drifted.native_snapshot_check().is_err());
+    assert!(drifted.generate(&r).is_err());
+    assert!(drifted.responses.lock().unwrap().is_empty());
+    assert!(!output.path().join("request-0.json").exists());
+}
+
+#[test]
+fn native_recorder_snapshot_loss_during_a_call_is_spent_and_stops_dispatch() {
+    struct Drift(Mutex<Option<ModelProfileSnapshot>>);
+    impl ModelRuntime for Drift {
+        fn generate(&self, r: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let response = NativeRecorderProbe.generate(r);
+            *self.0.lock().unwrap() = None;
+            response
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            NativeRecorderProbe.runtime_id()
+        }
+        fn model_id(&self) -> &str {
+            NativeRecorderProbe.model_id()
+        }
+        fn context_tokens(&self, s: PipelineStage) -> u32 {
+            NativeRecorderProbe.context_tokens(s)
+        }
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+    let output = tempfile::tempdir().unwrap();
+    let r = verification_request(
+        &projection(
+            &records(&manifest(), &fixture()).unwrap()[0],
+            &Runtime::default(),
+        )[0],
+        0,
+        7,
+    );
+    let snapshot = NativeRecorderProbe.profile_snapshot().unwrap();
+    let recording = Arc::new(Recording {
+        inner: Arc::new(Drift(Mutex::new(Some(snapshot.clone())))),
+        allowed: vec![r.clone()],
+        output: output.path().into(),
+        responses: Mutex::new(vec![]),
+        provenance: Provenance::Native {
+            snapshot: Box::new(snapshot),
+        },
+    });
+    let budget = QualificationBudget::native_stages();
+    let runtime = budget.wrap(recording.clone());
+    let failure = runtime.generate(&r).unwrap_err();
+    assert_eq!(failure.code, "QUALIFICATION_NATIVE_PROVENANCE_INVALID");
+    assert_eq!(failure.request_attempts.len(), 1);
+    assert_eq!(budget.observation()["reserved_completions"], 1);
+    assert_eq!(
+        recording.responses.lock().unwrap()[0]["provenance_valid"],
+        false
+    );
+    assert!(runtime.generate(&r).is_err());
+    assert_eq!(budget.observation()["reserved_completions"], 1);
+    assert!(!output.path().join("request-1.json").exists());
+}
+
+#[test]
+fn native_recorder_changed_request_is_rejected_before_delegation() {
+    let output = tempfile::tempdir().unwrap();
+    let r = verification_request(
+        &projection(
+            &records(&manifest(), &fixture()).unwrap()[0],
+            &Runtime::default(),
+        )[0],
+        0,
+        7,
+    );
+    let recording = Arc::new(Recording {
+        inner: Arc::new(NativeRecorderProbe),
+        allowed: vec![r.clone()],
+        output: output.path().into(),
+        responses: Mutex::new(vec![]),
+        provenance: Provenance::Native {
+            snapshot: Box::new(NativeRecorderProbe.profile_snapshot().unwrap()),
+        },
+    });
+    let budget = QualificationBudget::native_stages();
+    let runtime = budget.wrap(recording.clone());
+    let mut changed = r.clone();
+    changed.user_prompt.push(' ');
+    assert_eq!(
+        runtime.generate(&changed).unwrap_err().code,
+        "QUALIFICATION_REQUEST_CHANGED"
+    );
+    assert!(recording.responses.lock().unwrap().is_empty());
+    assert!(!output.path().join("request-0.json").exists());
+    assert_eq!(budget.observation()["reserved_completions"], 1);
+    assert_eq!(
+        runtime.generate(&r).unwrap_err().code,
+        "QUALIFICATION_STOPPED"
+    );
+}
+
+#[test]
+fn native_c9_reuses_the_case_loop_and_stops_on_first_failed_case() {
+    struct Replay {
+        failure_mode: usize,
+    }
+    impl ModelRuntime for Replay {
+        fn generate(&self, r: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            let mut response = NativeRecorderProbe.generate(r)?;
+            let baseline = native_baseline();
+            response.text = baseline["cases"][r.ordinal as usize]["response"]
+                .as_str()
+                .unwrap()
+                .into();
+            if r.ordinal == 0 {
+                match self.failure_mode {
+                    1 => response.text = "{}".into(),
+                    2 => {
+                        let mut raw: Value = serde_json::from_str(&response.text).unwrap();
+                        for dimension in DIMENSIONS {
+                            let c = &mut raw["verdicts"][0]["comparisons"][dimension];
+                            if !c["source_spans"].as_array().unwrap().is_empty()
+                                && !c["claim_spans"].as_array().unwrap().is_empty()
+                            {
+                                c["relation"] = json!("preserved");
+                            } else {
+                                *c = json!({"source_spans":[],"claim_spans":[],"relation":"not_applicable"});
+                            }
+                        }
+                        response.text = raw.to_string();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(response)
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            NativeRecorderProbe.runtime_id()
+        }
+        fn model_id(&self) -> &str {
+            NativeRecorderProbe.model_id()
+        }
+        fn context_tokens(&self, s: PipelineStage) -> u32 {
+            NativeRecorderProbe.context_tokens(s)
+        }
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            NativeRecorderProbe.profile_snapshot()
+        }
+    }
+    for failure_mode in 0..3 {
+        let fail_first = failure_mode != 0;
+        let output = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn ModelRuntime> = Arc::new(Replay { failure_mode });
+        let budget = QualificationBudget::native_stages();
+        let provenance = Provenance::Native {
+            snapshot: Box::new(inner.profile_snapshot().unwrap()),
+        };
+        let passed = c9_phase(
+            output.path().into(),
+            inner.clone(),
+            provenance,
+            Some(&budget),
+        );
+        assert_eq!(passed, !fail_first);
+        assert_eq!(
+            budget.observation()["reserved_completions"],
+            if fail_first { 1 } else { 30 }
+        );
+        let result: Value =
+            serde_json::from_slice(&std::fs::read(output.path().join("results.json")).unwrap())
+                .unwrap();
+        assert_eq!(result["native_parity_passed"], !fail_first);
+        assert_eq!(
+            result["cases"][0]["baseline_comparison"]["diagnostic_only"],
+            true
+        );
+        if failure_mode == 2 {
+            assert_eq!(result["cases"][0]["valid"], true);
+            assert_eq!(result["cases"][0]["actual_verdict"], "supported");
+        }
+        if fail_first {
+            assert!(budget
+                .wrap(inner)
+                .generate(&verification_request(
+                    &projection(
+                        &records(&manifest(), &fixture()).unwrap()[0],
+                        &Runtime::default()
+                    )[0],
+                    1,
+                    7
+                ))
+                .is_err());
+            assert_eq!(budget.observation()["reserved_completions"], 1);
+        } else {
+            assert!(budget.observation()["stopped"].is_null());
+        }
+    }
+}
+
 #[test]
 fn native_baseline_uses_existing_case_checks_with_diagnostic_passage_misses() {
-    let baseline_text = include_str!("fixtures/c9-native-baseline.json");
-    assert_eq!(
-        hash(baseline_text.as_bytes()),
-        "3351e2bc357853ec389e13220e63497363c4ba404c8c87232784e20564656a2e"
-    );
-    let baseline: Value = serde_json::from_str(baseline_text).unwrap();
+    let baseline = native_baseline();
     assert_eq!(
         baseline["baseline_result_sha256"],
         "9dc813f6618258a23333b344c295bb43e226d79c5caecc15bc021d5ed33e9936"
@@ -661,6 +1221,30 @@ fn native_baseline_uses_existing_case_checks_with_diagnostic_passage_misses() {
     assert_eq!(misses, 23);
     assert_eq!(cases_with_misses, 8);
     assert!(score(&m, &rows));
+    let mut diagnostic = rows[0].clone();
+    for relation in diagnostic["relations"].as_array_mut().unwrap() {
+        relation["actual_relation"] = json!("different diagnostic relation");
+        for passage in relation["passages"].as_array_mut().unwrap() {
+            passage["contained_in_selected_piece"] =
+                json!(!passage["contained_in_selected_piece"].as_bool().unwrap());
+        }
+    }
+    let batches = projection(&records[0], &Runtime::default());
+    let changes = baseline_difference(
+        &m["cases"][0],
+        &records[0],
+        &[batches[0].comparison.clone().unwrap()],
+        &diagnostic,
+    );
+    let changes: Vec<_> = changes["dimensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|d| d["passages"].as_array().unwrap())
+        .map(|p| p["change"].as_str().unwrap())
+        .collect();
+    assert!(changes.contains(&"loss"));
+    assert!(changes.contains(&"improvement"));
     // Diagnostic differences alone do not impose an unaccepted quality standard.
     rows[0]["relations"][0]["passages"][0]["contained_in_selected_piece"] = json!(false);
     rows[0]["relations"][0]["relation_equal"] = json!(false);
