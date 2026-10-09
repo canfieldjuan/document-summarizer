@@ -1,5 +1,6 @@
 //! Original experiment inputs through the actual production planner/classifier.
 use super::*;
+use crate::pipeline::contracts::ModelProfileSnapshot;
 use qualification::{admitted_runtime, request_value, save};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -435,6 +436,15 @@ impl ModelRuntime for Recording {
     fn model_id(&self) -> &str {
         self.inner.model_id()
     }
+    fn runtime_id_for_stage(&self, stage: PipelineStage) -> &str {
+        self.inner.runtime_id_for_stage(stage)
+    }
+    fn model_id_for_stage(&self, stage: PipelineStage) -> &str {
+        self.inner.model_id_for_stage(stage)
+    }
+    fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+        self.inner.profile_snapshot()
+    }
     fn context_tokens(&self, s: PipelineStage) -> u32 {
         self.inner.context_tokens(s)
     }
@@ -455,8 +465,7 @@ fn original_c9_production_gateway_parity() {
     let out = PathBuf::from(std::env::var("DOC_SUM_C9_PARITY_OUTPUT").unwrap());
     let m = manifest();
     let records = records(&m, &fixture()).unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let inner = admitted_runtime(&out, "gateway", scratch.path());
+    let (inner, _directory) = admitted_runtime(&out, "gateway");
     let mut plans = Vec::new();
     let mut allowed = Vec::new();
     let mut costs = Vec::new();
@@ -546,4 +555,119 @@ fn original_c9_production_gateway_parity() {
         &json!({"gateway_parity_passed":passed,"actual_calls":calls,"cases":observations,"manifest_sha256":MANIFEST_SHA}),
     );
     println!("C9_PARITY_RESULT calls={calls} passed={passed}");
+}
+
+#[test]
+fn qualification_recorder_forwards_selected_stage_identity() {
+    struct SelectedRuntime;
+    impl ModelRuntime for SelectedRuntime {
+        fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            panic!("metadata probe must never generate")
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            Ok(())
+        }
+        fn runtime_id(&self) -> &str {
+            "selected-global-runtime"
+        }
+        fn model_id(&self) -> &str {
+            "selected-global-model"
+        }
+        fn runtime_id_for_stage(&self, _: PipelineStage) -> &str {
+            "selected-stage-runtime"
+        }
+        fn model_id_for_stage(&self, _: PipelineStage) -> &str {
+            "selected-stage-model"
+        }
+        fn profile_snapshot(&self) -> Option<ModelProfileSnapshot> {
+            Some(
+                serde_json::from_value(qualification::data()["documents"][0]["profile"].clone())
+                    .unwrap(),
+            )
+        }
+    }
+    let output = tempfile::tempdir().unwrap();
+    let recorder = Recording {
+        inner: Arc::new(SelectedRuntime),
+        allowed: vec![],
+        output: output.path().into(),
+        responses: Mutex::new(vec![]),
+        owner: "unused".into(),
+        deployment: "unused".into(),
+        policy: 0,
+        process: Value::Null,
+    };
+    assert_eq!(
+        recorder.runtime_id_for_stage(PipelineStage::Verify),
+        "selected-stage-runtime"
+    );
+    assert_eq!(
+        recorder.model_id_for_stage(PipelineStage::Verify),
+        "selected-stage-model"
+    );
+    assert_eq!(
+        recorder.profile_snapshot(),
+        recorder.inner.profile_snapshot()
+    );
+}
+
+#[test]
+fn native_baseline_uses_existing_case_checks_with_diagnostic_passage_misses() {
+    let baseline_text = include_str!("fixtures/c9-native-baseline.json");
+    assert_eq!(
+        hash(baseline_text.as_bytes()),
+        "3351e2bc357853ec389e13220e63497363c4ba404c8c87232784e20564656a2e"
+    );
+    let baseline: Value = serde_json::from_str(baseline_text).unwrap();
+    assert_eq!(
+        baseline["baseline_result_sha256"],
+        "9dc813f6618258a23333b344c295bb43e226d79c5caecc15bc021d5ed33e9936"
+    );
+    let m = manifest();
+    let records = records(&m, &fixture()).unwrap();
+    assert_eq!(baseline["cases"].as_array().unwrap().len(), records.len());
+    let mut rows = Vec::new();
+    let mut misses = 0;
+    let mut cases_with_misses = 0;
+    for ((label, record), saved) in m["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&records)
+        .zip(baseline["cases"].as_array().unwrap())
+    {
+        assert_eq!(saved["case"], label["case"]);
+        assert_eq!(saved["expected_verdict"], label["expected_parity_verdict"]);
+        let batches = projection(record, &Runtime::default());
+        let prepared = vec![batches[0].comparison.clone().unwrap()];
+        let decoded = prepared[0]
+            .parse(saved["response"].as_str().unwrap(), &prepared[0].claim)
+            .unwrap();
+        let responses = vec![json!({"text":saved["response"]})];
+        let row = observation(label, record, &prepared, &responses, Some(decoded.verdict));
+        assert_eq!(row["passed"], true, "{}", saved["case"]);
+        let count = row["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|rel| rel["passages"].as_array().unwrap())
+            .filter(|p| p["contained_in_selected_piece"] == false)
+            .count();
+        assert_eq!(count as u64, saved["missing_references"].as_u64().unwrap());
+        misses += count;
+        cases_with_misses += usize::from(count > 0);
+        rows.push(row);
+    }
+    assert_eq!(misses, 23);
+    assert_eq!(cases_with_misses, 8);
+    assert!(score(&m, &rows));
+    // Diagnostic differences alone do not impose an unaccepted quality standard.
+    rows[0]["relations"][0]["passages"][0]["contained_in_selected_piece"] = json!(false);
+    rows[0]["relations"][0]["relation_equal"] = json!(false);
+    assert!(score(&m, &rows));
+    let mut duplicate = rows.clone();
+    duplicate[1] = rows[0].clone();
+    assert!(!score(&m, &duplicate));
+    assert!(!score(&m, &rows[..29]));
+    println!("NATIVE_BASELINE_REGRESSION cases=30 missing_references=23 cases_with_misses=8 generation_calls=0");
 }
