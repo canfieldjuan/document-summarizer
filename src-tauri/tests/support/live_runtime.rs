@@ -85,6 +85,7 @@ struct QualificationState {
 
 pub struct QualificationBudget {
     completion_limit: usize,
+    synthesis_only: bool,
     preflight_limit: usize,
     state: Mutex<QualificationState>,
 }
@@ -93,9 +94,15 @@ impl QualificationBudget {
     pub fn native_stages() -> Arc<Self> {
         Arc::new(Self::with_limits(41, 128))
     }
+    pub fn synthesis_only() -> Arc<Self> {
+        let mut budget = Self::with_limits(1, 64);
+        budget.synthesis_only = true;
+        Arc::new(budget)
+    }
     fn with_limits(completion_limit: usize, preflight_limit: usize) -> Self {
         Self {
             completion_limit,
+            synthesis_only: false,
             preflight_limit,
             state: Mutex::new(QualificationState::default()),
         }
@@ -149,6 +156,10 @@ impl ModelRuntime for QualificationRuntime {
         if state.stopped.is_some() {
             return Err(qualification_failure("QUALIFICATION_STOPPED"));
         }
+        if self.budget.synthesis_only && r.stage != PipelineStage::Synthesize {
+            state.stopped = Some("QUALIFICATION_UNEXPECTED_STAGE".into());
+            return Err(qualification_failure("QUALIFICATION_UNEXPECTED_STAGE"));
+        }
         // Initial page requests retain the owning run seed. The page owner derives
         // a different seed for a repair. Reject that departure before delegation;
         // no generated text or prompt is re-parsed here.
@@ -195,6 +206,10 @@ impl ModelRuntime for QualificationRuntime {
         let mut state = self.budget.state.lock().unwrap();
         if state.stopped.is_some() {
             return Err(qualification_failure("QUALIFICATION_STOPPED"));
+        }
+        if self.budget.synthesis_only && r.stage != PipelineStage::Synthesize {
+            state.stopped = Some("QUALIFICATION_UNEXPECTED_STAGE".into());
+            return Err(qualification_failure("QUALIFICATION_UNEXPECTED_STAGE"));
         }
         if state.preflights.len() >= self.budget.preflight_limit {
             state.stopped = Some("QUALIFICATION_PREFLIGHT_CEILING".into());
@@ -304,6 +319,76 @@ mod qualification_budget_tests {
             max_output_tokens: 8,
             output_format: ModelOutputFormat::Text,
         }
+    }
+    #[test]
+    fn synthesis_only_rejects_other_stages_before_delegation() {
+        for stage in [PipelineStage::Analyze, PipelineStage::Verify] {
+            for preflight in [false, true] {
+                let probe = Probe::new();
+                let budget = QualificationBudget::synthesis_only();
+                let runtime = budget.wrap(probe.clone());
+                let r = request(stage.clone(), 0);
+                let result = if preflight {
+                    runtime.preflight_request(&r)
+                } else {
+                    runtime.generate(&r).map(|_| ())
+                };
+                assert!(
+                    result.is_err(),
+                    "synthesis-only scope delegated another stage"
+                );
+                assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+                assert_eq!(probe.admissions.load(Ordering::SeqCst), 0);
+                assert!(budget.observation()["stopped"].is_string());
+            }
+        }
+    }
+    #[test]
+    fn synthesis_only_limits_are_separate_and_spent() {
+        let probe = Probe::new();
+        let budget = QualificationBudget::synthesis_only();
+        let runtime = budget.wrap(probe.clone());
+        let r = request(PipelineStage::Synthesize, 0);
+        for _ in 0..64 {
+            runtime.preflight_request(&r).unwrap();
+        }
+        assert_eq!(probe.admissions.load(Ordering::SeqCst), 64);
+        assert_eq!(
+            runtime.preflight_request(&r).unwrap_err().code,
+            "QUALIFICATION_PREFLIGHT_CEILING"
+        );
+        assert_eq!(probe.admissions.load(Ordering::SeqCst), 64);
+        assert!(runtime.generate(&r).is_err());
+        let budget = QualificationBudget::synthesis_only();
+        let runtime = budget.wrap(probe.clone());
+        runtime.generate(&r).unwrap();
+        assert!(runtime.generate(&r).is_err());
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.observation()["reserved_completions"], 1);
+        let original = QualificationBudget::native_stages();
+        assert_eq!(original.observation()["reserved_completions"], 0);
+        assert_eq!(original.observation()["completion_limit"], 41);
+        assert_eq!(original.observation()["preflight_limit"], 128);
+    }
+    #[test]
+    fn synthesis_only_error_spends_the_reservation() {
+        let probe = Probe::new();
+        let budget = QualificationBudget::synthesis_only();
+        let runtime = budget.wrap(probe.clone());
+        let token = crate::pipeline::control::CancellationToken::new();
+        token.request();
+        assert_eq!(
+            runtime
+                .generate_with_control(&request(PipelineStage::Synthesize, 0), &token)
+                .unwrap_err()
+                .code,
+            "MODEL_REQUEST_CANCELLED"
+        );
+        assert_eq!(budget.observation()["reserved_completions"], 1);
+        assert!(runtime
+            .generate(&request(PipelineStage::Synthesize, 0))
+            .is_err());
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
     }
     #[test]
     fn qualification_stages_share_the_exact_total_ceiling() {
