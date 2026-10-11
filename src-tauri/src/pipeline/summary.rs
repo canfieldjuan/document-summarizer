@@ -11865,6 +11865,46 @@ mod tests {
     }
 
     #[test]
+    fn synthesis_only_budget_admits_downstream_verification_and_reloads_draft() {
+        use crate::pipeline::live_runtime::QualificationBudget;
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let probe = std::sync::Arc::new(LowSynthesisContextRuntime::with_synthesis_context_tokens(
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        ));
+        analyze_chunked_document(&mut conn, probe.as_ref(), &run_id).unwrap();
+        let budget = QualificationBudget::synthesis_only();
+        let runtime = budget.wrap(probe.clone());
+        let synthesized = synthesize_analyzed_document(&mut conn, &runtime, &run_id)
+            .expect("Synthesize must finish its real Verify admission before persistence");
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert_eq!(
+            get_synthesized_document(&conn, &run_id).unwrap().unwrap(),
+            synthesized
+        );
+        assert!(probe.verification_preflight_calls.load(Ordering::SeqCst) > 0);
+        assert_eq!(budget.observation()["reserved_completions"], 1);
+        assert!(budget.observation()["stopped"].is_null());
+        assert!(budget.observation()["preflights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["stage"] == "Verify"));
+        let stages = probe.requests.lock().unwrap();
+        assert_eq!(
+            stages
+                .iter()
+                .filter(|s| **s == PipelineStage::Synthesize)
+                .count(),
+            1
+        );
+        assert!(!stages.contains(&PipelineStage::Verify));
+    }
+
+    #[test]
     fn coherent_verification_admission_falls_back_only_for_context_overflow() {
         let database = TestDatabase::new();
         let (mut conn, run_id) = chunked_run(&database);
@@ -14990,6 +15030,197 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!(pages::OMIT_HEADING)));
+    }
+
+    #[test]
+    fn qualification_fresh_selection_drives_owned_paraphrase_and_synthesis() {
+        struct SelectionRuntime {
+            inner: MaterialityRuntime,
+            choice: usize,
+        }
+        impl ModelRuntime for SelectionRuntime {
+            fn generate(&self, r: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                let mut response = self.inner.generate(r)?;
+                if matches!(&r.output_format, ModelOutputFormat::JsonSchema { name, .. } if name == pages::SELECTION_SCHEMA)
+                {
+                    let prompt: Value = serde_json::from_str(&r.user_prompt).unwrap();
+                    assert!(prompt["quote_candidates"].as_array().unwrap().len() > 1);
+                    response.text = match self.choice {
+                        usize::MAX => json!({"selection":"foreign"}).to_string(),
+                        n if n == usize::MAX - 1 => "not JSON".into(),
+                        n => json!({"selection":prompt["quote_candidates"][n]["quote_id"]})
+                            .to_string(),
+                    };
+                }
+                Ok(response)
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                self.inner.health()
+            }
+            fn runtime_id(&self) -> &str {
+                self.inner.runtime_id()
+            }
+            fn model_id(&self) -> &str {
+                self.inner.model_id()
+            }
+            fn context_tokens(&self, _: PipelineStage) -> u32 {
+                32768
+            }
+        }
+        let source = (1..=12)
+            .map(|i| format!("The reviewer must retain record set {i} for seven years."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (normalized, chunked) = materiality_fixture(&[source]);
+        let mut artifacts = Vec::new();
+        let mut synthesis_requests = Vec::new();
+        for choice in [0, 1] {
+            let runtime = SelectionRuntime {
+                inner: materiality_runtime(false, 0, false),
+                choice,
+            };
+            let analyzed = analyze(
+                &runtime,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            validate_analyzed_content(&analyzed, &chunked, &normalized).unwrap();
+            let fresh: AnalyzedDocument =
+                serde_json::from_slice(&serde_json::to_vec(&analyzed).unwrap()).unwrap();
+            let expected_quote = fresh.chunks[0].evidence[0].exact_quote.clone();
+            {
+                let requests = runtime.inner.requests.lock().unwrap();
+                assert_eq!(requests.len(), 2);
+                let selection: Value = serde_json::from_str(&requests[0].user_prompt).unwrap();
+                let paraphrase: Value = serde_json::from_str(&requests[1].user_prompt).unwrap();
+                assert_eq!(
+                    paraphrase["exact_quote"],
+                    selection["quote_candidates"][choice]["exact_quote"]
+                );
+                assert_eq!(paraphrase["exact_quote"], expected_quote);
+            }
+            let synthesized = coherent::synthesize(
+                SummaryProfile::General,
+                &runtime,
+                &fresh,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap();
+            // Fresh Analyze evidence owns the ledger. The source-only writer rebuilds its
+            // offered catalog from canonical text, independently of generated drafts.
+            assert_eq!(
+                synthesized.claims,
+                direct::source_ordered_claims(&fresh).unwrap()
+            );
+            let requests = runtime.inner.requests.lock().unwrap();
+            let synth: Vec<_> = requests
+                .iter()
+                .filter(|r| r.stage == PipelineStage::Synthesize)
+                .cloned()
+                .collect();
+            assert_eq!(synth.len(), 1);
+            synthesis_requests.push(synth[0].clone());
+            artifacts.push(fresh);
+        }
+        assert_ne!(
+            artifacts[0].chunks[0].evidence,
+            artifacts[1].chunks[0].evidence
+        );
+        assert_eq!(
+            synthesis_requests[0], synthesis_requests[1],
+            "source-only payload must not become draft-dependent"
+        );
+        for choice in [usize::MAX, usize::MAX - 1] {
+            let runtime = SelectionRuntime {
+                inner: materiality_runtime(false, 0, false),
+                choice,
+            };
+            assert!(analyze(
+                &runtime,
+                &chunked,
+                &normalized,
+                TEST_GENERATION_SEED,
+                &UNCONTROLLED_EXECUTION
+            )
+            .is_err());
+            assert_eq!(runtime.inner.requests.lock().unwrap().len(), 1);
+        }
+        let runtime = SelectionRuntime {
+            inner: materiality_runtime(false, 0, false),
+            choice: 0,
+        };
+        let mut invalid = artifacts[0].clone();
+        invalid.chunks[0].evidence[0]
+            .exact_quote
+            .push_str(" Invented.");
+        assert!(coherent::synthesize(
+            SummaryProfile::General,
+            &runtime,
+            &invalid,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION
+        )
+        .is_err());
+        assert!(runtime.inner.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn qualification_refuses_analyze_repair_before_dispatch() {
+        struct Unfinished(MaterialityRuntime);
+        impl ModelRuntime for Unfinished {
+            fn generate(&self, r: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                let mut response = self.0.generate(r)?;
+                if matches!(&r.output_format, ModelOutputFormat::JsonSchema { name, .. } if name == pages::PARAPHRASE_SCHEMA)
+                {
+                    response.text = json!({"claim_text":"Retain records"}).to_string();
+                }
+                Ok(response)
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                self.0.health()
+            }
+            fn runtime_id(&self) -> &str {
+                self.0.runtime_id()
+            }
+            fn model_id(&self) -> &str {
+                self.0.model_id()
+            }
+        }
+        for ordinal in 1..=11 {
+            assert_ne!(
+                generation_seed_for_attempt(TEST_GENERATION_SEED, ordinal),
+                TEST_GENERATION_SEED
+            );
+        }
+        let inner = std::sync::Arc::new(Unfinished(materiality_runtime(false, 0, false)));
+        let budget = crate::pipeline::live_runtime::QualificationBudget::native_stages();
+        let runtime = budget.wrap(inner.clone());
+        let (normalized, chunked) = materiality_fixture(&["Retain records forever.".into()]);
+        let result = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        );
+        assert!(
+            result.is_err(),
+            "Analyze repair escaped the qualification guard"
+        );
+        assert_eq!(inner.0.requests.lock().unwrap().len(), 2);
+        assert_eq!(budget.observation()["reserved_completions"], 2);
+        assert_eq!(
+            budget.observation()["stopped"],
+            "QUALIFICATION_ANALYSIS_SEED_CHANGED"
+        );
     }
 
     #[test]

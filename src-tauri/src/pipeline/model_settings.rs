@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 const SETTINGS_VERSION: u32 = 3;
 pub const SETTINGS_FILE_NAME: &str = "model-settings-v1.json";
-const DEFAULT_PRESET_ID: &str = "full-qwen3-30b-a3b-q4ks-v1";
+const DEFAULT_PRESET_ID: &str = "full-qwen35-9b-q4km-v1";
 #[cfg(feature = "connect-proof-runtime")]
 const CONNECT_PROOF_PRESET_ID: &str = "connect-proof-local-fixture-v1";
 #[cfg(feature = "connect-proof-runtime")]
@@ -65,6 +65,8 @@ struct QualifiedProfile {
     runtime_binary_digest: Option<&'static str>,
     runtime_libraries: &'static [QualifiedRuntimeFile],
     label: &'static str,
+    parameter_size: &'static str,
+    quantization_level: &'static str,
     disable_thinking: bool,
 }
 
@@ -85,6 +87,8 @@ const QUALIFIED_PROFILES: &[QualifiedProfile] = &[
         runtime_binary_digest: None,
         runtime_libraries: &[],
         label: "Qwen 3 30B-A3B",
+        parameter_size: "30B-A3B",
+        quantization_level: "Q4_K_S",
         disable_thinking: false,
     },
     QualifiedProfile {
@@ -101,7 +105,27 @@ const QUALIFIED_PROFILES: &[QualifiedProfile] = &[
         runtime_binary_digest: Some(QUALIFIED_LLAMA_SERVER_DIGEST),
         runtime_libraries: JACK_LLAMA_CPP_LIBRARIES,
         label: "Jack Qwen 3.8 27B Coder (12 GB)",
+        parameter_size: "27.3B",
+        quantization_level: "IQ2_M",
         disable_thinking: false,
+    },
+    QualifiedProfile {
+        profile_id: "qwen35-9b-q4km-v1",
+        digest: "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
+        tokenizer_family: QwenTokenizerFamily::Qwen35,
+        tokenizer_version: QWEN35_TOKENIZER_VERSION,
+        safe_context_tokens: 32_768,
+        analysis: true,
+        verifier_rank: Some(80),
+        full: true,
+        hybrid_analysis: false,
+        runtime_kind: ModelRuntimeKind::LlamaCppGguf,
+        runtime_binary_digest: Some(QUALIFIED_LLAMA_SERVER_DIGEST),
+        runtime_libraries: JACK_LLAMA_CPP_LIBRARIES,
+        label: "Qwen 3.5 9B",
+        parameter_size: "9B",
+        quantization_level: "Q4_K_M",
+        disable_thinking: true,
     },
 ];
 
@@ -640,8 +664,9 @@ fn registered_descriptors(
                     size_bytes: registration.size_bytes,
                     architecture: qualified.map(|_| "qwen35".to_string()),
                     tokenizer_family: qualified.map(|profile| profile.tokenizer_family),
-                    parameter_size: qualified.map(|_| "27.3B".to_string()),
-                    quantization_level: qualified.map(|_| "IQ2_M".to_string()),
+                    parameter_size: qualified.map(|profile| profile.parameter_size.to_string()),
+                    quantization_level: qualified
+                        .map(|profile| profile.quantization_level.to_string()),
                     maximum_context_tokens: qualified.map(|_| 262_144),
                     disabled_reason,
                 },
@@ -1562,7 +1587,7 @@ mod tests {
         };
         ModelProfileSnapshot {
             version: 1,
-            preset_id: DEFAULT_PRESET_ID.to_string(),
+            preset_id: format!("full-{}", profile.profile_id),
             analysis: stage.clone(),
             verification: stage,
         }
@@ -1694,6 +1719,221 @@ mod tests {
     }
 
     #[test]
+    fn fresh_settings_select_pinned_9b_for_both_stages() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = load_settings(&settings_path(directory.path())).unwrap();
+        assert_eq!(settings.selected_preset_id, "full-qwen35-9b-q4km-v1");
+        let profile = QUALIFIED_PROFILES
+            .iter()
+            .find(|profile| profile.profile_id == "qwen35-9b-q4km-v1")
+            .unwrap();
+        assert_eq!(
+            profile.digest,
+            "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13"
+        );
+        let installed = descriptor(
+            "renamed-9b.gguf",
+            profile.digest,
+            Some(QwenTokenizerFamily::Qwen35),
+            Some(262_144),
+        );
+        let catalog = catalog_from_descriptors(
+            settings,
+            vec![(installed, ModelRuntimeKind::LlamaCppGguf)],
+            QUALIFIED_PROFILES,
+            vec![],
+        )
+        .unwrap();
+        assert!(catalog.selected_preset_available);
+        assert!(profile.disable_thinking);
+        assert_eq!(catalog.presets.len(), 1);
+        let preset = &catalog.presets[0];
+        assert_eq!(preset.analysis_context_tokens, 32_768);
+        assert_eq!(preset.verification_context_tokens, 32_768);
+        assert_eq!(preset.analysis_digest, profile.digest);
+        assert_eq!(preset.verification_digest, profile.digest);
+        assert_eq!(preset.analysis_runtime_kind, ModelRuntimeKind::LlamaCppGguf);
+        assert_eq!(
+            preset.verification_runtime_kind,
+            ModelRuntimeKind::LlamaCppGguf
+        );
+    }
+
+    #[test]
+    fn qwen35_default_rejects_wrong_identity_without_falling_back() {
+        let profile = QUALIFIED_PROFILES
+            .iter()
+            .find(|p| p.profile_id == "qwen35-9b-q4km-v1")
+            .unwrap();
+        for (digest, family, context, runtime) in [
+            (
+                "wrong-digest",
+                QwenTokenizerFamily::Qwen35,
+                32_768,
+                ModelRuntimeKind::LlamaCppGguf,
+            ),
+            (
+                profile.digest,
+                QwenTokenizerFamily::Qwen3,
+                32_768,
+                ModelRuntimeKind::LlamaCppGguf,
+            ),
+            (
+                profile.digest,
+                QwenTokenizerFamily::Qwen35,
+                32_767,
+                ModelRuntimeKind::LlamaCppGguf,
+            ),
+            (
+                profile.digest,
+                QwenTokenizerFamily::Qwen35,
+                32_768,
+                ModelRuntimeKind::OllamaNative,
+            ),
+        ] {
+            let candidate = descriptor("Qwen3.5-9B.gguf", digest, Some(family), Some(context));
+            let catalog = catalog_from_descriptors(
+                ModelSettings::default(),
+                vec![(candidate, runtime)],
+                QUALIFIED_PROFILES,
+                vec![],
+            )
+            .unwrap();
+            assert!(!catalog.selected_preset_available);
+            assert!(catalog.presets.is_empty());
+        }
+        assert!(selected_direct_snapshot(&ModelSettings::default()).is_err());
+    }
+
+    #[test]
+    fn qwen35_context_admission_matches_the_stage_snapshot() {
+        let profile = QUALIFIED_PROFILES
+            .iter()
+            .find(|p| p.profile_id == "qwen35-9b-q4km-v1")
+            .unwrap();
+        for maximum in [
+            None,
+            Some(0),
+            Some(32_767),
+            Some(32_768),
+            Some(32_769),
+            Some(262_144),
+        ] {
+            let catalog = catalog_from_descriptors(
+                ModelSettings::default(),
+                vec![(
+                    descriptor(
+                        "renamed.gguf",
+                        profile.digest,
+                        Some(QwenTokenizerFamily::Qwen35),
+                        maximum,
+                    ),
+                    ModelRuntimeKind::LlamaCppGguf,
+                )],
+                QUALIFIED_PROFILES,
+                vec![],
+            )
+            .unwrap();
+            let admitted = maximum.is_some_and(|tokens| tokens >= 32_768);
+            assert_eq!(catalog.selected_preset_available, admitted, "{maximum:?}");
+            if admitted {
+                let preset = &catalog.presets[0];
+                assert_eq!(preset.analysis_context_tokens, 32_768);
+                assert_eq!(preset.verification_context_tokens, 32_768);
+            } else {
+                assert!(catalog.presets.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn existing_selections_are_not_rewritten_to_the_new_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = settings_path(directory.path());
+        for version in [1, 2, 3] {
+            let bytes = serde_json::to_vec(&serde_json::json!({"version": version, "selectedPresetId":"full-qwen3-30b-a3b-q4ks-v1"})).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                load_settings(&path).unwrap().selected_preset_id,
+                "full-qwen3-30b-a3b-q4ks-v1"
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn registered_9b_metadata_comes_from_its_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("renamed.gguf");
+        fs::write(&model, b"fixture").unwrap();
+        let (canonical_path, size_bytes, _, file_identity) = inspect_regular_file(&model).unwrap();
+        let profile = QUALIFIED_PROFILES
+            .iter()
+            .find(|p| p.profile_id == "qwen35-9b-q4km-v1")
+            .unwrap();
+        let mut settings = ModelSettings::default();
+        settings.registered_ggufs.push(RegisteredGguf {
+            canonical_path,
+            file_name: "renamed.gguf".into(),
+            digest: profile.digest.into(),
+            size_bytes,
+            file_identity,
+        });
+        let descriptors = registered_descriptors(&settings);
+        assert_eq!(descriptors[0].0.parameter_size.as_deref(), Some("9B"));
+        assert_eq!(
+            descriptors[0].0.quantization_level.as_deref(),
+            Some("Q4_K_M")
+        );
+        let snapshot = selected_direct_snapshot(&settings).unwrap().unwrap();
+        assert_eq!(snapshot.analysis, snapshot.verification);
+        assert_eq!(snapshot.analysis.model_digest, profile.digest);
+        assert_eq!(snapshot.analysis.context_tokens, 32_768);
+        assert_eq!(snapshot.verification.context_tokens, 32_768);
+        let config =
+            native_profile_config(&snapshot.analysis, profile, &settings, directory.path())
+                .unwrap();
+        assert_eq!(config.model_digest, profile.digest);
+        assert_eq!(config.context_tokens, 32_768);
+        assert!(config.disable_thinking);
+        assert_eq!(config.expected_server_digest, QUALIFIED_LLAMA_SERVER_DIGEST);
+        assert_eq!(
+            config.expected_runtime_libraries.len(),
+            profile.runtime_libraries.len()
+        );
+        for (actual, expected) in config
+            .expected_runtime_libraries
+            .iter()
+            .zip(profile.runtime_libraries)
+        {
+            assert_eq!(actual.file_name, expected.file_name);
+            assert_eq!(actual.digest, expected.digest);
+        }
+        assert_eq!(
+            config.model_path,
+            settings.registered_ggufs[0].canonical_path
+        );
+        assert_eq!(
+            config.expected_file_identity,
+            settings.registered_ggufs[0].file_identity
+        );
+    }
+
+    #[test]
+    fn integration_fresh_settings_select_9b() {
+        assert_eq!(
+            ModelSettings::default().selected_preset_id,
+            "full-qwen35-9b-q4km-v1"
+        );
+        let profile = QUALIFIED_PROFILES
+            .iter()
+            .find(|p| p.profile_id == "qwen35-9b-q4km-v1")
+            .expect("the pinned 9B profile must be admitted");
+        assert_eq!(profile.safe_context_tokens, 32_768);
+        assert!(profile.disable_thinking);
+    }
+
+    #[test]
     fn exact_digest_and_context_admit_only_the_qualified_preset() {
         let settings = ModelSettings::default();
         let qualified = descriptor(
@@ -1749,7 +1989,10 @@ mod tests {
             Some(262_144),
         );
         let catalog = catalog_for(
-            ModelSettings::default(),
+            ModelSettings {
+                selected_preset_id: "full-qwen3-30b-a3b-q4ks-v1".into(),
+                ..ModelSettings::default()
+            },
             vec![later_alias, canonical_alias],
             QUALIFIED_PROFILES,
         )
@@ -1757,7 +2000,7 @@ mod tests {
 
         assert_eq!(catalog.installed_models.len(), 2);
         assert_eq!(catalog.presets.len(), 1);
-        assert_eq!(catalog.presets[0].preset_id, DEFAULT_PRESET_ID);
+        assert_eq!(catalog.presets[0].preset_id, "full-qwen3-30b-a3b-q4ks-v1");
         assert_eq!(catalog.presets[0].analysis_model, "a-baseline:latest");
         assert_eq!(catalog.presets[0].verification_model, "a-baseline:latest");
         assert!(catalog.selected_preset_available);
@@ -1945,7 +2188,8 @@ mod tests {
             policies,
             vec![
                 ("qwen3-30b-a3b-q4ks-v1", false),
-                ("jack-qwen38-27b-iq2m-v1", false)
+                ("jack-qwen38-27b-iq2m-v1", false),
+                ("qwen35-9b-q4km-v1", true)
             ]
         );
     }
@@ -2022,9 +2266,12 @@ mod tests {
             selected_direct_snapshot(&missing).unwrap_err().code,
             "MODEL_CONFIG_INVALID"
         );
-        assert!(selected_direct_snapshot(&ModelSettings::default())
-            .unwrap()
-            .is_none());
+        assert!(selected_direct_snapshot(&ModelSettings {
+            selected_preset_id: "full-qwen3-30b-a3b-q4ks-v1".into(),
+            ..ModelSettings::default()
+        })
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -2118,6 +2365,8 @@ mod tests {
             runtime_binary_digest: None,
             runtime_libraries: &[],
             label: "Ollama fixture",
+            parameter_size: "30B-A3B",
+            quantization_level: "Q4_K_S",
             disable_thinking: false,
         };
         const DIRECT: QualifiedProfile = QualifiedProfile {
@@ -2227,6 +2476,8 @@ mod tests {
             runtime_binary_digest: None,
             runtime_libraries: &[],
             label: "Small analysis candidate",
+            parameter_size: "4B",
+            quantization_level: "Q4_K_M",
             disable_thinking: false,
         };
         const PROFILES: &[QualifiedProfile] = &[QUALIFIED_PROFILES[0], SMALL];

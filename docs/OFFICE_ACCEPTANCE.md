@@ -5,6 +5,25 @@ real-world PDFs that resemble documents a small office may receive. The files
 are downloaded into ignored `tmp/pdfs/office-acceptance/`; they are not copied
 into Git, and no private customer document or OAuth material is required.
 
+## Selected native profile integration (offline candidate)
+
+The accepted integration contract is `docs/PR-NATIVE-PROFILE-INTEGRATION.md`.
+This slice runs no ignored live tests and permits zero model calls. Catalog
+admission and deterministic tests do not qualify a profile or clear PR116.
+The existing release shell wrapper below remains a legacy Ollama lane; do not
+use it as proof for this native candidate.
+
+The shared live helper uses explicit `DOC_SUM_MODEL_SETTINGS_PATH` first,
+then an explicit `DOC_SUM_QUALIFICATION_ANALYSIS_MODEL` diagnostic candidate,
+then requires `DOC_SUM_QUALIFICATION_GGUF` for the selected default. The last
+path registers the GGUF into isolated private settings and calls the real
+production factory. Its temporary directory stays alive for the runtime.
+It never silently substitutes Ollama when the default GGUF is absent.
+Explicit diagnostic candidates default their verifier to the analysis model,
+as on the donor; that differs from the old office helper's 30B fallback and
+must not be reported as default-profile qualification. Existing saved model
+selections are preserved. Jack remains admitted with its qualification hold.
+
 ## Public corpus
 
 | Document | Source | SHA-256 | Purpose |

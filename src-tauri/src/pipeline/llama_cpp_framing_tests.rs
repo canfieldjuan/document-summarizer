@@ -1,4 +1,5 @@
 use crate::pipeline::contracts::ModelOutputFormat;
+use crate::pipeline::control::CancellationToken;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 fn pinned_9b_runtime() -> (tempfile::TempDir, Arc<LlamaCppRuntime>) {
@@ -345,13 +346,148 @@ thread_local! {
     static COMPLETION_CAPTURE: std::cell::RefCell<Option<(PathBuf, bool)>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(target_os = "linux")]
-struct CompletionCapture;
+pub(crate) struct CompletionCapture;
 #[cfg(target_os = "linux")]
 impl Drop for CompletionCapture {
     fn drop(&mut self) {
         COMPLETION_CAPTURE.with(|c| *c.borrow_mut() = None);
     }
 }
+// Reuse the framing lane's actual serializer/decoder hooks for stage qualification.
+// The scope must stay on the calling thread, just like the existing parity lane.
+#[cfg(target_os = "linux")]
+pub(crate) fn capture_native_completion(root: &Path) -> CompletionCapture {
+    COMPLETION_CAPTURE.with(|c| {
+        assert!(c.borrow().is_none(), "completion capture already active");
+        *c.borrow_mut() = Some((root.to_path_buf(), false));
+    });
+    CompletionCapture
+}
+
+struct TokenizerObservation {
+    root: PathBuf,
+    state: Mutex<TokenizerObservationState>,
+}
+struct TokenizerObservationState {
+    closed: bool,
+    phase: String,
+    attempts: Vec<Value>,
+    decoded: usize,
+}
+struct TokenizerRegistry {
+    enabled: AtomicBool,
+    scopes: Mutex<HashMap<String, Arc<TokenizerObservation>>>,
+}
+impl TokenizerRegistry {
+    fn new() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            scopes: Mutex::new(HashMap::new()),
+        }
+    }
+    fn send(&self, endpoint: &str, parse_special: bool) {
+        // Disabled observation does not touch a mutex or thread-local state.
+        if !self.enabled.load(Ordering::Acquire) {
+            return;
+        }
+        let scope = self.scopes.lock().unwrap().get(endpoint).cloned();
+        TOKENIZER_PENDING.with(|p| *p.borrow_mut() = None);
+        if let Some(scope) = scope {
+            let mut state = scope.state.lock().unwrap();
+            if state.closed {
+                return;
+            }
+            let ordinal = state.attempts.len();
+            let event = json!({"send_ordinal":ordinal,"endpoint":endpoint,"phase":state.phase,"parse_special":parse_special});
+            save(
+                &scope.root,
+                &format!("tokenizer-attempt-{ordinal}.json"),
+                &event,
+            );
+            state.attempts.push(event);
+            drop(state);
+            TOKENIZER_PENDING.with(|p| *p.borrow_mut() = Some(scope));
+        }
+    }
+}
+static TOKENIZER_REGISTRY: OnceLock<TokenizerRegistry> = OnceLock::new();
+thread_local! {
+    static TOKENIZER_PENDING: std::cell::RefCell<Option<Arc<TokenizerObservation>>> = const { std::cell::RefCell::new(None) };
+}
+pub(crate) struct NativeTokenizerCapture {
+    endpoints: Vec<String>,
+    scope: Arc<TokenizerObservation>,
+}
+impl Drop for NativeTokenizerCapture {
+    fn drop(&mut self) {
+        let registry = TOKENIZER_REGISTRY.get().unwrap();
+        {
+            let mut scopes = registry.scopes.lock().unwrap();
+            for endpoint in &self.endpoints {
+                scopes.remove(endpoint);
+            }
+            registry
+                .enabled
+                .store(!scopes.is_empty(), Ordering::Release);
+        }
+        let mut state = self.scope.state.lock().unwrap();
+        state.closed = true;
+        save(
+            &self.scope.root,
+            "tokenizer-observation.json",
+            &json!({
+                "tokenizer_http_send_attempts":state.attempts.len(),
+                "decoded_tokenizer_http_responses":state.decoded,
+                "attempts":state.attempts,
+                "metric":"attempted sends, including unsuccessful attempts; not proof of remote receipt",
+            }),
+        );
+    }
+}
+fn capture_tokenizer_endpoints(root: &Path, endpoints: &[String]) -> NativeTokenizerCapture {
+    assert!(!endpoints.is_empty());
+    let registry = TOKENIZER_REGISTRY.get_or_init(TokenizerRegistry::new);
+    let scope = Arc::new(TokenizerObservation {
+        root: root.into(),
+        state: Mutex::new(TokenizerObservationState {
+            closed: false,
+            phase: "startup".into(),
+            attempts: vec![],
+            decoded: 0,
+        }),
+    });
+    let mut scopes = registry.scopes.lock().unwrap();
+    for endpoint in endpoints {
+        assert!(
+            !scopes.contains_key(endpoint),
+            "tokenizer endpoint already observed"
+        );
+    }
+    for endpoint in endpoints {
+        scopes.insert(endpoint.clone(), scope.clone());
+    }
+    registry.enabled.store(true, Ordering::Release);
+    NativeTokenizerCapture {
+        endpoints: endpoints.to_vec(),
+        scope,
+    }
+}
+pub(crate) fn capture_native_tokenizer(root: &Path) -> NativeTokenizerCapture {
+    // The selected native owner uses one private Unix socket and this HTTP authority.
+    // The qualification binary runs one test/selected profile, never another app.
+    capture_tokenizer_endpoints(root, &["http://localhost".into()])
+}
+impl NativeTokenizerCapture {
+    pub(crate) fn set_phase(&self, phase: &str) {
+        self.scope.state.lock().unwrap().phase = phase.into();
+    }
+}
+pub(super) fn capture_tokenizer_send(endpoint: &str, parse_special: bool) {
+    if let Some(registry) = TOKENIZER_REGISTRY.get() {
+        registry.send(endpoint, parse_special);
+    }
+}
+
 pub(super) fn capture_completion_request(payload: &impl Serialize) {
     COMPLETION_CAPTURE.with(|c| {
         if let Some((root, pending)) = c.borrow_mut().as_mut() {
@@ -365,6 +501,20 @@ pub(super) fn capture_completion_request(payload: &impl Serialize) {
     });
 }
 pub(super) fn capture_completion_response(bytes: &[u8]) {
+    TOKENIZER_PENDING.with(|p| {
+        if let Some(scope) = p.borrow_mut().take() {
+            let mut state = scope.state.lock().unwrap();
+            if !state.closed && serde_json::from_slice::<TokenizeResponse>(bytes).is_ok() {
+                let mut f = private_capture_file(
+                    &scope
+                        .root
+                        .join(format!("tokenizer-response-{}.json", state.decoded)),
+                );
+                f.write_all(bytes).unwrap();
+                state.decoded += 1;
+            }
+        }
+    });
     COMPLETION_CAPTURE.with(|c| {
         if let Some((root, pending)) = c.borrow_mut().as_mut() {
             if *pending {
@@ -1164,4 +1314,238 @@ fn assert_summary_gpu_idle() {
             && queue["queue_pending"].as_array().unwrap().is_empty(),
         "ComfyUI is busy"
     );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn qualification_capture_reuses_actual_wire_and_scopes_tokenizer_observations() {
+    let output = tempfile::tempdir().unwrap();
+    {
+        let _tokens = capture_tokenizer_endpoints(output.path(), &["wire-unit-fixture".into()]);
+        capture_tokenizer_send("wire-unit-fixture", false);
+        capture_completion_response(br#"{"tokens":[1,2]}"#);
+        capture_completion_response(br#"{"data":[]}"#);
+        let _completion = capture_native_completion(output.path());
+        capture_tokenizer_send("wire-unit-fixture", false);
+        capture_completion_response(br#"{"tokens":[3]}"#);
+        assert!(!output.path().join("response.raw.json").exists());
+        capture_completion_request(&json!({"prompt":[1,2],"n_predict":10}));
+        capture_completion_response(br#"{"content":"ok","stop_type":"word"}"#);
+    }
+    capture_completion_response(br#"{"tokens":[4]}"#);
+    let observation: Value = serde_json::from_slice(
+        &fs::read(output.path().join("tokenizer-observation.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(observation["decoded_tokenizer_http_responses"], 2);
+    assert!(!output.path().join("tokenizer-response-2.json").exists());
+    assert_eq!(
+        fs::read(output.path().join("response.raw.json")).unwrap(),
+        br#"{"content":"ok","stop_type":"word"}"#
+    );
+    let wire: Value =
+        serde_json::from_slice(&fs::read(output.path().join("wire-request.json")).unwrap())
+            .unwrap();
+    assert_eq!(wire["prompt"], json!([1, 2]));
+}
+
+fn tokenizer_observation(root: &Path) -> Value {
+    serde_json::from_slice(&fs::read(root.join("tokenizer-observation.json")).unwrap()).unwrap()
+}
+
+fn tokenizer_http_fixture(
+    body: Vec<u8>,
+    status: &str,
+    calls: usize,
+) -> (String, thread::JoinHandle<usize>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let status = status.to_string();
+    let server = thread::spawn(move || {
+        for _ in 0..calls {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let count = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..count]).starts_with("POST /tokenize "));
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            // The decoder may stop at its hard bound before the server finishes.
+            let _ = stream.write_all(&body);
+        }
+        calls
+    });
+    (endpoint, server)
+}
+
+#[test]
+fn qualification_tokenizer_capture_counts_rejected_http_attempt() {
+    let output = tempfile::tempdir().unwrap();
+    let (endpoint, server) = tokenizer_http_fixture(vec![], "503 Service Unavailable", 1);
+    {
+        let _capture = capture_tokenizer_endpoints(output.path(), std::slice::from_ref(&endpoint));
+        let runtime = LlamaCppRuntime::for_test(endpoint, "public-fixture-token".into());
+        assert_eq!(
+            runtime
+                .prompt_tokens("system", "user", &UNCONTROLLED_EXECUTION)
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_REJECTED"
+        );
+    }
+    let actual = server.join().unwrap();
+    let observed = tokenizer_observation(output.path());
+    println!("TOKENIZER_ATTEMPT_PROBE actual_http_attempts={actual} observed_send_attempts={} observed_decoded_responses={}", observed["tokenizer_http_send_attempts"], observed["decoded_tokenizer_http_responses"]);
+    assert_eq!(observed["tokenizer_http_send_attempts"], json!(actual));
+    assert_eq!(observed["decoded_tokenizer_http_responses"], 0);
+}
+
+#[test]
+fn qualification_tokenizer_capture_success_and_malformed_oversized_boundaries() {
+    for (body, calls, expected_error) in [
+        (br#"{"tokens":[1]}"#.to_vec(), 2, None),
+        (b"malformed".to_vec(), 1, Some("MODEL_RESPONSE_INVALID")),
+        (
+            br#"{"tokens":"wrong-type"}"#.to_vec(),
+            1,
+            Some("MODEL_RESPONSE_INVALID"),
+        ),
+        (
+            vec![b'x'; MAX_TOKENIZE_RESPONSE_BYTES as usize + 1],
+            1,
+            Some("MODEL_RESPONSE_TOO_LARGE"),
+        ),
+    ] {
+        let output = tempfile::tempdir().unwrap();
+        let (endpoint, server) = tokenizer_http_fixture(body, "200 OK", calls);
+        {
+            let _capture =
+                capture_tokenizer_endpoints(output.path(), std::slice::from_ref(&endpoint));
+            let runtime = LlamaCppRuntime::for_test(endpoint, "public-fixture-token".into());
+            let result = runtime.prompt_tokens("system", "user", &UNCONTROLLED_EXECUTION);
+            if let Some(code) = expected_error {
+                assert_eq!(result.unwrap_err().code, code);
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+        assert_eq!(server.join().unwrap(), calls);
+        let observed = tokenizer_observation(output.path());
+        assert_eq!(observed["tokenizer_http_send_attempts"], calls);
+        assert_eq!(
+            observed["decoded_tokenizer_http_responses"],
+            if expected_error.is_some() { 0 } else { calls }
+        );
+    }
+}
+
+#[test]
+fn qualification_tokenizer_capture_transport_failure_and_cancellation() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut bytes = [0; 4096];
+        let count = stream.read(&mut bytes).unwrap();
+        assert!(count > 0);
+    });
+    let output = tempfile::tempdir().unwrap();
+    {
+        let _capture = capture_tokenizer_endpoints(output.path(), std::slice::from_ref(&endpoint));
+        let runtime = LlamaCppRuntime::for_test(endpoint, "public-fixture-token".into());
+        assert_eq!(
+            runtime
+                .prompt_tokens("system", "user", &UNCONTROLLED_EXECUTION)
+                .unwrap_err()
+                .code,
+            "MODEL_RUNTIME_UNAVAILABLE"
+        );
+    }
+    server.join().unwrap();
+    assert_eq!(
+        tokenizer_observation(output.path())["tokenizer_http_send_attempts"],
+        1
+    );
+    assert_eq!(
+        tokenizer_observation(output.path())["decoded_tokenizer_http_responses"],
+        0
+    );
+    let output = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    {
+        let _capture = capture_tokenizer_endpoints(output.path(), std::slice::from_ref(&endpoint));
+        let control = CancellationToken::new();
+        control.request();
+        let runtime = LlamaCppRuntime::for_test(endpoint, "public-fixture-token".into());
+        assert_eq!(
+            runtime
+                .prompt_tokens("system", "user", &control)
+                .unwrap_err()
+                .code,
+            "MODEL_REQUEST_CANCELLED"
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+    assert_eq!(
+        tokenizer_observation(output.path())["tokenizer_http_send_attempts"],
+        0
+    );
+}
+
+#[test]
+fn qualification_tokenizer_capture_disabled_does_not_acquire_lock() {
+    let registry = Arc::new(TokenizerRegistry::new());
+    let lock = registry.scopes.lock().unwrap();
+    let cloned = registry.clone();
+    let (tx, rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        cloned.send("unobserved", false);
+        tx.send(()).unwrap();
+    });
+    // Holding exactly the mutex send would take proves the disabled early return.
+    assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok());
+    drop(lock);
+    worker.join().unwrap();
+    assert!(registry.scopes.lock().unwrap().is_empty());
+}
+
+#[test]
+fn qualification_tokenizer_capture_cross_thread_and_endpoint_isolation() {
+    let output = tempfile::tempdir().unwrap();
+    let native = capture_native_tokenizer(output.path());
+    native.set_phase("worker-fixture");
+    let workers: Vec<_> = (0..8)
+        .map(|_| {
+            thread::spawn(|| {
+                capture_tokenizer_send("http://localhost", true);
+                capture_completion_response(br#"{"tokens":[1]}"#);
+                capture_tokenizer_send("unrelated-endpoint", false);
+                capture_completion_response(br#"{"tokens":[2]}"#);
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    drop(native);
+    let observed = tokenizer_observation(output.path());
+    assert_eq!(observed["tokenizer_http_send_attempts"], 8);
+    assert_eq!(observed["decoded_tokenizer_http_responses"], 8);
+    assert!(observed["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|v| v["endpoint"] == "http://localhost" && v["phase"] == "worker-fixture"));
+    capture_tokenizer_send("http://localhost", false);
+    assert_eq!(tokenizer_observation(output.path()), observed);
 }
