@@ -6,7 +6,7 @@ Status: ACCEPTED by the operator in this chat ("I accept"). Contract-only record
 
 Retained inventory: native-stage-qualification-contract-20261009/synthesis-after-budget-stop/inventory.json, verified SHA25683774cb1790d6ebdf41cdd777101c2497c851d9c1288a1a837e1362010cdf401. The active source/runtime freeze and saved artifacts below are the executed setup used here. Preserved C9/native diagnostics and saved fresh Analyze artifacts are reused, never regenerated. Active published head dd607bb85580ffa6d7481b50dd0095a8db29b6d0; frozen source c42fa95035dfa3c27496234be49e0e02cac0e36c2fe9cf2a5ec73a7b970fbe59. Qwen3.5-9B Q4_K_M digest cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13; server digest0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099; context32768, thinking off, repaired native message boundaries, /completion, existing library pins and prompt/schema/planner/parser/settings unchanged. This inventory claim is backed by the existing freeze and executed request, not a new capacity hypothesis.
 
-The sole replacement spent exactly1 completion after31 delegated preflights. The actual packet/request exactly matched the independent approval. Native stop eos, not truncated,158 generated tokens; the current native owner accepted the response. End-to-end synthesis failed at the harness's downstream Verify preflight. Saved response alias raw-generated-responses SHA256 a4f853ebcb82526c8a4a62ca68da8c3678ecd4f5d9eaad7a2789df132f35b0e2; raw wire response SHA256 c4dda3aa8237b65d89dfe80dbdd24c2e10e390804c436d2dcb185dea7cf6a226. Output fidelity is unreviewed; native success is not full qualification.
+The sole replacement spent exactly1 completion after31 delegated preflights. The actual packet/request exactly matched the independent approval. Native stop eos, not truncated,158 generated tokens; the current native owner accepted the response. End-to-end synthesis failed at the harness's downstream Verify preflight. Saved response alias raw-generated-responses SHA256 a4f853ebcb82526c8a4a62ca68da8c3678ecd4f5d9eaad7a2789df132f35b0e2; raw wire response SHA256 c4dda3aa8237b65d89dfe80dbdd24c2e10e390804c436d2dcb185dea7cf6a226. Output fidelity was unreviewed at the native stop. The subsequent independent review labels this same draft WITHHOLD (unfaithful), as recorded below; native success is not full qualification.
 
 ## Root cause
 
@@ -26,7 +26,7 @@ No production behavior, source association, prompt/framing, schema, sampler, mod
 
 ## Assumptions and blockers
 
-Operator acceptance now covers this offline admission-policy correction; it is distinct from the preceding lifecycle repair and its now-spent attempt. Any new native qualification remains separately unapproved. Actual native Verify admission and independent fidelity remain unresolved; a mock admission pass cannot clear them.
+Operator acceptance now covers this offline admission-policy correction; it is distinct from the preceding lifecycle repair and its now-spent attempt. Any new native qualification remains separately unapproved. Actual native Verify admission remains unmeasured. Independent fidelity review is complete with WITHHOLD (unfaithful), so fidelity clearance failed; a mock admission pass cannot clear either gate.
 
 ## Verification plan
 
@@ -40,4 +40,23 @@ Implementation: src-tauri/tests/support/live_runtime.rs::QualificationBudget::ad
 
 Evidence aliases: minimal-fail-before SHA256 f3b58b3f67e6fff2966c809886091f9441b12b106beb2cfee116d7e7096d0acc; production-owner-fail-before SHA256 21782e6108c69f29169c63c7a4309338365bde8a454d6348efe8730682588f1c; synthesis-scope-pass-after SHA256 760be2a9a7a77239840f5252896f798f43e504abcb673f69a7d8370ce239e750; budget-owner-tests SHA256 9510c7ebdec413ed6ef18ad5492d32cd8dc89887f49cc7cffd7ce218fbef0070; captured-replay-fail-before SHA256 78914ad7fd9048b83a33e1258c486357060001b30e27dcda3a43440423d1af4c; captured-replay-pass-after SHA256 b2673cd0e5832114a7f6c5bbbee54f425a037ffb724ee032cc0482a2b7142198; persisted-reloaded-draft SHA256 d89e071e23ad4f741b4395e148939aa1947e55efca5f1771ec794d9834e14fe2. Private artifacts contain owned source text and stay private.
 
-NOT DONE: actual native Verify admission, independent draft fidelity, full qualification, merge/release or any PR116 hold clearance. No new live run, model or tokenizer call is authorized. Cold diff audit and publication are recorded in the subsequent implementation receipt and PR reply.
+NOT DONE: actual native Verify admission, independent draft fidelity clearance (review complete, WITHHOLD), full qualification, merge/release or any PR116 hold clearance. No new live run, model or tokenizer call is authorized. Cold diff audit and publication are recorded in the subsequent implementation receipt and PR reply.
+
+
+## Recorded oversight dispositions at 41c1bdd
+
+[Oversight PR REVIEW](https://github.com/canfieldjuan/document-summarizer/pull/126#issuecomment-6104403941) clears the offline admission-policy repair at 41c1bdd832489d056ffe267a0d7d5cc22a6d07ba, pending CI and the bot's review. The repair permits the required Verify admission, counts it against the unchanged 64-preflight ceiling, keeps Verify generation forbidden, and leaves production unchanged. This disposition does not clear any PR116 hold.
+
+[Independent draft fidelity review](https://github.com/canfieldjuan/document-summarizer/pull/126#issuecomment-6104405951): **WITHHOLD (unfaithful)**. Criteria a91f1a26065c787cc9d9fafb4d8718d1576008d498dfe9532d0f78bc65017830 were applied unchanged to independent-draft-review-packet SHA256 1a7884485710d77e5bc6735f60ae4ab802cb29a0f421191328391cddbd31a9ea.
+
+- S3 reverses the anchor relationship ("ensuring that") and drops "should".
+- S4 attributes the fixture's purpose to the subsection rule and drops "exact source provenance".
+- S5 drops R6's "should".
+
+The reviewer records S1 and S2 as faithful, and R7 in S5 as faithful. All R1-R7 are present in some form, but R3 and R6 lose their modal force and R4 is partial. E2 is missing; that omission does not change the label. The unchanged criteria require withholding for any single unfaithful item. Structural parse, exact evidence quotes, persistence/reload and native eos are not fidelity clearance.
+
+P3: **non-blocking, no slice**. Verify preflight is admitted even before the Synthesize completion; the 64 cap still bounds it. Record the observation without changing the policy.
+
+Current terminal disposition: offline harness repair complete and independently cleared at the reviewed code head, subject to CI and bot review; fidelity review complete and the fidelity gate failed with WITHHOLD; actual native Verify admission remains unmeasured because it was mocked. The native attempt stays spent and all PR116 holds remain. No new generation, prompt/framing/schema change, or replacement run to improve the label. Any next native step waits for an explicit operator decision.
+
+Documentation-only reconciliation: this section records the existing review dispositions without changing their label or criteria. The earlier 14 budget-owner tests and 7 Synthesize-scope tests remain evidence for the repaired code at 41c1bdd832489d056ffe267a0d7d5cc22a6d07ba; they are not draft fidelity proof. No code suites are rerun for this documentation-only update. Cold diff and no-relevant-code-diff evidence are recorded in the publication receipt.
