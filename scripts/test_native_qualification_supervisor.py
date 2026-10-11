@@ -164,6 +164,7 @@ signal.signal(signal.SIGTERM, stopping)
         self.assertEqual(report['signal']['name'], 'SIGTERM')
         self.assertEqual(report['status'], 'SIGNALLED')
         self.assertEqual(report['cleanup_errors'], [])
+        self.assertEqual(report['late_signal'], {'number': signal.SIGHUP, 'name': 'SIGHUP'})
 
 
 class SupervisorBoundariesTests(unittest.TestCase):
@@ -190,6 +191,28 @@ class SupervisorBoundariesTests(unittest.TestCase):
             self.assertTrue((out/'owned-runtime.json').exists())
             self.assertTrue((out/'exit.json').exists())
             self.assertEqual(before, {sig: signal.getsignal(sig) for sig in before})
+
+    def test_late_signal_is_recorded_without_changing_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            original_save = self.owner.evidence.save
+
+            def signal_during_cleanup(path, value):
+                if path.name == 'owned-runtime.json':
+                    signal.raise_signal(signal.SIGHUP)
+                return original_save(path, value)
+
+            with mock.patch.object(self.owner.evidence, 'save', side_effect=signal_during_cleanup):
+                report = self.owner.supervise([sys.executable, '-c', 'pass'], out,
+                                              dict(os.environ), out, 'no-server', 1)
+            self.assertEqual(report['late_signal'], {'number': signal.SIGHUP, 'name': 'SIGHUP'})
+            self.assertEqual(json.loads((out/'exit.json').read_text())['late_signal'],
+                             report['late_signal'])
+            self.assertEqual(report['status'], 'PROCESS_EXIT')
+            self.assertEqual(report['exit_code'], 0)
+            self.assertIsNone(report['signal'])
+            self.assertFalse(report['timed_out'])
+            self.assertEqual(report['cleanup_errors'], [])
 
     def test_stop_receipt_distinguishes_uncatchable_loss(self):
         with tempfile.TemporaryDirectory() as tmp:

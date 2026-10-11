@@ -90,13 +90,15 @@ def supervise(command, cwd, environment, output, server_digest, deadline_seconds
     timed_out = False
     error = None
     cleanup_errors = []
-    state = {'signal': None, 'cleaning': False}
+    state = {'signal': None, 'late_signal': None, 'cleaning': False}
     previous = {}
     start = time.monotonic()
 
     def interrupted(sig, frame):
         # Repeated handled signals cannot interrupt cleanup or receipt writes.
         if state['cleaning']:
+            if state['late_signal'] is None:
+                state['late_signal'] = {'number': sig, 'name': signal.Signals(sig).name}
             return
         if state['signal'] is None:
             state['signal'] = {'number': sig, 'name': signal.Signals(sig).name}
@@ -169,6 +171,7 @@ def supervise(command, cwd, environment, output, server_digest, deadline_seconds
                     'exit_code': None if process is None else process.returncode,
                     'timed_out': timed_out, 'wall_seconds': time.monotonic() - start,
                     'error': error, 'signal': state['signal'],
+                    'late_signal': state['late_signal'],
                     'cleanup_errors': cleanup_errors, 'status': status,
                 }
                 evidence.save(output / 'exit.json', report)
