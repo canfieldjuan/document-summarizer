@@ -83,6 +83,12 @@ struct QualificationState {
     stopped: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum QualificationOperation {
+    Generation,
+    Preflight,
+}
+
 pub struct QualificationBudget {
     completion_limit: usize,
     synthesis_only: bool,
@@ -107,6 +113,30 @@ impl QualificationBudget {
             state: Mutex::new(QualificationState::default()),
         }
     }
+    fn admit_operation(
+        &self,
+        state: &mut QualificationState,
+        stage: &PipelineStage,
+        operation: QualificationOperation,
+    ) -> Result<(), ModelRuntimeFailure> {
+        if state.stopped.is_some() {
+            return Err(qualification_failure("QUALIFICATION_STOPPED"));
+        }
+        // Synthesize checks whether its completed draft fits Verify before saving it.
+        // Admission is not another generation; both still use the shared ceilings.
+        let allowed = !self.synthesis_only
+            || matches!(
+                (stage, operation),
+                (PipelineStage::Synthesize, _)
+                    | (PipelineStage::Verify, QualificationOperation::Preflight)
+            );
+        if !allowed {
+            state.stopped = Some("QUALIFICATION_UNEXPECTED_STAGE".into());
+            return Err(qualification_failure("QUALIFICATION_UNEXPECTED_STAGE"));
+        }
+        Ok(())
+    }
+
     pub fn wrap(self: &Arc<Self>, inner: Arc<dyn ModelRuntime>) -> QualificationRuntime {
         QualificationRuntime {
             inner,
@@ -153,13 +183,8 @@ impl ModelRuntime for QualificationRuntime {
     ) -> Result<ModelResponse, ModelRuntimeFailure> {
         // Hold the shared state through delegation: concurrent callers cannot cross a stop.
         let mut state = self.budget.state.lock().unwrap();
-        if state.stopped.is_some() {
-            return Err(qualification_failure("QUALIFICATION_STOPPED"));
-        }
-        if self.budget.synthesis_only && r.stage != PipelineStage::Synthesize {
-            state.stopped = Some("QUALIFICATION_UNEXPECTED_STAGE".into());
-            return Err(qualification_failure("QUALIFICATION_UNEXPECTED_STAGE"));
-        }
+        self.budget
+            .admit_operation(&mut state, &r.stage, QualificationOperation::Generation)?;
         // Initial page requests retain the owning run seed. The page owner derives
         // a different seed for a repair. Reject that departure before delegation;
         // no generated text or prompt is re-parsed here.
@@ -204,13 +229,8 @@ impl ModelRuntime for QualificationRuntime {
     }
     fn preflight_request(&self, r: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
         let mut state = self.budget.state.lock().unwrap();
-        if state.stopped.is_some() {
-            return Err(qualification_failure("QUALIFICATION_STOPPED"));
-        }
-        if self.budget.synthesis_only && r.stage != PipelineStage::Synthesize {
-            state.stopped = Some("QUALIFICATION_UNEXPECTED_STAGE".into());
-            return Err(qualification_failure("QUALIFICATION_UNEXPECTED_STAGE"));
-        }
+        self.budget
+            .admit_operation(&mut state, &r.stage, QualificationOperation::Preflight)?;
         if state.preflights.len() >= self.budget.preflight_limit {
             state.stopped = Some("QUALIFICATION_PREFLIGHT_CEILING".into());
             return Err(qualification_failure("QUALIFICATION_PREFLIGHT_CEILING"));
@@ -321,9 +341,43 @@ mod qualification_budget_tests {
         }
     }
     #[test]
-    fn synthesis_only_rejects_other_stages_before_delegation() {
+    fn synthesis_only_accepts_required_verification_preflight_after_generation() {
+        let probe = Probe::new();
+        let budget = QualificationBudget::synthesis_only();
+        let runtime = budget.wrap(probe.clone());
+        let synthesis = request(PipelineStage::Synthesize, 0);
+        for _ in 0..31 {
+            runtime.preflight_request(&synthesis).unwrap();
+        }
+        runtime.generate(&synthesis).unwrap();
+        runtime
+            .preflight_request(&request(PipelineStage::Verify, 0))
+            .expect(
+                "finished synthesis must admit its downstream verification without generating it",
+            );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.admissions.load(Ordering::SeqCst), 32);
+        assert_eq!(budget.observation()["delegated_preflights"], 32);
+        assert_eq!(budget.observation()["reserved_completions"], 1);
+        assert!(budget.observation()["stopped"].is_null());
+        assert_eq!(
+            runtime
+                .generate(&request(PipelineStage::Verify, 0))
+                .unwrap_err()
+                .code,
+            "QUALIFICATION_UNEXPECTED_STAGE"
+        );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.observation()["reserved_completions"], 1);
+    }
+
+    #[test]
+    fn synthesis_only_rejects_forbidden_operations_before_delegation() {
         for stage in [PipelineStage::Analyze, PipelineStage::Verify] {
             for preflight in [false, true] {
+                if stage == PipelineStage::Verify && preflight {
+                    continue; // Required downstream admission is covered by the positive regression.
+                }
                 let probe = Probe::new();
                 let budget = QualificationBudget::synthesis_only();
                 let runtime = budget.wrap(probe.clone());
@@ -349,8 +403,13 @@ mod qualification_budget_tests {
         let budget = QualificationBudget::synthesis_only();
         let runtime = budget.wrap(probe.clone());
         let r = request(PipelineStage::Synthesize, 0);
-        for _ in 0..64 {
-            runtime.preflight_request(&r).unwrap();
+        for i in 0..64 {
+            let stage = if i % 2 == 0 {
+                PipelineStage::Synthesize
+            } else {
+                PipelineStage::Verify
+            };
+            runtime.preflight_request(&request(stage, i)).unwrap();
         }
         assert_eq!(probe.admissions.load(Ordering::SeqCst), 64);
         assert_eq!(
@@ -370,6 +429,83 @@ mod qualification_budget_tests {
         assert_eq!(original.observation()["completion_limit"], 41);
         assert_eq!(original.observation()["preflight_limit"], 128);
     }
+    #[test]
+    fn synthesis_only_mixed_concurrent_admissions_share_the_total_ceiling() {
+        let probe = Probe::new();
+        let budget = QualificationBudget::synthesis_only();
+        let runtime = budget.wrap(probe.clone());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for i in 0..9 {
+                        let stage = if i % 2 == 0 {
+                            PipelineStage::Synthesize
+                        } else {
+                            PipelineStage::Verify
+                        };
+                        let _ = runtime.preflight_request(&request(stage, i));
+                    }
+                });
+            }
+        });
+        assert_eq!(probe.admissions.load(Ordering::SeqCst), 64);
+        assert_eq!(budget.observation()["delegated_preflights"], 64);
+        assert_eq!(
+            runtime
+                .preflight_request(&request(PipelineStage::Verify, 9))
+                .unwrap_err()
+                .code,
+            "QUALIFICATION_STOPPED"
+        );
+        assert_eq!(probe.admissions.load(Ordering::SeqCst), 64);
+        assert!(runtime
+            .generate(&request(PipelineStage::Synthesize, 0))
+            .is_err());
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn synthesis_only_verification_admission_error_is_terminal() {
+        struct RejectAdmission;
+        impl ModelRuntime for RejectAdmission {
+            fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                panic!("terminal admission error must never generate")
+            }
+            fn preflight_request(&self, _: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+                Err(qualification_failure("MODEL_CONFIG_INVALID"))
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+            fn runtime_id(&self) -> &str {
+                "probe"
+            }
+            fn model_id(&self) -> &str {
+                "probe"
+            }
+        }
+        let budget = QualificationBudget::synthesis_only();
+        let runtime = budget.wrap(Arc::new(RejectAdmission));
+        let r = request(PipelineStage::Verify, 0);
+        assert_eq!(
+            runtime.preflight_request(&r).unwrap_err().code,
+            "MODEL_CONFIG_INVALID"
+        );
+        assert_eq!(budget.observation()["delegated_preflights"], 1);
+        assert_eq!(
+            runtime.preflight_request(&r).unwrap_err().code,
+            "QUALIFICATION_STOPPED"
+        );
+        assert_eq!(
+            runtime
+                .generate(&request(PipelineStage::Synthesize, 0))
+                .unwrap_err()
+                .code,
+            "QUALIFICATION_STOPPED"
+        );
+        assert_eq!(budget.observation()["reserved_completions"], 0);
+    }
+
     #[test]
     fn synthesis_only_error_spends_the_reservation() {
         let probe = Probe::new();

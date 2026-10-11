@@ -11865,6 +11865,46 @@ mod tests {
     }
 
     #[test]
+    fn synthesis_only_budget_admits_downstream_verification_and_reloads_draft() {
+        use crate::pipeline::live_runtime::QualificationBudget;
+        let database = TestDatabase::new();
+        let (mut conn, run_id) = chunked_run(&database);
+        let probe = std::sync::Arc::new(LowSynthesisContextRuntime::with_synthesis_context_tokens(
+            LEGACY_MODEL_CONTEXT_TOKENS,
+        ));
+        analyze_chunked_document(&mut conn, probe.as_ref(), &run_id).unwrap();
+        let budget = QualificationBudget::synthesis_only();
+        let runtime = budget.wrap(probe.clone());
+        let synthesized = synthesize_analyzed_document(&mut conn, &runtime, &run_id)
+            .expect("Synthesize must finish its real Verify admission before persistence");
+        assert_eq!(
+            synthesized.presentation_mode,
+            SummaryPresentationMode::Coherent
+        );
+        assert_eq!(
+            get_synthesized_document(&conn, &run_id).unwrap().unwrap(),
+            synthesized
+        );
+        assert!(probe.verification_preflight_calls.load(Ordering::SeqCst) > 0);
+        assert_eq!(budget.observation()["reserved_completions"], 1);
+        assert!(budget.observation()["stopped"].is_null());
+        assert!(budget.observation()["preflights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["stage"] == "Verify"));
+        let stages = probe.requests.lock().unwrap();
+        assert_eq!(
+            stages
+                .iter()
+                .filter(|s| **s == PipelineStage::Synthesize)
+                .count(),
+            1
+        );
+        assert!(!stages.contains(&PipelineStage::Verify));
+    }
+
+    #[test]
     fn coherent_verification_admission_falls_back_only_for_context_overflow() {
         let database = TestDatabase::new();
         let (mut conn, run_id) = chunked_run(&database);
