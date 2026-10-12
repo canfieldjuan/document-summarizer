@@ -4471,6 +4471,121 @@ fn validate_synthesized_source_coverage(
     Ok(())
 }
 
+#[cfg(test)]
+mod relation_guard_precision_inventory {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+
+    #[test]
+    #[ignore = "CPU-only private corpus validation; requires DOC_SUM_GUARD_PRECISION_ROOT"]
+    fn archived_delivery_uses_production_getters_and_validation() {
+        let root = PathBuf::from(std::env::var_os("DOC_SUM_GUARD_PRECISION_ROOT").unwrap());
+        let freeze: Value = serde_json::from_slice(
+            &std::fs::read(root.join("delivered-candidate-freeze.json")).unwrap(),
+        )
+        .unwrap();
+        let mut rows = Vec::new();
+        for item in freeze["delivered_candidates"].as_array().unwrap() {
+            let alias = item["alias"].as_str().unwrap();
+            let capsule: Value = serde_json::from_slice(
+                &std::fs::read(root.join("artifact-capsules").join(format!("{alias}.json")))
+                    .unwrap(),
+            )
+            .unwrap();
+            let database = capsule["database_alias"].as_str().unwrap();
+            let run_id = capsule["run_id"].as_str().unwrap();
+            let conn = Connection::open_with_flags(
+                root.join("database-copies")
+                    .join(format!("{database}.sqlite3")),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let mut guard_observations = Value::Null;
+            let result = (|| -> Result<(), String> {
+                let verified = db::get_verified_document(&conn, run_id)
+                    .map_err(|error| format!("verified getter: {error:?}"))?
+                    .ok_or("missing verified artifact")?;
+                let synthesized = db::get_synthesized_document(&conn, run_id)
+                    .map_err(|error| format!("synthesized getter: {error:?}"))?
+                    .ok_or("missing synthesis artifact")?;
+                let analyzed = db::get_analyzed_document(&conn, run_id)
+                    .map_err(|error| format!("analyzed getter: {error:?}"))?
+                    .ok_or("missing analysis artifact")?;
+                let normalized = db::get_normalized_document(&conn, run_id)
+                    .map_err(|error| format!("normalized getter: {error:?}"))?
+                    .ok_or("missing normalized artifact")?;
+                let chunked = db::get_chunked_document(&conn, run_id)
+                    .map_err(|error| format!("chunked getter: {error:?}"))?
+                    .ok_or("missing chunked artifact")?;
+                let summary = db::get_summary_artifact(&conn, run_id)
+                    .map_err(|error| format!("summary getter: {error:?}"))?
+                    .ok_or("missing delivered summary")?;
+                let citations = db::get_citation_artifact(&conn, run_id)
+                    .map_err(|error| format!("citations getter: {error:?}"))?
+                    .ok_or("missing delivered citations")?;
+                let ledger_evidence = analyzed
+                    .chunks
+                    .iter()
+                    .flat_map(|chunk| chunk.evidence.iter().cloned())
+                    .collect::<Vec<_>>();
+                let mut ledger = verified.claim_verifications.clone();
+                let mut summary_checks = verified.summary_claim_verifications.clone();
+                coherent::apply_semantic_fidelity_guards(
+                    &synthesized.claims,
+                    &ledger_evidence,
+                    &mut ledger,
+                )
+                .map_err(|failure| format!("ledger guard identity: {failure:?}"))?;
+                coherent::apply_semantic_fidelity_guards(
+                    &synthesized.summary_claims,
+                    &synthesized.synthesis_evidence,
+                    &mut summary_checks,
+                )
+                .map_err(|failure| format!("summary guard identity: {failure:?}"))?;
+                guard_observations = json!({"ledger": ledger, "summary": summary_checks,
+                    "presentation_mode": verified.presentation_mode,
+                    "note": "all saved catalogs; nondelivered ledger/prose entries are diagnostic, not delivered precision flips"});
+                validate_verified_document(
+                    &verified,
+                    &synthesized,
+                    &analyzed,
+                    &chunked,
+                    &normalized,
+                )
+                .map_err(|failure| format!("saved validation: {failure:?}"))?;
+                if summary.text != verified.summary_text
+                    || citations.rendered_text != summary.text
+                    || citations.summary_integrity_hash != summary.integrity_hash
+                {
+                    return Err("delivered summary/citation/verified identity mismatch".into());
+                }
+                Ok(())
+            })();
+            rows.push(
+                json!({"alias": alias, "validated": result.is_ok(), "failure": result.err(), "guard_observations": guard_observations}),
+            );
+        }
+        let valid = rows.iter().filter(|row| row["validated"] == true).count();
+        let report = json!({"rows": rows, "validated": valid, "generation_calls": 0,
+            "status": "baseline corpus validation observation, not policy or fidelity clearance"});
+        std::fs::write(
+            root.join(
+                std::env::var("DOC_SUM_GUARD_PRECISION_OUTPUT")
+                    .unwrap_or_else(|_| "baseline-production-validation.json".into()),
+            ),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "PRECISION_BASELINE_VALIDATION candidates={} validated={} gaps={} generation_calls=0",
+            rows.len(),
+            valid,
+            rows.len() - valid
+        );
+    }
+}
+
 fn validate_verified_document(
     verified: &VerifiedDocument,
     synthesized: &SynthesizedDocument,

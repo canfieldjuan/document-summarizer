@@ -1,0 +1,101 @@
+{
+  "cases": [
+    {
+      "case": "modal_nonliteral_required_must",
+      "claim": "The operator must close the valve.",
+      "expected_supported": true,
+      "source": "The operator is required to close the valve."
+    },
+    {
+      "case": "modal_nonliteral_must_required",
+      "claim": "The operator is required to close the valve.",
+      "expected_supported": true,
+      "source": "The operator must close the valve."
+    },
+    {
+      "case": "causal_invented_link",
+      "claim": "The pump supplies water to the tank, ensuring that the outlet carries water to the garden.",
+      "expected_supported": false,
+      "source": "The pump supplies water to the tank. The outlet carries water to the garden."
+    },
+    {
+      "case": "causal_separate_facts_faithful",
+      "claim": "The pump supplies water to the tank. The outlet carries water to the garden.",
+      "expected_supported": true,
+      "source": "The pump supplies water to the tank. The outlet carries water to the garden."
+    },
+    {
+      "case": "causal_explicit_faithful",
+      "claim": "Closing the valve ensures that water flow stops.",
+      "expected_supported": true,
+      "source": "Closing the valve ensures that water flow stops."
+    },
+    {
+      "case": "causal_faithful_no_ensure_lexeme",
+      "claim": "Closing the valve ensures that water flow stops.",
+      "expected_supported": true,
+      "source": "Closing the valve stops water flow."
+    },
+    {
+      "case": "causal_changed_consequence",
+      "claim": "Backup power ensures that ventilation remains available.",
+      "expected_supported": false,
+      "source": "Backup power ensures that emergency lighting remains available."
+    },
+    {
+      "case": "modal_dropped_should",
+      "claim": "The operator closes the valve.",
+      "expected_supported": false,
+      "source": "The operator should close the valve."
+    },
+    {
+      "case": "modal_preserved_should",
+      "claim": "The operator should close the valve.",
+      "expected_supported": true,
+      "source": "The operator should close the valve."
+    },
+    {
+      "case": "modal_strengthened_should_must",
+      "claim": "The operator must close the valve.",
+      "expected_supported": false,
+      "source": "The operator should close the valve."
+    },
+    {
+      "case": "modal_dropped_may",
+      "claim": "The operator closes the valve.",
+      "expected_supported": false,
+      "source": "The operator may close the valve."
+    },
+    {
+      "case": "modal_dropped_must",
+      "claim": "The operator closes the valve.",
+      "expected_supported": false,
+      "source": "The operator must close the valve."
+    },
+    {
+      "case": "modal_unrelated_omission_faithful",
+      "claim": "The gauge reports pressure.",
+      "expected_supported": true,
+      "source": "The operator should close the valve. The gauge reports pressure."
+    },
+    {
+      "case": "evaluation_invented",
+      "claim": "The backup pump is essential.",
+      "expected_supported": false,
+      "source": "A backup pump is installed."
+    },
+    {
+      "case": "causal_direction_reversal",
+      "claim": "Water flow stopping ensures that the valve closes.",
+      "expected_supported": false,
+      "source": "Water flow stops because the valve closes."
+    },
+    {
+      "case": "modal_weakened_must_should",
+      "claim": "The operator should close the valve.",
+      "expected_supported": false,
+      "source": "The operator must close the valve."
+    }
+  ],
+  "approval": "original12: issuecomment-6116321794; supplement4: issuecomment-6117022556"
+}

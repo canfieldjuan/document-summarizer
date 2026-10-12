@@ -2,6 +2,99 @@
 //! model verdict when a source relationship changes mechanically.
 use super::*;
 
+#[cfg(test)]
+mod relation_guard_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn evidence(text: &str) -> EvidenceItem {
+        EvidenceItem {
+            evidence_id: "relation-e1".into(),
+            chunk_id: "relation-c1".into(),
+            block_id: "relation-b1".into(),
+            claim_text: text.into(),
+            exact_quote: text.into(),
+            source_span: SourceSpan {
+                page_start: 1,
+                page_end: 1,
+                section_id: None,
+                source_type: crate::pipeline::contracts::SourceType::NativeText,
+            },
+        }
+    }
+
+    #[test]
+    fn approved_relations_preserve_meaning() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_fixtures.json")).unwrap();
+        let mut wrong_approvals = Vec::new();
+        let mut faithful_rejections = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let item = evidence(row["source"].as_str().unwrap());
+            let claim = CitedClaim {
+                claim_id: "relation-k1".into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verification = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verification).unwrap();
+            let supported = verification[0].verdict == ClaimVerdict::Supported;
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!(
+                "RELATION_REGRESSION case={name} expected_supported={expected} verdict={:?}",
+                verification[0].verdict
+            );
+            if supported && !expected {
+                wrong_approvals.push(name);
+            } else if !supported && expected {
+                faithful_rejections.push(name);
+            }
+        }
+        assert!(
+            faithful_rejections.is_empty(),
+            "faithful controls rejected: {faithful_rejections:?}"
+        );
+        assert!(
+            wrong_approvals.is_empty(),
+            "false approvals: {wrong_approvals:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "CPU-only original A1 guard replay; requires DOC_SUM_GUARD_A1_DRAFT"]
+    fn original_a1_unit_is_withheld() {
+        let path = std::env::var_os("DOC_SUM_GUARD_A1_DRAFT").unwrap();
+        let saved: SynthesizedDocument =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut verifications = saved
+            .summary_claims
+            .iter()
+            .map(|claim| ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            })
+            .collect::<Vec<_>>();
+        apply_semantic_fidelity_guards(
+            &saved.summary_claims,
+            &saved.synthesis_evidence,
+            &mut verifications,
+        )
+        .unwrap();
+        println!("ORIGINAL_A1_GUARD_VERDICT {:?}", verifications[0].verdict);
+        assert_ne!(
+            verifications[0].verdict,
+            ClaimVerdict::Supported,
+            "unfaithful A1 unit must be withheld"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumericRelation {
     LessThan,
