@@ -15304,6 +15304,75 @@ mod tests {
     }
 
     #[test]
+    fn empty_permission_evidence_is_rejected_before_verify_dispatch() {
+        let (normalized, chunked) = materiality_fixture(&["Apprentices may carry crates.".into()]);
+        let runtime = materiality_runtime(false, 0, false);
+        let mut analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let synthesized = direct::synthesize(
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        validate_synthesized_document_without_runtime(
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .unwrap();
+        let before = runtime.requests.lock().unwrap().len();
+        let chunk = &mut analyzed.chunks[0];
+        let item = &mut chunk.evidence[0];
+        item.exact_quote.clear();
+        item.evidence_id = deterministic_evidence_id(
+            &analyzed.document_id,
+            &analyzed.analysis_version,
+            &chunk.chunk_id,
+            0,
+            &item.block_id,
+            &item.claim_text,
+            &item.exact_quote,
+        );
+        assert!(!canonical_bounded_text(
+            &item.exact_quote,
+            MAX_ANALYSIS_QUOTE_CHARACTERS
+        ));
+        let failure = verify(
+            SummaryProfile::General,
+            &runtime,
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            0,
+            false,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "INVALID_ANALYZED_DOCUMENT");
+        assert_eq!(
+            runtime.requests.lock().unwrap().len(),
+            before,
+            "invalid evidence must fail before a Verify model request"
+        );
+        println!(
+            "EMPTY_PERMISSION_ADMISSION verdict={} verify_dispatches=0",
+            failure.code
+        );
+    }
+
+    #[test]
     fn materiality_filter_omits_without_calls_backfills_and_rejects_tampering() {
         let mut texts = (1..=20)
             .map(|i| format!("Page {i}: records must be retained."))

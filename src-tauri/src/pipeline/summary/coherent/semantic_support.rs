@@ -249,6 +249,69 @@ mod relation_guard_tests {
     }
 
     #[test]
+    fn permission_qualifier_fixtures_preserve_final_verdicts() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_permission_fixtures.json")).unwrap();
+        let mut failures = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let mut items = row["owned_evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let mut item = evidence(text.as_str().unwrap());
+                    item.evidence_id = format!("permission-e{i}");
+                    item
+                })
+                .collect::<Vec<_>>();
+            let ids = items
+                .iter()
+                .map(|item| item.evidence_id.clone())
+                .collect::<Vec<_>>();
+            if let Some(extra) = row["uncited_evidence"].as_array() {
+                for (i, text) in extra.iter().enumerate() {
+                    let mut item = evidence(text.as_str().unwrap());
+                    item.evidence_id = format!("uncited-e{i}");
+                    items.push(item);
+                }
+            }
+            let claim = CitedClaim {
+                claim_id: "permission-k1".into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: ids.clone(),
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: ids,
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &items, &mut verdict).unwrap();
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!(
+                "PERMISSION_REGRESSION case={name} expected_supported={expected} verdict={:?}",
+                verdict[0].verdict
+            );
+            if expected != (verdict[0].verdict == ClaimVerdict::Supported) {
+                failures.push(name);
+                println!(
+                    "PERMISSION_ORIGIN source={:?} claim={:?}",
+                    items
+                        .iter()
+                        .map(|item| permission_propositions(&item.exact_quote))
+                        .collect::<Vec<_>>(),
+                    permission_propositions(row["claim"].as_str().unwrap())
+                );
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "permission final verdict mismatch: {failures:?}"
+        );
+    }
+
+    #[test]
     fn approved_proposition_relations_preserve_final_verdicts() {
         let fixtures: Value =
             serde_json::from_str(include_str!("relation_guard_proposition_fixtures.json")).unwrap();

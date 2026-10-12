@@ -1,0 +1,338 @@
+{
+  "status": "Approved by oversight issuecomment-6131149208; four required negative controls included",
+  "cases": [
+    {
+      "case": "licensed_agentive",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "One owned item supplies the shorthand; aligned permission and head unchanged.",
+      "expected_supported": true
+    },
+    {
+      "case": "licensed_no_agent",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": true
+    },
+    {
+      "case": "literal_permission",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry crates not declared fragile by the inspector.",
+      "reason": "",
+      "expected_supported": true
+    },
+    {
+      "case": "different_lexemes_same_rule",
+      "owned_evidence": [
+        "Technicians may stack parcels not declared unstable by the auditor. Clerks may stack non-unstable parcels."
+      ],
+      "claim": "Rules allow technicians to stack non-unstable parcels.",
+      "reason": "General shape; no adjective/noun dictionary.",
+      "expected_supported": true
+    },
+    {
+      "case": "polarity_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates declared fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "adjective_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared heavy by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "head_noun_twin",
+      "owned_evidence": [
+        "Apprentices may carry boxes not declared fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "missing_shorthand_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "different_item_license_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector.",
+        "Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "Even a cited second item cannot license the first item.",
+      "expected_supported": false
+    },
+    {
+      "case": "uncited_license_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "uncited_evidence": [
+        "Adults may carry non-fragile crates."
+      ],
+      "expected_supported": false
+    },
+    {
+      "case": "tier_extra_qualifier_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared currently fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "tier_condition_loss_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector only after testing. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "agent_extent_unknown_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by whichever inspector approves the shipment after testing. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "Unknown agent/condition extent must not be discarded.",
+      "expected_supported": false
+    },
+    {
+      "case": "actor_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit visitors to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "action_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to destroy non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "permission_negation_twin",
+      "owned_evidence": [
+        "Apprentices may not carry crates not declared fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "unlicensed_compound_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-heavy crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "witness_head_mismatch_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Adults may carry non-fragile boxes."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "witness_negated_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Adults may not carry non-fragile crates."
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "A prohibited use is not an affirmative shorthand witness.",
+      "expected_supported": false
+    },
+    {
+      "case": "empty_evidence_twin",
+      "owned_evidence": [
+        ""
+      ],
+      "claim": "The rules permit apprentices to carry non-fragile crates.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "mixed_tiers_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Adults may carry non-fragile crates. Visitors may carry crates declared fragile."
+      ],
+      "claim": "Rules permit apprentices to carry non-fragile crates, and visitors to carry non-fragile crates.",
+      "reason": "One valid tier cannot release an invalid tier.",
+      "expected_supported": false
+    },
+    {
+      "case": "outside_of_form",
+      "owned_evidence": [
+        "Apprentices may carry crates outside of inspection hours."
+      ],
+      "claim": "Rules allow apprentices to carry crates outside inspection hours.",
+      "reason": "Supplemental formal projection; requires explicit scope clearance.",
+      "expected_supported": true
+    },
+    {
+      "case": "outside_inside_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates outside of inspection hours."
+      ],
+      "claim": "Rules allow apprentices to carry crates inside inspection hours.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "active_relative_form",
+      "owned_evidence": [
+        "Apprentices may carry crates on shelves that also contain labels."
+      ],
+      "claim": "Rules permit apprentices to carry crates on shelves containing labels.",
+      "reason": "Supplemental active-relative/participle projection.",
+      "expected_supported": true
+    },
+    {
+      "case": "relative_negation_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates on shelves that do not contain labels."
+      ],
+      "claim": "Rules permit apprentices to carry crates on shelves containing labels.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "relative_object_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates on shelves that also contain labels."
+      ],
+      "claim": "Rules permit apprentices to carry crates on shelves containing tools.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "relative_modal_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates on shelves that may contain labels."
+      ],
+      "claim": "Rules permit apprentices to carry crates on shelves containing labels.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "number_descriptor_form",
+      "owned_evidence": [
+        "Tier 8+ may carry crates at any time."
+      ],
+      "claim": "Rules permit tiers 8+ to carry crates at any time.",
+      "reason": "Supplemental same-denotation number-group descriptor inflection.",
+      "expected_supported": true
+    },
+    {
+      "case": "number_extent_twin",
+      "owned_evidence": [
+        "Tier 8+ may carry crates at any time."
+      ],
+      "claim": "Rules permit tiers 7+ to carry crates at any time.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "number_quantifier_twin",
+      "owned_evidence": [
+        "Tier 8+ may carry crates at any time."
+      ],
+      "claim": "Rules permit tiers 8 to carry crates at any time.",
+      "reason": "The plus extent is material and must survive projection.",
+      "expected_supported": false
+    },
+    {
+      "case": "non_numeric_actor_plural_twin",
+      "owned_evidence": [
+        "One apprentice may carry crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates.",
+      "reason": "Descriptor inflection cannot widen ordinary actors.",
+      "expected_supported": false
+    },
+    {
+      "case": "whole_permission_list",
+      "owned_evidence": [
+        "Access tiers\n\nTier 8+ may move any load at any time.\n\nTiers 6 and 7 may work outside inspection hours with crates not declared fragile by the inspector.\n\nTiers 4 and 5 may work outside of inspection hours with non-fragile crates on shelves that also contain their label(s) or with written permission."
+      ],
+      "claim": "Access rules allow tiers 8+ to move any load at any time, tiers 6-7 to work outside inspection hours with non-fragile crates, and tiers 4-5 to work outside inspection hours with non-fragile crates on shelves containing their labels or with written permission.",
+      "reason": "Complete synthetic layout; every tier must align distinctly, not only the qualifier.",
+      "expected_supported": true
+    },
+    {
+      "case": "whole_permission_list_condition_twin",
+      "owned_evidence": [
+        "Access tiers\n\nTier 8+ may move any load at any time.\n\nTiers 6 and 7 may work outside inspection hours with crates not declared fragile by the inspector.\n\nTiers 4 and 5 may work outside of inspection hours with non-fragile crates on shelves that also contain their label(s) or with written permission."
+      ],
+      "claim": "Access rules allow tiers 8+ to move any load at any time, tiers 6-7 to work outside inspection hours with non-fragile crates, and tiers 4-5 to work outside inspection hours with non-fragile crates on shelves containing their labels.",
+      "reason": "",
+      "expected_supported": false
+    },
+    {
+      "case": "literal_agent_substitution_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Adults may carry non-fragile crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates not declared fragile by the supervisor.",
+      "expected_supported": false
+    },
+    {
+      "case": "nonpermission_witness_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates not declared fragile by the inspector. Non-fragile crates are stored upstairs."
+      ],
+      "claim": "Rules permit apprentices to carry non-fragile crates.",
+      "expected_supported": false
+    },
+    {
+      "case": "past_relative_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates on shelves that contained labels."
+      ],
+      "claim": "Rules permit apprentices to carry crates on shelves containing labels.",
+      "expected_supported": false
+    },
+    {
+      "case": "object_relative_twin",
+      "owned_evidence": [
+        "Apprentices may carry crates that the inspector marks."
+      ],
+      "claim": "Rules permit apprentices to carry crates marking the inspector.",
+      "expected_supported": false
+    }
+  ]
+}
