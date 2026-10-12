@@ -66,6 +66,48 @@ mod relation_guard_tests {
     }
 
     #[test]
+    fn approved_precision_relations_preserve_final_verdicts() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_precision_fixtures.json")).unwrap();
+        let mut wrong_approvals = Vec::new();
+        let mut faithful_rejections = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let item = evidence(row["source"].as_str().unwrap());
+            let claim = CitedClaim {
+                claim_id: "relation-k1".into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verification = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verification).unwrap();
+            let supported = verification[0].verdict == ClaimVerdict::Supported;
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!(
+                "PRECISION_REGRESSION case={name} expected_supported={expected} verdict={:?}",
+                verification[0].verdict
+            );
+            if supported && !expected {
+                wrong_approvals.push(name);
+            } else if !supported && expected {
+                faithful_rejections.push(name);
+            }
+        }
+        assert!(
+            faithful_rejections.is_empty(),
+            "faithful controls rejected: {faithful_rejections:?}"
+        );
+        assert!(
+            wrong_approvals.is_empty(),
+            "false approvals: {wrong_approvals:?}"
+        );
+    }
+
+    #[test]
     fn relation_boundaries_preserve_polarity_and_do_not_join_evidence() {
         let valve = evidence("Closing the valve stops water flow.");
         let mut other = evidence("Opening the valve ensures that alarms sound.");

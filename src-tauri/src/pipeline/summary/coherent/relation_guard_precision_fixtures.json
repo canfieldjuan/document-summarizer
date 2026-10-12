@@ -1,0 +1,180 @@
+{
+  "status": "22 labels approved in oversight6124728844; two required negatives explicitly labeled withheld by same review",
+  "cases": [
+    {
+      "case": "plain_evaluation",
+      "source": "A panel is critical.",
+      "claim": "A panel is critical.",
+      "expected_supported": true
+    },
+    {
+      "case": "wrapped_subject",
+      "source": "A panel\nis critical.",
+      "claim": "A panel is critical.",
+      "expected_supported": true
+    },
+    {
+      "case": "heading_blank_boundary",
+      "source": "Inspection\n\nA panel\nis critical.",
+      "claim": "A panel is critical.",
+      "expected_supported": true
+    },
+    {
+      "case": "article_swap",
+      "source": "The panel is critical.",
+      "claim": "A panel is critical.",
+      "expected_supported": true
+    },
+    {
+      "case": "acronym_case",
+      "source": "LABs are responsible for health services.",
+      "claim": "LABS are responsible for health services.",
+      "expected_supported": true
+    },
+    {
+      "case": "wrapped_acronym",
+      "source": "LABs are\nresponsible for health services.",
+      "claim": "LABS are responsible for health services.",
+      "expected_supported": true
+    },
+    {
+      "case": "noun_safety",
+      "source": "The operator is responsible for\ntransportation safety services.",
+      "claim": "The operator is responsible for transportation safety services.",
+      "expected_supported": true
+    },
+    {
+      "case": "noun_health",
+      "source": "Workers are assigned to\nhealth services.",
+      "claim": "Workers are assigned to health services.",
+      "expected_supported": true
+    },
+    {
+      "case": "noun_guarantee",
+      "source": "The guarantee period starts in June.",
+      "claim": "The guarantee period starts in June.",
+      "expected_supported": true
+    },
+    {
+      "case": "noun_guarantees",
+      "source": "The publisher makes no express guarantees.",
+      "claim": "The publisher makes no express guarantees.",
+      "expected_supported": true
+    },
+    {
+      "case": "required_necessary",
+      "source": "The contractor is not required to supply design services unless required to perform its own work.",
+      "claim": "The contractor is not required to supply design services unless necessary to perform its own work.",
+      "expected_supported": true
+    },
+    {
+      "case": "necessary_scope_change",
+      "source": "The contractor is not required to supply design services unless required to perform its own work.",
+      "claim": "The contractor is not required to supply design services unless necessary to perform another contractor's work.",
+      "expected_supported": false
+    },
+    {
+      "case": "definitional_shall",
+      "source": "The term of this Agreement shall be from June through August.",
+      "claim": "The term of this Agreement is from June through August.",
+      "expected_supported": true
+    },
+    {
+      "case": "definition_dates_changed",
+      "source": "The term of this Agreement shall be from June through August.",
+      "claim": "The term of this Agreement is from May through August.",
+      "expected_supported": false
+    },
+    {
+      "case": "dropped_obligation",
+      "source": "The operator shall be present during inspection.",
+      "claim": "The operator is present during inspection.",
+      "expected_supported": false
+    },
+    {
+      "case": "dropped_required_state",
+      "source": "The valve shall be closed during inspection.",
+      "claim": "The valve is closed during inspection.",
+      "expected_supported": false
+    },
+    {
+      "case": "invented_cause",
+      "source": "The panel records temperature.",
+      "claim": "The panel ensures that the valve closes.",
+      "expected_supported": false
+    },
+    {
+      "case": "invented_evaluation",
+      "source": "Safety requirements are listed in the manual.",
+      "claim": "The manual is safe.",
+      "expected_supported": false
+    },
+    {
+      "case": "transfer_across_paragraphs",
+      "source": "Panel A is critical.\n\nPanel B records temperature.",
+      "claim": "Panel B is critical.",
+      "expected_supported": false
+    },
+    {
+      "case": "transfer_across_bullets",
+      "source": "Equipment\n\n- Panel A is critical.\n- Panel B records temperature.",
+      "claim": "Panel B is critical.",
+      "expected_supported": false
+    },
+    {
+      "case": "maintenance_means",
+      "source": "Containers must preserve water quality. Water is replenished as necessary.",
+      "claim": "Containers must preserve water quality by being replenished as necessary.",
+      "expected_supported": false
+    },
+    {
+      "case": "obligation_to_condition",
+      "source": "Policies shall not prohibit the authorization.",
+      "claim": "The authorization is effective as long as policies do not prohibit it.",
+      "expected_supported": false
+    },
+    {
+      "case": "dropped_fee_payment_obligation",
+      "source": "The fee shall be paid within thirty days.",
+      "claim": "The fee is paid within thirty days.",
+      "expected_supported": false
+    },
+    {
+      "case": "dropped_term_extension_obligation",
+      "source": "The term shall be extended by written notice.",
+      "claim": "The term is extended by written notice.",
+      "expected_supported": false
+    },
+    {
+      "case": "changed_from_to_range",
+      "source": "The term of this Agreement shall be from June to August.",
+      "claim": "The term of this Agreement is from May to August.",
+      "expected_supported": false
+    },
+    {
+      "case": "changed_definition_value",
+      "source": "The category of this Agreement shall be Basic.",
+      "claim": "The category of this Agreement is Premium.",
+      "expected_supported": false
+    },
+    {
+      "case": "definition_without_shall_change",
+      "source": "The term is from June through August.",
+      "claim": "The term is from May through August.",
+      "expected_supported": false
+    },
+    {
+      "case": "definition_range_connector",
+      "source": "The term shall be from June through August.",
+      "claim": "The term is from June to August.",
+      "expected_supported": true
+    },
+    {
+      "case": "definition_range_dash",
+      "source": "The term shall be June\u2013August.",
+      "claim": "The term is from June to August.",
+      "expected_supported": true
+    }
+  ],
+  "approval": "issuecomment-6124728844 and issuecomment-6128274791; final-verdict oracle"
+}
