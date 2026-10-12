@@ -6,6 +6,14 @@ Required added Unsupported controls: literal-agent substitution; shorthand only 
 
 No other form is cleared. Fail-first and owner mutations precede precision clearance; candidate publication then needs exact-head CI, bot review and oversight PR diff review. All PR116, production, qualification and merge holds remain. Zero generation, GPU, delegated preflights and tokenizer calls.
 
+## Accepted admission-seam amendment and diagnostics
+
+Oversight issuecomment-6131605488 clears amendment SHA256 94070287ca69b563abcf78709d38f92a1cb5ed1d780e8dbb63526f1b1bd83075 and resumes the stopped trial. Keep the approved empty_evidence_twin text and rejection requirement, exercising it through production Verify preflight: INVALID_ANALYZED_DOCUMENT and zero dispatches. The other 36 reviewed controls stay at the semantic guard. Report both seams; do not add an empty-text policy patch.
+
+Add two guard-seam diagnostics over admissible non-empty evidence: a plain assertion against an invented explicit grant, and an obligation against an explicit grant. Report their actual final verdicts without tuning them. The obligation diagnostic must withhold; otherwise stop as a defect inside the cleared scope. A Supported plain-assertion diagnostic is a pre-existing gap to file under a future contract, not another gate or repair in this slice.
+
+The evidence-local permission rule, three bounded forms, labels, owner mutations, frozen60 replay and all existing holds remain unchanged. This additional acceptance record precedes the amended executable harness and policy implementation.
+
 ## Implementation summary
 
 Acceptance record only; no policy or executable tests changed in this commit.
