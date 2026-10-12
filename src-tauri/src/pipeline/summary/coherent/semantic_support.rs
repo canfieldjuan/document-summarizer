@@ -91,6 +91,31 @@ mod relation_guard_tests {
                 "PRECISION_REGRESSION case={name} expected_supported={expected} verdict={:?}",
                 verification[0].verdict
             );
+            if !supported && expected {
+                println!(
+                    "PRECISION_DIAGNOSTIC case={name} reasons={:?}",
+                    relation_guard_rejection_reasons(
+                        row["claim"].as_str().unwrap(),
+                        &[&evidence(row["source"].as_str().unwrap())]
+                    )
+                );
+                if name == "required_necessary" {
+                    println!(
+                        "NECESSITY_SOURCE {:?}",
+                        evaluation_relations(
+                            row["source"].as_str().unwrap(),
+                            EVALUATIVE_CONCEPTS[0]
+                        )
+                    );
+                    println!(
+                        "NECESSITY_CLAIM {:?}",
+                        evaluation_relations(
+                            row["claim"].as_str().unwrap(),
+                            EVALUATIVE_CONCEPTS[0]
+                        )
+                    );
+                }
+            }
             if supported && !expected {
                 wrong_approvals.push(name);
             } else if !supported && expected {
@@ -104,6 +129,106 @@ mod relation_guard_tests {
         assert!(
             wrong_approvals.is_empty(),
             "false approvals: {wrong_approvals:?}"
+        );
+    }
+
+    #[test]
+    fn precision_boundaries_keep_assignment_values_and_evidence_ownership() {
+        for (source, claim, supported) in [
+            (
+                "The term shall be June-August.",
+                "The term is from June to August.",
+                true,
+            ),
+            (
+                "The term shall be from June through August.",
+                "The term is from June through September.",
+                false,
+            ),
+            (
+                "The term is from June to August.",
+                "The term is from August to June.",
+                false,
+            ),
+            (
+                "The term is from June to August.",
+                "The term is from june to August.",
+                false,
+            ),
+            ("The category is Basic.", "The category is Premium.", false),
+            (
+                "The category is not Basic.",
+                "The category is Basic.",
+                false,
+            ),
+            (
+                "The category is Basic during inspection.",
+                "The category is Basic.",
+                false,
+            ),
+            (
+                "The category is Basic during inspection.",
+                "The category is Basic during inspection.",
+                true,
+            ),
+            (
+                "Inspection:\nA panel\nis critical.",
+                "A panel is critical.",
+                true,
+            ),
+            ("A panel\n\nis critical.", "A panel is critical.", false),
+            ("- A panel\n- is critical.", "A panel is critical.", false),
+        ] {
+            let item = evidence(source);
+            assert_eq!(
+                semantic_fidelity_supported(claim, &[&item]),
+                supported,
+                "{source} -> {claim}"
+            );
+        }
+        let first = evidence("A panel");
+        let second = evidence("is critical.");
+        assert!(!semantic_fidelity_supported(
+            "A panel is critical.",
+            &[&first, &second]
+        ));
+        let first = evidence("The category is Basic.");
+        let second = evidence("The category is Premium.");
+        assert!(!definition_value_decision("The category is Basic.", &[&first, &second]).supported);
+        for text in [
+            "",
+            "The operator is present during inspection.",
+            "The term shall be extended by written notice.",
+            "The contractor is required to supply services.",
+            "The operator is assigned to health services.",
+        ] {
+            assert!(
+                definition_relation(text.trim_end_matches('.')).is_none(),
+                "{text}"
+            );
+            let item = evidence(text);
+            let decision = definition_value_decision(text, &[&item]);
+            assert!(
+                decision.supported && decision.released_modals.is_empty(),
+                "{text}"
+            );
+        }
+        let required = evidence("The operator must be from June through August.");
+        assert!(!semantic_fidelity_supported(
+            "The operator is from June through August.",
+            &[&required]
+        ));
+        let parsed = semantic_clauses(
+            "A panel\r\nis critical.\r\n\r\n- Panel B is safe.\r\n- Panel C is healthy.",
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(
+            parsed,
+            [
+                "A panel is critical",
+                "Panel B is safe",
+                "Panel C is healthy"
+            ]
         );
     }
 
@@ -597,10 +722,45 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
     None
 }
 
-fn semantic_clauses(text: &str) -> impl Iterator<Item = &str> {
-    text.split(['.', '?', '!', ';', '\n', '\r'])
-        .map(str::trim)
-        .filter(|clause| !clause.is_empty())
+// Layout boundaries belong to the relation reader. A single wrapped line is
+// not a proposition boundary; paragraphs, list entries and marked headings are.
+// The iterator is invoked independently for each owned EvidenceItem.
+fn semantic_clauses(text: &str) -> impl Iterator<Item = String> {
+    let mut paragraphs = Vec::new();
+    let mut paragraph = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let bullet = line
+            .strip_prefix("- ")
+            .or_else(|| line.strip_prefix("* "))
+            .or_else(|| line.strip_prefix("\u{2022} "));
+        let marked = marked_heading_title(line);
+        let heading = line.ends_with(':') || framing_from_heading(line).is_some();
+        if line.is_empty() || bullet.is_some() || marked.is_some() || heading {
+            if !paragraph.is_empty() {
+                paragraphs.push(std::mem::take(&mut paragraph));
+            }
+            if line.is_empty() || heading {
+                continue;
+            }
+        }
+        let body = bullet.or(marked).unwrap_or(line);
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
+        paragraph.push_str(body);
+    }
+    if !paragraph.is_empty() {
+        paragraphs.push(paragraph);
+    }
+    paragraphs.into_iter().flat_map(|paragraph| {
+        paragraph
+            .split(['.', '?', '!', ';'])
+            .map(str::trim)
+            .filter(|clause| !clause.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    })
 }
 
 fn currency_symbol_token(character: char) -> Option<&'static str> {
@@ -1555,7 +1715,7 @@ fn directional_actor_supports(source: &[String], claim: &[String]) -> bool {
 
 fn directional_relations(text: &str) -> Vec<DirectionalRelation> {
     semantic_clauses(text)
-        .flat_map(directional_relations_in_clause)
+        .flat_map(|clause| directional_relations_in_clause(&clause))
         .collect()
 }
 
@@ -1563,7 +1723,7 @@ fn directional_actor_is_cited(actor: &[String], evidence: &[&EvidenceItem]) -> b
     !actor.is_empty()
         && evidence.iter().any(|item| {
             semantic_clauses(&item.exact_quote).any(|clause| {
-                let tokens = words(clause);
+                let tokens = words(&clause);
                 strip_leading_article(&tokens).starts_with(actor)
             })
         })
@@ -1591,7 +1751,7 @@ fn effective_directional_actor(
     evidence
         .iter()
         .flat_map(|item| semantic_clauses(&item.exact_quote))
-        .map(words)
+        .map(|clause| words(&clause))
         .map(|tokens| strip_leading_article(&tokens).to_vec())
         .filter_map(|tokens| {
             let shared = prefix
@@ -1748,7 +1908,7 @@ fn actor_relation_segments(
     evidence
         .iter()
         .flat_map(|item| semantic_clauses(&item.exact_quote))
-        .flat_map(|clause| actor_relation_token_segments(&words(clause), actors, concept))
+        .flat_map(|clause| actor_relation_token_segments(&words(&clause), actors, concept))
         .collect()
 }
 
@@ -1962,7 +2122,7 @@ fn actor_qualifications_supported(claim: &str, evidence: &[&EvidenceItem]) -> bo
         .collect::<Vec<_>>();
     semantic_clauses(claim)
         .flat_map(|clause| {
-            let tokens = words(clause);
+            let tokens = words(&clause);
             if tokens
                 .first()
                 .is_some_and(|word| is_actor_condition_connector(word))
@@ -2134,15 +2294,63 @@ fn explicit_causal_relations(clause: &str) -> Vec<EvaluationRelation> {
     relations
 }
 
+struct NecessityProjection {
+    tokens: Vec<String>,
+    qualifications: Vec<EvaluationRelation>,
+    indices: Vec<usize>,
+}
+
+// Conditional necessity is a qualification of its owning proposition, not an
+// independent prescribed action. All Verify readers consume this classification.
+fn necessity_projection(tokens: &[String]) -> NecessityProjection {
+    let mut canonical = tokens.to_vec();
+    let mut indices = Vec::new();
+    for (index, word) in tokens.iter().enumerate() {
+        let conditional = index > 0
+            && tokens[index - 1] == "unless"
+            && matches!(word.as_str(), "necessary" | "required")
+            && tokens.get(index + 1).is_some_and(|word| word == "to");
+        let discretionary = index > 0 && tokens[index - 1] == "as" && word == "necessary";
+        if conditional || discretionary {
+            if conditional {
+                canonical[index] = "necessary".into();
+            }
+            indices.push(index);
+        }
+    }
+    let qualifications = indices
+        .iter()
+        .map(|index| EvaluationRelation {
+            subject: strip_leading_article(&canonical).to_vec(),
+            negated: negation_present(&canonical[..*index]),
+            consequence: None,
+        })
+        .collect();
+    NecessityProjection {
+        tokens: canonical,
+        qualifications,
+        indices,
+    }
+}
+
 fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelation> {
     let tokens = original_words(clause)
         .into_iter()
         .map(|word| word.to_ascii_lowercase())
         .collect::<Vec<_>>();
+    let necessity = necessity_projection(&tokens);
+    let qualifications = if concept.contains(&"necessary") {
+        necessity.qualifications
+    } else {
+        Vec::new()
+    };
+    let qualified_indices = necessity.indices;
     let concept_indices = tokens
         .iter()
         .enumerate()
-        .filter(|(_, word)| concept.contains(&word.as_str()))
+        .filter(|(index, word)| {
+            concept.contains(&word.as_str()) && !qualified_indices.contains(index)
+        })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     concept_indices
@@ -2152,12 +2360,39 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                 tokens[concept_index].as_str(),
                 "ensure" | "ensures" | "ensuring" | "guarantee" | "guarantees"
             );
+            // Nominal guarantee uses have a determiner/modifier or no verb
+            // complement. Ensure has no such nominal ambiguity.
+            if matches!(tokens[concept_index].as_str(), "guarantee" | "guarantees")
+                && (concept_index == 0
+                    || tokens.get(concept_index - 1).is_some_and(|word| {
+                        matches!(word.as_str(), "a" | "an" | "the" | "no" | "any" | "some")
+                    })
+                    || (tokens.get(concept_index + 1).is_none()
+                        && tokens[..concept_index].iter().any(|word| word == "no")))
+            {
+                return None;
+            }
             let subject_end = if transitive {
                 concept_index
             } else {
-                tokens[..concept_index]
+                // These nouns name domains/qualities; safe/healthy are the
+                // corresponding predicative evaluations.
+                if matches!(tokens[concept_index].as_str(), "safety" | "health") {
+                    return None;
+                }
+                let link = tokens[..concept_index]
                     .iter()
-                    .rposition(|word| is_evaluation_link(word))?
+                    .rposition(|word| is_evaluation_link(word))?;
+                let predicate_context = &tokens[link + 1..concept_index];
+                if predicate_context.iter().any(|word| {
+                    matches!(
+                        word.as_str(),
+                        "for" | "to" | "in" | "of" | "by" | "unless" | "as"
+                    )
+                }) {
+                    return None;
+                }
+                link
             };
             let subject_start = evaluation_subject_start(&tokens, subject_end);
             let mut subject = tokens[subject_start..subject_end].to_vec();
@@ -2221,6 +2456,7 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                 consequence: transitive.then(|| causal_terms(&tokens[concept_index + 1..])),
             })
         })
+        .chain(qualifications)
         .collect()
 }
 
@@ -2245,7 +2481,7 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
         .collect::<Vec<_>>();
     for concept in EVALUATIVE_CONCEPTS {
         let claim_relations = semantic_clauses(claim)
-            .flat_map(|clause| evaluation_relations(clause, concept))
+            .flat_map(|clause| evaluation_relations(&clause, concept))
             .collect::<Vec<_>>();
         let source_relations = source_clauses
             .iter()
@@ -2287,11 +2523,163 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
     true
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AssignmentValue {
+    Range { start: String, end: String },
+    Literal(String),
+}
+
+#[derive(Debug, Clone)]
+struct DefinitionRelation {
+    subject: Vec<String>,
+    value: AssignmentValue,
+    scope: Vec<String>,
+    negated: bool,
+    prescribed_assignment: Option<ModalPredicate>,
+    plain_assignment: bool,
+}
+
+fn definition_relation(clause: &str) -> Option<DefinitionRelation> {
+    let tokens = original_words(clause);
+    let lowered = words(clause);
+    let (copula, value_start, prescribed) = lowered
+        .windows(2)
+        .position(|pair| pair == ["shall", "be"])
+        .map(|index| (index, index + 2, true))
+        .or_else(|| {
+            lowered
+                .iter()
+                .position(|word| matches!(word.as_str(), "is" | "are"))
+                .map(|index| (index, index + 1, false))
+        })?;
+    let subject = strip_leading_article(&lowered[..copula]).to_vec();
+    if subject.is_empty()
+        || subject.iter().any(|word| is_modal_anchor(word))
+        || matches!(subject.as_slice(), [word] if matches!(word.as_str(), "it" | "they"))
+    {
+        return None;
+    }
+    let negated = lowered.get(value_start).is_some_and(|word| word == "not");
+    let value_start = value_start + usize::from(negated);
+    let first = tokens.get(value_start)?;
+    // Retain punctuation and endpoint spelling. Token normalization is for
+    // subject/scope identity only, never for the assigned literal or endpoints.
+    let offset = clause
+        .match_indices(first)
+        .find(|(offset, _)| original_words(&clause[..*offset]).len() == value_start)?
+        .0;
+    let raw_value = clause[offset..].trim();
+    let scope_start = lowered[value_start..]
+        .iter()
+        .position(|word| {
+            matches!(
+                word.as_str(),
+                "if" | "unless" | "during" | "while" | "under"
+            )
+        })
+        .map(|index| index + value_start);
+    let (raw_value, scope) = if let Some(index) = scope_start {
+        let scope_word = tokens.get(index)?;
+        let scope_offset = raw_value
+            .match_indices(scope_word)
+            .find(|(offset, _)| original_words(&raw_value[..*offset]).len() == index - value_start)?
+            .0;
+        (raw_value[..scope_offset].trim(), lowered[index..].to_vec())
+    } else {
+        (raw_value, Vec::new())
+    };
+    let compact = raw_value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let range_body = compact.strip_prefix("from ").unwrap_or(&compact);
+    let range = (compact.starts_with("from ")
+        || range_body
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_uppercase() || first.is_numeric()))
+    .then(|| {
+        [" through ", " to ", "\u{2013}", "-"]
+            .iter()
+            .find_map(|connector| range_body.split_once(connector))
+    })
+    .flatten();
+    let value = if let Some((start, end)) = range {
+        if start.trim().is_empty() || end.trim().is_empty() {
+            return None;
+        }
+        AssignmentValue::Range {
+            start: start.trim().into(),
+            end: end.trim().into(),
+        }
+    } else if original_words(&compact).len() == 1
+        && compact.chars().next().is_some_and(char::is_uppercase)
+    {
+        AssignmentValue::Literal(compact)
+    } else {
+        // Passive actions, prescribed states and arbitrary prose are not
+        // recognized value assignments and receive no decision from this owner.
+        return None;
+    };
+    Some(DefinitionRelation {
+        subject,
+        value,
+        scope,
+        negated,
+        prescribed_assignment: prescribed
+            .then(|| modal_predicates(clause, true))
+            .and_then(|mut predicates| (predicates.len() == 1).then(|| predicates.remove(0))),
+        plain_assignment: !prescribed,
+    })
+}
+
+struct DefinitionDecision {
+    supported: bool,
+    released_modals: Vec<ModalPredicate>,
+}
+
+fn definition_value_decision(claim: &str, evidence: &[&EvidenceItem]) -> DefinitionDecision {
+    let sources = evidence
+        .iter()
+        .flat_map(|item| semantic_clauses(&item.exact_quote))
+        .filter_map(|clause| definition_relation(&clause))
+        .collect::<Vec<_>>();
+    let mut decision = DefinitionDecision {
+        supported: true,
+        released_modals: Vec::new(),
+    };
+    for assignment in semantic_clauses(claim).filter_map(|clause| definition_relation(&clause)) {
+        let paired = sources
+            .iter()
+            .filter(|source| source.subject == assignment.subject)
+            .collect::<Vec<_>>();
+        if paired.is_empty() {
+            continue;
+        }
+        let equal = paired.iter().all(|source| {
+            source.value == assignment.value
+                && source.scope == assignment.scope
+                && source.negated == assignment.negated
+        });
+        if !equal {
+            decision.supported = false;
+            continue;
+        }
+        if assignment.plain_assignment {
+            decision.released_modals.extend(
+                paired
+                    .into_iter()
+                    .filter_map(|source| source.prescribed_assignment.clone()),
+            );
+        }
+    }
+    decision
+}
+
 // Use the existing predicate/context owner to recognize an assertion of the
 // same source proposition with its modal removed. No writer parser is changed.
 fn plain_assertion_for_modal(claim: &str, source: &ModalPredicate) -> Option<ModalPredicate> {
-    for clause in claim.split(['.', '?', '!', ';', ',', '\n', '\r']) {
-        let tokens = words(clause);
+    for clause in semantic_clauses(claim)
+        .flat_map(|clause| clause.split(',').map(str::to_owned).collect::<Vec<_>>())
+    {
+        let tokens = necessity_projection(&words(&clause)).tokens;
         for (index, word) in tokens.iter().enumerate() {
             if word != &source.predicate && word != &format!("{}s", source.predicate) {
                 continue;
@@ -2310,11 +2698,22 @@ fn plain_assertion_for_modal(claim: &str, source: &ModalPredicate) -> Option<Mod
     None
 }
 
+#[cfg(test)]
 fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
+    let definitions = definition_value_decision(claim, evidence);
+    definitions.supported && modal_force_with_definitions(claim, evidence, &definitions)
+}
+
+fn modal_force_with_definitions(
+    claim: &str,
+    evidence: &[&EvidenceItem],
+    definitions: &DefinitionDecision,
+) -> bool {
     let guarded_modal_predicates = |text: &str, strong: bool| {
-        text.split(['.', '?', '!', ';', ',', '\n', '\r'])
+        semantic_clauses(text)
+            .flat_map(|clause| clause.split(',').map(str::to_owned).collect::<Vec<_>>())
             .flat_map(|clause| {
-                let tokens = words(clause);
+                let tokens = necessity_projection(&words(&clause)).tokens;
                 let mut normalized = Vec::with_capacity(tokens.len());
                 let mut index = 0;
                 while index < tokens.len() {
@@ -2395,6 +2794,9 @@ fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
         .map(|predicate| (true, predicate))
         .chain(weak_source.iter().map(|predicate| (false, predicate)))
     {
+        if source_strong && definitions.released_modals.contains(source) {
+            continue;
+        }
         let matching_strong = strong_claim
             .iter()
             .any(|claim| modal_statements_match(claim, source, true));
@@ -2422,12 +2824,14 @@ fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
 }
 
 fn semantic_fidelity_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
-    comparison_boundaries_supported(claim, evidence)
+    let definitions = definition_value_decision(claim, evidence);
+    definitions.supported
+        && comparison_boundaries_supported(claim, evidence)
         && broader_enumeration_supported(claim, evidence)
         && directional_endpoints_supported(claim, evidence)
         && actor_qualifications_supported(claim, evidence)
         && evaluative_conclusions_supported(claim, evidence)
-        && modal_force_supported(claim, evidence)
+        && modal_force_with_definitions(claim, evidence, &definitions)
 }
 
 #[cfg(test)]
@@ -2440,7 +2844,11 @@ pub(in crate::pipeline::summary) fn relation_guard_rejection_reasons(
     if !evaluative_conclusions_supported(claim, evidence) {
         reasons.push("evaluation_or_causal_relation");
     }
-    if !modal_force_supported(claim, evidence) {
+    let definitions = definition_value_decision(claim, evidence);
+    if !definitions.supported {
+        reasons.push("definition_value");
+    }
+    if !modal_force_with_definitions(claim, evidence, &definitions) {
         reasons.push("modal_preservation");
     }
     reasons
