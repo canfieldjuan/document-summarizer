@@ -183,7 +183,8 @@
       ],
       "claim": "The rules permit apprentices to carry non-fragile crates.",
       "reason": "",
-      "expected_supported": false
+      "expected_supported": false,
+      "verification_seam": "production_admission"
     },
     {
       "case": "mixed_tiers_twin",
@@ -333,6 +334,24 @@
       ],
       "claim": "Rules permit apprentices to carry crates marking the inspector.",
       "expected_supported": false
+    }
+  ],
+  "diagnostics": [
+    {
+      "case": "plain_assertion_invented_grant",
+      "owned_evidence": [
+        "Apprentices carry crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates.",
+      "gate": false
+    },
+    {
+      "case": "obligation_replaced_by_grant",
+      "owned_evidence": [
+        "Apprentices must carry crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates.",
+      "gate": "must_withhold"
     }
   ]
 }

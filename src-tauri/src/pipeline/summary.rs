@@ -15305,7 +15305,20 @@ mod tests {
 
     #[test]
     fn empty_permission_evidence_is_rejected_before_verify_dispatch() {
-        let (normalized, chunked) = materiality_fixture(&["Apprentices may carry crates.".into()]);
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "summary/coherent/relation_guard_permission_fixtures.json"
+        ))
+        .unwrap();
+        let control = fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["case"] == "empty_evidence_twin")
+            .unwrap();
+        assert_eq!(control["verification_seam"], "production_admission");
+        assert_eq!(control["expected_supported"], false);
+        let (normalized, chunked) =
+            materiality_fixture(&[control["claim"].as_str().unwrap().into()]);
         let runtime = materiality_runtime(false, 0, false);
         let mut analyzed = analyze(
             &runtime,
@@ -15333,7 +15346,7 @@ mod tests {
         let before = runtime.requests.lock().unwrap().len();
         let chunk = &mut analyzed.chunks[0];
         let item = &mut chunk.evidence[0];
-        item.exact_quote.clear();
+        item.exact_quote = control["owned_evidence"][0].as_str().unwrap().into();
         item.evidence_id = deterministic_evidence_id(
             &analyzed.document_id,
             &analyzed.analysis_version,
@@ -15367,7 +15380,7 @@ mod tests {
             "invalid evidence must fail before a Verify model request"
         );
         println!(
-            "EMPTY_PERMISSION_ADMISSION verdict={} verify_dispatches=0",
+            "EMPTY_PERMISSION_ADMISSION case=empty_evidence_twin verdict={} verify_dispatches=0",
             failure.code
         );
     }

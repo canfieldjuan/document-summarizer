@@ -253,8 +253,14 @@ mod relation_guard_tests {
         let fixtures: Value =
             serde_json::from_str(include_str!("relation_guard_permission_fixtures.json")).unwrap();
         let mut failures = Vec::new();
+        let mut admitted_controls = 0;
         for row in fixtures["cases"].as_array().unwrap() {
             let name = row["case"].as_str().unwrap();
+            if row["verification_seam"] == "production_admission" {
+                assert_eq!(name, "empty_evidence_twin");
+                continue; // Exercised by the real Verify preflight regression.
+            }
+            admitted_controls += 1;
             let mut items = row["owned_evidence"]
                 .as_array()
                 .unwrap()
@@ -305,10 +311,40 @@ mod relation_guard_tests {
                 );
             }
         }
+        assert_eq!(admitted_controls, 36);
         assert!(
             failures.is_empty(),
             "permission final verdict mismatch: {failures:?}"
         );
+    }
+
+    #[test]
+    fn permission_grant_diagnostics_report_actual_final_verdicts() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_permission_fixtures.json")).unwrap();
+        for row in fixtures["diagnostics"].as_array().unwrap() {
+            let item = evidence(row["owned_evidence"][0].as_str().unwrap());
+            assert!(!item.exact_quote.trim().is_empty());
+            let claim = CitedClaim {
+                claim_id: row["case"].as_str().unwrap().into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verdict).unwrap();
+            println!(
+                "PERMISSION_DIAGNOSTIC case={} verdict={:?}",
+                row["case"], verdict[0].verdict
+            );
+            if row["gate"] == "must_withhold" {
+                assert_ne!(verdict[0].verdict, ClaimVerdict::Supported,
+                    "STOP: the obligation diagnostic must withhold through the existing modal owner");
+            }
+        }
     }
 
     #[test]
