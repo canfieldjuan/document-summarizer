@@ -1,0 +1,125 @@
+{
+  "approval": "operator direction and issuecomment-6129005624",
+  "cases": [
+    {
+      "case": "compressed_actor_faithful",
+      "source": "Cards must be carried.\n\nAll technicians using the services of a vendor must ensure valid registration.",
+      "claim": "Cards must be carried, and all technicians using vendor services must ensure valid registration.",
+      "expected_supported": true
+    },
+    {
+      "case": "compressed_actor_unfaithful",
+      "source": "Cards must be carried.\n\nAll technicians using the services of a vendor must ensure valid registration.",
+      "claim": "Cards must be carried, and all vendors using technician services must ensure valid registration.",
+      "expected_supported": false
+    },
+    {
+      "case": "definition_proposition_faithful",
+      "source": "The term shall be from June through August. The fee is Basic.",
+      "claim": "The term is from June through August, and the fee is Basic.",
+      "expected_supported": true
+    },
+    {
+      "case": "definition_proposition_unfaithful",
+      "source": "The term shall be from June through August. The fee is Basic.",
+      "claim": "The term is from June through August and September, and the fee is Basic.",
+      "expected_supported": false
+    },
+    {
+      "case": "article_identity_faithful",
+      "source": "Determining whether the worker is an employee is critical.",
+      "claim": "Determining whether a worker is an employee is critical.",
+      "expected_supported": true
+    },
+    {
+      "case": "article_identity_unfaithful",
+      "source": "Determining whether the worker is an employee is critical.",
+      "claim": "Determining whether a supplier is an employee is critical.",
+      "expected_supported": false
+    },
+    {
+      "case": "action_inflection_faithful",
+      "source": "The employer must guarantee to offer employment.",
+      "claim": "The employer must guarantee offering employment.",
+      "expected_supported": true
+    },
+    {
+      "case": "action_inflection_unfaithful",
+      "source": "The employer must guarantee to offer employment.",
+      "claim": "The employer must guarantee withdrawing employment.",
+      "expected_supported": false
+    },
+    {
+      "case": "nominal_rationale_faithful",
+      "source": "We make no express or implied guarantees because updates are delayed.",
+      "claim": "We make no express or implied guarantees because updates are delayed.",
+      "expected_supported": true
+    },
+    {
+      "case": "nominal_rationale_unfaithful",
+      "source": "We make no express or implied guarantees because updates are delayed.",
+      "claim": "We make no express or implied guarantees because updates are immediate.",
+      "expected_supported": false
+    },
+    {
+      "case": "permission_list_faithful",
+      "source": "Adults may work at any time.\n\nStudents may work outside school hours.",
+      "claim": "The standards allow adults to work at any time, and students to work outside school hours.",
+      "expected_supported": true
+    },
+    {
+      "case": "permission_list_unfaithful",
+      "source": "Adults may work at any time.\n\nStudents may work outside school hours.",
+      "claim": "The standards allow adults to work at any time, and students to work at any time.",
+      "expected_supported": false
+    },
+    {
+      "case": "permission_distinct_faithful",
+      "source": "Adults may work at any time.",
+      "claim": "The standards permit adults to work at any time.",
+      "expected_supported": true
+    },
+    {
+      "case": "permission_distinct_unfaithful",
+      "source": "Adults may work at any time.",
+      "claim": "The standards permit adults to work at any time, and students to work at any time.",
+      "expected_supported": false
+    },
+    {
+      "case": "definition_second_clause_faithful",
+      "source": "The term shall be from June to August. The fee is Basic.",
+      "claim": "The term is from June to August, but the fee is Basic.",
+      "expected_supported": true
+    },
+    {
+      "case": "definition_second_clause_unfaithful",
+      "source": "The term shall be from June to August. The fee is Basic.",
+      "claim": "The term is from June to August, but the fee is Premium.",
+      "expected_supported": false
+    },
+    {
+      "case": "causal_action_inflection_faithful",
+      "source": "An alarm ensures that pumping stops.",
+      "claim": "An alarm ensures that pumping stops.",
+      "expected_supported": true
+    },
+    {
+      "case": "causal_action_inflection_unfaithful",
+      "source": "An alarm ensures that pumping stops.",
+      "claim": "An alarm ensures that pumping starts.",
+      "expected_supported": false
+    },
+    {
+      "case": "nominal_chain_faithful",
+      "source": "An update ensures accuracy. We make no express or implied guarantees.",
+      "claim": "We make no express or implied guarantees, and an update ensures accuracy.",
+      "expected_supported": true
+    },
+    {
+      "case": "nominal_chain_changed_rationale",
+      "source": "An update ensures accuracy. We make no express or implied guarantees.",
+      "claim": "We make no express or implied guarantees, and an update ensures inaccuracy.",
+      "expected_supported": false
+    }
+  ]
+}

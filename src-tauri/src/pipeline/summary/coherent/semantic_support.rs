@@ -24,6 +24,40 @@ mod relation_guard_tests {
     }
 
     #[test]
+    #[ignore = "offline private trace; explicit packet path required"]
+    fn compressed_actor_owner_trace() {
+        let path = std::env::var("DOC_SUM_GUARD_TRACE_PACKET").unwrap();
+        let packet: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        for row in packet["changed_claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row["alias"] == "ART0051"
+                    && (row["previous_independent_expected_supported"] == true
+                        || row["new_flip"] == true)
+            })
+        {
+            println!("OWNER_TRACE claim_id={}", row["claim"]["claim_id"]);
+            for (label, text) in [
+                ("claim", row["claim"]["text"].as_str().unwrap()),
+                (
+                    "source",
+                    row["owned_evidence"][0]["exact_quote"].as_str().unwrap(),
+                ),
+            ] {
+                for clause in semantic_clauses(text) {
+                    println!(
+                        "OWNER_TRACE {label} clause={clause:?} relations={:?} permission={:?}",
+                        evaluation_relations(&clause, EVALUATIVE_CONCEPTS[1]),
+                        permission_propositions(&clause)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn approved_relations_preserve_meaning() {
         let fixtures: Value =
             serde_json::from_str(include_str!("relation_guard_fixtures.json")).unwrap();
@@ -62,6 +96,40 @@ mod relation_guard_tests {
         assert!(
             wrong_approvals.is_empty(),
             "false approvals: {wrong_approvals:?}"
+        );
+    }
+
+    #[test]
+    fn approved_proposition_relations_preserve_final_verdicts() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_proposition_fixtures.json")).unwrap();
+        let mut failures = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let item = evidence(row["source"].as_str().unwrap());
+            let claim = CitedClaim {
+                claim_id: "proposition-k1".into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verification = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verification).unwrap();
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!(
+                "PROPOSITION_REGRESSION case={name} expected_supported={expected} verdict={:?}",
+                verification[0].verdict
+            );
+            if expected != (verification[0].verdict == ClaimVerdict::Supported) {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "proposition final verdict mismatch: {failures:?}"
         );
     }
 
@@ -761,6 +829,124 @@ fn semantic_clauses(text: &str) -> impl Iterator<Item = String> {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     })
+}
+
+fn claim_propositions(text: &str) -> impl Iterator<Item = String> {
+    semantic_clauses(text).flat_map(|clause| independent_propositions(&clause))
+}
+
+// Only explicit coordinated independent propositions introduce an actor
+// boundary. Conjoined values and shared-subject verb lists remain intact.
+fn has_finite_predicate(tokens: &[String]) -> bool {
+    tokens.iter().enumerate().any(|(index, word)| {
+        index > 0
+            && (is_modal_anchor(word)
+                || matches!(
+                    word.as_str(),
+                    "is" | "are"
+                        | "was"
+                        | "were"
+                        | "has"
+                        | "have"
+                        | "begins"
+                        | "ends"
+                        | "ensures"
+                        | "guarantees"
+                        | "provides"
+                        | "makes"
+                        | "make"
+                        | "commenced"
+                ))
+    })
+}
+
+fn independent_propositions(clause: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    for (comma, _) in clause.match_indices(',') {
+        let tail = clause[comma + 1..].trim_start();
+        let Some(body) = tail
+            .strip_prefix("and ")
+            .or_else(|| tail.strip_prefix("but "))
+        else {
+            continue;
+        };
+        let candidate = body.split(',').next().unwrap_or(body);
+        if !has_finite_predicate(&words(candidate))
+            || !has_finite_predicate(&words(&clause[start..comma]))
+        {
+            continue;
+        }
+        result.push(clause[start..comma].trim().to_owned());
+        start = clause.len() - body.len();
+    }
+    if start < clause.len() {
+        result.push(clause[start..].trim().to_owned());
+    }
+    result
+}
+
+// Identity is structural: discard articles, and canonicalize a single owned
+// noun-of-owner construction to the corresponding attributive noun phrase.
+// Actor nouns and their roles remain ordered; this is not a bag of words.
+fn relation_subject_identity(tokens: &[String]) -> Vec<String> {
+    let mut result = tokens
+        .iter()
+        .filter(|word| !matches!(word.as_str(), "a" | "an" | "the"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    while index + 2 < result.len() {
+        if result[index + 1] == "of" && index + 3 == result.len() {
+            let owner = result.remove(index + 2);
+            result.remove(index + 1);
+            result.insert(index, owner);
+        }
+        index += 1;
+    }
+    result
+}
+
+fn owned_action_identity(word: &str) -> String {
+    if let Some(stem) = word.strip_suffix("ing") {
+        if stem.len() >= 3 {
+            return stem.to_owned();
+        }
+    }
+    word.to_owned()
+}
+
+fn relation_consequence_identity(tokens: &[String]) -> Vec<String> {
+    let mut terms = causal_terms(tokens);
+    if terms.first().is_some_and(|word| word == "to") {
+        terms.remove(0);
+    }
+    if let Some(action) = terms.first_mut() {
+        *action = owned_action_identity(action);
+    }
+    terms
+}
+
+fn nominal_evaluation(tokens: &[String], index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    for word in tokens[..index].iter().rev() {
+        if matches!(
+            word.as_str(),
+            "a" | "an" | "the" | "no" | "any" | "some" | "each" | "every" | "all"
+        ) {
+            return true;
+        }
+        let modifier = matches!(word.as_str(), "express" | "implied" | "full" | "limited")
+            || ["al", "ive", "ary", "ous", "ful", "less", "ed"]
+                .iter()
+                .any(|ending| word.ends_with(ending));
+        if !modifier && !matches!(word.as_str(), "and" | "or") {
+            return false;
+        }
+    }
+    false
 }
 
 fn currency_symbol_token(character: char) -> Option<&'static str> {
@@ -2120,7 +2306,7 @@ fn actor_qualifications_supported(claim: &str, evidence: &[&EvidenceItem]) -> bo
         .iter()
         .map(|(actor, label)| (actor.as_str(), label.as_slice()))
         .collect::<Vec<_>>();
-    semantic_clauses(claim)
+    claim_propositions(claim)
         .flat_map(|clause| {
             let tokens = words(&clause);
             if tokens
@@ -2363,12 +2549,7 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
             // Nominal guarantee uses have a determiner/modifier or no verb
             // complement. Ensure has no such nominal ambiguity.
             if matches!(tokens[concept_index].as_str(), "guarantee" | "guarantees")
-                && (concept_index == 0
-                    || tokens.get(concept_index - 1).is_some_and(|word| {
-                        matches!(word.as_str(), "a" | "an" | "the" | "no" | "any" | "some")
-                    })
-                    || (tokens.get(concept_index + 1).is_none()
-                        && tokens[..concept_index].iter().any(|word| word == "no")))
+                && nominal_evaluation(&tokens, concept_index)
             {
                 return None;
             }
@@ -2461,10 +2642,12 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
 }
 
 fn evaluated_subject_matches(source: &[String], claim: &[String]) -> bool {
-    source == claim
+    relation_subject_identity(source) == relation_subject_identity(claim)
         || evaluation_subject_components(source)
             .into_iter()
-            .any(|component| component == claim)
+            .any(|component| {
+                relation_subject_identity(component) == relation_subject_identity(claim)
+            })
 }
 
 fn evaluation_subject_components(subject: &[String]) -> Vec<&[String]> {
@@ -2479,8 +2662,37 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
         .iter()
         .flat_map(|item| semantic_clauses(&item.exact_quote))
         .collect::<Vec<_>>();
+    // Explicit rationale is a causal relation even when its consequence is
+    // nominal. Pair by the owned consequence before comparing causes; unknown
+    // consequence constructions do not acquire a fabricated conflict.
+    let rationales = source_clauses
+        .iter()
+        .flat_map(|clause| explicit_causal_relations(clause))
+        .collect::<Vec<_>>();
+    for clause in claim_propositions(claim) {
+        if let Some((consequence, cause)) = clause.split_once(" because ") {
+            let consequence = relation_subject_identity(&causal_terms(&words(consequence)));
+            let cause = relation_subject_identity(&causal_terms(&words(cause)));
+            let paired = rationales
+                .iter()
+                .filter(|source| {
+                    source
+                        .consequence
+                        .as_ref()
+                        .is_some_and(|owned| relation_subject_identity(owned) == consequence)
+                })
+                .collect::<Vec<_>>();
+            if !paired.is_empty()
+                && !paired
+                    .iter()
+                    .any(|source| relation_subject_identity(&source.subject) == cause)
+            {
+                return false;
+            }
+        }
+    }
     for concept in EVALUATIVE_CONCEPTS {
-        let claim_relations = semantic_clauses(claim)
+        let claim_relations = claim_propositions(claim)
             .flat_map(|clause| evaluation_relations(&clause, concept))
             .collect::<Vec<_>>();
         let source_relations = source_clauses
@@ -2500,9 +2712,16 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
             let supported = if let Some(consequence) = &relation.consequence {
                 !consequence.is_empty()
                     && source_relations.iter().any(|source| {
-                        source.subject == relation.subject
+                        relation_subject_identity(&source.subject)
+                            == relation_subject_identity(&relation.subject)
                             && source.negated == relation.negated
-                            && source.consequence.as_ref() == Some(consequence)
+                            && source
+                                .consequence
+                                .as_ref()
+                                .is_some_and(|source_consequence| {
+                                    relation_consequence_identity(source_consequence)
+                                        == relation_consequence_identity(consequence)
+                                })
                     })
             } else {
                 evaluation_subject_components(&relation.subject)
@@ -2602,7 +2821,13 @@ fn definition_relation(clause: &str) -> Option<DefinitionRelation> {
     })
     .flatten();
     let value = if let Some((start, end)) = range {
-        if start.trim().is_empty() || end.trim().is_empty() {
+        if start.trim().is_empty()
+            || end.trim().is_empty()
+            || has_finite_predicate(&words(start))
+            || has_finite_predicate(&words(end))
+        {
+            // An endpoint still containing a proposition is unclassified. It
+            // cannot become a conflicting value or release source modality.
             return None;
         }
         AssignmentValue::Range {
@@ -2645,7 +2870,7 @@ fn definition_value_decision(claim: &str, evidence: &[&EvidenceItem]) -> Definit
         supported: true,
         released_modals: Vec::new(),
     };
-    for assignment in semantic_clauses(claim).filter_map(|clause| definition_relation(&clause)) {
+    for assignment in claim_propositions(claim).filter_map(|clause| definition_relation(&clause)) {
         let paired = sources
             .iter()
             .filter(|source| source.subject == assignment.subject)
@@ -2676,7 +2901,7 @@ fn definition_value_decision(claim: &str, evidence: &[&EvidenceItem]) -> Definit
 // Use the existing predicate/context owner to recognize an assertion of the
 // same source proposition with its modal removed. No writer parser is changed.
 fn plain_assertion_for_modal(claim: &str, source: &ModalPredicate) -> Option<ModalPredicate> {
-    for clause in semantic_clauses(claim)
+    for clause in claim_propositions(claim)
         .flat_map(|clause| clause.split(',').map(str::to_owned).collect::<Vec<_>>())
     {
         let tokens = necessity_projection(&words(&clause)).tokens;
@@ -2698,6 +2923,135 @@ fn plain_assertion_for_modal(claim: &str, source: &ModalPredicate) -> Option<Mod
     None
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PermissionProposition {
+    subject: Vec<String>,
+    action: Vec<String>,
+    negated: bool,
+}
+
+// Full permission propositions, including every condition/scope token, own
+// equivalence. ModalPredicate's bounded contexts are not sufficient for this.
+fn permission_propositions(text: &str) -> Option<Vec<PermissionProposition>> {
+    let mut result = Vec::new();
+    for clause in semantic_clauses(text) {
+        let tokens = words(&clause);
+        let permission = tokens
+            .iter()
+            .position(|word| matches!(word.as_str(), "allow" | "allows" | "permit" | "permits"));
+        if let Some(index) = permission {
+            if index > 0 && tokens[index - 1] == "to" {
+                continue;
+            }
+            if negation_present(&tokens[..index]) {
+                return None;
+            }
+            // The governing permission applies only to explicit actor-to-action
+            // items. A bare or shared-actor list receives no invented alignment.
+            // Recover comma boundaries from the original clause, not token bags.
+            let first = original_words(&clause).get(index + 1)?.clone();
+            let offset = clause
+                .match_indices(&first)
+                .find(|(offset, _)| original_words(&clause[..*offset]).len() == index + 1)?
+                .0;
+            for item in clause[offset..].split(',') {
+                let item = words(item);
+                let item = item.strip_prefix(&["and".into()]).unwrap_or(&item);
+                let action = item.iter().position(|word| word == "to")?;
+                if action == 0 || action + 1 >= item.len() {
+                    return None;
+                }
+                result.push(PermissionProposition {
+                    subject: relation_subject_identity(&item[..action]),
+                    action: item[action + 1..].to_vec(),
+                    negated: false,
+                });
+            }
+        } else if let Some(index) = tokens.iter().position(|word| word == "may") {
+            if index == 0 || index + 1 >= tokens.len() || tokens[index + 1] == "be" {
+                // Stative may-be is epistemic/conditional, not an owned grant.
+                continue;
+            }
+            let negated = tokens.get(index + 1).is_some_and(|word| word == "not");
+            result.push(PermissionProposition {
+                subject: relation_subject_identity(&tokens[..index]),
+                action: tokens[index + 1 + usize::from(negated)..].to_vec(),
+                negated,
+            });
+        }
+    }
+    Some(result)
+}
+
+fn permission_equivalence(claim: &str, evidence: &[&EvidenceItem]) -> Option<Vec<ModalPredicate>> {
+    let has_form = |text: &str| {
+        words(text)
+            .iter()
+            .any(|word| matches!(word.as_str(), "allow" | "allows" | "permit" | "permits"))
+    };
+    let explicit_claim = has_form(claim);
+    let sources = evidence
+        .iter()
+        .flat_map(|item| semantic_clauses(&item.exact_quote))
+        .filter_map(|clause| permission_propositions(&clause))
+        .flatten()
+        .collect::<Vec<_>>();
+    // A permission elsewhere in the evidence is not a decision about this
+    // claim. Only a recognized explicit grant or its aligned may counterpart
+    // engages this comparator.
+    if !explicit_claim {
+        if !evidence.iter().any(|item| has_form(&item.exact_quote)) {
+            return Some(Vec::new());
+        }
+        let requests =
+            permission_propositions(&claim_propositions(claim).collect::<Vec<_>>().join("; "))
+                .unwrap_or_default();
+        for request in requests {
+            let paired = sources
+                .iter()
+                .filter(|source| {
+                    source.subject == request.subject
+                        && source.action.first() == request.action.first()
+                })
+                .collect::<Vec<_>>();
+            if !paired.is_empty() && !paired.contains(&&request) {
+                return None;
+            }
+        }
+        return Some(Vec::new());
+    }
+    if !words(claim).iter().any(|word| word == "to")
+        || sources.is_empty()
+        || !evidence
+            .iter()
+            .any(|item| words(&item.exact_quote).iter().any(|word| word == "may"))
+    {
+        return Some(Vec::new());
+    }
+    let requests =
+        permission_propositions(&claim_propositions(claim).collect::<Vec<_>>().join("; "))?;
+    let mut used = HashSet::new();
+    let mut projected = Vec::new();
+    for request in requests {
+        let index = sources
+            .iter()
+            .enumerate()
+            .position(|(index, source)| !used.contains(&index) && source == &request)?;
+        used.insert(index);
+        let text = format!(
+            "{} may {}{}",
+            request.subject.join(" "),
+            if request.negated { "not " } else { "" },
+            request.action.join(" ")
+        );
+        projected.extend(modal_predicates(&text, false));
+    }
+    if projected.is_empty() {
+        return None;
+    }
+    Some(projected)
+}
+
 #[cfg(test)]
 fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
     let definitions = definition_value_decision(claim, evidence);
@@ -2709,8 +3063,14 @@ fn modal_force_with_definitions(
     evidence: &[&EvidenceItem],
     definitions: &DefinitionDecision,
 ) -> bool {
-    let guarded_modal_predicates = |text: &str, strong: bool| {
-        semantic_clauses(text)
+    let guarded_modal_predicates = |text: &str, strong: bool, claim_side: bool| {
+        let clauses = if claim_side {
+            claim_propositions(text).collect::<Vec<_>>()
+        } else {
+            semantic_clauses(text).collect::<Vec<_>>()
+        };
+        clauses
+            .into_iter()
             .flat_map(|clause| clause.split(',').map(str::to_owned).collect::<Vec<_>>())
             .flat_map(|clause| {
                 let tokens = necessity_projection(&words(&clause)).tokens;
@@ -2765,14 +3125,18 @@ fn modal_force_with_definitions(
     };
     let weak_source = evidence
         .iter()
-        .flat_map(|item| guarded_modal_predicates(&item.exact_quote, false))
+        .flat_map(|item| guarded_modal_predicates(&item.exact_quote, false, false))
         .collect::<Vec<_>>();
     let strong_source = evidence
         .iter()
-        .flat_map(|item| guarded_modal_predicates(&item.exact_quote, true))
+        .flat_map(|item| guarded_modal_predicates(&item.exact_quote, true, false))
         .collect::<Vec<_>>();
-    let strong_claim = guarded_modal_predicates(claim, true);
-    let weak_claim = guarded_modal_predicates(claim, false);
+    let strong_claim = guarded_modal_predicates(claim, true, true);
+    let mut weak_claim = guarded_modal_predicates(claim, false, true);
+    let Some(permission_claim) = permission_equivalence(claim, evidence) else {
+        return false;
+    };
+    weak_claim.extend(permission_claim);
     let strengthening_supported = strong_claim.iter().all(|predicate| {
         let matching_weak_source = weak_source
             .iter()
