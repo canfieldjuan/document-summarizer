@@ -6507,6 +6507,8 @@ fn validate_modal_content(
 }
 
 pub(super) use semantic_support::apply_semantic_fidelity_guards;
+#[cfg(test)]
+pub(super) use semantic_support::relation_guard_rejection_reasons;
 
 fn modal_strengthening_failure() -> PipelineFailure {
     stage_failure(
@@ -6629,6 +6631,40 @@ fn fallback_document(
         claims: ledger_claims,
         warnings,
     })
+}
+
+#[cfg(test)]
+pub(super) fn saved_relation_prose_fixture(
+    analyzed: &AnalyzedDocument,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+    replacement: Option<&str>,
+) -> SynthesizedDocument {
+    let catalog =
+        source_catalog_for_synthesis_version(VERSION, chunked, normalized, Some(analyzed)).unwrap();
+    let evidence = catalog.candidates[0].evidence.clone();
+    let text = replacement.unwrap_or(&evidence.exact_quote).to_string();
+    let ids = vec![evidence.evidence_id.clone()];
+    let claims = vec![CitedClaim {
+        claim_id: deterministic_claim_id(&analyzed.document_id, VERSION, 0, &text, &ids),
+        text,
+        evidence_ids: ids,
+    }];
+    SynthesizedDocument {
+        contract_extraction: None,
+        document_id: analyzed.document_id.clone(),
+        synthesis_version: VERSION.into(),
+        runtime_id: analyzed.runtime_id.clone(),
+        model_id: analyzed.model_id.clone(),
+        presentation_mode: SummaryPresentationMode::Coherent,
+        summary_text: render_cited_summary_with_evidence(&claims, std::slice::from_ref(&evidence))
+            .unwrap(),
+        source_chunk_ids: chunked.chunks.iter().map(|c| c.chunk_id.clone()).collect(),
+        claims: direct::source_ordered_claims(analyzed).unwrap(),
+        summary_claims: claims,
+        synthesis_evidence: vec![evidence],
+        warnings: analyzed.warnings.clone(),
+    }
 }
 
 // Versioned deterministic subset: source order and identity come from the full

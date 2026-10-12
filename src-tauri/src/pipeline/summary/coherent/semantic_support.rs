@@ -66,6 +66,56 @@ mod relation_guard_tests {
     }
 
     #[test]
+    fn relation_boundaries_preserve_polarity_and_do_not_join_evidence() {
+        let valve = evidence("Closing the valve stops water flow.");
+        let mut other = evidence("Opening the valve ensures that alarms sound.");
+        other.evidence_id = "relation-e2".into();
+        let sources = [&valve, &other];
+        assert!(evaluative_conclusions_supported(
+            "Closing the valve ensures that water flow stops.",
+            &sources
+        ));
+        for claim in [
+            "Closing the valve ensures that alarms sound.",
+            "Closing the valve ensures that water flow does not stop.",
+            "Closing the valve ensures.",
+            "It ensures that water flow stops.",
+            "Opening the valve ensures that alarms sound. It ensures that water flow stops.",
+        ] {
+            assert!(
+                !evaluative_conclusions_supported(claim, &sources),
+                "{claim}"
+            );
+        }
+        let observation = evidence("The operator sees water flow.");
+        assert!(!evaluative_conclusions_supported(
+            "The operator ensures that water flow sees.",
+            &[&observation]
+        ));
+        let required = evidence("The operator must not close the valve.");
+        assert!(modal_force_supported(
+            "The operator must not close the valve.",
+            &[&required]
+        ));
+        assert!(!modal_force_supported(
+            "The operator closes the valve.",
+            &[&required]
+        ));
+        assert!(!modal_force_supported(
+            "The operator does not close the valve.",
+            &[&required]
+        ));
+        assert!(!modal_force_supported(
+            "The operator should not close the valve.",
+            &[&required]
+        ));
+        assert!(modal_force_supported(
+            "The guard watches the door.",
+            &[&required]
+        ));
+    }
+
+    #[test]
     #[ignore = "CPU-only original A1 guard replay; requires DOC_SUM_GUARD_A1_DRAFT"]
     fn original_a1_unit_is_withheld() {
         let path = std::env::var_os("DOC_SUM_GUARD_A1_DRAFT").unwrap();
@@ -1616,18 +1666,6 @@ fn defined_actor_labels(text: &str) -> HashMap<String, Vec<String>> {
     labels
 }
 
-fn contains_owned_words(text: &str, phrase: &[String]) -> bool {
-    let tokens = words(text);
-    tokens.windows(phrase.len()).any(|window| window == phrase)
-}
-
-fn contains_any_word(text: &str, alternatives: &[&str]) -> bool {
-    let tokens = words(text);
-    tokens
-        .iter()
-        .any(|word| alternatives.contains(&word.as_str()))
-}
-
 fn tokens_contain_any(tokens: &[String], alternatives: &[&str]) -> bool {
     tokens
         .iter()
@@ -1909,6 +1947,7 @@ fn original_words(text: &str) -> Vec<String> {
 struct EvaluationRelation {
     subject: Vec<String>,
     negated: bool,
+    consequence: Option<Vec<String>>,
 }
 
 const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
@@ -1996,6 +2035,63 @@ fn evaluation_subject_start(tokens: &[String], linking_index: usize) -> usize {
         })
 }
 
+fn causal_terms(tokens: &[String]) -> Vec<String> {
+    let start = usize::from(tokens.first().is_some_and(|word| word == "that"));
+    let tokens = &tokens[start..];
+    let article = usize::from(tokens.first().is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "a" | "an" | "the" | "this" | "these" | "that" | "those"
+        )
+    }));
+    let mut terms = tokens[article..].to_vec();
+    // Present-tense inflection of the explicitly represented Stop event.
+    if terms.last().is_some_and(|word| word == "stops") {
+        *terms.last_mut().expect("last term exists") = "stop".into();
+    }
+    terms
+}
+
+fn explicit_causal_relations(clause: &str) -> Vec<EvaluationRelation> {
+    let mut relations = evaluation_relations(clause, EVALUATIVE_CONCEPTS[1]);
+    let tokens = words(clause);
+    if let Some(index) = tokens.iter().position(|word| word == "because") {
+        let subject = causal_terms(&tokens[index + 1..]);
+        let consequence = causal_terms(&tokens[..index]);
+        if !subject.is_empty() && !consequence.is_empty() {
+            relations.push(EvaluationRelation {
+                subject,
+                consequence: Some(consequence),
+                negated: false,
+            });
+        }
+    }
+    // A causative Stop statement owns both the cause and the resulting event:
+    // "X stops Y" -> cause X, event "Y stops". This is not a rule that turns
+    // arbitrary transitive predicates into causal assertions.
+    if !tokens
+        .iter()
+        .any(|word| EVALUATIVE_CONCEPTS[1].contains(&word.as_str()))
+    {
+        if let Some(index) = tokens
+            .iter()
+            .position(|word| matches!(word.as_str(), "stop" | "stops"))
+        {
+            let subject = causal_terms(&tokens[..index]);
+            let mut consequence = causal_terms(&tokens[index + 1..]);
+            if !subject.is_empty() && !consequence.is_empty() {
+                consequence.push("stop".into());
+                relations.push(EvaluationRelation {
+                    subject,
+                    consequence: Some(consequence),
+                    negated: false,
+                });
+            }
+        }
+    }
+    relations
+}
+
 fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelation> {
     let tokens = original_words(clause)
         .into_iter()
@@ -2067,10 +2163,20 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                     subject.as_slice(),
                     [word] if matches!(word.as_str(), "it" | "they" | "he" | "she")
                 );
-            subject_is_concrete.then(|| EvaluationRelation {
-                subject,
+            Some(EvaluationRelation {
+                // Preserve the recognized relation even when its actor cannot
+                // be owned. The comparator withholds that unknown relation,
+                // including when another clause in the same unit is known.
+                subject: if !subject_is_concrete {
+                    Vec::new()
+                } else if transitive {
+                    causal_terms(&subject)
+                } else {
+                    subject
+                },
                 negated: negation_present(&tokens[subject_end.saturating_sub(3)..=concept_index])
                     ^ is_lexically_negated_evaluation(&tokens[concept_index]),
+                consequence: transitive.then(|| causal_terms(&tokens[concept_index + 1..])),
             })
         })
         .collect()
@@ -2096,61 +2202,70 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
         .flat_map(|item| semantic_clauses(&item.exact_quote))
         .collect::<Vec<_>>();
     for concept in EVALUATIVE_CONCEPTS {
-        let claim_clauses = semantic_clauses(claim)
-            .filter(|clause| contains_any_word(clause, concept))
-            .collect::<Vec<_>>();
-        if claim_clauses.is_empty() {
-            continue;
-        }
-        let evaluated_source_clauses = source_clauses
-            .iter()
-            .copied()
-            .filter(|clause| contains_any_word(clause, concept))
-            .collect::<Vec<_>>();
-        if evaluated_source_clauses.is_empty() {
-            continue;
-        }
-        let evaluated_relations = evaluated_source_clauses
-            .iter()
+        let claim_relations = semantic_clauses(claim)
             .flat_map(|clause| evaluation_relations(clause, concept))
             .collect::<Vec<_>>();
-        for clause in claim_clauses {
-            for claim_relation in evaluation_relations(clause, concept) {
-                let subject_is_cited = evidence
-                    .iter()
-                    .any(|item| contains_owned_words(&item.exact_quote, &claim_relation.subject));
-                let subject_components = evaluation_subject_components(&claim_relation.subject);
-                let components_are_cited = subject_components.len() > 1
-                    && subject_components.iter().all(|component| {
-                        evidence
-                            .iter()
-                            .any(|item| contains_owned_words(&item.exact_quote, component))
-                    });
-                let relation_is_supported = if subject_is_cited {
-                    evaluated_relations.iter().any(|source| {
-                        evaluated_subject_matches(&source.subject, &claim_relation.subject)
-                            && source.negated == claim_relation.negated
+        let source_relations = source_clauses
+            .iter()
+            .flat_map(|clause| {
+                if *concept == EVALUATIVE_CONCEPTS[1] {
+                    explicit_causal_relations(clause)
+                } else {
+                    evaluation_relations(clause, concept)
+                }
+            })
+            .collect::<Vec<_>>();
+        for relation in claim_relations {
+            if relation.subject.is_empty() {
+                return false;
+            }
+            let supported = if let Some(consequence) = &relation.consequence {
+                !consequence.is_empty()
+                    && source_relations.iter().any(|source| {
+                        source.subject == relation.subject
+                            && source.negated == relation.negated
+                            && source.consequence.as_ref() == Some(consequence)
                     })
-                } else if components_are_cited {
-                    subject_components.iter().all(|component| {
-                        evaluated_relations.iter().any(|source| {
-                            evaluated_subject_matches(&source.subject, component)
-                                && source.negated == claim_relation.negated
+            } else {
+                evaluation_subject_components(&relation.subject)
+                    .iter()
+                    .all(|component| {
+                        source_relations.iter().any(|source| {
+                            source.consequence.is_none()
+                                && evaluated_subject_matches(&source.subject, component)
+                                && source.negated == relation.negated
                         })
                     })
-                } else {
-                    true
-                };
-                if (subject_is_cited || components_are_cited)
-                    && !evaluated_relations.is_empty()
-                    && !relation_is_supported
-                {
-                    return false;
-                }
+            };
+            if !supported {
+                return false;
             }
         }
     }
     true
+}
+
+// Use the existing predicate/context owner to recognize an assertion of the
+// same source proposition with its modal removed. No writer parser is changed.
+fn plain_assertion_for_modal(claim: &str, source: &ModalPredicate) -> Option<ModalPredicate> {
+    for clause in claim.split(['.', '?', '!', ';', ',', '\n', '\r']) {
+        let tokens = words(clause);
+        for (index, word) in tokens.iter().enumerate() {
+            if word != &source.predicate && word != &format!("{}s", source.predicate) {
+                continue;
+            }
+            if tokens[..index].iter().any(|word| is_modal_anchor(word)) {
+                continue;
+            }
+            let mut predicate = modal_occurrence(&tokens, index, index, None)?;
+            // Canonicalize only the inflection of this already-owned action.
+            predicate.predicate.clone_from(&source.predicate);
+            if modal_statements_match(&predicate, source, false) {
+                return Some(predicate);
+            }
+        }
+    }
+    None
 }
 
 fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
@@ -2215,21 +2330,53 @@ fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
         .iter()
         .flat_map(|item| guarded_modal_predicates(&item.exact_quote, true))
         .collect::<Vec<_>>();
-    guarded_modal_predicates(claim, true)
-        .into_iter()
-        .all(|predicate| {
-            let matching_weak_source = weak_source
-                .iter()
-                .any(|source| modal_statements_match(&predicate, source, false));
-            let matching_strong_source = strong_source
-                .iter()
-                .any(|source| modal_statements_match(&predicate, source, false));
-            let matching_strong_polarity = strong_source
-                .iter()
-                .any(|source| modal_statements_match(&predicate, source, true));
-            (!matching_weak_source || matching_strong_polarity)
-                && (!matching_strong_source || matching_strong_polarity)
-        })
+    let strong_claim = guarded_modal_predicates(claim, true);
+    let weak_claim = guarded_modal_predicates(claim, false);
+    let strengthening_supported = strong_claim.iter().all(|predicate| {
+        let matching_weak_source = weak_source
+            .iter()
+            .any(|source| modal_statements_match(predicate, source, false));
+        let matching_strong_source = strong_source
+            .iter()
+            .any(|source| modal_statements_match(predicate, source, false));
+        let matching_strong_polarity = strong_source
+            .iter()
+            .any(|source| modal_statements_match(predicate, source, true));
+        (!matching_weak_source || matching_strong_polarity)
+            && (!matching_strong_source || matching_strong_polarity)
+    });
+    if !strengthening_supported {
+        return false;
+    }
+    for (source_strong, source) in strong_source
+        .iter()
+        .map(|predicate| (true, predicate))
+        .chain(weak_source.iter().map(|predicate| (false, predicate)))
+    {
+        let matching_strong = strong_claim
+            .iter()
+            .any(|claim| modal_statements_match(claim, source, true));
+        let matching_weak = weak_claim
+            .iter()
+            .any(|claim| modal_statements_match(claim, source, true));
+        let asserted = strong_claim
+            .iter()
+            .chain(&weak_claim)
+            .any(|claim| modal_statements_match(claim, source, false))
+            || plain_assertion_for_modal(claim, source).is_some();
+        if !asserted {
+            continue;
+        }
+        let same_strong_source = strong_source
+            .iter()
+            .any(|strong| modal_statements_match(strong, source, true));
+        if source_strong && !matching_strong
+            || !source_strong && !matching_weak && !(matching_strong && same_strong_source)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn semantic_fidelity_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
@@ -2239,6 +2386,22 @@ fn semantic_fidelity_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool 
         && actor_qualifications_supported(claim, evidence)
         && evaluative_conclusions_supported(claim, evidence)
         && modal_force_supported(claim, evidence)
+}
+
+#[cfg(test)]
+pub(in crate::pipeline::summary) fn relation_guard_rejection_reasons(
+    claim: &str,
+    evidence: &[&EvidenceItem],
+) -> Vec<&'static str> {
+    // Diagnostics call the decision owners; they never decide delivery.
+    let mut reasons = Vec::new();
+    if !evaluative_conclusions_supported(claim, evidence) {
+        reasons.push("evaluation_or_causal_relation");
+    }
+    if !modal_force_supported(claim, evidence) {
+        reasons.push("modal_preservation");
+    }
+    reasons
 }
 
 pub(in crate::pipeline::summary) fn apply_semantic_fidelity_guards(
