@@ -1,0 +1,221 @@
+{
+  "approval": "issuecomment-6129897093 plus issuecomment-6129693411; final bounded form round",
+  "cases": [
+    {
+      "case": "vulgar_fraction_faithful",
+      "source": "The employer must guarantee to offer at least \u00be of the hours.",
+      "claim": "The employer must guarantee offering at least three-quarters of the hours.",
+      "expected_supported": true
+    },
+    {
+      "case": "vulgar_fraction_unfaithful",
+      "source": "The employer must guarantee to offer at least \u00be of the hours.",
+      "claim": "The employer must guarantee offering at least two-thirds of the hours.",
+      "expected_supported": false
+    },
+    {
+      "case": "numeric_fraction_faithful",
+      "source": "The supplier guarantees delivering 3/4 of the inventory.",
+      "claim": "The supplier guarantees to deliver three quarters of the inventory.",
+      "expected_supported": true
+    },
+    {
+      "case": "numeric_fraction_unfaithful",
+      "source": "The supplier guarantees delivering 3/4 of the inventory.",
+      "claim": "The supplier guarantees to deliver one quarter of the inventory.",
+      "expected_supported": false
+    },
+    {
+      "case": "exact_age_range_faithful",
+      "source": "Ages 14 and 15 may work outside school hours.",
+      "claim": "The standards allow ages 14-15 to work outside school hours.",
+      "expected_supported": true
+    },
+    {
+      "case": "exact_age_range_unfaithful",
+      "source": "Ages 14 and 15 may work outside school hours.",
+      "claim": "The standards allow ages 14-16 to work outside school hours.",
+      "expected_supported": false
+    },
+    {
+      "case": "nonconsecutive_age_range_faithful",
+      "source": "Ages 14 and 16 may work outside school hours.",
+      "claim": "The standards allow ages 14 and 16 to work outside school hours.",
+      "expected_supported": true
+    },
+    {
+      "case": "nonconsecutive_age_range_unfaithful",
+      "source": "Ages 14 and 16 may work outside school hours.",
+      "claim": "The standards allow ages 14-16 to work outside school hours.",
+      "expected_supported": false
+    },
+    {
+      "case": "optional_plural_faithful",
+      "source": "Students may work on farms employing their parent(s).",
+      "claim": "The standards permit students to work on farms employing their parents.",
+      "expected_supported": true
+    },
+    {
+      "case": "optional_plural_unfaithful",
+      "source": "Students may work on farms employing their parent(s).",
+      "claim": "The standards permit students to work on farms employing their employers.",
+      "expected_supported": false
+    },
+    {
+      "case": "governed_complement_faithful",
+      "source": "The supplier guarantees to deliver the inventory.",
+      "claim": "The supplier guarantees delivering the inventory.",
+      "expected_supported": true
+    },
+    {
+      "case": "governed_complement_unfaithful",
+      "source": "The supplier guarantees to deliver the inventory.",
+      "claim": "The supplier guarantees withholding the inventory.",
+      "expected_supported": false
+    },
+    {
+      "case": "rule_consequence_faithful",
+      "source": "Failure to deliver would require the supplier to refund the payment.",
+      "claim": "Failure to deliver requires the supplier to refund the payment.",
+      "expected_supported": true
+    },
+    {
+      "case": "rule_consequence_unfaithful",
+      "source": "Failure to deliver would require the supplier to refund the payment.",
+      "claim": "Failure to deliver requires the customer to refund the payment.",
+      "expected_supported": false
+    },
+    {
+      "case": "rule_negation_faithful",
+      "source": "Failure to deliver would require the supplier to refund the payment.",
+      "claim": "Failure to deliver requires the supplier to refund the payment.",
+      "expected_supported": true
+    },
+    {
+      "case": "rule_negation_unfaithful",
+      "source": "Failure to deliver would require the supplier to refund the payment.",
+      "claim": "Failure to deliver does not require the supplier to refund the payment.",
+      "expected_supported": false
+    },
+    {
+      "case": "qualified_if_faithful",
+      "source": "The term shall be from June to August, but only if the parties agree.",
+      "claim": "The term is from June to August, but only if the parties agree.",
+      "expected_supported": true
+    },
+    {
+      "case": "qualified_if_unfaithful",
+      "source": "The term shall be from June to August, but only if the parties agree.",
+      "claim": "The term is from June to August, but only if the director agrees.",
+      "expected_supported": false
+    },
+    {
+      "case": "invented_if_faithful",
+      "source": "The term shall be from June to August.",
+      "claim": "The term is from June to August.",
+      "expected_supported": true
+    },
+    {
+      "case": "invented_if_unfaithful",
+      "source": "The term shall be from June to August.",
+      "claim": "The term is from June to August, but only if the parties agree.",
+      "expected_supported": false
+    },
+    {
+      "case": "qualified_when_faithful",
+      "source": "The term shall be from June to August, and only when notice is given.",
+      "claim": "The term is from June to August, and only when notice is given.",
+      "expected_supported": true
+    },
+    {
+      "case": "qualified_when_unfaithful",
+      "source": "The term shall be from June to August, and only when notice is given.",
+      "claim": "The term is from June to August, and only when permission is given.",
+      "expected_supported": false
+    },
+    {
+      "case": "invented_when_faithful",
+      "source": "The term shall be from June to August.",
+      "claim": "The term is from June to August.",
+      "expected_supported": true
+    },
+    {
+      "case": "invented_when_unfaithful",
+      "source": "The term shall be from June to August.",
+      "claim": "The term is from June to August, and only when notice is given.",
+      "expected_supported": false
+    },
+    {
+      "case": "subject_noun_verb_faithful",
+      "source": "The official checks the records.",
+      "claim": "The official checks the records.",
+      "expected_supported": true
+    },
+    {
+      "case": "subject_noun_verb_unfaithful",
+      "source": "The official checks the records.",
+      "claim": "The official guarantees accuracy.",
+      "expected_supported": false
+    },
+    {
+      "case": "adjective_subject_verb_faithful",
+      "source": "The senior official checks the records.",
+      "claim": "The senior official checks the records.",
+      "expected_supported": true
+    },
+    {
+      "case": "adjective_subject_verb_unfaithful",
+      "source": "The senior official checks the records.",
+      "claim": "The senior official ensures accuracy.",
+      "expected_supported": false
+    },
+    {
+      "case": "nominal_written_faithful",
+      "source": "An update ensures accuracy. The supplier offers no written or verbal guarantees.",
+      "claim": "The supplier offers no written or verbal guarantees, and an update ensures accuracy.",
+      "expected_supported": true
+    },
+    {
+      "case": "nominal_written_unfaithful",
+      "source": "An update ensures accuracy. The supplier offers no written or verbal guarantees.",
+      "claim": "The supplier offers no written or verbal guarantees, and an update ensures inaccuracy.",
+      "expected_supported": false
+    },
+    {
+      "case": "nominal_due_faithful",
+      "source": "The supplier offers no written or verbal guarantees due to delayed updates. An update ensures accuracy.",
+      "claim": "The supplier offers no written or verbal guarantees due to delayed updates, and an update ensures accuracy.",
+      "expected_supported": true
+    },
+    {
+      "case": "nominal_due_unfaithful",
+      "source": "The supplier offers no written or verbal guarantees due to delayed updates. An update ensures accuracy.",
+      "claim": "The supplier offers no written or verbal guarantees due to delayed updates, and an update ensures inaccuracy.",
+      "expected_supported": false
+    },
+    {
+      "case": "absolute_proposition_faithful",
+      "source": "The supplier must guarantee to offer \u00be of the hours. The guarantee period begins on arrival and ends on expiration.",
+      "claim": "The supplier must guarantee offering three quarters of the hours, with the guarantee period beginning on arrival and ending on expiration.",
+      "expected_supported": true
+    },
+    {
+      "case": "absolute_proposition_unfaithful",
+      "source": "The supplier must guarantee to offer \u00be of the hours. The guarantee period begins on arrival and ends on expiration.",
+      "claim": "The supplier must guarantee offering one quarter of the hours, with the guarantee period beginning on arrival and ending on expiration.",
+      "expected_supported": false
+    },
+    {
+      "case": "complete_guarantee_faithful",
+      "source": "Guarantee\n\n\u2022 Employer must guarantee to offer employment for at least \u00be of the total hours promised in the work contract.\n\n\u2022 Guarantee period begins on the first workday after the worker arrives and ends on the contract expiration date, including extensions.\n\n\u2022 Failure to meet this provision would require employer to supplement workers\u2019 pay.",
+      "claim": "The employer must guarantee offering employment for at least three-quarters of the total hours promised in the work contract, with the guarantee period beginning on the first workday after the worker arrives and ending on the contract expiration date, including extensions, and failure to meet this provision requires supplementing workers\u2019 pay.",
+      "expected_supported": true
+    },
+    {
+      "case": "complete_guarantee_unfaithful",
+      "source": "Guarantee\n\n\u2022 Employer must guarantee to offer employment for at least \u00be of the total hours promised in the work contract.\n\n\u2022 Guarantee period begins on the first workday after the worker arrives and ends on the contract expiration date, including extensions.\n\n\u2022 Failure to meet this provision would require employer to supplement workers\u2019 pay.",
+      "claim": "The employer must guarantee offering employment for at least one-quarter of the total hours promised in the work contract, with the guarantee period beginning on the first workday after the worker arrives and ending on the contract expiration date, including extensions, and failure to meet this provision requires supplementing workers\u2019 pay.",
+      "expected_supported": false
+    }
+  ]
+}
