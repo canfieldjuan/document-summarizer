@@ -319,6 +319,50 @@ mod relation_guard_tests {
     }
 
     #[test]
+    fn permission_activation_preserves_registered_boundary() {
+        let item = evidence("The policy permits trainees to enter temporarily.");
+        let paraphrase = "Rules allow trainees to enter for a limited period.";
+        assert_eq!(
+            permission_equivalence(paraphrase, &[&item]),
+            Some(()),
+            "explicit-grant/source-grant must remain inactive"
+        );
+        let mut verdict = [ClaimVerification {
+            claim_id: "activation-k1".into(),
+            evidence_ids: vec![item.evidence_id.clone()],
+            verdict: ClaimVerdict::Supported,
+        }];
+        let claim = CitedClaim {
+            claim_id: "activation-k1".into(),
+            text: paraphrase.into(),
+            evidence_ids: vec![item.evidence_id.clone()],
+        };
+        apply_semantic_fidelity_guards(&[claim], &[item], &mut verdict).unwrap();
+        assert_eq!(verdict[0].verdict, ClaimVerdict::Supported);
+        let mixed =
+            evidence("Rules permit trainees to enter temporarily. The office may be closed.");
+        assert_eq!(
+            permission_equivalence(paraphrase, &[&mixed]),
+            None,
+            "the registered literal-may activation must include stative may-be"
+        );
+        let modal = evidence("Trainees may enter temporarily.");
+        assert_eq!(
+            permission_equivalence("Rules permit trainees to enter permanently.", &[&modal]),
+            None
+        );
+        let grant = evidence("Rules permit trainees to enter temporarily.");
+        assert_eq!(
+            permission_equivalence("Trainees may enter permanently.", &[&grant]),
+            None
+        );
+        assert_eq!(
+            permission_equivalence("Trainees may enter temporarily.", &[&grant]),
+            Some(())
+        );
+    }
+
+    #[test]
     fn permission_identity_preserves_modal_force() {
         let fixtures: Value =
             serde_json::from_str(include_str!("relation_guard_permission_fixtures.json")).unwrap();
@@ -3410,8 +3454,15 @@ struct PermissionQualification {
     agent: Option<Vec<String>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionForm {
+    Grant,
+    May,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PermissionProposition {
+    form: PermissionForm,
     subject: Vec<String>,
     action: Vec<String>,
     negated: bool,
@@ -3564,12 +3615,14 @@ fn permission_qualifications(action: &str) -> Vec<PermissionQualification> {
 }
 
 fn permission_proposition(
+    form: PermissionForm,
     subject: &str,
     action: &str,
     negated: bool,
     clause: &str,
 ) -> PermissionProposition {
     PermissionProposition {
+        form,
         subject: permission_subject(subject),
         action: permission_form_words(action),
         negated,
@@ -3609,6 +3662,7 @@ fn permission_propositions(text: &str) -> Option<Vec<PermissionProposition>> {
                     return None;
                 }
                 result.push(permission_proposition(
+                    PermissionForm::Grant,
                     &item[..item_spans[to].0.start],
                     &item[item_spans[to + 1].0.start..],
                     false,
@@ -3625,6 +3679,7 @@ fn permission_propositions(text: &str) -> Option<Vec<PermissionProposition>> {
             let negated = spans[index + 1].1 == "not";
             let action = spans.get(index + 1 + usize::from(negated))?.0.start;
             result.push(permission_proposition(
+                PermissionForm::May,
                 &clause[..spans[index].0.start],
                 &clause[action..],
                 negated,
@@ -3638,6 +3693,21 @@ fn permission_propositions(text: &str) -> Option<Vec<PermissionProposition>> {
 struct OwnedPermissions<'a> {
     evidence_id: &'a str,
     permissions: Vec<PermissionProposition>,
+    forms: Vec<PermissionForm>,
+}
+
+// Admission to full comparison historically depends on literal form markers,
+// including stative may-be. Preserve that trigger independently of recognized
+// action propositions; it is not a new permission interpretation.
+fn permission_forms(text: &str) -> Vec<PermissionForm> {
+    words(text)
+        .iter()
+        .filter_map(|word| match word.as_str() {
+            "allow" | "allows" | "permit" | "permits" => Some(PermissionForm::Grant),
+            "may" => Some(PermissionForm::May),
+            _ => None,
+        })
+        .collect()
 }
 
 fn permission_qualifier_marker(qualifier: &PermissionQualification) -> String {
@@ -3771,10 +3841,7 @@ fn verify_proposition_clauses(text: &str, claim_side: bool) -> Vec<String> {
     clauses
         .into_iter()
         .flat_map(|clause| {
-            if words(&clause)
-                .iter()
-                .any(|word| matches!(word.as_str(), "allow" | "allows" | "permit" | "permits"))
-            {
+            if permission_forms(&clause).contains(&PermissionForm::Grant) {
                 if let Some(propositions) =
                     permission_propositions(&clause).filter(|items| !items.is_empty())
                 {
@@ -3797,23 +3864,28 @@ fn verify_proposition_clauses(text: &str, claim_side: bool) -> Vec<String> {
 }
 
 fn permission_equivalence(claim: &str, evidence: &[&EvidenceItem]) -> Option<()> {
-    let has_form = |text: &str| {
-        words(text)
-            .iter()
-            .any(|word| matches!(word.as_str(), "allow" | "allows" | "permit" | "permits"))
-    };
-    let explicit_claim = has_form(claim);
+    let explicit_claim = permission_forms(claim).contains(&PermissionForm::Grant);
     let owners = evidence
         .iter()
         .map(|item| OwnedPermissions {
             evidence_id: &item.evidence_id,
             permissions: permission_propositions(&item.exact_quote).unwrap_or_default(),
+            forms: permission_forms(&item.exact_quote),
         })
         .collect::<Vec<_>>();
-    // Preserve the report-only invented-grant gap under issue129. Unrecognized
-    // non-permission prose is not a new fail-closed rule in this slice.
-    if owners.iter().all(|owner| owner.permissions.is_empty())
-        || !explicit_claim && !evidence.iter().any(|item| has_form(&item.exact_quote))
+    // The registered comparator covers cross-form permissions only. Keep the
+    // source form at the origin; explicit-grant/source-grant is report-only.
+    // Modal readers still receive actor/may/action identity independently.
+    let required_source_form = if explicit_claim {
+        PermissionForm::May
+    } else {
+        PermissionForm::Grant
+    };
+    if owners
+        .iter()
+        .all(|owner| !owner.forms.contains(&required_source_form))
+        || owners.iter().all(|owner| owner.permissions.is_empty())
+        || explicit_claim && !words(claim).iter().any(|word| word == "to")
     {
         return Some(());
     }

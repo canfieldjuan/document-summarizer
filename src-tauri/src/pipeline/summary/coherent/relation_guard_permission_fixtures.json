@@ -442,6 +442,22 @@
       ],
       "claim": "Rules permit tier 8+ to carry crates.",
       "expected_supported": false
+    },
+    {
+      "case": "coordinated_one_tier_weakened",
+      "owned_evidence": [
+        "Apprentices must carry crates. Adults may stack parcels."
+      ],
+      "claim": "Rules permit apprentices to carry crates, and adults to stack parcels.",
+      "expected_supported": false
+    },
+    {
+      "case": "coordinated_may_to_grant",
+      "owned_evidence": [
+        "Apprentices may carry crates. Adults may stack parcels."
+      ],
+      "claim": "Rules permit apprentices to carry crates, and adults to stack parcels.",
+      "expected_supported": true
     }
   ]
 }
