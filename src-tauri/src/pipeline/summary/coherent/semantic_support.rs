@@ -319,6 +319,90 @@ mod relation_guard_tests {
     }
 
     #[test]
+    fn permission_source_clause_failures_preserve_owned_siblings() {
+        let grant = "Landlord permits Tenant to sublet only commercial units.";
+        let modal = "Tenant may sublet only commercial units.";
+        let cases = [
+            (
+                "grant_control",
+                "Tenant may sublet.",
+                vec![grant.to_owned()],
+            ),
+            (
+                "grant_negated_sibling",
+                "Tenant may sublet.",
+                vec![format!(
+                    "{grant}; Landlord does not permit Tenant to keep pets."
+                )],
+            ),
+            (
+                "grant_malformed_list_sibling",
+                "Tenant may sublet.",
+                vec![format!("{grant} Landlord allows pets, and parking.")],
+            ),
+            (
+                "may_control",
+                "Landlord allows Tenant to sublet.",
+                vec![modal.to_owned()],
+            ),
+            (
+                "may_negated_sibling",
+                "Landlord allows Tenant to sublet.",
+                vec![format!(
+                    "{modal}; Landlord does not permit Tenant to keep pets."
+                )],
+            ),
+            (
+                "may_trailing_incomplete_sibling",
+                "Landlord allows Tenant to sublet.",
+                vec![format!("{modal} Tenant may not.")],
+            ),
+            (
+                "grant_separate_negated_item",
+                "Tenant may sublet.",
+                vec![
+                    grant.to_owned(),
+                    "Landlord does not permit Tenant to keep pets.".to_owned(),
+                ],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, text, quotes) in cases {
+            let items = quotes
+                .iter()
+                .enumerate()
+                .map(|(index, quote)| {
+                    let mut item = evidence(quote);
+                    item.evidence_id = format!("clause-owner-e{index}");
+                    item
+                })
+                .collect::<Vec<_>>();
+            let claim = CitedClaim {
+                claim_id: name.into(),
+                text: text.into(),
+                evidence_ids: items.iter().map(|item| item.evidence_id.clone()).collect(),
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &items, &mut verdict).unwrap();
+            println!(
+                "PERMISSION_CLAUSE_OWNERSHIP case={name} verdict={:?}",
+                verdict[0].verdict
+            );
+            if verdict[0].verdict != ClaimVerdict::Unsupported {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "source sibling permissions erased: {failures:?}"
+        );
+    }
+
+    #[test]
     fn permission_activation_preserves_registered_boundary() {
         let item = evidence("The policy permits trainees to enter temporarily.");
         let paraphrase = "Rules allow trainees to enter for a limited period.";
