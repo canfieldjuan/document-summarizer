@@ -352,6 +352,96 @@
       ],
       "claim": "Rules permit apprentices to carry crates.",
       "gate": "must_withhold"
+    },
+    {
+      "case": "grantor_substitution",
+      "owned_evidence": [
+        "The policy permits apprentices to carry crates."
+      ],
+      "claim": "The contract permits apprentices to carry crates.",
+      "gate": false
+    }
+  ],
+  "identity_cases": [
+    {
+      "case": "must_to_grant",
+      "owned_evidence": [
+        "Apprentices must carry crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates.",
+      "expected_supported": false
+    },
+    {
+      "case": "shall_to_grant",
+      "owned_evidence": [
+        "Apprentices shall carry crates."
+      ],
+      "claim": "Rules allow apprentices to carry crates.",
+      "expected_supported": false
+    },
+    {
+      "case": "required_to_grant",
+      "owned_evidence": [
+        "Rules require apprentices to carry crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates.",
+      "expected_supported": false
+    },
+    {
+      "case": "must_not_to_grant",
+      "owned_evidence": [
+        "Apprentices must not carry crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates.",
+      "expected_supported": false
+    },
+    {
+      "case": "may_not_to_grant",
+      "owned_evidence": [
+        "Apprentices may not carry crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates.",
+      "expected_supported": false
+    },
+    {
+      "case": "coordinated_obligation_to_grant",
+      "owned_evidence": [
+        "Apprentices must carry crates. Adults must stack parcels."
+      ],
+      "claim": "Rules permit apprentices to carry crates, and adults to stack parcels.",
+      "expected_supported": false
+    },
+    {
+      "case": "may_to_permit",
+      "owned_evidence": [
+        "Apprentices may carry crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates.",
+      "expected_supported": true
+    },
+    {
+      "case": "may_to_allow",
+      "owned_evidence": [
+        "Apprentices may carry crates."
+      ],
+      "claim": "Rules allow apprentices to carry crates.",
+      "expected_supported": true
+    },
+    {
+      "case": "may_to_may",
+      "owned_evidence": [
+        "Apprentices may carry crates."
+      ],
+      "claim": "Apprentices may carry crates.",
+      "expected_supported": true
+    },
+    {
+      "case": "numeric_obligation_to_grant",
+      "owned_evidence": [
+        "Tier 8+ must carry crates."
+      ],
+      "claim": "Rules permit tier 8+ to carry crates.",
+      "expected_supported": false
     }
   ]
 }
