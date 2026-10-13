@@ -25,3 +25,11 @@ Only this scope record is added. Existing contract, proposed labels, code and pr
 ## Gap audit
 
 NOT DONE: executable fail-first controls, origin repair, mutations and complete frozen replay remain.
+
+## Accepted obligation identity repair before the qualifier trial
+
+Operator: continue with the repair. Oversight issuecomment-6134473775 confirms the stopped obligation result and clears its repair within this slice. Use one proposition identity owner before permission and modal comparisons: explicit grantor allow/permit actor-to-action becomes actor/may/action. Grantor identity is not a gating difference. Source must/shall/required-to versus claim may, and source must-not/may-not versus positive may, must withhold. Add an obligation in a coordinated list, plain may-to-allow/permit positives, and a grantor-substitution report-only diagnostic. Plain assertion/invented grant remains diagnostic under issue129.
+
+Root cause: prior afabcb9 permission projection activates only after permission equivalence, while the 1abee71c plain-assertion and dropped-modal readers depend on preceding context. They therefore disagree about actor identity. Required surface is the Verify proposition owner, permission comparison, modal-reader adapters and additive public regressions. Inventory all readers; remove the old comparator's conditional may-text projection and its two matching copies. The generic coherent.rs modal-occurrence/context constructor remains a downstream consumer of the owner-projected actor/may/action stream; writer feedback/parser behavior is outside scope. Definition, plain-assertion and dropped-modal Verify readers consume the same adapter.
+
+Verification: public identity gates fail first with retained Supported obligation; fix and pass all identity positives/twins before resuming the cleared 37-case qualifier trial. Keep the original approved inputs and expectations. Add a reader-bypass mutation for the identity owner, then the qualifier/form mutations and SAME frozen60 complete lists against baseline and f7ca3f5, with every change justified and zero releases past baseline. Saved completion, archived C9 and A1 guards remain required. No model/requests/prompts/schema/framing/settings, source reassociation, storage, dependency or live-run changes. Production and merge holds unchanged. No further unlisted equivalence is accepted.
