@@ -36,3 +36,7 @@ NOT DONE. Reproduction/isolation/explanation and independent acceptance precede 
 ## Reproduction result
 
 One fail-first test at published285ad6e plus the additive public probe, exit101: grant_negated_sibling, grant_malformed_list_sibling, may_negated_sibling and may_trailing_incomplete_sibling returned Supported. grant_control, may_control and grant_separate_negated_item stayed Unsupported. Removing the inserted test restores published semantic_support.rs byte-for-byte (SHA256 e10968c3a4a23d348955e4c7c9b57b1005ad3ab4864ef5d31d3ec7f437a7194b). No policy repair or broad tests followed this stop.
+
+## Acceptance before policy implementation
+
+Operator acceptance in this session: “I accept.” Independent oversight issuecomment-6137493893 accepts this root-cause consolidation as written, including the exact seven-case reproduction and required gates. Restore source aggregation per clause inside each OwnedPermissions, using the existing shared reader and retaining evidence_id ownership. Every explicit non-scope, unexpected-change stop and PR116/production/qualification/merge hold remains. This acceptance record precedes the policy correction. The immutable proposal remains in the durable root-cause alias.
