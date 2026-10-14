@@ -3953,7 +3953,10 @@ fn permission_equivalence(claim: &str, evidence: &[&EvidenceItem]) -> Option<()>
         .iter()
         .map(|item| OwnedPermissions {
             evidence_id: &item.evidence_id,
-            permissions: permission_propositions(&item.exact_quote).unwrap_or_default(),
+            permissions: semantic_clauses(&item.exact_quote)
+                .filter_map(|clause| permission_propositions(&clause))
+                .flatten()
+                .collect(),
             forms: permission_forms(&item.exact_quote),
         })
         .collect::<Vec<_>>();
