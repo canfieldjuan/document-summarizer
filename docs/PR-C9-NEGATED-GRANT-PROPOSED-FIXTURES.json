@@ -1,5 +1,5 @@
 {
-  "status": "PROPOSED expectations; operator acceptance and independent label review required",
+  "status": "REVISED PROPOSAL; not accepted; no executable fixture binding",
   "base_head": "8169514b209fbcb49599de660992886048c3cf7b",
   "cases": [
     {
@@ -79,8 +79,8 @@
         "Landlord does not permit Tenant to keep pets."
       ],
       "claim": "Tenant may not keep pets.",
-      "proposed_expected_supported": true,
-      "reason": "Registered internal permission normal form, same polarity and complete action."
+      "proposed_expected_supported": false,
+      "reason": "Recommended conservative N3 policy: absence of a named grant does not alone establish a categorical actor prohibition. Operator may explicitly choose the mirrored mapping instead."
     },
     {
       "case": "negative_grant_vs_negative_may",
@@ -89,8 +89,8 @@
         "Tenant may not keep pets."
       ],
       "claim": "Landlord does not permit Tenant to keep pets.",
-      "proposed_expected_supported": true,
-      "reason": "Reverse spelling, same negative permission proposition."
+      "proposed_expected_supported": false,
+      "reason": "The claim introduces a named grantor absent from the source; negative-family attribution must withhold."
     },
     {
       "case": "negative_grant_vs_positive_may",
@@ -161,6 +161,126 @@
       "claim": "The rules permit apprentices to carry non-fragile crates.",
       "proposed_expected_supported": false,
       "reason": "Only affirmative owned permission can license the shorthand; negative witness is not authority."
+    },
+    {
+      "case": "contraction_positive_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord doesn't permit Tenant to keep pets."
+      ],
+      "claim": "Landlord permits Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "Contraction aliases categorical does-not; must not license its positive inverse."
+    },
+    {
+      "case": "never_positive_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord never permits Tenant to keep pets."
+      ],
+      "claim": "Landlord permits Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "Unowned negative spelling carries a scoped origin fact; no positive support for this actor/action."
+    },
+    {
+      "case": "uncertain_positive_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord might not permit Tenant to keep pets."
+      ],
+      "claim": "Landlord permits Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "Uncertain source cannot support an unconditional positive grant."
+    },
+    {
+      "case": "grantor_mismatch_negative",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit Tenant to keep pets."
+      ],
+      "claim": "City does not permit Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "Named source authority differs; do not erase grantor attribution in the negative family."
+    },
+    {
+      "case": "dropped_negative_qualifier",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit Tenant to keep pets during renovations."
+      ],
+      "claim": "Landlord does not permit Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "A scoped prohibition must not become categorical."
+    },
+    {
+      "case": "faithful_contraction",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord doesn't permit Tenant to keep pets."
+      ],
+      "claim": "Landlord doesn't permit Tenant to keep pets.",
+      "proposed_expected_supported": true,
+      "reason": "Exact negative contraction twin."
+    },
+    {
+      "case": "faithful_never_surface",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord never permits Tenant to keep pets."
+      ],
+      "claim": "Landlord never permits Tenant to keep pets.",
+      "proposed_expected_supported": true,
+      "reason": "Same bounded unowned surface retained; no inferred categorical may-not assertion."
+    },
+    {
+      "case": "faithful_uncertain_surface",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord might not permit Tenant to keep pets."
+      ],
+      "claim": "Landlord might not permit Tenant to keep pets.",
+      "proposed_expected_supported": true,
+      "reason": "Same explicit uncertainty retained; no polarity strengthening."
+    },
+    {
+      "case": "conditional_positive_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "If Landlord does not permit Tenant to keep pets."
+      ],
+      "claim": "Landlord permits Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "Conditional material supplies no categorical positive permission."
+    },
+    {
+      "case": "question_positive_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Does Landlord not permit Tenant to keep pets?"
+      ],
+      "claim": "Landlord permits Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "A question supplies no categorical positive permission."
+    },
+    {
+      "case": "bare_not_positive_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules not permit apprentices to carry crates."
+      ],
+      "claim": "Rules permit apprentices to carry crates.",
+      "proposed_expected_supported": false,
+      "reason": "An unowned direct-not surface cannot license its positive inverse."
+    },
+    {
+      "case": "faithful_bare_not_surface",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules not permit apprentices to carry crates."
+      ],
+      "claim": "Rules not permit apprentices to carry crates.",
+      "proposed_expected_supported": true,
+      "reason": "Identical bounded unowned surface retains the injected supported result, without inventing a categorical asserted proposition."
     }
   ],
   "unowned_reader_boundaries": [
@@ -186,11 +306,12 @@
       "reason": "Action extent missing."
     },
     {
-      "case": "unowned_contraction",
+      "case": "owned_contraction_alias",
       "seam": "raw_permission_reader",
       "text": "Landlord doesn't permit Tenant to keep pets.",
-      "proposed_expected_unowned": true,
-      "reason": "Contractions not added by this narrow spelling contract."
+      "proposed_expected_unowned": false,
+      "reason": "Revised recommended N1 choice: same categorical spelling as does not, not an unowned form.",
+      "proposed_expected_negated": true
     },
     {
       "case": "unowned_indirect_negative",
@@ -219,6 +340,30 @@
       "text": "Landlord might not permit Tenant to keep pets.",
       "proposed_expected_unowned": true,
       "reason": "Uncertain/modal scope not normalized into a categorical prohibition."
+    },
+    {
+      "case": "unowned_interrogative",
+      "seam": "raw_permission_reader",
+      "text": "Does Landlord not permit Tenant to keep pets?",
+      "proposed_expected_unowned": true,
+      "reason": "Interrogative scope cannot be asserted as a categorical negative grant."
+    },
+    {
+      "case": "additive_not_only",
+      "seam": "raw_permission_reader",
+      "text": "Landlord not only permits Tenant to keep pets.",
+      "proposed_expected_unowned": false,
+      "proposed_expected_negated": false,
+      "reason": "Unowned as a negative form; preserve existing affirmative additive interpretation."
+    },
+    {
+      "case": "unowned_bare_not",
+      "seam": "raw_permission_reader",
+      "text": "Rules not permit apprentices to carry crates.",
+      "proposed_expected_unowned": true,
+      "reason": "No finite categorical auxiliary; retain a bounded unowned-negative fact, not an asserted negative Grant."
     }
-  ]
+  ],
+  "revision": 2,
+  "reader_boundary_note": "Unowned refers to absence of an asserted Grant proposition, not loss of scoped negative/uncertain facts. The collection also includes explicit owned/nonnegative controls."
 }
