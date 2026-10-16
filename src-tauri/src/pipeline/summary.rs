@@ -4471,6 +4471,129 @@ fn validate_synthesized_source_coverage(
     Ok(())
 }
 
+#[cfg(test)]
+mod relation_guard_precision_inventory {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+
+    #[test]
+    #[ignore = "CPU-only private corpus validation; requires DOC_SUM_GUARD_PRECISION_ROOT"]
+    fn archived_delivery_uses_production_getters_and_validation() {
+        let root = PathBuf::from(std::env::var_os("DOC_SUM_GUARD_PRECISION_ROOT").unwrap());
+        let freeze: Value = serde_json::from_slice(
+            &std::fs::read(root.join("delivered-candidate-freeze.json")).unwrap(),
+        )
+        .unwrap();
+        let mut rows = Vec::new();
+        for item in freeze["delivered_candidates"].as_array().unwrap() {
+            let alias = item["alias"].as_str().unwrap();
+            let capsule: Value = serde_json::from_slice(
+                &std::fs::read(root.join("artifact-capsules").join(format!("{alias}.json")))
+                    .unwrap(),
+            )
+            .unwrap();
+            let database = capsule["database_alias"].as_str().unwrap();
+            let run_id = capsule["run_id"].as_str().unwrap();
+            let conn = Connection::open_with_flags(
+                root.join("database-copies")
+                    .join(format!("{database}.sqlite3")),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let mut guard_observations = Value::Null;
+            let result = (|| -> Result<(), String> {
+                let verified = db::get_verified_document(&conn, run_id)
+                    .map_err(|error| format!("verified getter: {error:?}"))?
+                    .ok_or("missing verified artifact")?;
+                let synthesized = db::get_synthesized_document(&conn, run_id)
+                    .map_err(|error| format!("synthesized getter: {error:?}"))?
+                    .ok_or("missing synthesis artifact")?;
+                let analyzed = db::get_analyzed_document(&conn, run_id)
+                    .map_err(|error| format!("analyzed getter: {error:?}"))?
+                    .ok_or("missing analysis artifact")?;
+                let normalized = db::get_normalized_document(&conn, run_id)
+                    .map_err(|error| format!("normalized getter: {error:?}"))?
+                    .ok_or("missing normalized artifact")?;
+                let chunked = db::get_chunked_document(&conn, run_id)
+                    .map_err(|error| format!("chunked getter: {error:?}"))?
+                    .ok_or("missing chunked artifact")?;
+                let summary = db::get_summary_artifact(&conn, run_id)
+                    .map_err(|error| format!("summary getter: {error:?}"))?
+                    .ok_or("missing delivered summary")?;
+                let citations = db::get_citation_artifact(&conn, run_id)
+                    .map_err(|error| format!("citations getter: {error:?}"))?
+                    .ok_or("missing delivered citations")?;
+                let ledger_evidence = analyzed
+                    .chunks
+                    .iter()
+                    .flat_map(|chunk| chunk.evidence.iter().cloned())
+                    .collect::<Vec<_>>();
+                let mut ledger = verified.claim_verifications.clone();
+                let mut summary_checks = verified.summary_claim_verifications.clone();
+                coherent::apply_semantic_fidelity_guards(
+                    &synthesized.claims,
+                    &ledger_evidence,
+                    &mut ledger,
+                )
+                .map_err(|failure| format!("ledger guard identity: {failure:?}"))?;
+                coherent::apply_semantic_fidelity_guards(
+                    &synthesized.summary_claims,
+                    &synthesized.synthesis_evidence,
+                    &mut summary_checks,
+                )
+                .map_err(|failure| format!("summary guard identity: {failure:?}"))?;
+                let reasons = |claims: &[CitedClaim], evidence: &[EvidenceItem]| {
+                    claims.iter().map(|claim| {
+                    let cited = claim.evidence_ids.iter().map(|id| evidence.iter().find(|e| &e.evidence_id == id).unwrap()).collect::<Vec<_>>();
+                    json!({"claim_id": claim.claim_id, "reasons": coherent::relation_guard_rejection_reasons(&claim.text, &cited)})
+                }).collect::<Vec<_>>()
+                };
+                guard_observations = json!({"ledger": ledger, "summary": summary_checks,
+                    "presentation_mode": verified.presentation_mode,
+                    "ledger_reasons": reasons(&synthesized.claims, &ledger_evidence),
+                    "summary_reasons": reasons(&synthesized.summary_claims, &synthesized.synthesis_evidence),
+                    "note": "all saved catalogs; nondelivered ledger/prose entries are diagnostic, not delivered precision flips"});
+                validate_verified_document(
+                    &verified,
+                    &synthesized,
+                    &analyzed,
+                    &chunked,
+                    &normalized,
+                )
+                .map_err(|failure| format!("saved validation: {failure:?}"))?;
+                if summary.text != verified.summary_text
+                    || citations.rendered_text != summary.text
+                    || citations.summary_integrity_hash != summary.integrity_hash
+                {
+                    return Err("delivered summary/citation/verified identity mismatch".into());
+                }
+                Ok(())
+            })();
+            rows.push(
+                json!({"alias": alias, "validated": result.is_ok(), "failure": result.err(), "guard_observations": guard_observations}),
+            );
+        }
+        let valid = rows.iter().filter(|row| row["validated"] == true).count();
+        let report = json!({"rows": rows, "validated": valid, "generation_calls": 0,
+            "status": "baseline corpus validation observation, not policy or fidelity clearance"});
+        std::fs::write(
+            root.join(
+                std::env::var("DOC_SUM_GUARD_PRECISION_OUTPUT")
+                    .unwrap_or_else(|_| "baseline-production-validation.json".into()),
+            ),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "PRECISION_BASELINE_VALIDATION candidates={} validated={} gaps={} generation_calls=0",
+            rows.len(),
+            valid,
+            rows.len() - valid
+        );
+    }
+}
+
 fn validate_verified_document(
     verified: &VerifiedDocument,
     synthesized: &SynthesizedDocument,
@@ -4645,6 +4768,40 @@ fn validate_coherent_verified_document(
                 verification.claim_id == claim.claim_id
                     && verification.evidence_ids == claim.evidence_ids
             });
+    if ledger_coverage_valid && summary_coverage_valid {
+        // Mirror the fresh Verify/delivery owners: coherent ledgers are not
+        // presented, while a delivered fallback ledger must pass the guard.
+        // Check copies only; sealed historical verdicts are never rewritten.
+        let mut checked_ledger = verified.claim_verifications.clone();
+        if verified.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback {
+            let evidence = analyzed
+                .chunks
+                .iter()
+                .flat_map(|chunk| chunk.evidence.iter().cloned())
+                .collect::<Vec<_>>();
+            coherent::apply_semantic_fidelity_guards(
+                &synthesized.claims,
+                &evidence,
+                &mut checked_ledger,
+            )?;
+        }
+        let mut checked_summary = verified.summary_claim_verifications.clone();
+        coherent::apply_semantic_fidelity_guards(
+            &synthesized.summary_claims,
+            &synthesized.synthesis_evidence,
+            &mut checked_summary,
+        )?;
+        if checked_ledger != verified.claim_verifications
+            || checked_summary != verified.summary_claim_verifications
+        {
+            return Err(stage_failure(
+                PipelineStage::Verify,
+                "INVALID_VERIFIED_DOCUMENT",
+                "Saved Supported verdict contradicts the source-owned semantic fidelity policy",
+                false,
+            ));
+        }
+    }
     let supported_claims = synthesized
         .claims
         .iter()
@@ -13089,6 +13246,205 @@ mod tests {
     }
 
     #[test]
+    fn saved_relation_support_is_checked_before_completion_without_generation() {
+        for (coherent_mode, stale_support) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let database = TestDatabase::new();
+            let (mut conn, run_id) = chunked_run_with_profile(&database, SummaryProfile::Story);
+            let normalized = get_normalized_document(&conn, &run_id).unwrap().unwrap();
+            let chunked = get_chunked_document(&conn, &run_id).unwrap().unwrap();
+            let runtime = FakeRuntime::healthy();
+            let blocks = validate_normalized_chunk_boundary(&normalized, &chunked).unwrap();
+            let mut analyzed = AnalyzedDocument {
+                document_id: chunked.document_id.clone(),
+                analysis_version: LEGACY_ANALYSIS_VERSION.into(),
+                runtime_id: runtime.runtime_id().into(),
+                model_id: runtime.model_id().into(),
+                chunks: chunked
+                    .chunks
+                    .iter()
+                    .map(|chunk| {
+                        let catalog = build_versioned_analysis_quote_catalog_for_blocks(
+                            LEGACY_ANALYSIS_VERSION,
+                            chunk,
+                            &blocks,
+                            &chunk.block_ids,
+                        )
+                        .unwrap();
+                        let candidate = &catalog.candidates[0];
+                        let text = candidate.exact_quote.clone();
+                        let item = EvidenceItem {
+                            evidence_id: deterministic_evidence_id(
+                                &chunked.document_id,
+                                LEGACY_ANALYSIS_VERSION,
+                                &chunk.chunk_id,
+                                0,
+                                &candidate.block_id,
+                                &text,
+                                &text,
+                            ),
+                            chunk_id: chunk.chunk_id.clone(),
+                            block_id: candidate.block_id.clone(),
+                            claim_text: text.clone(),
+                            exact_quote: text.clone(),
+                            source_span: blocks[candidate.block_id.as_str()].source.clone(),
+                        };
+                        ChunkAnalysis {
+                            chunk_id: chunk.chunk_id.clone(),
+                            summary_text: text,
+                            evidence: vec![item],
+                            source_spans: chunk.source_spans.clone(),
+                        }
+                    })
+                    .collect(),
+                omissions: Vec::new(),
+                inspected_pages: Vec::new(),
+                warnings: Vec::new(),
+            };
+            if stale_support && !coherent_mode {
+                let item = &mut analyzed.chunks[0].evidence[0];
+                item.claim_text = "The inventory guarantees payment approval.".into();
+                item.evidence_id = deterministic_evidence_id(
+                    &analyzed.document_id,
+                    LEGACY_ANALYSIS_VERSION,
+                    &item.chunk_id,
+                    0,
+                    &item.block_id,
+                    &item.claim_text,
+                    &item.exact_quote,
+                );
+                analyzed.chunks[0].summary_text = item.claim_text.clone();
+            }
+            let claims = direct::source_ordered_claims(&analyzed).unwrap();
+            let synthesized = if coherent_mode {
+                coherent::saved_relation_prose_fixture(
+                    &analyzed,
+                    &chunked,
+                    &normalized,
+                    stale_support.then_some("The inventory guarantees payment approval."),
+                )
+            } else {
+                SynthesizedDocument {
+                contract_extraction: None,
+                document_id: analyzed.document_id.clone(),
+                synthesis_version: SYNTHESIS_VERSION.into(),
+                runtime_id: runtime.runtime_id().into(),
+                model_id: runtime.model_id().into(),
+                presentation_mode: SummaryPresentationMode::ClaimLedgerFallback,
+                summary_text: render_cited_summary(&claims, &analyzed).unwrap(),
+                source_chunk_ids: chunked.chunks.iter().map(|c| c.chunk_id.clone()).collect(),
+                summary_claims: Vec::new(),
+                synthesis_evidence: Vec::new(),
+                claims,
+                warnings: vec![PipelineWarning {
+                    code: coherent::FALLBACK_WARNING_CODE.into(),
+                    message: "The complete source context does not fit one bounded synthesis request; showing verified source claims instead".into(),
+                    stage: Some(PipelineStage::Synthesize),
+                }],
+            }
+            };
+            validate_synthesized_document_without_runtime(
+                &synthesized,
+                &analyzed,
+                &chunked,
+                &normalized,
+            )
+            .unwrap();
+            let checks = synthesized
+                .claims
+                .iter()
+                .map(|c| ClaimVerification {
+                    claim_id: c.claim_id.clone(),
+                    evidence_ids: c.evidence_ids.clone(),
+                    verdict: ClaimVerdict::Supported,
+                })
+                .collect::<Vec<_>>();
+            let summary_checks = synthesized
+                .summary_claims
+                .iter()
+                .map(|c| ClaimVerification {
+                    claim_id: c.claim_id.clone(),
+                    evidence_ids: c.evidence_ids.clone(),
+                    verdict: ClaimVerdict::Supported,
+                })
+                .collect::<Vec<_>>();
+            let all_checks = checks
+                .iter()
+                .chain(&summary_checks)
+                .cloned()
+                .collect::<Vec<_>>();
+            let verified = VerifiedDocument {
+                contract_extraction: None,
+                document_id: synthesized.document_id.clone(),
+                verification_version: if coherent_mode {
+                    VERIFICATION_VERSION
+                } else {
+                    PRE_COMPARISON_VERIFICATION_VERSION
+                }
+                .into(),
+                synthesis_attempt_ordinal: 0,
+                runtime_id: runtime.runtime_id().into(),
+                model_id: runtime.model_id().into(),
+                presentation_mode: synthesized.presentation_mode.clone(),
+                summary_text: synthesized.summary_text.clone(),
+                source_chunk_ids: synthesized.source_chunk_ids.clone(),
+                claims: synthesized.claims.clone(),
+                summary_claims: synthesized.summary_claims.clone(),
+                synthesis_evidence: synthesized.synthesis_evidence.clone(),
+                summary_claim_verifications: summary_checks,
+                warnings: verification_warnings(&synthesized, &all_checks, false),
+                claim_verifications: checks,
+                key_point_claim_ids: Vec::new(),
+            };
+            let run = get_pipeline_run(&conn, &run_id).unwrap().unwrap();
+            let (started, _) = db::start_analysis(&mut conn, &run_id, run.state_version).unwrap();
+            let analyzed_run =
+                complete_analysis(&mut conn, &run_id, started.state_version, &analyzed).unwrap();
+            let (started, _) =
+                db::start_synthesis(&mut conn, &run_id, analyzed_run.state_version).unwrap();
+            let synthesized_run =
+                complete_synthesis(&mut conn, &run_id, started.state_version, &synthesized)
+                    .unwrap();
+            let (started, _) =
+                db::start_verification(&mut conn, &run_id, synthesized_run.state_version).unwrap();
+            complete_verification(&mut conn, &run_id, started.state_version, 0, &verified).unwrap();
+            drop(conn);
+            let mut reopened = init_db(&database.0).unwrap();
+            let result = complete_verified_document(&mut reopened, &run_id);
+            assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
+            if stale_support {
+                let error = result.expect_err("stale relation support must not complete");
+                assert_eq!(error.code(), "INVALID_VERIFIED_DOCUMENT");
+                assert!(get_summary_artifact(&reopened, &run_id).unwrap().is_none());
+                assert!(get_citation_artifact(&reopened, &run_id).unwrap().is_none());
+                assert_eq!(
+                    get_pipeline_run(&reopened, &run_id).unwrap().unwrap().state,
+                    PipelineState::Failed
+                );
+                assert_eq!(
+                    get_verified_document(&reopened, &run_id).unwrap().unwrap(),
+                    verified,
+                    "sealed support evidence must not be rewritten"
+                );
+                assert!(!list_pipeline_events(&reopened, &run_id)
+                    .unwrap()
+                    .iter()
+                    .any(|e| matches!(
+                        e.next_state,
+                        PipelineState::Complete | PipelineState::CompleteWithWarnings
+                    )));
+            } else {
+                result.expect("faithful saved support must complete");
+                assert!(
+                    crate::pipeline::workspace::get_persisted_summary(&reopened, &run_id).is_ok()
+                );
+            }
+            println!("SAVED_RELATION_COMPLETION coherent={coherent_mode} stale={stale_support} generation_calls=0");
+        }
+    }
+
+    #[test]
     fn attempt_lineage_survives_reopen_and_rejects_update_delete_duplicate_and_ordinal_overflow() {
         let database = TestDatabase::new();
         let (mut conn, run_id) = chunked_run(&database);
@@ -14945,6 +15301,88 @@ mod tests {
             .iter()
             .any(|warning| warning.code == key_points::UNAVAILABLE_WARNING_CODE));
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn empty_permission_evidence_is_rejected_before_verify_dispatch() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "summary/coherent/relation_guard_permission_fixtures.json"
+        ))
+        .unwrap();
+        let control = fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["case"] == "empty_evidence_twin")
+            .unwrap();
+        assert_eq!(control["verification_seam"], "production_admission");
+        assert_eq!(control["expected_supported"], false);
+        let (normalized, chunked) =
+            materiality_fixture(&[control["claim"].as_str().unwrap().into()]);
+        let runtime = materiality_runtime(false, 0, false);
+        let mut analyzed = analyze(
+            &runtime,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let synthesized = direct::synthesize(
+            &runtime,
+            &analyzed,
+            &chunked,
+            &normalized,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        validate_synthesized_document_without_runtime(
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+        )
+        .unwrap();
+        let before = runtime.requests.lock().unwrap().len();
+        let chunk = &mut analyzed.chunks[0];
+        let item = &mut chunk.evidence[0];
+        item.exact_quote = control["owned_evidence"][0].as_str().unwrap().into();
+        item.evidence_id = deterministic_evidence_id(
+            &analyzed.document_id,
+            &analyzed.analysis_version,
+            &chunk.chunk_id,
+            0,
+            &item.block_id,
+            &item.claim_text,
+            &item.exact_quote,
+        );
+        assert!(!canonical_bounded_text(
+            &item.exact_quote,
+            MAX_ANALYSIS_QUOTE_CHARACTERS
+        ));
+        let failure = verify(
+            SummaryProfile::General,
+            &runtime,
+            &synthesized,
+            &analyzed,
+            &chunked,
+            &normalized,
+            TEST_GENERATION_SEED,
+            0,
+            false,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "INVALID_ANALYZED_DOCUMENT");
+        assert_eq!(
+            runtime.requests.lock().unwrap().len(),
+            before,
+            "invalid evidence must fail before a Verify model request"
+        );
+        println!(
+            "EMPTY_PERMISSION_ADMISSION case=empty_evidence_twin verdict={} verify_dispatches=0",
+            failure.code
+        );
     }
 
     #[test]

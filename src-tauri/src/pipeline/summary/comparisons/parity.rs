@@ -1255,3 +1255,49 @@ fn native_baseline_uses_existing_case_checks_with_diagnostic_passage_misses() {
     assert!(!score(&m, &rows[..29]));
     println!("NATIVE_BASELINE_REGRESSION cases=30 missing_references=23 cases_with_misses=8 generation_calls=0");
 }
+
+#[test]
+fn archived_c9_verdicts_survive_relation_guard() {
+    let m = manifest();
+    let saved = native_baseline();
+    let inputs = records(&m, &fixture()).unwrap();
+    for (record, response) in inputs.iter().zip(saved["cases"].as_array().unwrap()) {
+        let (prompt, claims) = input(record);
+        let batches = projection(record, &Runtime::default());
+        let decoded = batches[0]
+            .comparison
+            .as_ref()
+            .unwrap()
+            .parse(response["response"].as_str().unwrap(), &claims[0])
+            .unwrap();
+        let evidence = prompt.claims[0]
+            .evidence
+            .iter()
+            .map(|e| EvidenceItem {
+                evidence_id: e.evidence_id.clone(),
+                chunk_id: "archived-c9".into(),
+                block_id: "archived-c9".into(),
+                claim_text: e.exact_quote.clone(),
+                exact_quote: e.exact_quote.clone(),
+                source_span: crate::pipeline::contracts::SourceSpan {
+                    page_start: 1,
+                    page_end: 1,
+                    section_id: None,
+                    source_type: crate::pipeline::contracts::SourceType::NativeText,
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut verdicts = [ClaimVerification {
+            claim_id: claims[0].claim_id.clone(),
+            evidence_ids: claims[0].evidence_ids.clone(),
+            verdict: decoded.verdict.clone(),
+        }];
+        super::super::coherent::apply_semantic_fidelity_guards(&claims, &evidence, &mut verdicts)
+            .unwrap();
+        println!(
+            "ARCHIVED_C9_GUARD case={} before={:?} after={:?}",
+            record["case"], decoded.verdict, verdicts[0].verdict
+        );
+        assert_eq!(verdicts[0].verdict, decoded.verdict, "{}", record["case"]);
+    }
+}

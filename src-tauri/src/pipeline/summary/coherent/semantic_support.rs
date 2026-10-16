@@ -2,6 +2,994 @@
 //! model verdict when a source relationship changes mechanically.
 use super::*;
 
+#[cfg(test)]
+mod relation_guard_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn evidence(text: &str) -> EvidenceItem {
+        EvidenceItem {
+            evidence_id: "relation-e1".into(),
+            chunk_id: "relation-c1".into(),
+            block_id: "relation-b1".into(),
+            claim_text: text.into(),
+            exact_quote: text.into(),
+            source_span: SourceSpan {
+                page_start: 1,
+                page_end: 1,
+                section_id: None,
+                source_type: crate::pipeline::contracts::SourceType::NativeText,
+            },
+        }
+    }
+
+    #[test]
+    #[ignore = "offline private trace; explicit packet path required"]
+    fn compressed_actor_owner_trace() {
+        let path = std::env::var("DOC_SUM_GUARD_TRACE_PACKET").unwrap();
+        let packet: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        for row in packet["changed_claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row["alias"] == "ART0051"
+                    && (row["previous_independent_expected_supported"] == true
+                        || row["new_flip"] == true)
+            })
+        {
+            println!("OWNER_TRACE claim_id={}", row["claim"]["claim_id"]);
+            for (label, text) in [
+                ("claim", row["claim"]["text"].as_str().unwrap()),
+                (
+                    "source",
+                    row["owned_evidence"][0]["exact_quote"].as_str().unwrap(),
+                ),
+            ] {
+                for clause in semantic_clauses(text) {
+                    println!(
+                        "OWNER_TRACE {label} clause={clause:?} relations={:?} permission={:?}",
+                        evaluation_relations(&clause, EVALUATIVE_CONCEPTS[1]),
+                        permission_propositions(&clause)
+                    );
+                }
+            }
+        }
+    }
+
+    fn negated_grant_fixtures() -> Value {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/PR-C9-NEGATED-GRANT-PROPOSED-FIXTURES.json"
+        )))
+        .unwrap()
+    }
+
+    #[test]
+    fn negated_grant_o2_final_controls() {
+        let fixtures = negated_grant_fixtures();
+        let mut failures = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let items = row["owned_evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let mut item = evidence(text.as_str().unwrap());
+                    item.evidence_id = format!("negated-e{index}");
+                    item
+                })
+                .collect::<Vec<_>>();
+            let claim = CitedClaim {
+                claim_id: name.into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: items.iter().map(|item| item.evidence_id.clone()).collect(),
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &items, &mut verdict).unwrap();
+            let expected = row["proposed_expected_supported"]
+                .as_bool()
+                .unwrap_or_else(|| {
+                    row["proposed_expected_supported_by_option"]["O2_FLIP_ONLY"]
+                        .as_bool()
+                        .unwrap()
+                });
+            let actual = verdict[0].verdict == ClaimVerdict::Supported;
+            println!(
+                "NEGATED_O2 case={name} expected_supported={expected} verdict={:?}",
+                verdict[0].verdict
+            );
+            if actual != expected {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "negated O2 final mismatches: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn negated_grant_o2_reader_boundaries() {
+        let fixtures = negated_grant_fixtures();
+        let mut failures = Vec::new();
+        for row in fixtures["unowned_reader_boundaries"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let parsed = permission_propositions(row["text"].as_str().unwrap());
+            let grants = parsed
+                .as_ref()
+                .map(|read| read.propositions.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .filter(|item| item.form == PermissionForm::Grant && item.asserted)
+                .collect::<Vec<_>>();
+            let expected_unowned = row["proposed_expected_unowned"].as_bool().unwrap();
+            let correct = grants.is_empty() == expected_unowned
+                && row["proposed_expected_negated"]
+                    .as_bool()
+                    .is_none_or(|expected| grants.iter().all(|item| item.negated == expected));
+            println!(
+                "NEGATED_READER case={name} expected_unowned={expected_unowned} actual_unowned={}",
+                grants.is_empty()
+            );
+            for item in &grants {
+                if let PermissionComplement::ObjectActivity { items } = &item.complement {
+                    for object in items {
+                        assert_eq!(
+                            permission_form_words(&item.raw_action[object.raw_span.clone()]),
+                            object.identity
+                        );
+                    }
+                }
+            }
+            let kind_correct = row["proposed_expected_complement_kind"]
+                .as_str()
+                .is_none_or(|kind| {
+                    grants.iter().all(|item| {
+                        matches!(
+                            (&item.complement, kind),
+                            (PermissionComplement::ActorAction { .. }, "ActorAction")
+                                | (
+                                    PermissionComplement::ObjectActivity { .. },
+                                    "ObjectActivity"
+                                )
+                        )
+                    })
+                });
+            if !correct || !kind_correct {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "negated O2 reader mismatches: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn negated_grant_scope_preserves_owned_siblings() {
+        let source = evidence("Landlord permits Tenant to enter temporarily. Landlord does not permit Visitor to paint walls.");
+        assert_eq!(
+            permission_equivalence(
+                "Rules allow Tenant to enter for a limited period.",
+                &[&source]
+            ),
+            Some(())
+        );
+        let source = evidence("Landlord does not permit cats. Tenant may enter temporarily.");
+        assert_eq!(
+            permission_equivalence("Tenant may enter temporarily.", &[&source]),
+            Some(())
+        );
+        assert_eq!(
+            permission_equivalence("Visitor may work outside.", &[&source]),
+            Some(())
+        );
+        let source = evidence("Tenant shall not keep cats, or permit cats in the unit.");
+        assert_eq!(
+            permission_equivalence(
+                "Tenant may not keep cats, or allow cats in the unit.",
+                &[&source]
+            ),
+            Some(())
+        );
+        assert!(
+            permission_propositions("Tenant may not keep cats, or allow cats in the unit.")
+                .unwrap()
+                .propositions
+                .is_empty()
+        );
+        let text =
+            "Does Landlord not permit Tenant to keep pets? City permits Visitor to paint walls.";
+        let parts = semantic_clause_parts(text).collect::<Vec<_>>();
+        assert!(parts[0].question);
+        assert!(!parts[1].question);
+        assert_eq!(
+            semantic_clauses(text).collect::<Vec<_>>(),
+            vec![parts[0].text.clone(), parts[1].text.clone()]
+        );
+        let parsed = permission_propositions(text).unwrap();
+        assert!(!parsed.propositions[0].asserted);
+        assert!(parsed.propositions[1].asserted);
+        assert_eq!(parsed.propositions[1].grantor, Some(vec!["city".into()]));
+    }
+
+    #[test]
+    fn negated_grant_intentional_scope_skip_is_not_parse_failure() {
+        let source = evidence("Tenant may not use the unit, or permit its use, for purposes unrelated to the tenancy. Landlord does not permit pets.");
+        let mut failures = Vec::new();
+        for (name, source_text, text, expected) in [
+            ("excluded_prepositional_to", source.exact_quote.as_str(), "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy.", true),
+            ("excluded_without_to", "Tenant may not keep cats, or permit cats in the unit. Landlord does not permit pets.", "Tenant may not keep cats, or allow cats in the unit.", true),
+            ("genuinely_failed_parse", source.exact_quote.as_str(), "Tenant may not.", false),
+            ("empty_actor_action_parse", source.exact_quote.as_str(), "Landlord permits Tenant to.", false),
+            ("mixed_skipped_and_inverted", source.exact_quote.as_str(), "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy. Landlord permits pets.", false),
+            ("mixed_skipped_and_faithful", source.exact_quote.as_str(), "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy. Landlord does not permit pets.", true),
+            ("mixed_skipped_and_failed", source.exact_quote.as_str(), "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy. Tenant may not.", false),
+        ] {
+            let source = evidence(source_text);
+            let claim = CitedClaim { claim_id: name.into(), text: text.into(), evidence_ids: vec![source.evidence_id.clone()] };
+            let mut verdict = [ClaimVerification { claim_id: claim.claim_id.clone(), evidence_ids: claim.evidence_ids.clone(), verdict: ClaimVerdict::Supported }];
+            apply_semantic_fidelity_guards(&[claim], std::slice::from_ref(&source), &mut verdict).unwrap();
+            println!("INTENTIONAL_SCOPE_REASONS case={name} {:?}", relation_guard_rejection_reasons(text, &[&source]));
+            let supported = verdict[0].verdict == ClaimVerdict::Supported;
+            println!("INTENTIONAL_SCOPE case={name} expected_supported={expected} verdict={:?}", verdict[0].verdict);
+            if supported != expected { failures.push(name); }
+        }
+        let skipped = permission_propositions(
+            "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy.",
+        )
+        .unwrap();
+        assert!(skipped.propositions.is_empty());
+        assert_eq!(
+            skipped.exclusions,
+            vec![PermissionScopeExclusion::CoordinatedMayNot]
+        );
+        assert!(permission_propositions("Tenant may not.").is_none());
+        assert!(
+            failures.is_empty(),
+            "intentional scope/parse distinction mismatches: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn approved_relations_preserve_meaning() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_fixtures.json")).unwrap();
+        let mut wrong_approvals = Vec::new();
+        let mut faithful_rejections = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let item = evidence(row["source"].as_str().unwrap());
+            let claim = CitedClaim {
+                claim_id: "relation-k1".into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verification = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verification).unwrap();
+            let supported = verification[0].verdict == ClaimVerdict::Supported;
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!(
+                "RELATION_REGRESSION case={name} expected_supported={expected} verdict={:?}",
+                verification[0].verdict
+            );
+            if supported && !expected {
+                wrong_approvals.push(name);
+            } else if !supported && expected {
+                faithful_rejections.push(name);
+            }
+        }
+        assert!(
+            faithful_rejections.is_empty(),
+            "faithful controls rejected: {faithful_rejections:?}"
+        );
+        assert!(
+            wrong_approvals.is_empty(),
+            "false approvals: {wrong_approvals:?}"
+        );
+    }
+
+    #[test]
+    fn form_boundaries_preserve_extent_polarity_and_ownership() {
+        let supported = |source: &str, claim_text: &str| {
+            let item = evidence(source);
+            let claim = CitedClaim {
+                claim_id: "boundary".into(),
+                text: claim_text.into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verdict).unwrap();
+            verdict[0].verdict == ClaimVerdict::Supported
+        };
+        for (source,claim,expected) in [
+            ("The supplier guarantees to deliver ¾ of the inventory.", "The supplier guarantees delivering fraction3over4 of the inventory.", false),
+            ("Ages 14 and 15 may work outside school hours.", "The rules permit ages integers14through15 to work outside school hours.", false),
+            ("The supplier guarantees to deliver 0/4 of the inventory.", "The supplier guarantees delivering zero quarters of the inventory.", true),
+            ("The supplier guarantees to deliver 4/4 of the inventory.", "The supplier guarantees delivering four quarters of the inventory.", true),
+            ("The supplier guarantees to deliver 4/4 of the inventory.", "The supplier guarantees delivering three quarters of the inventory.", false),
+            ("The supplier guarantees to deliver 3/0 of the inventory.", "The supplier guarantees delivering three quarters of the inventory.", false),
+            ("The supplier guarantees to deliver 18446744073709551616/4 of the inventory.", "The supplier guarantees delivering three quarters of the inventory.", false),
+            ("The supplier guarantees to deliver 18446744073709551615/18446744073709551615 of the inventory.", "The supplier guarantees delivering four quarters of the inventory.", true),
+            ("The supplier guarantees to deliver ¾ of the inventory.", "The supplier does not guarantee delivering three quarters of the inventory.", false),
+            ("The supplier guarantees to deliver ¾ of the inventory.", "The customer guarantees delivering three quarters of the inventory.", false),
+            ("The supplier guarantees to deliver the inventory.", "The supplier ensures delivering the inventory.", false),
+            ("The supplier guarantees that pumping stops.", "The supplier guarantees that pumps stop.", false),
+            ("Ages 0 and 1 may work outside school hours.", "The rules permit ages 0-1 to work outside school hours.", true),
+            ("Ages 0 and 1 may work outside school hours.", "The rules permit ages 0-2 to work outside school hours.", false),
+            ("Ages 14 and 15 and 17 may work outside school hours.", "The rules permit ages 14-17 to work outside school hours.", false),
+            ("Ages 15 and 14 may work outside school hours.", "The rules permit ages 14-15 to work outside school hours.", false),
+            ("Ages 18446744073709551614 and 18446744073709551615 may work outside school hours.", "The rules permit ages 18446744073709551614-18446744073709551615 to work outside school hours.", true),
+            ("Ages 14 and 15 may work outside school hours.", "The rules permit ages 14-15 to work at any time.", false),
+            ("Students may work on farms employing their parent(s).", "The rules permit students to work on farms employing their parents without consent.", false),
+            ("Failure to deliver would require the supplier to refund the payment.", "Failure to deliver requires the supplier to withhold the payment.", false),
+            ("The supplier would refund the payment if the customer agreed.", "The supplier would refund the payment if the customer agreed.", true),
+            ("The official checks records.", "The tribunal guarantees accuracy.", false),
+        ] {
+            assert_eq!(supported(source,claim),expected,"boundary source={source:?} claim={claim:?}");
+        }
+        for qualifier in [
+            "only if the parties agree",
+            "only when notice is given",
+            "unless notice is given",
+            "until notice is given",
+            "provided notice is given",
+            "so long as notice is given",
+        ] {
+            let source = format!("The term shall be from June to August, but {qualifier}.");
+            let claim = format!("The term is from June to August, but {qualifier}.");
+            assert_eq!(
+                claim_propositions(&claim).count(),
+                1,
+                "qualifying conjunct must stay attached: {qualifier}"
+            );
+            assert!(
+                supported(&source, &claim),
+                "unchanged qualifier must remain supported: {qualifier}"
+            );
+            assert!(
+                !supported("The term shall be from June to August.", &claim),
+                "invented qualifier must be withheld: {qualifier}"
+            );
+        }
+        for text in [
+            "",
+            "0",
+            "false",
+            "unknown",
+            "3/0",
+            "18446744073709551616/4",
+            "(s)",
+        ] {
+            assert_ne!(
+                relation_form_words(text),
+                relation_form_words("¾"),
+                "no falsy/unknown fraction defaults"
+            );
+        }
+        let left = evidence("The supplier guarantees to deliver ¾ of the inventory.");
+        let mut right = evidence("The customer guarantees to deliver ¾ of the inventory.");
+        right.evidence_id = "uncited".into();
+        let claim = CitedClaim {
+            claim_id: "ownership".into(),
+            text: "The customer guarantees delivering three quarters of the inventory.".into(),
+            evidence_ids: vec![left.evidence_id.clone()],
+        };
+        let mut verdict = [ClaimVerification {
+            claim_id: claim.claim_id.clone(),
+            evidence_ids: claim.evidence_ids.clone(),
+            verdict: ClaimVerdict::Supported,
+        }];
+        apply_semantic_fidelity_guards(&[claim], &[left, right], &mut verdict).unwrap();
+        assert_eq!(
+            verdict[0].verdict,
+            ClaimVerdict::Unsupported,
+            "uncited form match cannot supply evidence"
+        );
+    }
+
+    #[test]
+    fn approved_forms_preserve_final_verdicts() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_form_fixtures.json")).unwrap();
+        let mut failures = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let item = evidence(row["source"].as_str().unwrap());
+            let claim = CitedClaim {
+                claim_id: "form-k1".into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verification = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(
+                &[claim],
+                std::slice::from_ref(&item),
+                &mut verification,
+            )
+            .unwrap();
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!("FORM_REGRESSION case={name} expected_supported={expected} verdict={:?} reasons={:?}",
+                verification[0].verdict, relation_guard_rejection_reasons(row["claim"].as_str().unwrap(), &[&item]));
+            if expected != (verification[0].verdict == ClaimVerdict::Supported) {
+                println!(
+                    "FORM_ORIGIN_TRACE case={name} propositions={:?}",
+                    claim_propositions(row["claim"].as_str().unwrap())
+                        .map(|clause| {
+                            let relations = evaluation_relations(&clause, EVALUATIVE_CONCEPTS[1]);
+                            (clause, relations)
+                        })
+                        .collect::<Vec<_>>()
+                );
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "form final verdict mismatch: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn permission_qualifier_fixtures_preserve_final_verdicts() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_permission_fixtures.json")).unwrap();
+        let mut failures = Vec::new();
+        let mut admitted_controls = 0;
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            if row["verification_seam"] == "production_admission" {
+                assert_eq!(name, "empty_evidence_twin");
+                continue; // Exercised by the real Verify preflight regression.
+            }
+            admitted_controls += 1;
+            let mut items = row["owned_evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let mut item = evidence(text.as_str().unwrap());
+                    item.evidence_id = format!("permission-e{i}");
+                    item
+                })
+                .collect::<Vec<_>>();
+            let ids = items
+                .iter()
+                .map(|item| item.evidence_id.clone())
+                .collect::<Vec<_>>();
+            if let Some(extra) = row["uncited_evidence"].as_array() {
+                for (i, text) in extra.iter().enumerate() {
+                    let mut item = evidence(text.as_str().unwrap());
+                    item.evidence_id = format!("uncited-e{i}");
+                    items.push(item);
+                }
+            }
+            let claim = CitedClaim {
+                claim_id: "permission-k1".into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: ids.clone(),
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: ids,
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &items, &mut verdict).unwrap();
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!(
+                "PERMISSION_REGRESSION case={name} expected_supported={expected} verdict={:?}",
+                verdict[0].verdict
+            );
+            if expected != (verdict[0].verdict == ClaimVerdict::Supported) {
+                failures.push(name);
+                println!(
+                    "PERMISSION_ORIGIN source={:?} claim={:?}",
+                    items
+                        .iter()
+                        .map(|item| permission_propositions(&item.exact_quote))
+                        .collect::<Vec<_>>(),
+                    permission_propositions(row["claim"].as_str().unwrap())
+                );
+            }
+        }
+        assert_eq!(admitted_controls, 36);
+        assert!(
+            failures.is_empty(),
+            "permission final verdict mismatch: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn permission_source_clause_failures_preserve_owned_siblings() {
+        let grant = "Landlord permits Tenant to sublet only commercial units.";
+        let modal = "Tenant may sublet only commercial units.";
+        let cases = [
+            (
+                "grant_control",
+                "Tenant may sublet.",
+                vec![grant.to_owned()],
+            ),
+            (
+                "grant_negated_sibling",
+                "Tenant may sublet.",
+                vec![format!(
+                    "{grant}; Landlord does not permit Tenant to keep pets."
+                )],
+            ),
+            (
+                "grant_malformed_list_sibling",
+                "Tenant may sublet.",
+                vec![format!("{grant} Landlord allows pets, and parking.")],
+            ),
+            (
+                "may_control",
+                "Landlord allows Tenant to sublet.",
+                vec![modal.to_owned()],
+            ),
+            (
+                "may_negated_sibling",
+                "Landlord allows Tenant to sublet.",
+                vec![format!(
+                    "{modal}; Landlord does not permit Tenant to keep pets."
+                )],
+            ),
+            (
+                "may_trailing_incomplete_sibling",
+                "Landlord allows Tenant to sublet.",
+                vec![format!("{modal} Tenant may not.")],
+            ),
+            (
+                "grant_separate_negated_item",
+                "Tenant may sublet.",
+                vec![
+                    grant.to_owned(),
+                    "Landlord does not permit Tenant to keep pets.".to_owned(),
+                ],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, text, quotes) in cases {
+            let items = quotes
+                .iter()
+                .enumerate()
+                .map(|(index, quote)| {
+                    let mut item = evidence(quote);
+                    item.evidence_id = format!("clause-owner-e{index}");
+                    item
+                })
+                .collect::<Vec<_>>();
+            let claim = CitedClaim {
+                claim_id: name.into(),
+                text: text.into(),
+                evidence_ids: items.iter().map(|item| item.evidence_id.clone()).collect(),
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &items, &mut verdict).unwrap();
+            println!(
+                "PERMISSION_CLAUSE_OWNERSHIP case={name} verdict={:?}",
+                verdict[0].verdict
+            );
+            if verdict[0].verdict != ClaimVerdict::Unsupported {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "source sibling permissions erased: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn permission_activation_preserves_registered_boundary() {
+        let item = evidence("The policy permits trainees to enter temporarily.");
+        let paraphrase = "Rules allow trainees to enter for a limited period.";
+        assert_eq!(
+            permission_equivalence(paraphrase, &[&item]),
+            Some(()),
+            "explicit-grant/source-grant must remain inactive"
+        );
+        let mut verdict = [ClaimVerification {
+            claim_id: "activation-k1".into(),
+            evidence_ids: vec![item.evidence_id.clone()],
+            verdict: ClaimVerdict::Supported,
+        }];
+        let claim = CitedClaim {
+            claim_id: "activation-k1".into(),
+            text: paraphrase.into(),
+            evidence_ids: vec![item.evidence_id.clone()],
+        };
+        apply_semantic_fidelity_guards(&[claim], &[item], &mut verdict).unwrap();
+        assert_eq!(verdict[0].verdict, ClaimVerdict::Supported);
+        let mixed =
+            evidence("Rules permit trainees to enter temporarily. The office may be closed.");
+        assert_eq!(
+            permission_equivalence(paraphrase, &[&mixed]),
+            None,
+            "the registered literal-may activation must include stative may-be"
+        );
+        let modal = evidence("Trainees may enter temporarily.");
+        assert_eq!(
+            permission_equivalence("Rules permit trainees to enter permanently.", &[&modal]),
+            None
+        );
+        let grant = evidence("Rules permit trainees to enter temporarily.");
+        assert_eq!(
+            permission_equivalence("Trainees may enter permanently.", &[&grant]),
+            None
+        );
+        assert_eq!(
+            permission_equivalence("Trainees may enter temporarily.", &[&grant]),
+            Some(())
+        );
+    }
+
+    #[test]
+    fn permission_identity_preserves_modal_force() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_permission_fixtures.json")).unwrap();
+        let mut failures = Vec::new();
+        for row in fixtures["identity_cases"].as_array().unwrap() {
+            let item = evidence(row["owned_evidence"][0].as_str().unwrap());
+            let claim = CitedClaim {
+                claim_id: row["case"].as_str().unwrap().into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verdict).unwrap();
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!(
+                "PERMISSION_IDENTITY case={} expected_supported={expected} verdict={:?}",
+                row["case"], verdict[0].verdict
+            );
+            if expected != (verdict[0].verdict == ClaimVerdict::Supported) {
+                failures.push(row["case"].as_str().unwrap());
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "identity modal-force mismatch: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn permission_grant_diagnostics_report_actual_final_verdicts() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_permission_fixtures.json")).unwrap();
+        for row in fixtures["diagnostics"].as_array().unwrap() {
+            let item = evidence(row["owned_evidence"][0].as_str().unwrap());
+            assert!(!item.exact_quote.trim().is_empty());
+            let claim = CitedClaim {
+                claim_id: row["case"].as_str().unwrap().into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verdict).unwrap();
+            println!(
+                "PERMISSION_DIAGNOSTIC case={} verdict={:?}",
+                row["case"], verdict[0].verdict
+            );
+            if row["gate"] == "must_withhold" {
+                assert_ne!(verdict[0].verdict, ClaimVerdict::Supported,
+                    "STOP: the obligation diagnostic must withhold through the existing modal owner");
+            }
+        }
+    }
+
+    #[test]
+    fn approved_proposition_relations_preserve_final_verdicts() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_proposition_fixtures.json")).unwrap();
+        let mut failures = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let item = evidence(row["source"].as_str().unwrap());
+            let claim = CitedClaim {
+                claim_id: "proposition-k1".into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verification = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verification).unwrap();
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!(
+                "PROPOSITION_REGRESSION case={name} expected_supported={expected} verdict={:?}",
+                verification[0].verdict
+            );
+            if expected != (verification[0].verdict == ClaimVerdict::Supported) {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "proposition final verdict mismatch: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn approved_precision_relations_preserve_final_verdicts() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("relation_guard_precision_fixtures.json")).unwrap();
+        let mut wrong_approvals = Vec::new();
+        let mut faithful_rejections = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let item = evidence(row["source"].as_str().unwrap());
+            let claim = CitedClaim {
+                claim_id: "relation-k1".into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: vec![item.evidence_id.clone()],
+            };
+            let mut verification = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &[item], &mut verification).unwrap();
+            let supported = verification[0].verdict == ClaimVerdict::Supported;
+            let expected = row["expected_supported"].as_bool().unwrap();
+            println!(
+                "PRECISION_REGRESSION case={name} expected_supported={expected} verdict={:?}",
+                verification[0].verdict
+            );
+            if !supported && expected {
+                println!(
+                    "PRECISION_DIAGNOSTIC case={name} reasons={:?}",
+                    relation_guard_rejection_reasons(
+                        row["claim"].as_str().unwrap(),
+                        &[&evidence(row["source"].as_str().unwrap())]
+                    )
+                );
+                if name == "required_necessary" {
+                    println!(
+                        "NECESSITY_SOURCE {:?}",
+                        evaluation_relations(
+                            row["source"].as_str().unwrap(),
+                            EVALUATIVE_CONCEPTS[0]
+                        )
+                    );
+                    println!(
+                        "NECESSITY_CLAIM {:?}",
+                        evaluation_relations(
+                            row["claim"].as_str().unwrap(),
+                            EVALUATIVE_CONCEPTS[0]
+                        )
+                    );
+                }
+            }
+            if supported && !expected {
+                wrong_approvals.push(name);
+            } else if !supported && expected {
+                faithful_rejections.push(name);
+            }
+        }
+        assert!(
+            faithful_rejections.is_empty(),
+            "faithful controls rejected: {faithful_rejections:?}"
+        );
+        assert!(
+            wrong_approvals.is_empty(),
+            "false approvals: {wrong_approvals:?}"
+        );
+    }
+
+    #[test]
+    fn precision_boundaries_keep_assignment_values_and_evidence_ownership() {
+        for (source, claim, supported) in [
+            (
+                "The term shall be June-August.",
+                "The term is from June to August.",
+                true,
+            ),
+            (
+                "The term shall be from June through August.",
+                "The term is from June through September.",
+                false,
+            ),
+            (
+                "The term is from June to August.",
+                "The term is from August to June.",
+                false,
+            ),
+            (
+                "The term is from June to August.",
+                "The term is from june to August.",
+                false,
+            ),
+            ("The category is Basic.", "The category is Premium.", false),
+            (
+                "The category is not Basic.",
+                "The category is Basic.",
+                false,
+            ),
+            (
+                "The category is Basic during inspection.",
+                "The category is Basic.",
+                false,
+            ),
+            (
+                "The category is Basic during inspection.",
+                "The category is Basic during inspection.",
+                true,
+            ),
+            (
+                "Inspection:\nA panel\nis critical.",
+                "A panel is critical.",
+                true,
+            ),
+            ("A panel\n\nis critical.", "A panel is critical.", false),
+            ("- A panel\n- is critical.", "A panel is critical.", false),
+        ] {
+            let item = evidence(source);
+            assert_eq!(
+                semantic_fidelity_supported(claim, &[&item]),
+                supported,
+                "{source} -> {claim}"
+            );
+        }
+        let first = evidence("A panel");
+        let second = evidence("is critical.");
+        assert!(!semantic_fidelity_supported(
+            "A panel is critical.",
+            &[&first, &second]
+        ));
+        let first = evidence("The category is Basic.");
+        let second = evidence("The category is Premium.");
+        assert!(!definition_value_decision("The category is Basic.", &[&first, &second]).supported);
+        for text in [
+            "",
+            "The operator is present during inspection.",
+            "The term shall be extended by written notice.",
+            "The contractor is required to supply services.",
+            "The operator is assigned to health services.",
+        ] {
+            assert!(
+                definition_relation(text.trim_end_matches('.')).is_none(),
+                "{text}"
+            );
+            let item = evidence(text);
+            let decision = definition_value_decision(text, &[&item]);
+            assert!(
+                decision.supported && decision.released_modals.is_empty(),
+                "{text}"
+            );
+        }
+        let required = evidence("The operator must be from June through August.");
+        assert!(!semantic_fidelity_supported(
+            "The operator is from June through August.",
+            &[&required]
+        ));
+        let parsed = semantic_clauses(
+            "A panel\r\nis critical.\r\n\r\n- Panel B is safe.\r\n- Panel C is healthy.",
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(
+            parsed,
+            [
+                "A panel is critical",
+                "Panel B is safe",
+                "Panel C is healthy"
+            ]
+        );
+    }
+
+    #[test]
+    fn relation_boundaries_preserve_polarity_and_do_not_join_evidence() {
+        let valve = evidence("Closing the valve stops water flow.");
+        let mut other = evidence("Opening the valve ensures that alarms sound.");
+        other.evidence_id = "relation-e2".into();
+        let sources = [&valve, &other];
+        assert!(evaluative_conclusions_supported(
+            "Closing the valve ensures that water flow stops.",
+            &sources
+        ));
+        for claim in [
+            "Closing the valve ensures that alarms sound.",
+            "Closing the valve ensures that water flow does not stop.",
+            "Closing the valve ensures.",
+            "It ensures that water flow stops.",
+            "Opening the valve ensures that alarms sound. It ensures that water flow stops.",
+        ] {
+            assert!(
+                !evaluative_conclusions_supported(claim, &sources),
+                "{claim}"
+            );
+        }
+        let observation = evidence("The operator sees water flow.");
+        assert!(!evaluative_conclusions_supported(
+            "The operator ensures that water flow sees.",
+            &[&observation]
+        ));
+        let required = evidence("The operator must not close the valve.");
+        assert!(modal_force_supported(
+            "The operator must not close the valve.",
+            &[&required]
+        ));
+        assert!(!modal_force_supported(
+            "The operator closes the valve.",
+            &[&required]
+        ));
+        assert!(!modal_force_supported(
+            "The operator does not close the valve.",
+            &[&required]
+        ));
+        assert!(!modal_force_supported(
+            "The operator should not close the valve.",
+            &[&required]
+        ));
+        assert!(modal_force_supported(
+            "The guard watches the door.",
+            &[&required]
+        ));
+    }
+
+    #[test]
+    #[ignore = "CPU-only original A1 guard replay; requires DOC_SUM_GUARD_A1_DRAFT"]
+    fn original_a1_unit_is_withheld() {
+        let path = std::env::var_os("DOC_SUM_GUARD_A1_DRAFT").unwrap();
+        let saved: SynthesizedDocument =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut verifications = saved
+            .summary_claims
+            .iter()
+            .map(|claim| ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            })
+            .collect::<Vec<_>>();
+        apply_semantic_fidelity_guards(
+            &saved.summary_claims,
+            &saved.synthesis_evidence,
+            &mut verifications,
+        )
+        .unwrap();
+        println!("ORIGINAL_A1_GUARD_VERDICT {:?}", verifications[0].verdict);
+        assert_ne!(
+            verifications[0].verdict,
+            ClaimVerdict::Supported,
+            "unfaithful A1 unit must be withheld"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumericRelation {
     LessThan,
@@ -412,10 +1400,358 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
     None
 }
 
-fn semantic_clauses(text: &str) -> impl Iterator<Item = &str> {
-    text.split(['.', '?', '!', ';', '\n', '\r'])
-        .map(str::trim)
-        .filter(|clause| !clause.is_empty())
+// Layout boundaries belong to the relation reader. A single wrapped line is
+// not a proposition boundary; paragraphs, list entries and marked headings are.
+// The iterator is invoked independently for each owned EvidenceItem.
+struct SemanticClause {
+    text: String,
+    question: bool,
+}
+
+fn semantic_clause_parts(text: &str) -> impl Iterator<Item = SemanticClause> {
+    let mut paragraphs = Vec::new();
+    let mut paragraph = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let bullet = line
+            .strip_prefix("- ")
+            .or_else(|| line.strip_prefix("* "))
+            .or_else(|| line.strip_prefix("\u{2022} "));
+        let marked = marked_heading_title(line);
+        let heading = line.ends_with(':') || framing_from_heading(line).is_some();
+        if line.is_empty() || bullet.is_some() || marked.is_some() || heading {
+            if !paragraph.is_empty() {
+                paragraphs.push(std::mem::take(&mut paragraph));
+            }
+            if line.is_empty() || heading {
+                continue;
+            }
+        }
+        let body = bullet.or(marked).unwrap_or(line);
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
+        paragraph.push_str(body);
+    }
+    if !paragraph.is_empty() {
+        paragraphs.push(paragraph);
+    }
+    paragraphs.into_iter().flat_map(|paragraph| {
+        paragraph
+            .split_inclusive(['.', '?', '!', ';'])
+            .filter_map(|part| {
+                let question = part.ends_with('?');
+                let text = part.trim_end_matches(['.', '?', '!', ';']).trim();
+                (!text.is_empty()).then(|| SemanticClause {
+                    text: text.into(),
+                    question,
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+fn semantic_clauses(text: &str) -> impl Iterator<Item = String> {
+    semantic_clause_parts(text).map(|clause| clause.text)
+}
+
+fn claim_propositions(text: &str) -> impl Iterator<Item = String> {
+    semantic_clauses(text).flat_map(|clause| independent_propositions(&clause))
+}
+
+// Only explicit coordinated independent propositions introduce an actor
+// boundary. Conjoined values and shared-subject verb lists remain intact.
+fn has_finite_predicate(tokens: &[String]) -> bool {
+    tokens.iter().enumerate().any(|(index, word)| {
+        index > 0
+            && (is_modal_anchor(word)
+                || matches!(
+                    word.as_str(),
+                    "is" | "are"
+                        | "was"
+                        | "were"
+                        | "has"
+                        | "have"
+                        | "begins"
+                        | "ends"
+                        | "ensures"
+                        | "guarantees"
+                        | "provides"
+                        | "makes"
+                        | "make"
+                        | "commenced"
+                ))
+    })
+}
+
+fn qualifying_conjunct(tokens: &[String]) -> bool {
+    tokens.first().is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "only" | "if" | "unless" | "until" | "when" | "provided"
+        )
+    }) || tokens.starts_with(&["so".into(), "long".into(), "as".into()])
+}
+
+fn independent_propositions(clause: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    for (comma, _) in clause.match_indices(',') {
+        let tail = clause[comma + 1..].trim_start();
+        let absolute = tail.strip_prefix("with ").filter(|body| {
+            let tokens = words(body.split(',').next().unwrap_or(body));
+            tokens
+                .iter()
+                .enumerate()
+                .any(|(i, word)| i > 0 && matches!(word.as_str(), "beginning" | "ending"))
+        });
+        let Some(body) = absolute
+            .or_else(|| tail.strip_prefix("and "))
+            .or_else(|| tail.strip_prefix("but "))
+        else {
+            continue;
+        };
+        let candidate = body.split(',').next().unwrap_or(body);
+        let tokens = words(candidate);
+        if qualifying_conjunct(&tokens) {
+            continue;
+        }
+        if absolute.is_none() && !has_finite_predicate(&tokens)
+            || !(has_finite_predicate(&words(&clause[start..comma]))
+                || words(&clause[start..comma])
+                    .iter()
+                    .any(|word| matches!(word.as_str(), "beginning" | "ending")))
+        {
+            continue;
+        }
+        result.push(clause[start..comma].trim().to_owned());
+        start = clause.len() - body.len();
+    }
+    if start < clause.len() {
+        result.push(clause[start..].trim().to_owned());
+    }
+    result
+}
+
+// Identity is structural: discard articles, and canonicalize a single owned
+// noun-of-owner construction to the corresponding attributive noun phrase.
+// Actor nouns and their roles remain ordered; this is not a bag of words.
+fn relation_subject_identity(tokens: &[String]) -> Vec<String> {
+    let mut result = tokens
+        .iter()
+        .filter(|word| !matches!(word.as_str(), "a" | "an" | "the"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    while index + 2 < result.len() {
+        if result[index + 1] == "of" && index + 3 == result.len() {
+            let owner = result.remove(index + 2);
+            result.remove(index + 1);
+            result.insert(index, owner);
+        }
+        index += 1;
+    }
+    result
+}
+
+// Canonical form projection is local to owned Verify relations. Raw source
+// tokens/offsets and the writer's shared predicate parser remain unchanged.
+fn fraction_identity(numerator: u64, denominator: u64) -> Option<String> {
+    if denominator == 0 {
+        return None;
+    }
+    let (mut a, mut b) = (numerator, denominator);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    Some(format!(
+        "\0fraction{}over{}",
+        numerator / a,
+        denominator / a
+    ))
+}
+
+fn fraction_denominator(word: &str) -> Option<u64> {
+    Some(match word {
+        "half" | "halves" => 2,
+        "third" | "thirds" => 3,
+        "quarter" | "quarters" | "fourth" | "fourths" => 4,
+        "fifth" | "fifths" => 5,
+        "sixth" | "sixths" => 6,
+        "seventh" | "sevenths" => 7,
+        "eighth" | "eighths" => 8,
+        "ninth" | "ninths" => 9,
+        "tenth" | "tenths" => 10,
+        _ => return None,
+    })
+}
+
+fn relation_form_words(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for raw in text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && !matches!(c, '/' | '-' | '\u{2013}' | '(' | ')'))
+        .filter(|word| !word.is_empty())
+    {
+        let vulgar = match raw {
+            "¼" => Some((1, 4)),
+            "½" => Some((1, 2)),
+            "¾" => Some((3, 4)),
+            "⅐" => Some((1, 7)),
+            "⅑" => Some((1, 9)),
+            "⅒" => Some((1, 10)),
+            "⅓" => Some((1, 3)),
+            "⅔" => Some((2, 3)),
+            "⅕" => Some((1, 5)),
+            "⅖" => Some((2, 5)),
+            "⅗" => Some((3, 5)),
+            "⅘" => Some((4, 5)),
+            "⅙" => Some((1, 6)),
+            "⅚" => Some((5, 6)),
+            "⅛" => Some((1, 8)),
+            "⅜" => Some((3, 8)),
+            "⅝" => Some((5, 8)),
+            "⅞" => Some((7, 8)),
+            _ => None,
+        };
+        if let Some((n, d)) = vulgar {
+            tokens.push(fraction_identity(n, d).expect("vulgar denominator is nonzero"));
+        } else if raw.contains('/') {
+            let fraction = raw
+                .split_once('/')
+                .and_then(|(n, d)| fraction_identity(n.parse().ok()?, d.parse().ok()?));
+            // Malformed/overflow fractions retain their spelling, never equality
+            // with a recognized fraction or a numeric default.
+            tokens.push(fraction.unwrap_or_else(|| raw.to_owned()));
+        } else if let Some(base) = raw.strip_suffix("(s)") {
+            if !base.is_empty() && base.chars().all(char::is_alphabetic) {
+                tokens.push(format!("{base}s"));
+            } else {
+                tokens.extend(words(raw));
+            }
+        } else if let Some((start, end)) = raw
+            .split_once(['-', '\u{2013}'])
+            .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)))
+        {
+            if start <= end {
+                tokens.push(format!("\0integers{start}through{end}"));
+            } else {
+                tokens.push(raw.to_owned());
+            }
+        } else {
+            tokens.extend(words(raw));
+        }
+    }
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if let Some(number) = spelled_numeric_value(&tokens, index) {
+            if let Some(denominator) = tokens
+                .get(number.end)
+                .and_then(|word| fraction_denominator(word))
+            {
+                if let Some(value) = number
+                    .value
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|n| fraction_identity(n, denominator))
+                {
+                    result.push(value);
+                    index = number.end + 1;
+                    continue;
+                }
+            }
+        }
+        if let Ok(start) = tokens[index].parse::<u64>() {
+            let mut end = start;
+            let mut next = index + 1;
+            while tokens.get(next).is_some_and(|word| word == "and") {
+                let Some(value) = tokens
+                    .get(next + 1)
+                    .and_then(|word| word.parse::<u64>().ok())
+                else {
+                    break;
+                };
+                if end.checked_add(1) != Some(value) {
+                    break;
+                }
+                end = value;
+                next += 2;
+            }
+            if next > index + 1 {
+                // Do not compress a prefix of a nonconsecutive coordinated list.
+                if !tokens.get(next).is_some_and(|word| {
+                    word == "and"
+                        && tokens
+                            .get(next + 1)
+                            .is_some_and(|w| w.parse::<u64>().is_ok())
+                }) {
+                    result.push(format!("\0integers{start}through{end}"));
+                    index = next;
+                    continue;
+                }
+            }
+        }
+        result.push(tokens[index].clone());
+        index += 1;
+    }
+    result
+}
+
+fn owned_complement_matches(source: &[String], claim: &[String], same_governor: bool) -> bool {
+    let source = causal_terms(source);
+    let claim = causal_terms(claim);
+    if source == claim {
+        return true;
+    }
+    if !same_governor {
+        return false;
+    }
+    // Infinitive and gerund are compared only as the complement of the same
+    // transitive relation, not by stripping -ing from arbitrary noun phrases.
+    let gerund_matches = |infinitive: &[String], gerund: &[String]| {
+        infinitive.first().is_some_and(|word| word == "to")
+            && infinitive.len() == gerund.len() + 1
+            && infinitive.get(1).is_some_and(|base| {
+                gerund.first().is_some_and(|verb| {
+                    verb == &format!("{base}ing")
+                        || base
+                            .strip_suffix('e')
+                            .is_some_and(|stem| verb == &format!("{stem}ing"))
+                })
+            })
+            && infinitive[2..] == gerund[1..]
+    };
+    gerund_matches(&source, &claim) || gerund_matches(&claim, &source)
+}
+
+fn nominal_evaluation(tokens: &[String], index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    if matches!(
+        tokens[index - 1].as_str(),
+        "a" | "an" | "the" | "no" | "any" | "some" | "each" | "every" | "all"
+    ) {
+        return true;
+    }
+    // A nominal guarantee can end its proposition or introduce a rationale.
+    // A direct complement instead belongs to the finite guarantee verb.
+    let nominal_tail = index + 1 == tokens.len()
+        || tokens
+            .get(index + 1)
+            .is_some_and(|word| matches!(word.as_str(), "because" | "due"));
+    if !nominal_tail {
+        return false;
+    }
+    // Quantified object guarantees need a determiner; arbitrary adjective
+    // suffixes cannot identify a noun phrase (official is also a noun).
+    tokens[..index].iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "a" | "an" | "the" | "no" | "any" | "some" | "each" | "every" | "all"
+        )
+    })
 }
 
 fn currency_symbol_token(character: char) -> Option<&'static str> {
@@ -1370,7 +2706,7 @@ fn directional_actor_supports(source: &[String], claim: &[String]) -> bool {
 
 fn directional_relations(text: &str) -> Vec<DirectionalRelation> {
     semantic_clauses(text)
-        .flat_map(directional_relations_in_clause)
+        .flat_map(|clause| directional_relations_in_clause(&clause))
         .collect()
 }
 
@@ -1378,7 +2714,7 @@ fn directional_actor_is_cited(actor: &[String], evidence: &[&EvidenceItem]) -> b
     !actor.is_empty()
         && evidence.iter().any(|item| {
             semantic_clauses(&item.exact_quote).any(|clause| {
-                let tokens = words(clause);
+                let tokens = words(&clause);
                 strip_leading_article(&tokens).starts_with(actor)
             })
         })
@@ -1406,7 +2742,7 @@ fn effective_directional_actor(
     evidence
         .iter()
         .flat_map(|item| semantic_clauses(&item.exact_quote))
-        .map(words)
+        .map(|clause| words(&clause))
         .map(|tokens| strip_leading_article(&tokens).to_vec())
         .filter_map(|tokens| {
             let shared = prefix
@@ -1523,18 +2859,6 @@ fn defined_actor_labels(text: &str) -> HashMap<String, Vec<String>> {
     labels
 }
 
-fn contains_owned_words(text: &str, phrase: &[String]) -> bool {
-    let tokens = words(text);
-    tokens.windows(phrase.len()).any(|window| window == phrase)
-}
-
-fn contains_any_word(text: &str, alternatives: &[&str]) -> bool {
-    let tokens = words(text);
-    tokens
-        .iter()
-        .any(|word| alternatives.contains(&word.as_str()))
-}
-
 fn tokens_contain_any(tokens: &[String], alternatives: &[&str]) -> bool {
     tokens
         .iter()
@@ -1575,7 +2899,7 @@ fn actor_relation_segments(
     evidence
         .iter()
         .flat_map(|item| semantic_clauses(&item.exact_quote))
-        .flat_map(|clause| actor_relation_token_segments(&words(clause), actors, concept))
+        .flat_map(|clause| actor_relation_token_segments(&words(&clause), actors, concept))
         .collect()
 }
 
@@ -1787,9 +3111,9 @@ fn actor_qualifications_supported(claim: &str, evidence: &[&EvidenceItem]) -> bo
         .iter()
         .map(|(actor, label)| (actor.as_str(), label.as_slice()))
         .collect::<Vec<_>>();
-    semantic_clauses(claim)
+    claim_propositions(claim)
         .flat_map(|clause| {
-            let tokens = words(clause);
+            let tokens = words(&clause);
             if tokens
                 .first()
                 .is_some_and(|word| is_actor_condition_connector(word))
@@ -1814,8 +3138,10 @@ fn original_words(text: &str) -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EvaluationRelation {
+    governor: Option<String>,
     subject: Vec<String>,
     negated: bool,
+    consequence: Option<Vec<String>>,
 }
 
 const EVALUATIVE_CONCEPTS: &[&[&str]] = &[
@@ -1903,15 +3229,120 @@ fn evaluation_subject_start(tokens: &[String], linking_index: usize) -> usize {
         })
 }
 
+fn causal_terms(tokens: &[String]) -> Vec<String> {
+    let start = usize::from(tokens.first().is_some_and(|word| word == "that"));
+    let tokens = &tokens[start..];
+    let article = usize::from(tokens.first().is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "a" | "an" | "the" | "this" | "these" | "that" | "those"
+        )
+    }));
+    let mut terms = tokens[article..].to_vec();
+    // Present-tense inflection of the explicitly represented Stop event.
+    if terms.last().is_some_and(|word| word == "stops") {
+        *terms.last_mut().expect("last term exists") = "stop".into();
+    }
+    terms
+}
+
+fn explicit_causal_relations(clause: &str) -> Vec<EvaluationRelation> {
+    let mut relations = evaluation_relations(clause, EVALUATIVE_CONCEPTS[1]);
+    let tokens = relation_form_words(clause);
+    if let Some(index) = tokens.iter().position(|word| word == "because") {
+        let subject = causal_terms(&tokens[index + 1..]);
+        let consequence = causal_terms(&tokens[..index]);
+        if !subject.is_empty() && !consequence.is_empty() {
+            relations.push(EvaluationRelation {
+                governor: None,
+                subject,
+                consequence: Some(consequence),
+                negated: false,
+            });
+        }
+    }
+    // A causative Stop statement owns both the cause and the resulting event:
+    // "X stops Y" -> cause X, event "Y stops". This is not a rule that turns
+    // arbitrary transitive predicates into causal assertions.
+    if !tokens
+        .iter()
+        .any(|word| EVALUATIVE_CONCEPTS[1].contains(&word.as_str()))
+    {
+        if let Some(index) = tokens
+            .iter()
+            .position(|word| matches!(word.as_str(), "stop" | "stops"))
+        {
+            let subject = causal_terms(&tokens[..index]);
+            let mut consequence = causal_terms(&tokens[index + 1..]);
+            if !subject.is_empty() && !consequence.is_empty() {
+                consequence.push("stop".into());
+                relations.push(EvaluationRelation {
+                    governor: None,
+                    subject,
+                    consequence: Some(consequence),
+                    negated: false,
+                });
+            }
+        }
+    }
+    relations
+}
+
+struct NecessityProjection {
+    tokens: Vec<String>,
+    qualifications: Vec<EvaluationRelation>,
+    indices: Vec<usize>,
+}
+
+// Conditional necessity is a qualification of its owning proposition, not an
+// independent prescribed action. All Verify readers consume this classification.
+fn necessity_projection(tokens: &[String]) -> NecessityProjection {
+    let mut canonical = tokens.to_vec();
+    let mut indices = Vec::new();
+    for (index, word) in tokens.iter().enumerate() {
+        let conditional = index > 0
+            && tokens[index - 1] == "unless"
+            && matches!(word.as_str(), "necessary" | "required")
+            && tokens.get(index + 1).is_some_and(|word| word == "to");
+        let discretionary = index > 0 && tokens[index - 1] == "as" && word == "necessary";
+        if conditional || discretionary {
+            if conditional {
+                canonical[index] = "necessary".into();
+            }
+            indices.push(index);
+        }
+    }
+    let qualifications = indices
+        .iter()
+        .map(|index| EvaluationRelation {
+            governor: None,
+            subject: strip_leading_article(&canonical).to_vec(),
+            negated: negation_present(&canonical[..*index]),
+            consequence: None,
+        })
+        .collect();
+    NecessityProjection {
+        tokens: canonical,
+        qualifications,
+        indices,
+    }
+}
+
 fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelation> {
-    let tokens = original_words(clause)
-        .into_iter()
-        .map(|word| word.to_ascii_lowercase())
-        .collect::<Vec<_>>();
+    let tokens = relation_form_words(clause);
+    let necessity = necessity_projection(&tokens);
+    let qualifications = if concept.contains(&"necessary") {
+        necessity.qualifications
+    } else {
+        Vec::new()
+    };
+    let qualified_indices = necessity.indices;
     let concept_indices = tokens
         .iter()
         .enumerate()
-        .filter(|(_, word)| concept.contains(&word.as_str()))
+        .filter(|(index, word)| {
+            concept.contains(&word.as_str()) && !qualified_indices.contains(index)
+        })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     concept_indices
@@ -1921,12 +3352,34 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                 tokens[concept_index].as_str(),
                 "ensure" | "ensures" | "ensuring" | "guarantee" | "guarantees"
             );
+            // Nominal guarantee uses have a determiner/modifier or no verb
+            // complement. Ensure has no such nominal ambiguity.
+            if matches!(tokens[concept_index].as_str(), "guarantee" | "guarantees")
+                && nominal_evaluation(&tokens, concept_index)
+            {
+                return None;
+            }
             let subject_end = if transitive {
                 concept_index
             } else {
-                tokens[..concept_index]
+                // These nouns name domains/qualities; safe/healthy are the
+                // corresponding predicative evaluations.
+                if matches!(tokens[concept_index].as_str(), "safety" | "health") {
+                    return None;
+                }
+                let link = tokens[..concept_index]
                     .iter()
-                    .rposition(|word| is_evaluation_link(word))?
+                    .rposition(|word| is_evaluation_link(word))?;
+                let predicate_context = &tokens[link + 1..concept_index];
+                if predicate_context.iter().any(|word| {
+                    matches!(
+                        word.as_str(),
+                        "for" | "to" | "in" | "of" | "by" | "unless" | "as"
+                    )
+                }) {
+                    return None;
+                }
+                link
             };
             let subject_start = evaluation_subject_start(&tokens, subject_end);
             let mut subject = tokens[subject_start..subject_end].to_vec();
@@ -1974,20 +3427,37 @@ fn evaluation_relations(clause: &str, concept: &[&str]) -> Vec<EvaluationRelatio
                     subject.as_slice(),
                     [word] if matches!(word.as_str(), "it" | "they" | "he" | "she")
                 );
-            subject_is_concrete.then(|| EvaluationRelation {
-                subject,
+            Some(EvaluationRelation {
+                governor: transitive.then(|| match tokens[concept_index].as_str() {
+                    "guarantee" | "guarantees" => "guarantee".to_owned(),
+                    _ => "ensure".to_owned(),
+                }),
+                // Preserve the recognized relation even when its actor cannot
+                // be owned. The comparator withholds that unknown relation,
+                // including when another clause in the same unit is known.
+                subject: if !subject_is_concrete {
+                    Vec::new()
+                } else if transitive {
+                    causal_terms(&subject)
+                } else {
+                    subject
+                },
                 negated: negation_present(&tokens[subject_end.saturating_sub(3)..=concept_index])
                     ^ is_lexically_negated_evaluation(&tokens[concept_index]),
+                consequence: transitive.then(|| causal_terms(&tokens[concept_index + 1..])),
             })
         })
+        .chain(qualifications)
         .collect()
 }
 
 fn evaluated_subject_matches(source: &[String], claim: &[String]) -> bool {
-    source == claim
+    relation_subject_identity(source) == relation_subject_identity(claim)
         || evaluation_subject_components(source)
             .into_iter()
-            .any(|component| component == claim)
+            .any(|component| {
+                relation_subject_identity(component) == relation_subject_identity(claim)
+            })
 }
 
 fn evaluation_subject_components(subject: &[String]) -> Vec<&[String]> {
@@ -2002,150 +3472,1363 @@ fn evaluative_conclusions_supported(claim: &str, evidence: &[&EvidenceItem]) -> 
         .iter()
         .flat_map(|item| semantic_clauses(&item.exact_quote))
         .collect::<Vec<_>>();
-    for concept in EVALUATIVE_CONCEPTS {
-        let claim_clauses = semantic_clauses(claim)
-            .filter(|clause| contains_any_word(clause, concept))
-            .collect::<Vec<_>>();
-        if claim_clauses.is_empty() {
-            continue;
-        }
-        let evaluated_source_clauses = source_clauses
-            .iter()
-            .copied()
-            .filter(|clause| contains_any_word(clause, concept))
-            .collect::<Vec<_>>();
-        if evaluated_source_clauses.is_empty() {
-            continue;
-        }
-        let evaluated_relations = evaluated_source_clauses
-            .iter()
-            .flat_map(|clause| evaluation_relations(clause, concept))
-            .collect::<Vec<_>>();
-        for clause in claim_clauses {
-            for claim_relation in evaluation_relations(clause, concept) {
-                let subject_is_cited = evidence
+    // Explicit rationale is a causal relation even when its consequence is
+    // nominal. Pair by the owned consequence before comparing causes; unknown
+    // consequence constructions do not acquire a fabricated conflict.
+    let rationales = source_clauses
+        .iter()
+        .flat_map(|clause| explicit_causal_relations(clause))
+        .collect::<Vec<_>>();
+    for clause in claim_propositions(claim) {
+        if let Some((consequence, cause)) = clause.split_once(" because ") {
+            let consequence =
+                relation_subject_identity(&causal_terms(&relation_form_words(consequence)));
+            let cause = relation_subject_identity(&causal_terms(&relation_form_words(cause)));
+            let paired = rationales
+                .iter()
+                .filter(|source| {
+                    source
+                        .consequence
+                        .as_ref()
+                        .is_some_and(|owned| relation_subject_identity(owned) == consequence)
+                })
+                .collect::<Vec<_>>();
+            if !paired.is_empty()
+                && !paired
                     .iter()
-                    .any(|item| contains_owned_words(&item.exact_quote, &claim_relation.subject));
-                let subject_components = evaluation_subject_components(&claim_relation.subject);
-                let components_are_cited = subject_components.len() > 1
-                    && subject_components.iter().all(|component| {
-                        evidence
-                            .iter()
-                            .any(|item| contains_owned_words(&item.exact_quote, component))
-                    });
-                let relation_is_supported = if subject_is_cited {
-                    evaluated_relations.iter().any(|source| {
-                        evaluated_subject_matches(&source.subject, &claim_relation.subject)
-                            && source.negated == claim_relation.negated
+                    .any(|source| relation_subject_identity(&source.subject) == cause)
+            {
+                return false;
+            }
+        }
+    }
+    for concept in EVALUATIVE_CONCEPTS {
+        let claim_relations = claim_propositions(claim)
+            .flat_map(|clause| evaluation_relations(&clause, concept))
+            .collect::<Vec<_>>();
+        let source_relations = source_clauses
+            .iter()
+            .flat_map(|clause| {
+                if *concept == EVALUATIVE_CONCEPTS[1] {
+                    explicit_causal_relations(clause)
+                } else {
+                    evaluation_relations(clause, concept)
+                }
+            })
+            .collect::<Vec<_>>();
+        for relation in claim_relations {
+            if relation.subject.is_empty() {
+                return false;
+            }
+            let supported = if let Some(consequence) = &relation.consequence {
+                !consequence.is_empty()
+                    && source_relations.iter().any(|source| {
+                        relation_subject_identity(&source.subject)
+                            == relation_subject_identity(&relation.subject)
+                            && source.negated == relation.negated
+                            && source
+                                .consequence
+                                .as_ref()
+                                .is_some_and(|source_consequence| {
+                                    owned_complement_matches(
+                                        source_consequence,
+                                        consequence,
+                                        source.governor.is_some()
+                                            && source.governor == relation.governor,
+                                    )
+                                })
                     })
-                } else if components_are_cited {
-                    subject_components.iter().all(|component| {
-                        evaluated_relations.iter().any(|source| {
-                            evaluated_subject_matches(&source.subject, component)
-                                && source.negated == claim_relation.negated
+            } else {
+                evaluation_subject_components(&relation.subject)
+                    .iter()
+                    .all(|component| {
+                        source_relations.iter().any(|source| {
+                            source.consequence.is_none()
+                                && evaluated_subject_matches(&source.subject, component)
+                                && source.negated == relation.negated
                         })
                     })
-                } else {
-                    true
-                };
-                if (subject_is_cited || components_are_cited)
-                    && !evaluated_relations.is_empty()
-                    && !relation_is_supported
-                {
-                    return false;
-                }
+            };
+            if !supported {
+                return false;
             }
         }
     }
     true
 }
 
-fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
-    let guarded_modal_predicates = |text: &str, strong: bool| {
-        text.split(['.', '?', '!', ';', ',', '\n', '\r'])
-            .flat_map(|clause| {
-                let tokens = words(clause);
-                let mut normalized = Vec::with_capacity(tokens.len());
-                let mut index = 0;
-                while index < tokens.len() {
-                    if tokens[index] == "cannot" {
-                        normalized.push("can".into());
-                        normalized.push("not".into());
-                        index += 1;
-                        continue;
-                    }
-                    let contraction = tokens.get(index + 1).is_some_and(|word| word == "t")
-                        && matches!(
-                            tokens[index].as_str(),
-                            "can"
-                                | "couldn"
-                                | "mayn"
-                                | "mightn"
-                                | "mustn"
-                                | "shalln"
-                                | "shouldn"
-                                | "won"
-                                | "wouldn"
-                        );
-                    if contraction {
-                        normalized.push(
-                            match tokens[index].as_str() {
-                                "couldn" => "could",
-                                "mayn" => "may",
-                                "mightn" => "might",
-                                "mustn" => "must",
-                                "shalln" => "shall",
-                                "shouldn" => "should",
-                                "won" => "will",
-                                "wouldn" => "would",
-                                "can" => "can",
-                                _ => unreachable!("modal contraction is exhaustively matched"),
-                            }
-                            .to_string(),
-                        );
-                        normalized.push("not".into());
-                        index += 2;
-                    } else {
-                        normalized.push(tokens[index].clone());
-                        index += 1;
-                    }
-                }
-                modal_predicates(&normalized.join(" "), strong)
-            })
-            .collect::<Vec<_>>()
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AssignmentValue {
+    Range { start: String, end: String },
+    Literal(String),
+}
+
+#[derive(Debug, Clone)]
+struct DefinitionRelation {
+    subject: Vec<String>,
+    value: AssignmentValue,
+    scope: Vec<String>,
+    negated: bool,
+    prescribed_assignment: Option<ModalPredicate>,
+    plain_assignment: bool,
+}
+
+fn definition_relation(clause: &str) -> Option<DefinitionRelation> {
+    let tokens = original_words(clause);
+    let lowered = words(clause);
+    let (copula, value_start, prescribed) = lowered
+        .windows(2)
+        .position(|pair| pair == ["shall", "be"])
+        .map(|index| (index, index + 2, true))
+        .or_else(|| {
+            lowered
+                .iter()
+                .position(|word| matches!(word.as_str(), "is" | "are"))
+                .map(|index| (index, index + 1, false))
+        })?;
+    let subject = strip_leading_article(&lowered[..copula]).to_vec();
+    if subject.is_empty()
+        || subject.iter().any(|word| is_modal_anchor(word))
+        || matches!(subject.as_slice(), [word] if matches!(word.as_str(), "it" | "they"))
+    {
+        return None;
+    }
+    let negated = lowered.get(value_start).is_some_and(|word| word == "not");
+    let value_start = value_start + usize::from(negated);
+    let first = tokens.get(value_start)?;
+    // Retain punctuation and endpoint spelling. Token normalization is for
+    // subject/scope identity only, never for the assigned literal or endpoints.
+    let offset = clause
+        .match_indices(first)
+        .find(|(offset, _)| original_words(&clause[..*offset]).len() == value_start)?
+        .0;
+    let raw_value = clause[offset..].trim();
+    let scope_start = (value_start..lowered.len()).find(|index| {
+        qualifying_conjunct(&lowered[*index..])
+            || matches!(lowered[*index].as_str(), "during" | "while" | "under")
+    });
+    let (raw_value, scope) = if let Some(index) = scope_start {
+        let scope_word = tokens.get(index)?;
+        let scope_offset = raw_value
+            .match_indices(scope_word)
+            .find(|(offset, _)| original_words(&raw_value[..*offset]).len() == index - value_start)?
+            .0;
+        let extent = raw_value[..scope_offset]
+            .trim()
+            .trim_end_matches(',')
+            .trim();
+        let extent = extent
+            .strip_suffix(", but")
+            .or_else(|| extent.strip_suffix(", and"))
+            .unwrap_or(extent)
+            .trim();
+        (extent, lowered[index..].to_vec())
+    } else {
+        (raw_value, Vec::new())
     };
-    let weak_source = evidence
+    let compact = raw_value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let range_body = compact.strip_prefix("from ").unwrap_or(&compact);
+    let range = (compact.starts_with("from ")
+        || range_body
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_uppercase() || first.is_numeric()))
+    .then(|| {
+        [" through ", " to ", "\u{2013}", "-"]
+            .iter()
+            .find_map(|connector| range_body.split_once(connector))
+    })
+    .flatten();
+    let value = if let Some((start, end)) = range {
+        if start.trim().is_empty()
+            || end.trim().is_empty()
+            || has_finite_predicate(&words(start))
+            || has_finite_predicate(&words(end))
+        {
+            // An endpoint still containing a proposition is unclassified. It
+            // cannot become a conflicting value or release source modality.
+            return None;
+        }
+        AssignmentValue::Range {
+            start: start.trim().into(),
+            end: end.trim().into(),
+        }
+    } else if original_words(&compact).len() == 1
+        && compact.chars().next().is_some_and(char::is_uppercase)
+    {
+        AssignmentValue::Literal(compact)
+    } else {
+        // Passive actions, prescribed states and arbitrary prose are not
+        // recognized value assignments and receive no decision from this owner.
+        return None;
+    };
+    Some(DefinitionRelation {
+        subject,
+        value,
+        scope,
+        negated,
+        prescribed_assignment: prescribed
+            .then(|| verify_modal_predicates(clause, true, false))
+            .and_then(|mut predicates| (predicates.len() == 1).then(|| predicates.remove(0))),
+        plain_assignment: !prescribed,
+    })
+}
+
+struct DefinitionDecision {
+    supported: bool,
+    released_modals: Vec<ModalPredicate>,
+}
+
+fn definition_value_decision(claim: &str, evidence: &[&EvidenceItem]) -> DefinitionDecision {
+    let sources = evidence
         .iter()
-        .flat_map(|item| guarded_modal_predicates(&item.exact_quote, false))
+        .flat_map(|item| semantic_clauses(&item.exact_quote))
+        .filter_map(|clause| definition_relation(&clause))
         .collect::<Vec<_>>();
-    let strong_source = evidence
-        .iter()
-        .flat_map(|item| guarded_modal_predicates(&item.exact_quote, true))
-        .collect::<Vec<_>>();
-    guarded_modal_predicates(claim, true)
+    let mut decision = DefinitionDecision {
+        supported: true,
+        released_modals: Vec::new(),
+    };
+    for assignment in claim_propositions(claim).filter_map(|clause| definition_relation(&clause)) {
+        let paired = sources
+            .iter()
+            .filter(|source| source.subject == assignment.subject)
+            .collect::<Vec<_>>();
+        if paired.is_empty() {
+            continue;
+        }
+        let equal = paired.iter().all(|source| {
+            source.value == assignment.value
+                && source.scope == assignment.scope
+                && source.negated == assignment.negated
+        });
+        if !equal {
+            decision.supported = false;
+            continue;
+        }
+        if assignment.plain_assignment {
+            decision.released_modals.extend(
+                paired
+                    .into_iter()
+                    .filter_map(|source| source.prescribed_assignment.clone()),
+            );
+        }
+    }
+    decision
+}
+
+// Use the existing predicate/context owner to recognize an assertion of the
+// same source proposition with its modal removed. No writer parser is changed.
+fn plain_assertion_for_modal(claim: &str, source: &ModalPredicate) -> Option<ModalPredicate> {
+    for clause in verify_proposition_clauses(claim, true)
         .into_iter()
-        .all(|predicate| {
-            let matching_weak_source = weak_source
-                .iter()
-                .any(|source| modal_statements_match(&predicate, source, false));
-            let matching_strong_source = strong_source
-                .iter()
-                .any(|source| modal_statements_match(&predicate, source, false));
-            let matching_strong_polarity = strong_source
-                .iter()
-                .any(|source| modal_statements_match(&predicate, source, true));
-            (!matching_weak_source || matching_strong_polarity)
-                && (!matching_strong_source || matching_strong_polarity)
+        .flat_map(|clause| clause.split(',').map(str::to_owned).collect::<Vec<_>>())
+    {
+        let tokens = necessity_projection(&words(&clause)).tokens;
+        for (index, word) in tokens.iter().enumerate() {
+            if word != &source.predicate && word != &format!("{}s", source.predicate) {
+                continue;
+            }
+            if tokens[..index].iter().any(|word| is_modal_anchor(word)) {
+                continue;
+            }
+            let mut predicate = modal_occurrence(&tokens, index, index, None)?;
+            // Canonicalize only the inflection of this already-owned action.
+            predicate.predicate.clone_from(&source.predicate);
+            if modal_statements_match(&predicate, source, false) {
+                return Some(predicate);
+            }
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PermissionQualification {
+    raw_span: std::ops::Range<usize>,
+    token_span: std::ops::Range<usize>,
+    adjective: String,
+    head: String,
+    declared: bool,
+    agent: Option<Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionForm {
+    Grant,
+    May,
+    OriginalModal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PermissionObjectItem {
+    raw_span: std::ops::Range<usize>,
+    identity: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PermissionComplement {
+    ActorAction {
+        subject: Vec<String>,
+        raw_subject: String,
+    },
+    ObjectActivity {
+        items: Vec<PermissionObjectItem>,
+    },
+}
+
+impl PermissionComplement {
+    fn actor(subject: &str) -> Self {
+        Self::ActorAction {
+            subject: permission_subject(subject),
+            raw_subject: subject.trim().into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PermissionProposition {
+    form: PermissionForm,
+    complement: PermissionComplement,
+    grantor: Option<Vec<String>>,
+    asserted: bool,
+    action: Vec<String>,
+    negated: bool,
+    raw_clause: String,
+    raw_action: String,
+    qualifications: Vec<PermissionQualification>,
+}
+
+fn permission_form_words(text: &str) -> Vec<String> {
+    // A plus extent cannot disappear in the shared punctuation tokenizer.
+    let mut tokens = Vec::new();
+    for (index, segment) in text.split('+').enumerate() {
+        if index > 0 {
+            tokens.push("\0permission-plus".into());
+        }
+        tokens.extend(relation_form_words(segment));
+    }
+    tokens
+}
+
+fn permission_subject(text: &str) -> Vec<String> {
+    let mut tokens = relation_subject_identity(&permission_form_words(text));
+    for index in 0..tokens.len().saturating_sub(1) {
+        let numeric_group =
+            tokens[index + 1].parse::<u64>().is_ok() || tokens[index + 1].starts_with("\0integers");
+        if numeric_group && tokens[index].ends_with('s') {
+            tokens[index].pop();
+        }
+    }
+    tokens
+}
+
+fn permission_word_spans(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, character) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        if character.is_alphanumeric() || matches!(character, '-' | '(' | ')') {
+            start.get_or_insert(index);
+        } else if let Some(begin) = start.take() {
+            spans.push((begin..index, text[begin..index].to_lowercase()));
+        }
+    }
+    spans
+}
+
+fn permission_agent_extent(tokens: &[String]) -> bool {
+    // Bounded nominal heads joined by of, optionally preceded by an article.
+    // Longer modifier sequences or any unestablished extent receive no projection.
+    !tokens.is_empty()
+        && tokens.len() <= 8
+        && tokens.split(|word| word == "of").all(|part| {
+            let part = strip_leading_article(part);
+            part.len() == 1
+                && part[0].chars().all(char::is_alphabetic)
+                && !is_modal_anchor(&part[0])
+                && !matches!(
+                    part[0].as_str(),
+                    "who"
+                        | "which"
+                        | "whichever"
+                        | "that"
+                        | "only"
+                        | "after"
+                        | "before"
+                        | "until"
+                        | "unless"
+                        | "when"
+                        | "if"
+                        | "currently"
+                        | "and"
+                        | "or"
+                        | "not"
+                        | "be"
+                )
         })
 }
 
+fn permission_qualifications(action: &str) -> Vec<PermissionQualification> {
+    let words = permission_word_spans(action);
+    let mut result = Vec::new();
+    for (index, (span, word)) in words.iter().enumerate() {
+        if let Some(adjective) = word
+            .strip_prefix("non-")
+            .filter(|word| !word.is_empty() && word.chars().all(char::is_alphabetic))
+        {
+            if let Some((head_span, head)) = words
+                .get(index + 1)
+                .filter(|(_, word)| word.chars().all(char::is_alphabetic))
+            {
+                result.push(PermissionQualification {
+                    raw_span: span.start..head_span.end,
+                    token_span: permission_form_words(&action[..span.start]).len()
+                        ..permission_form_words(&action[..head_span.end]).len(),
+                    adjective: adjective.into(),
+                    head: head.clone(),
+                    declared: false,
+                    agent: None,
+                });
+            }
+        }
+        if word != "not"
+            || index == 0
+            || words
+                .get(index + 1)
+                .is_none_or(|(_, word)| word != "declared")
+        {
+            continue;
+        }
+        let Some((adjective_span, adjective)) = words
+            .get(index + 2)
+            .filter(|(_, word)| word.chars().all(char::is_alphabetic))
+        else {
+            continue;
+        };
+        let (head_span, head) = &words[index - 1];
+        let tail = words[index + 3..]
+            .iter()
+            .map(|(_, word)| word.clone())
+            .collect::<Vec<_>>();
+        let agent = if tail.is_empty() {
+            None
+        } else {
+            let Some(agent) = tail
+                .strip_prefix(&["by".into()])
+                .filter(|agent| permission_agent_extent(agent))
+            else {
+                continue;
+            };
+            Some(agent.to_vec())
+        };
+        // A declaration must end at its bounded nominal agent, not swallow a condition.
+        let end = words
+            .last()
+            .map_or(adjective_span.end, |(span, _)| span.end);
+        result.push(PermissionQualification {
+            raw_span: head_span.start..end,
+            token_span: permission_form_words(&action[..head_span.start]).len()
+                ..permission_form_words(&action[..end]).len(),
+            adjective: adjective.clone(),
+            head: head.clone(),
+            declared: true,
+            agent,
+        });
+    }
+    result
+}
+
+fn permission_proposition(
+    form: PermissionForm,
+    complement: PermissionComplement,
+    action: &str,
+    negated: bool,
+    clause: &str,
+) -> PermissionProposition {
+    PermissionProposition {
+        form,
+        complement,
+        grantor: None,
+        asserted: true,
+        action: permission_form_words(action),
+        negated,
+        raw_clause: clause.into(),
+        raw_action: action.into(),
+        qualifications: permission_qualifications(action),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionScopeExclusion {
+    CoordinatedMayNot,
+}
+
+#[derive(Debug)]
+struct PermissionRead {
+    propositions: Vec<PermissionProposition>,
+    exclusions: Vec<PermissionScopeExclusion>,
+}
+
+// This reader owns clause scope, complement type, authority and polarity.
+// Unasserted negative facts retain their bounded relation, never a permission witness.
+fn permission_propositions(text: &str) -> Option<PermissionRead> {
+    let mut result = Vec::new();
+    let mut exclusions = Vec::new();
+    for part in semantic_clause_parts(text) {
+        for original in independent_propositions(&part.text) {
+            let spans = permission_word_spans(&original);
+            let Some(index) = spans.iter().position(|(_, word)| {
+                matches!(word.as_str(), "allow" | "allows" | "permit" | "permits")
+            }) else {
+                let Some(index) = spans.iter().position(|(_, word)| word == "may") else {
+                    continue;
+                };
+                if index == 0 || index + 1 >= spans.len() || spans[index + 1].1 == "be" {
+                    continue;
+                }
+                let negated = spans[index + 1].1 == "not";
+                let action = spans.get(index + 1 + usize::from(negated))?.0.start;
+                result.push(permission_proposition(
+                    PermissionForm::May,
+                    PermissionComplement::actor(&original[..spans[index].0.start]),
+                    &original[action..],
+                    negated,
+                    &original,
+                ));
+                continue;
+            };
+            if index > 0 && spans[index - 1].1 == "to" {
+                continue;
+            }
+            // A contrast or a new finite grantor terminates preceding negative scope.
+            let reset = spans[..index]
+                .iter()
+                .rposition(|(_, word)| matches!(word.as_str(), "but" | "whereas"))
+                .map_or(0, |i| i + 1);
+            let clause = &original[spans.get(reset).map_or(0, |(span, _)| span.start)..];
+            let spans = permission_word_spans(clause);
+            let index = index - reset;
+            let prefix = spans[..index]
+                .iter()
+                .map(|(_, word)| word.as_str())
+                .collect::<Vec<_>>();
+            let additive = prefix.ends_with(&["not", "only"]);
+            let contraction = prefix.ends_with(&["doesn", "t"]) || prefix.ends_with(&["don", "t"]);
+            let direct = contraction
+                || prefix.len() >= 2
+                    && prefix[prefix.len() - 1] == "not"
+                    && matches!(prefix[prefix.len() - 2], "do" | "does" | "shall" | "will");
+            let negative = !additive
+                && (contraction || prefix.iter().any(|word| matches!(*word, "not" | "never")));
+            let auxiliary = prefix.iter().position(|word| {
+                matches!(
+                    *word,
+                    "do" | "does"
+                        | "shall"
+                        | "will"
+                        | "don"
+                        | "doesn"
+                        | "may"
+                        | "might"
+                        | "could"
+                        | "would"
+                        | "not"
+                        | "never"
+                )
+            });
+            let coordinated = prefix.last() == Some(&"or")
+                && auxiliary.is_some_and(|i| {
+                    matches!(prefix[i], "shall" | "will")
+                        && prefix.get(i + 1) == Some(&"not")
+                        && !prefix[i + 2..prefix.len() - 1]
+                            .iter()
+                            .any(|word| is_modal_anchor(word))
+                });
+            // Coordinated may-not object requests were explicitly left outside
+            // N1; the separately proposed O3b reader extension remains unbuilt.
+            if prefix.last() == Some(&"or")
+                && auxiliary.is_some_and(|i| {
+                    prefix[i] == "may"
+                        && prefix.get(i + 1) == Some(&"not")
+                        && i + 2 < prefix.len() - 1
+                })
+            {
+                exclusions.push(PermissionScopeExclusion::CoordinatedMayNot);
+                continue;
+            }
+            let embedded = part.question
+                || prefix.iter().any(|word| {
+                    matches!(
+                        *word,
+                        "if" | "unless" | "whether" | "said" | "says" | "reported" | "reports"
+                    )
+                })
+                || prefix
+                    .first()
+                    .is_some_and(|word| matches!(*word, "do" | "does"));
+            let negative_count = prefix
+                .iter()
+                .filter(|word| matches!(**word, "not" | "never"))
+                .count();
+            let asserted =
+                !embedded && (!negative || (direct || coordinated) && negative_count <= 1);
+            let grantor_start = usize::from(
+                prefix
+                    .first()
+                    .is_some_and(|word| matches!(*word, "if" | "do" | "does")),
+            );
+            let grantor_end = if additive {
+                prefix.len() - 2
+            } else {
+                auxiliary.unwrap_or(prefix.len())
+            };
+            // Questions can put their auxiliary before the grantor.
+            let grantor_end = if embedded && grantor_end < grantor_start {
+                prefix
+                    .iter()
+                    .position(|word| *word == "not")
+                    .unwrap_or(prefix.len())
+            } else {
+                grantor_end
+            };
+            let grantor = (grantor_end > grantor_start).then(|| {
+                permission_subject(
+                    &clause[spans[grantor_start].0.start..spans[grantor_end - 1].0.end],
+                )
+            });
+            let begin = spans.get(index + 1).map(|(span, _)| span.start)?;
+            let raw_complement = clause[begin..].trim();
+            let complement_spans = permission_word_spans(raw_complement);
+            let to = complement_spans.iter().position(|(_, word)| word == "to");
+            if to == Some(0) || to.is_some_and(|i| i + 1 == complement_spans.len()) {
+                return None;
+            }
+            // Articles/pronouns following to are nominal destinations, not infinitives.
+            let actor_action = to.filter(|i| {
+                !complement_spans[0].1.ends_with("ing")
+                    && !matches!(
+                        complement_spans[i + 1].1.as_str(),
+                        "a" | "an" | "the" | "his" | "her" | "their" | "our" | "my" | "your"
+                    )
+            });
+            let mut proposition = if let Some(to) = actor_action {
+                // Only another explicit actor-to-infinitive starts a list item.
+                // Commas inside an action (including HUD's shared object) stay attached.
+                let mut ranges = Vec::new();
+                let mut item_start = 0;
+                for (comma, _) in raw_complement.match_indices(',') {
+                    let tail = raw_complement[comma + 1..].trim_start();
+                    let item = tail
+                        .strip_prefix("and ")
+                        .or_else(|| tail.strip_prefix("or "))
+                        .unwrap_or(tail);
+                    let words = permission_word_spans(item);
+                    if words
+                        .iter()
+                        .position(|(_, word)| word == "to")
+                        .is_some_and(|i| i > 0 && i + 1 < words.len())
+                        && !words[..words.iter().position(|(_, word)| word == "to").unwrap()]
+                            .iter()
+                            .any(|(_, word)| is_modal_anchor(word))
+                    {
+                        ranges.push(item_start..comma);
+                        item_start = raw_complement.len() - item.len();
+                    }
+                }
+                ranges.push(item_start..raw_complement.len());
+                let mut parsed = Vec::new();
+                for bounds in ranges {
+                    let item = raw_complement[bounds].trim().trim_end_matches(',').trim();
+                    let words = permission_word_spans(item);
+                    let to = words.iter().position(|(_, word)| word == "to")?;
+                    let action_start = words.get(to + 1).map(|(span, _)| span.start)?;
+                    let action = item[action_start..].trim_start_matches(',').trim();
+                    parsed.push(permission_proposition(
+                        PermissionForm::Grant,
+                        PermissionComplement::actor(&item[..words[to].0.start]),
+                        action,
+                        negative,
+                        clause,
+                    ));
+                }
+                // Retain the finite subject's original non-grant prohibition. A
+                // shared object is attached only when the stated predicates match.
+                if coordinated {
+                    if let Some(aux) = auxiliary {
+                        let predicate = aux + 2;
+                        if predicate < prefix.len() - 1 {
+                            let mut action = clause
+                                [spans[predicate].0.start..spans[index - 1].0.start]
+                                .trim()
+                                .trim_end_matches(',')
+                                .trim()
+                                .to_owned();
+                            if action == complement_spans[to + 1].1 {
+                                let suffix = &raw_complement[complement_spans[to + 1].0.end..];
+                                action.push(' ');
+                                action.push_str(suffix.trim_start_matches(',').trim());
+                            }
+                            if let Some(grantor_end) = auxiliary.filter(|i| *i > 0) {
+                                let subject = &clause[..spans[grantor_end].0.start];
+                                let raw =
+                                    format!("{} {} not {}", subject.trim(), prefix[aux], action);
+                                result.push(permission_proposition(
+                                    PermissionForm::OriginalModal,
+                                    PermissionComplement::actor(subject),
+                                    &action,
+                                    true,
+                                    &raw,
+                                ));
+                            }
+                        }
+                    }
+                }
+                let first = parsed.remove(0);
+                for mut item in parsed {
+                    item.grantor = grantor.clone();
+                    item.asserted = asserted;
+                    result.push(item);
+                }
+                first
+            } else {
+                // Only a complete simple nominal list exposes per-item identity;
+                // complex/shared-head lists retain the whole owned extent.
+                let mut separators = raw_complement
+                    .match_indices(',')
+                    .map(|(index, _)| index..index + 1)
+                    .chain(
+                        complement_spans
+                            .iter()
+                            .filter(|(_, word)| matches!(word.as_str(), "and" | "or"))
+                            .map(|(span, _)| span.clone()),
+                    )
+                    .collect::<Vec<_>>();
+                separators.sort_by_key(|span| span.start);
+                let mut start = 0;
+                let mut items = Vec::new();
+                for separator in separators
+                    .into_iter()
+                    .chain(std::iter::once(raw_complement.len()..raw_complement.len()))
+                {
+                    let raw = &raw_complement[start..separator.start];
+                    let trimmed = raw.trim();
+                    if !trimmed.is_empty() {
+                        let begin = start + raw.len() - raw.trim_start().len();
+                        items.push(PermissionObjectItem {
+                            raw_span: begin..begin + trimmed.len(),
+                            identity: permission_form_words(trimmed),
+                        });
+                    }
+                    start = separator.end;
+                }
+                let simple = items.len() > 1
+                    && items.iter().all(|item| {
+                        !item.identity.is_empty()
+                            && item.identity.len() <= 2
+                            && item
+                                .identity
+                                .iter()
+                                .all(|word| is_context_word(word) && !is_modal_anchor(word))
+                    });
+                permission_proposition(
+                    PermissionForm::Grant,
+                    PermissionComplement::ObjectActivity {
+                        items: if simple { items } else { Vec::new() },
+                    },
+                    raw_complement,
+                    negative,
+                    clause,
+                )
+            };
+            proposition.grantor = grantor;
+            proposition.asserted = asserted;
+            result.push(proposition);
+        }
+    }
+    Some(PermissionRead {
+        propositions: result,
+        exclusions,
+    })
+}
+
+struct OwnedPermissions<'a> {
+    evidence_id: &'a str,
+    permissions: Vec<PermissionProposition>,
+    forms: Vec<PermissionForm>,
+}
+
+// Admission to full comparison historically depends on literal form markers,
+// including stative may-be. Preserve that trigger independently of recognized
+// action propositions; it is not a new permission interpretation.
+fn permission_forms(text: &str) -> Vec<PermissionForm> {
+    words(text)
+        .iter()
+        .filter_map(|word| match word.as_str() {
+            "allow" | "allows" | "permit" | "permits" => Some(PermissionForm::Grant),
+            "may" => Some(PermissionForm::May),
+            _ => None,
+        })
+        .collect()
+}
+
+fn permission_qualifier_marker(qualifier: &PermissionQualification) -> String {
+    format!(
+        "\0permission-qualifier:{}:{}",
+        qualifier.adjective, qualifier.head
+    )
+}
+
+fn permission_action_projection(
+    proposition: &PermissionProposition,
+    owner: &OwnedPermissions<'_>,
+    source_side: bool,
+) -> Vec<String> {
+    let mut tokens = proposition.action.clone();
+    for qualifier in proposition.qualifications.iter().rev() {
+        let licensed = !qualifier.declared
+            || source_side
+                && owner.permissions.iter().any(|witness| {
+                    witness.asserted
+                        && !witness.negated
+                        && witness.qualifications.iter().any(|other| {
+                            !other.declared
+                                && other.adjective == qualifier.adjective
+                                && other.head == qualifier.head
+                        })
+                });
+        if licensed {
+            tokens.splice(
+                qualifier.token_span.clone(),
+                [permission_qualifier_marker(qualifier)],
+            );
+        }
+    }
+    // Only this preposition form is registered; complement and suffix survive.
+    let mut index = 0;
+    while index + 2 < tokens.len() {
+        if tokens[index] == "outside" && tokens[index + 1] == "of" {
+            tokens.remove(index + 1);
+        }
+        index += 1;
+    }
+    tokens
+}
+
+fn permission_action_forms_match(source: &[String], claim: &[String]) -> bool {
+    if source == claim {
+        return true;
+    }
+    let mut a = 0;
+    let mut b = 0;
+    while a < source.len() && b < claim.len() {
+        if source[a] == claim[b] {
+            a += 1;
+            b += 1;
+            continue;
+        }
+        // An immediate present subject-relative verb can align with its gerund;
+        // object relatives, modal/negative/past forms cannot enter this path.
+        if a > 0 && source[a] == "that" {
+            let verb = a + 1 + usize::from(source.get(a + 1).is_some_and(|word| word == "also"));
+            if let Some(word) = source.get(verb).filter(|word| {
+                !is_modal_anchor(word)
+                    && !word.ends_with("ed")
+                    && !matches!(
+                        word.as_str(),
+                        "the"
+                            | "a"
+                            | "an"
+                            | "not"
+                            | "do"
+                            | "does"
+                            | "did"
+                            | "is"
+                            | "are"
+                            | "was"
+                            | "were"
+                            | "be"
+                            | "have"
+                            | "has"
+                            | "had"
+                    )
+            }) {
+                let base = word.strip_suffix('s').unwrap_or(word);
+                if owned_complement_matches(&["to".into(), base.into()], &[claim[b].clone()], true)
+                {
+                    a = verb + 1;
+                    b += 1;
+                    continue;
+                }
+            }
+        }
+        return false;
+    }
+    a == source.len() && b == claim.len()
+}
+
+fn permission_propositions_match(
+    source: &PermissionProposition,
+    claim: &PermissionProposition,
+    owner: &OwnedPermissions<'_>,
+) -> bool {
+    if !source.asserted || !claim.asserted || source.negated != claim.negated {
+        return false;
+    }
+    if (source.negated || claim.negated)
+        && claim.form == PermissionForm::Grant
+        && (source.form != PermissionForm::Grant || source.grantor != claim.grantor)
+    {
+        return false;
+    }
+    match (&source.complement, &claim.complement) {
+        (
+            PermissionComplement::ActorAction { subject: a, .. },
+            PermissionComplement::ActorAction { subject: b, .. },
+        ) if a == b => {}
+        (
+            PermissionComplement::ObjectActivity { items },
+            PermissionComplement::ObjectActivity { .. },
+        ) => {
+            return source.grantor == claim.grantor
+                && (source.action == claim.action
+                    || items.iter().any(|item| item.identity == claim.action));
+        }
+        _ => return false,
+    }
+    if source.action == claim.action {
+        return true;
+    }
+    // Stated literal agents cannot be erased by a shorthand projection.
+    if claim
+        .qualifications
+        .iter()
+        .any(|qualifier| qualifier.declared)
+    {
+        return permission_action_forms_match(&source.action, &claim.action);
+    }
+    permission_action_forms_match(
+        &permission_action_projection(source, owner, true),
+        &permission_action_projection(claim, owner, false),
+    )
+}
+
+// Verify readers consume one actor/may/action identity before constructing
+// bounded modal contexts. The raw source remains owned by its EvidenceItem;
+// the permission matcher retains the complete action for its separate comparison.
+fn verify_proposition_clauses(text: &str, claim_side: bool) -> Vec<String> {
+    semantic_clause_parts(text)
+        .flat_map(|part| {
+            let owned_text = if part.question {
+                format!("{}?", part.text)
+            } else {
+                part.text.clone()
+            };
+            let parsed = permission_propositions(&owned_text);
+            if let Some(propositions) = parsed.filter(|read| {
+                read.propositions
+                    .iter()
+                    .any(|item| item.form == PermissionForm::Grant)
+            }) {
+                let mut projected = Vec::new();
+                for item in propositions.propositions {
+                    if !item.asserted {
+                        continue;
+                    }
+                    match (&item.complement, item.form) {
+                        (_, PermissionForm::OriginalModal) => projected.push(item.raw_clause),
+                        (
+                            PermissionComplement::ActorAction { raw_subject, .. },
+                            PermissionForm::Grant,
+                        ) => {
+                            projected.push(format!(
+                                "{} may {}{}",
+                                raw_subject,
+                                if item.negated { "not " } else { "" },
+                                item.raw_action
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                if !projected.is_empty() {
+                    return projected;
+                }
+            }
+            if claim_side {
+                independent_propositions(&part.text)
+            } else {
+                vec![part.text]
+            }
+        })
+        .collect()
+}
+
+fn permission_equivalence(claim: &str, evidence: &[&EvidenceItem]) -> Option<()> {
+    let explicit_claim = permission_forms(claim).contains(&PermissionForm::Grant);
+    let owners = evidence
+        .iter()
+        .map(|item| OwnedPermissions {
+            evidence_id: &item.evidence_id,
+            // A malformed clause cannot erase its separately owned siblings.
+            permissions: semantic_clause_parts(&item.exact_quote)
+                .flat_map(|part| {
+                    let text = if part.question {
+                        format!("{}?", part.text)
+                    } else {
+                        part.text
+                    };
+                    permission_propositions(&text)
+                        .map(|read| read.propositions)
+                        .unwrap_or_default()
+                })
+                .collect(),
+            forms: permission_forms(&item.exact_quote),
+        })
+        .collect::<Vec<_>>();
+    let required_source_form = if explicit_claim {
+        PermissionForm::May
+    } else {
+        PermissionForm::Grant
+    };
+    let legacy_active = owners
+        .iter()
+        .any(|owner| owner.forms.contains(&required_source_form))
+        && owners.iter().any(|owner| !owner.permissions.is_empty());
+    let requests = permission_propositions(claim);
+    let negative_family = owners
+        .iter()
+        .flat_map(|owner| &owner.permissions)
+        .chain(requests.iter().flat_map(|read| &read.propositions))
+        .any(|item| item.negated && item.form == PermissionForm::Grant);
+    if !legacy_active && !negative_family {
+        return Some(());
+    }
+    let requests = requests?;
+    if explicit_claim && requests.propositions.is_empty() && requests.exclusions.is_empty() {
+        return None;
+    }
+    // Intentional exclusions carry no relation to compare. They cannot waive
+    // comparison of parsed siblings, and a malformed read returned None above.
+    let mut used = HashSet::new();
+    for request in requests.propositions {
+        let sources = owners
+            .iter()
+            .flat_map(|owner| {
+                owner
+                    .permissions
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, source)| (owner, index, source))
+            })
+            .collect::<Vec<_>>();
+        if !request.asserted {
+            // A literal unowned surface can retain its old verdict, but cannot
+            // become a newly asserted positive or negative permission.
+            if sources
+                .iter()
+                .any(|(_, _, source)| source.raw_clause == request.raw_clause)
+            {
+                continue;
+            }
+            return None;
+        }
+        if let PermissionComplement::ObjectActivity { .. } = &request.complement {
+            let aligned = sources.iter().filter(|(_,_,source)| {
+                matches!(source.complement,PermissionComplement::ObjectActivity {..})
+                    && (source.action == request.action || matches!(&source.complement,
+                        PermissionComplement::ObjectActivity {items} if items.iter().any(|item|item.identity == request.action)))
+            }).collect::<Vec<_>>();
+            // O2 compares only opposite-polarity objects. Same-polarity object
+            // wording, authority drift and omitted exceptions remain report-only.
+            if !aligned
+                .iter()
+                .any(|(_, _, source)| source.negated != request.negated)
+            {
+                continue;
+            }
+            if !aligned
+                .iter()
+                .any(|(owner, _, source)| permission_propositions_match(source, &request, owner))
+            {
+                return None;
+            }
+            continue;
+        }
+        let PermissionComplement::ActorAction { subject, .. } = &request.complement else {
+            unreachable!()
+        };
+        let candidates = sources
+            .into_iter()
+            .filter(|(_, _, source)| match &source.complement {
+                PermissionComplement::ActorAction { subject: other, .. } => {
+                    explicit_claim
+                        || other == subject && source.action.first() == request.action.first()
+                }
+                PermissionComplement::ObjectActivity { .. } => false,
+            })
+            .collect::<Vec<_>>();
+        let strict = request.negated && request.form == PermissionForm::Grant
+            || candidates.iter().any(|(_, _, source)| {
+                source.negated
+                    && (source.form == PermissionForm::Grant
+                        || source.form == PermissionForm::OriginalModal)
+                    && matches!(&source.complement, PermissionComplement::ActorAction {subject: other,..}
+                        if other == subject && source.action.first() == request.action.first())
+            });
+        if !legacy_active && !strict {
+            continue;
+        }
+        if candidates.is_empty() && !explicit_claim {
+            // An object prohibition supplies no modal actor or action. It cannot
+            // act as a witness for a modal request, in either polarity.
+            if owners
+                .iter()
+                .flat_map(|owner| &owner.permissions)
+                .any(|source| {
+                    source.negated
+                        && matches!(
+                            source.complement,
+                            PermissionComplement::ObjectActivity { .. }
+                        )
+                        && request.action.ends_with(&source.action)
+                })
+            {
+                return None;
+            }
+            continue;
+        }
+        let (owner, index, _) = candidates.into_iter().find(|(owner, index, source)| {
+            !used.contains(&(owner.evidence_id, *index))
+                && permission_propositions_match(source, &request, owner)
+        })?;
+        used.insert((owner.evidence_id, index));
+    }
+    Some(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RuleConsequence {
+    event: Vec<String>,
+    obligor: Vec<String>,
+    action: Vec<String>,
+    negated: bool,
+}
+
+fn rule_consequence(clause: &str) -> Option<RuleConsequence> {
+    let tokens = relation_form_words(clause);
+    // A stated failure consequence, not a hypothetical would assertion.
+    if !tokens.starts_with(&["failure".into(), "to".into()]) {
+        return None;
+    }
+    let predicate = tokens
+        .iter()
+        .position(|word| matches!(word.as_str(), "require" | "requires"))?;
+    let mut event = tokens[..predicate].to_vec();
+    while event
+        .last()
+        .is_some_and(|word| matches!(word.as_str(), "would" | "does" | "do" | "not"))
+    {
+        event.pop();
+    }
+    let tail = &tokens[predicate + 1..];
+    let action = tail.iter().position(|word| word == "to")?;
+    if action == 0 || action + 1 >= tail.len() {
+        return None;
+    }
+    Some(RuleConsequence {
+        event,
+        obligor: relation_subject_identity(&tail[..action]),
+        action: tail[action + 1..].to_vec(),
+        negated: negation_present(&tokens[..=predicate]),
+    })
+}
+
+fn stated_rule_consequences_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
+    let sources = evidence
+        .iter()
+        .flat_map(|item| semantic_clauses(&item.exact_quote))
+        .filter_map(|clause| rule_consequence(&clause))
+        .collect::<Vec<_>>();
+    claim_propositions(claim)
+        .filter_map(|clause| rule_consequence(&clause))
+        .all(|request| {
+            let paired = sources
+                .iter()
+                .filter(|source| source.event == request.event)
+                .collect::<Vec<_>>();
+            paired.is_empty() || paired.iter().any(|source| **source == request)
+        })
+}
+
+#[cfg(test)]
+fn modal_force_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
+    let definitions = definition_value_decision(claim, evidence);
+    definitions.supported && modal_force_with_definitions(claim, evidence, &definitions)
+}
+
+fn verify_modal_predicates(text: &str, strong: bool, claim_side: bool) -> Vec<ModalPredicate> {
+    let clauses = verify_proposition_clauses(text, claim_side);
+    clauses
+        .into_iter()
+        .flat_map(|clause| clause.split(',').map(str::to_owned).collect::<Vec<_>>())
+        .flat_map(|clause| {
+            let mut tokens = necessity_projection(&words(&clause)).tokens;
+            if rule_consequence(&clause).is_some() {
+                tokens.retain(|word| word != "would");
+            }
+            let mut normalized = Vec::with_capacity(tokens.len());
+            let mut index = 0;
+            while index < tokens.len() {
+                if tokens[index] == "cannot" {
+                    normalized.push("can".into());
+                    normalized.push("not".into());
+                    index += 1;
+                    continue;
+                }
+                let contraction = tokens.get(index + 1).is_some_and(|word| word == "t")
+                    && matches!(
+                        tokens[index].as_str(),
+                        "can"
+                            | "couldn"
+                            | "mayn"
+                            | "mightn"
+                            | "mustn"
+                            | "shalln"
+                            | "shouldn"
+                            | "won"
+                            | "wouldn"
+                    );
+                if contraction {
+                    normalized.push(
+                        match tokens[index].as_str() {
+                            "couldn" => "could",
+                            "mayn" => "may",
+                            "mightn" => "might",
+                            "mustn" => "must",
+                            "shalln" => "shall",
+                            "shouldn" => "should",
+                            "won" => "will",
+                            "wouldn" => "would",
+                            "can" => "can",
+                            _ => unreachable!("modal contraction is exhaustively matched"),
+                        }
+                        .to_string(),
+                    );
+                    normalized.push("not".into());
+                    index += 2;
+                } else {
+                    normalized.push(tokens[index].clone());
+                    index += 1;
+                }
+            }
+            modal_predicates(&normalized.join(" "), strong)
+        })
+        .collect::<Vec<_>>()
+}
+
+fn modal_force_with_definitions(
+    claim: &str,
+    evidence: &[&EvidenceItem],
+    definitions: &DefinitionDecision,
+) -> bool {
+    if !stated_rule_consequences_supported(claim, evidence) {
+        return false;
+    }
+    let weak_source = evidence
+        .iter()
+        .flat_map(|item| verify_modal_predicates(&item.exact_quote, false, false))
+        .collect::<Vec<_>>();
+    let strong_source = evidence
+        .iter()
+        .flat_map(|item| verify_modal_predicates(&item.exact_quote, true, false))
+        .collect::<Vec<_>>();
+    let strong_claim = verify_modal_predicates(claim, true, true);
+    let weak_claim = verify_modal_predicates(claim, false, true);
+    let Some(()) = permission_equivalence(claim, evidence) else {
+        return false;
+    };
+    let strengthening_supported = strong_claim.iter().all(|predicate| {
+        let matching_weak_source = weak_source
+            .iter()
+            .any(|source| modal_statements_match(predicate, source, false));
+        let matching_strong_source = strong_source
+            .iter()
+            .any(|source| modal_statements_match(predicate, source, false));
+        let matching_strong_polarity = strong_source
+            .iter()
+            .any(|source| modal_statements_match(predicate, source, true));
+        (!matching_weak_source || matching_strong_polarity)
+            && (!matching_strong_source || matching_strong_polarity)
+    });
+    if !strengthening_supported {
+        return false;
+    }
+    for (source_strong, source) in strong_source
+        .iter()
+        .map(|predicate| (true, predicate))
+        .chain(weak_source.iter().map(|predicate| (false, predicate)))
+    {
+        if source_strong && definitions.released_modals.contains(source) {
+            continue;
+        }
+        let matching_strong = strong_claim
+            .iter()
+            .any(|claim| modal_statements_match(claim, source, true));
+        let matching_weak = weak_claim
+            .iter()
+            .any(|claim| modal_statements_match(claim, source, true));
+        let asserted = strong_claim
+            .iter()
+            .chain(&weak_claim)
+            .any(|claim| modal_statements_match(claim, source, false))
+            || plain_assertion_for_modal(claim, source).is_some();
+        if !asserted {
+            continue;
+        }
+        let same_strong_source = strong_source
+            .iter()
+            .any(|strong| modal_statements_match(strong, source, true));
+        if source_strong && !matching_strong
+            || !source_strong && !matching_weak && !(matching_strong && same_strong_source)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn semantic_fidelity_supported(claim: &str, evidence: &[&EvidenceItem]) -> bool {
-    comparison_boundaries_supported(claim, evidence)
+    let definitions = definition_value_decision(claim, evidence);
+    definitions.supported
+        && comparison_boundaries_supported(claim, evidence)
         && broader_enumeration_supported(claim, evidence)
         && directional_endpoints_supported(claim, evidence)
         && actor_qualifications_supported(claim, evidence)
         && evaluative_conclusions_supported(claim, evidence)
-        && modal_force_supported(claim, evidence)
+        && modal_force_with_definitions(claim, evidence, &definitions)
+}
+
+#[cfg(test)]
+pub(in crate::pipeline::summary) fn relation_guard_rejection_reasons(
+    claim: &str,
+    evidence: &[&EvidenceItem],
+) -> Vec<&'static str> {
+    // Diagnostics call the decision owners; they never decide delivery.
+    let mut reasons = Vec::new();
+    if !evaluative_conclusions_supported(claim, evidence) {
+        reasons.push("evaluation_or_causal_relation");
+    }
+    let definitions = definition_value_decision(claim, evidence);
+    if !definitions.supported {
+        reasons.push("definition_value");
+    }
+    if !modal_force_with_definitions(claim, evidence, &definitions) {
+        reasons.push("modal_preservation");
+    }
+    reasons
 }
 
 pub(in crate::pipeline::summary) fn apply_semantic_fidelity_guards(
