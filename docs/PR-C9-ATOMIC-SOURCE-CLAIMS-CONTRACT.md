@@ -451,3 +451,83 @@ This is a received reference, not a local file inspection. Do not open, derive,
 modify or tune against it during the offline build. Bind the received hash in the
 later live-benchmark contract and consume it only in that accepted run. The DV
 labels and unseen cases retain their separate freeze and holds.
+
+
+## Proposed source-dependency amendment — NOT ACCEPTED
+
+The accepted section 4.3 requires a separate amendment before a dependency-reader
+change. This is that proposed amendment; it does not withdraw the accepted offline
+scope. Dependent section-reader implementation is stopped pending acceptance.
+
+### Reproduce, isolate and explain
+
+A public three-clause fixture has clause 1: “The operator may use the equipment
+subject to Section 3.” Clause 3 says: “This permission excludes exterior work.”
+Through the existing General `Clauses::new` / `segment` / `context` owners, clause
+1's returned context contains only its own permission and the reference, not the
+referenced exception. The declared probe
+`whole_document_cross_section_dependency_preserves_governing_exception` fails
+at that missing exception; it makes no model call. This is a source-context probe,
+not a claim that a completed new section planner or a live model failed.
+
+First missing ownership: `coherent/whole_clauses.rs`, the context construction at
+lines 96–104, introduced by `c913fd2a`. It builds from the numbered parents plus
+the current clause. No non-parent dependency graph exists in that reader or the
+structure owner. This predates this PR. Neither a larger writer cap nor a later
+word-matching exception guard repairs that missing relationship.
+
+### Proposed required change surface
+
+Add a **versioned source-dependency projection at this existing clause owner**
+for the new General revision. Keep historical General contexts, Contract's full
+clause list, heading grammar and extraction categories unchanged.
+
+- Reuse the existing owned decimal heading identity/parser for explicit decimal
+  references such as `Section 3`, `Section 3.2` and `§ 3`. Do not add another
+  number parser or infer a dependency by shared words, actors or model output.
+- Return app-owned clause IDs, exact source fragments, parent IDs, dependency IDs
+  and a typed resolved/unresolved status. Build stable identities from original
+  document order and source spans. Preserve exact source bytes.
+- Compute the transitive referenced-clause/parent closure once at that owner.
+  Deduplicate by owned identity with a visited set, including finite cycles;
+  preserve canonical source order in the result. A missing or duplicate target,
+  unsupported explicit reference form, or ambiguous source boundary is unresolved,
+  never an arbitrary best match. Unsupported ranges/lists/relative references
+  are not silently treated as independent. This limited projection does not
+  claim to solve arbitrary semantic references in prose.
+- The section planner and new-revision Verify source projection consume that
+  same metadata. No downstream text re-scan. A resolved dependency that lies in
+  another section travels with the governing unit. Its complete text and parent
+  context stay present even when size admission then fails. Existing per-claim
+  comparison bounds and typed size withholding are unchanged.
+- An unresolved dependency blocks the affected section plan before any generation.
+  Measure/report it for an owner amendment; do not skip the clause, cut context
+  or claim complete coverage. Whole-document input does not make a guessed
+  dependency acceptable. No live run is granted by this amendment.
+
+### Proposed proof and compatibility gates
+
+Keep the current public failing probe, then add exact multi-hop/parent/cycle,
+missing/duplicate-target, unsupported-form and boundary-uncertainty cases through
+this owner. A different referenced clause must not acquire clause 3's exception.
+The faithful permission-plus-exclusion case retains both sources; its omitted-
+exclusion twin must not be labelled faithful by the source/proof controls.
+
+Mutation of a dependency edge or its unresolved status must fail the corresponding
+public regression. The new planner must consume the projection and retain complete
+source coverage without copying the resolver. Re-run unchanged historical C9 and
+SAME60 lists after implementation; expected changes on those frozen inputs: none.
+No new model prompt, comparator, cap, model/runtime/settings, labels or live budget.
+
+### Current implementation and stop
+
+The new-protocol schema and budget capacity controls have fail-before/pass-after
+logs. They are preliminary local work, not a completed writer or pipeline fix.
+Parser, persistence, planning and delivery work remain incomplete. The dependency
+probe is intentionally still failing and unpublished; do not weaken or skip it.
+No reader fix has been made. No behavior code from this work is published yet.
+
+Publish this amendment for oversight/operator review, then obtain explicit
+acceptance before modifying the dependency reader. The previously accepted
+benchmark and live-run freezes, all production/merge holds, and the source-owner
+amendment requirement remain binding.
