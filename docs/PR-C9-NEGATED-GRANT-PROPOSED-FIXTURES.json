@@ -1,5 +1,5 @@
 {
-  "status": "PROPOSED revision 4; accepted revision-3 decisions carried forward with the explicit object boundary change; STOP A, no Phase B",
+  "status": "ACCEPTED revision4 with O2 selected as fallback; Phase B HOLD for proposed O3 revision5 and renewed operator selection",
   "base_head": "8169514b209fbcb49599de660992886048c3cf7b",
   "cases": [
     {
@@ -1484,5 +1484,13 @@
       "re-\nplacements": "replacements"
     }
   },
-  "fixture_option_note": "Common boolean labels apply to both object options. Option-specific labels apply only after the operator selects O1 or O2. This is a contract fixture, not an executable test suite."
+  "fixture_option_note": "Common boolean labels apply to both object options. Option-specific labels apply only after the operator selects O1 or O2. This is a contract fixture, not an executable test suite.",
+  "selected_object_comparison_option": "O2_FLIP_ONLY",
+  "revision4_operator_acceptance": {
+    "reviewed_head": "51003a3c2144aa7ec11c3315a4466cccf51cd9da",
+    "source_comment": "https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6205666709",
+    "answer_verbatim": "O2 flip-only (Recommended)",
+    "option_text_verbatim": "Block summaries that claim the opposite; faithful rewordings pass as today. No change to the 60 delivered summaries. A restatement that drops an exception isn't newly caught.",
+    "later_hold_comment": "https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6206263352"
+  }
 }

@@ -1,6 +1,18 @@
 # PR128 separate negated-grant round — contract revision 4
 
-Status: **PROPOSED revision4, NOT ACCEPTED. STOP A again. No Phase B code or tests.** Revision3 acceptance is recorded separately in28cee17ae7b2ba0865b7267301d2a6b7835ee50d. The operator subsequently chose object/activity coverage, requiring this amendment and renewed acceptance. PR128 remains draft and stacked on its existing base. PR116/126/128 production, qualification and merge holds remain. No merge, ready or base changes.
+Status: **ACCEPTED revision4, O2 selected as fallback. Phase B HOLD for O3 revision5 and renewed operator selection.** No product code or tests. The later operator instruction to prove O3 first supersedes the permission to start Phase B now. PR128 stays draft and stacked; all PR116/126/128 production, qualification and merge holds remain. No merge, ready or base change.
+
+## Verbatim operator acceptance of revision4 and later O3 direction
+
+Acceptance relayed in [issuecomment-6205666709](https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6205666709), reviewing51003a3:
+
+- Answer: **“O2 flip-only (Recommended)”**.
+- Option text: **“Block summaries that claim the opposite; faithful rewordings pass as today. No change to the 60 delivered summaries. A restatement that drops an exception isn't newly caught.”**
+- Accepted together: strict authority wording within performed comparisons; conservative ObjectActivity-to-modal with no invented actor/verb; the pets boundary supersession plus missing complement boundary; O2-specific and shared labels; O2 A2 cost0/825 changes and31 saved validation. ActorAction strictness stays unchanged.
+
+Subsequent decision relayed in [issuecomment-6206263352](https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6206263352): **“Yes, prove O3 first (Recommended)”**. Option text: **“One more contract-only revision with O3 defined and predicted against the 60 summaries and the 26 lease restrictions plus dropped-exception versions. You then pick O1, O2 or O3. No code until then; O2 stays as the fallback.”**
+
+This commit records the accepted fallback and the later HOLD. It does not select or implement O3. Renewed STOP A applies to revision5.
 
 ## Verbatim operator acceptance of revision3
 
@@ -149,7 +161,7 @@ Bound A2 artifacts:
 
 ## Verification plan and acceptance packet
 
-Proposed JSON SHA256cc7f3291b1ab4152a0a2d9213d3184b19ce5b9add66b8ee622623b0ad6143062:115 final-verdict controls and21 reader boundaries. Both options share110 final labels;5 labels explicitly differ by selected object option. All26 fictional restrictions have full-sentence inversions and exact faithful twins, plus list-item, exception, authority, mixed-sibling, guest-limit, complement/trap and object/modal boundaries. This is proposed label data, not an executable test suite or model gold. The only changed accepted revision3 label is the listed pets object boundary; the earlier N3 label change was already accepted and committed separately.
+Proposed JSON SHA25698cea98832afb4520b543c9935c9ba923eaf886adff1bf364122e4411d7bf9e0:115 final-verdict controls and21 reader boundaries. Both options share110 final labels;5 labels explicitly differ by selected object option. All26 fictional restrictions have full-sentence inversions and exact faithful twins, plus list-item, exception, authority, mixed-sibling, guest-limit, complement/trap and object/modal boundaries. This is proposed label data, not an executable test suite or model gold. The only changed accepted revision3 label is the listed pets object boundary; the earlier N3 label change was already accepted and committed separately.
 
 Operator acceptance must select O1 or O2, adopt/revise strict grantor wording and conservative ObjectActivity-to-modal handling, approve the explicit boundary change and option-specific/public labels, and accept that option's complete A2 cost. Then record exact relayed acceptance in a contract-only commit **before** Phase B. Oversight recommendations and CI green do not grant this acceptance.
 
@@ -168,4 +180,4 @@ This revision changes only contract text and proposed fixture labels after the s
 
 ## Gap audit
 
-**NOT DONE.** Revision4, object policy, label change, option-specific labels and A2 costs await independent review and renewed operator acceptance relayed verbatim. All reproduction, policy code, mutations, Rust gates, actual SAME60 and final exact-head PASS remain. No production, qualification or merge hold is released by this contract.
+**NOT DONE.** Revision4 O2 and its labels/cost are accepted as fallback. Phase B is held for the separately proposed revision5 O3 comparison and renewed operator selection. All reproduction, policy code, mutations, Rust gates, actual SAME60 and final exact-head PASS remain. No production, qualification or merge hold is released.
