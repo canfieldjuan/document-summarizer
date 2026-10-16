@@ -424,3 +424,30 @@ separate live budget, unseen qualification and operator hold release remain.
 No claim that the existing saved-chunk inspection satisfies new-planner proof.
 Publish the contract-only revision, notify oversight and stop for the operator.
 No automatic build, live run, merge, ready transition or hold-thread edit.
+
+
+## Recorded operator acceptance — offline Phase B
+
+ACCEPTED: operator answer “Accept (Recommended)”, relayed verbatim by oversight in
+[PR132 comment 6225524659](https://github.com/canfieldjuan/document-summarizer/pull/132#issuecomment-6225524659),
+and confirmed directly in this session: “i accept lets check oversight”.
+Accepted source revision: `ef2eb6c70155431e8a41ff9c93d191ba7034f6f5`; exact contract
+SHA256 `c368fd75c07ec680a869774286ea1b41e3e48bff98d8401eee0554da07282803`.
+The proposal status and stop above record the earlier publication state. This
+acceptance supersedes that pre-implementation stop only, retaining every scope,
+proof, origin-amendment requirement and later live/production/merge hold.
+
+Authorized sequence: this acceptance-record commit first, then test-first offline
+implementation under section 7; one push per round, exact-head review, then STOP.
+The source/dependency/capacity blockers still require measurement and an amendment
+at their owner when the accepted design cannot represent them. No weaker fallback.
+No live writer/verifier calls or GPU workload; a separate exact budget is required.
+
+Oversight owns the independent benchmark facts. Their frozen approval is relayed
+in [PR132 comment 6226397989](https://github.com/canfieldjuan/document-summarizer/pull/132#issuecomment-6226397989).
+Private alias `docsum-preproduction-benchmark-20261016/frozen-20261016/benchmark-facts-frozen.json`;
+SHA256 `8b9817a9a425647dc63f2968a56c5962ba19e95109c1f3e5ab7c66f8a2f75cbf`.
+This is a received reference, not a local file inspection. Do not open, derive,
+modify or tune against it during the offline build. Bind the received hash in the
+later live-benchmark contract and consume it only in that accepted run. The DV
+labels and unseen cases retain their separate freeze and holds.
