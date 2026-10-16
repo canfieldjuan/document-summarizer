@@ -281,6 +281,119 @@
       "claim": "Rules not permit apprentices to carry crates.",
       "proposed_expected_supported": true,
       "reason": "Identical bounded unowned surface retains the injected supported result, without inventing a categorical asserted proposition."
+    },
+    {
+      "case": "hud_modal_coordinated_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "The Tenant shall not undertake, or permit his/her family or guests to undertake, any hazardous acts or do anything that will increase the project's insurance premiums."
+      ],
+      "claim": "The Tenant may permit his/her family or guests to undertake hazardous acts.",
+      "proposed_expected_supported": false,
+      "reason": "Public HUD-90105a section 24: the source forbids permitting this action; the claim licenses it.",
+      "public_source": "https://www.hud.gov/sites/dfiles/OCHCO/documents/90105a.pdf#section-24"
+    },
+    {
+      "case": "hud_modal_coordinated_faithful",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "The Tenant shall not undertake, or permit his/her family or guests to undertake, any hazardous acts or do anything that will increase the project's insurance premiums."
+      ],
+      "claim": "The Tenant shall not undertake, or permit his/her family or guests to undertake, any hazardous acts or do anything that will increase the project's insurance premiums.",
+      "proposed_expected_supported": true,
+      "reason": "Exact public modal/coordinated negative grant and every original prohibition retained.",
+      "public_source": "https://www.hud.gov/sites/dfiles/OCHCO/documents/90105a.pdf#section-24"
+    },
+    {
+      "case": "hud_original_actor_prohibition_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "The Tenant shall not undertake, or permit his/her family or guests to undertake, any hazardous acts or do anything that will increase the project's insurance premiums."
+      ],
+      "claim": "The Tenant may undertake hazardous acts.",
+      "proposed_expected_supported": false,
+      "reason": "Extracting the coordinated grant must not erase the earlier prohibition on the Tenant undertaking the acts.",
+      "public_source": "https://www.hud.gov/sites/dfiles/OCHCO/documents/90105a.pdf#section-24"
+    },
+    {
+      "case": "shall_not_direct_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord shall not permit Tenant to keep pets."
+      ],
+      "claim": "Landlord permits Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "Recommended N1 modal scope: a prohibited grant cannot license the positive inverse."
+    },
+    {
+      "case": "shall_not_direct_faithful",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord shall not permit Tenant to keep pets."
+      ],
+      "claim": "Landlord shall not permit Tenant to keep pets.",
+      "proposed_expected_supported": true,
+      "reason": "Exact shall-not twin retains modality."
+    },
+    {
+      "case": "will_not_direct_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord will not allow Tenant to keep pets."
+      ],
+      "claim": "Landlord allows Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "Recommended N1 includes explicit will-not negation."
+    },
+    {
+      "case": "will_not_direct_faithful",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord will not allow Tenant to keep pets."
+      ],
+      "claim": "Landlord will not allow Tenant to keep pets.",
+      "proposed_expected_supported": true,
+      "reason": "Exact will-not twin retains modality."
+    },
+    {
+      "case": "will_not_coordinated_inversion",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord will not paint walls, or permit Tenant to keep pets."
+      ],
+      "claim": "Landlord permits Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "Same bounded coordinated predicate shape as the public shall-not example."
+    },
+    {
+      "case": "will_not_coordinated_faithful",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord will not paint walls, or permit Tenant to keep pets."
+      ],
+      "claim": "Landlord will not paint walls, or permit Tenant to keep pets.",
+      "proposed_expected_supported": true,
+      "reason": "Both original predicates and will-not retained."
+    },
+    {
+      "case": "modal_scope_reset_faithful_positive",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord shall not paint walls, but City permits Tenant to keep pets."
+      ],
+      "claim": "City permits Tenant to keep pets.",
+      "proposed_expected_supported": true,
+      "reason": "Negation ends at a contrasting new finite subject; it cannot migrate to the City grant."
+    },
+    {
+      "case": "modal_scope_reset_false_negative",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord shall not paint walls, but City permits Tenant to keep pets."
+      ],
+      "claim": "City does not permit Tenant to keep pets.",
+      "proposed_expected_supported": false,
+      "reason": "Negation ends at a contrasting new finite subject; it cannot migrate to the City grant."
     }
   ],
   "unowned_reader_boundaries": [
@@ -362,8 +475,48 @@
       "text": "Rules not permit apprentices to carry crates.",
       "proposed_expected_unowned": true,
       "reason": "No finite categorical auxiliary; retain a bounded unowned-negative fact, not an asserted negative Grant."
+    },
+    {
+      "case": "owned_shall_not",
+      "seam": "raw_permission_reader",
+      "text": "Landlord shall not permit Tenant to keep pets.",
+      "proposed_expected_unowned": false,
+      "proposed_expected_negated": true,
+      "reason": "Proposed modal N1 option; explicit finite negative scope and actor-to-action extent."
+    },
+    {
+      "case": "owned_will_not",
+      "seam": "raw_permission_reader",
+      "text": "Landlord will not allow Tenant to keep pets.",
+      "proposed_expected_unowned": false,
+      "proposed_expected_negated": true,
+      "reason": "Proposed modal N1 option; explicit finite negative scope and actor-to-action extent."
+    },
+    {
+      "case": "owned_shall_not_coordinated",
+      "seam": "raw_permission_reader",
+      "text": "The Tenant shall not undertake, or permit his/her family or guests to undertake, any hazardous acts or do anything that will increase the project's insurance premiums.",
+      "proposed_expected_unowned": false,
+      "proposed_expected_negated": true,
+      "reason": "Proposed modal N1 option; explicit finite negative scope and actor-to-action extent."
+    },
+    {
+      "case": "owned_will_not_coordinated",
+      "seam": "raw_permission_reader",
+      "text": "Landlord will not paint walls, or permit Tenant to keep pets.",
+      "proposed_expected_unowned": false,
+      "proposed_expected_negated": true,
+      "reason": "Proposed modal N1 option; explicit finite negative scope and actor-to-action extent."
     }
   ],
-  "revision": 2,
-  "reader_boundary_note": "Unowned refers to absence of an asserted Grant proposition, not loss of scoped negative/uncertain facts. The collection also includes explicit owned/nonnegative controls."
+  "revision": 3,
+  "reader_boundary_note": "Unowned refers to absence of an asserted Grant proposition, not loss of scoped negative/uncertain facts. The collection also includes explicit owned/nonnegative controls.",
+  "public_source_provenance": {
+    "url": "https://www.hud.gov/sites/dfiles/OCHCO/documents/90105a.pdf",
+    "sha256": "ae735de3c9619a2bb7f2431db1d06e2476468d627e82232fe463815b08b78754",
+    "section": 24,
+    "work": "HUD-90105a Model Lease for Subsidized Programs",
+    "rights": "United States federal government work; public domain",
+    "faithful_twin": "Exact normalized original sentence, not a model paraphrase"
+  }
 }
