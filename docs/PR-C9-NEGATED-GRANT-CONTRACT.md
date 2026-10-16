@@ -52,7 +52,7 @@ The operator decision is [issuecomment-6205088924](https://github.com/canfieldju
 - Answer: **“Cover it now (Recommended)”**.
 - Option text: **“Amend the contract before any code: 'does not permit / allow + thing or activity' becomes a recognized prohibition. A summary claiming the opposite ('landlord permits pets') is blocked; faithful restatements pass. This lease becomes a test document. Adds a contract revision and your acceptance again, but fixes the common case.”**
 
-This authorizes a contract amendment; it does not accept revision4. The later oversight recommendation to offer O1/O2 is a recommendation for the operator, not implementation permission.
+That earlier decision authorized the revision4 proposal. The later explicit O2 acceptance and build decision recorded above now govern implementation; recommendations alone never supplied permission.
 
 Operator-supplied fictional test lease: private PDF alias MOCK-OCR-2026-V4, SHA256422219220bd8bbb6bf32a63148d645daebade3dc81707e54b46f2c959ac954ed; extracted-layout text SHA256aa50fb04976748e2a49572d523577056d0fd52f616f2e78529a1d6d4d26daec6. Inspected26 negative restrictions:25 object/activity and1 explicit actor-to-action. Public fixture text contains only fictional restriction sentences. The PDF stays outside the repo. The hardened sibling and scanned copies belong to other issues and are not this trial.
 
@@ -60,7 +60,7 @@ Normalization: reflow whitespace; join the observed wrapped words in- / doors, s
 
 ## Root cause and required change surface
 
-Ground truth remains executable8169514, semantic_support.rs SHA256a8a081fca9772d578c7f472f14c2a784f6984a3c62e38d82e8474ae04df3ffcd. `permission_propositions`(:3722) discards a negative prefix at:3736–3738, requires each comma item to contain a first `to` at:3740–3746, then treats everything before it as actor and everything after it as action. It cannot represent an object prohibition, and a prepositional `to` can masquerade as an infinitive. `permission_equivalence`(:3950–3980) also bypasses explicit claims without `to` and retains the cross-form-only gate. Fixing only the final verdict would leave both wrong assumptions intact.
+The executable baseline was8169514, semantic_support.rs SHA256a8a081fca9772d578c7f472f14c2a784f6984a3c62e38d82e8474ae04df3ffcd. `permission_propositions`(:3722) discards a negative prefix at:3736–3738, requires each comma item to contain a first `to` at:3740–3746, then treats everything before it as actor and everything after it as action. It cannot represent an object prohibition, and a prepositional `to` can masquerade as an infinitive. `permission_equivalence`(:3950–3980) also bypasses explicit claims without `to` and retains the cross-form-only gate. Fixing only the final verdict would leave both wrong assumptions intact.
 
 Blame at this head: afabcb9e introduced the negative-prefix rejection and actor/to/action invariant; afe5fdd moved the first-to/comma split to raw spans and hard-coded false polarity;285ad6e named the Grant form. These are earlier changes in this arc, not defects introduced by the current docs-only pushes. The accepted8169514 per-clause aggregation stays intact. The concept is **owned permission complement and its scope**, not a list of special pet/payment rules.
 
@@ -74,7 +74,7 @@ The direct window is the finite negative auxiliary immediately before the grant 
 
 Never, bare-not, might-not/uncertainty, double negation, outside-window negation, reported/conditional/interrogative scope remain unowned as asserted Grant propositions. The origin retains bounded unowned-negative facts with established relation extent so their positive inverse cannot take an empty-owner pass. Not-only remains nonnegative/additive. Unknown extent cannot become a whole-unit flag. Question metadata, if needed, comes from existing semantic_clauses(:1205/:1235) before punctuation is discarded, preserving other callers' old string projection. No second splitter.
 
-## N1b — proposed object/activity representation at that same owner
+## N1b — accepted object/activity representation at that same owner
 
 A Grant complement is explicitly typed:
 
@@ -100,19 +100,19 @@ For ObjectActivity, O1/O2 below are the recorded revision4 alternatives. O2 was 
 | Object policy | Same-polarity negative restatements | Opposite-polarity object claims | Missing negative exception / invented negative authority or item | Predicted SAME60 cost |
 |---|---|---|---|---|
 | **O1 STRICT** | Require same owned grantor, complete object/item and qualifiers using existing canonical forms only | Withhold when a positive object claim has no compatible affirmative witness and conflicts with the owned prohibition | Withhold |20 faithful claim usages newly withheld; saved validation31→23 |
-| **O2 FLIP-ONLY — proposed default, recommended by oversight** | Keep prior report-only behavior; no new negative/negative comparison | Compare the opposite-polarity family at the existing comparator; block its positive inverse for an owned object or list item | **Not newly caught** for negative/negative object pairs |0 verdict changes; saved validation31 unchanged |
+| **O2 FLIP-ONLY — accepted** | Keep prior report-only behavior; no new negative/negative comparison | Compare the opposite-polarity family at the existing comparator; block its positive inverse for an owned object or list item | **Not newly caught** for negative/negative object pairs |0 verdict changes; saved validation31 unchanged |
 
-O1 prevents scope/authority inventions in negative object claims but rejects some faithful wording differences. O2 preserves those faithful claims but knowingly leaves negative object exception loss, authority drift and invented negative list-item claims unchecked as before. It is a semantic coverage tradeoff requiring explicit operator acceptance, not an implementation shortcut or an accepted policy yet. No O2 relaxation applies to ActorAction; the overnight-guest limits/consent controls stay strict under both.
+O1 prevents scope/authority inventions in negative object claims but rejects some faithful wording differences. O2 preserves those faithful claims but knowingly leaves negative object exception loss, authority drift and invented negative list-item claims unchecked as before. It is a semantic coverage tradeoff requiring explicit operator acceptance, not an implementation shortcut. The operator explicitly accepted O2 and its stated coverage cost. No O2 relaxation applies to ActorAction; the overnight-guest limits/consent controls stay strict under both.
 
 Grantor identity default is strict **within comparisons the selected policy performs**: normalize only the existing case/article identity, never equate landlord, policy and agreement by domain inference. A different named authority cannot supply a positive witness for an activated opposite-polarity request. This can falsely withhold a faithful reference to the same authority under different wording; accept that cost or contract a separate authority mapping. Under O2, a negative/negative grantor wording change remains report-only and can retain an unsupported attribution. Both directions are explicit option-specific fixtures.
 
 Comparison is per owned relation/item. Preserve separately owned positive witnesses and unrelated non-grant clauses; do not reject an entire claim because any evidence contains a negative object. Do not invent a broad pets taxonomy from a dogs/cats list. A positive claim with no owned witness is not proved by that negative list; no guessed animal classification is required.
 
-## N3 — ActorAction mirrored mapping accepted; ObjectActivity cross-form proposed
+## N3 — accepted ActorAction mapping and conservative ObjectActivity boundary
 
 Accepted ActorAction rules stay fixed: positive may against negative Grant withholds; negative may against positive Grant withholds; negative Grant with an invented named grantor against source-only negative may withholds; **negative may against aligned named negative ActorAction Grant passes**, mirroring the existing positive mapping. `negative_may_vs_negative_grant` remains Supported under both object options.
 
-For ObjectActivity versus an actor/modal claim, proposed default is conservative: **no inferred actor or verb and no new support**. Object-only “Landlord does not permit cats” cannot license either “Tenant may keep cats” or “Tenant may not keep cats”; the new modal actor/verb is unowned, so these fixture outcomes are Unsupported under both options. Alternative: infer keep/possess/use from the noun and equate the forms; that reduces false withholds but invents language absent from the source and exceeds the recommended bounded contract. This alternative is not proposed for implementation.
+For ObjectActivity versus an actor/modal claim, the accepted default is conservative: **no inferred actor or verb and no new support**. Object-only “Landlord does not permit cats” cannot license either “Tenant may keep cats” or “Tenant may not keep cats”; the new modal actor/verb is unowned, so these fixture outcomes are Unsupported under both options. Alternative: infer keep/possess/use from the noun and equate the forms; that reduces false withholds but invents language absent from the source and exceeds the recommended bounded contract. This alternative is not proposed for implementation.
 
 A separately owned original actor/action or explicit non-grant modal clause can still support its own relation through the existing path. Preserve it during projection. This is why a non-grant paraphrase is not rejected just because its cited quote also has an object prohibition. Unowned negative object surfaces retain only the scoped facts established by accepted N1; an outside-window coordinated may-not surface remains unowned, without inventing its scope. O1 requires an owned complement for an explicit grant request in its activated negative family; O2 does not add comparison to that unowned negative restatement. No second matcher or lexical guess joining an arbitrary object to an arbitrary modal verb.
 
@@ -256,11 +256,11 @@ Bound A2 artifacts:
 
 ## Verification plan and acceptance packet
 
-Proposed JSON SHA2565606eb4320f083844a3b7f5c7fe3a29679c90b5776b85d372e8c8ad5e4b523a9:115 legacy final-verdict controls and21 legacy reader boundaries, plus the revision5 packet above. The legacy O1/O2 alternatives share110 final labels;5 labels explicitly differ by selected object option. All26 fictional restrictions have full-sentence inversions and exact faithful twins, plus list-item, exception, authority, mixed-sibling, guest-limit, complement/trap and object/modal boundaries. This is proposed label data, not an executable test suite or model gold. The only changed accepted revision3 label is the listed pets object boundary; the earlier N3 label change was already accepted and committed separately.
+Historical revision5 JSON snapshot SHA2565606eb4320f083844a3b7f5c7fe3a29679c90b5776b85d372e8c8ad5e4b523a9:115 legacy final-verdict controls and21 legacy reader boundaries, plus the revision5 packet above. The legacy O1/O2 alternatives share110 final labels;5 labels explicitly differ by selected object option. All26 fictional restrictions have full-sentence inversions and exact faithful twins, plus list-item, exception, authority, mixed-sibling, guest-limit, complement/trap and object/modal boundaries. The accepted O2 subset now feeds unit regression tests; O3 data remains an unbuilt proposal, not model gold. The only changed accepted revision3 label is the listed pets object boundary; the earlier N3 label change was already accepted and committed separately.
 
-Revision4 O2 acceptance is recorded above. Revision5 requires a renewed selection of O1/O2/O3a/O3b and acceptance of its labels, limits and complete A2 cost. Record the exact relayed choice before Phase B. Oversight recommendations and CI green do not grant this acceptance.
+Revision4 O2 acceptance and the later build-O2 decision are recorded above. O3a/O3b remain unbuilt offline candidates under their independent-label adoption gate. They require a future operator decision before implementation. Oversight recommendations and CI green do not grant that decision.
 
-Phase B after renewed STOP A:
+Phase B under the accepted O2 selection:
 
 1. Fail-first public tests at executable8169514, recording original inversions and every accepted faithful/unowned boundary; no policy code before the expected failures. Declare expected failing tests/classes before execution. Unexpected pass or different failure stops the action.
 2. Fix the typed complement/negative extent at its one origin and route all current consumers through it. Remove redundant first-to/negative/comma assumptions there. Preserve per-clause ownership and original modal clauses; no downstream compensation.
@@ -271,8 +271,61 @@ Phase B after renewed STOP A:
 
 ## Implementation summary / cold diff audit
 
-Revision5 changes only contract and proposed fixture data after the separately recorded O2 fallback acceptance. It defines a bounded O3 condition representation and two explicit reader scopes; no candidate is implemented. Executable source stays byte-identical to8169514. No Rust tests, candidate policy, inference or GPU work ran. A2 uses read-only frozen input inventory and manual source comparison; no executable comparator was run. The private PDF stays outside the repo; public fixture text is operator-authorized fiction. Each new fixture traces to N1b, N2 or N3 and retains source/provenance. No hardening or unrelated implementation is included.
+O2 is implemented only in src-tauri/src/pipeline/summary/coherent/semantic_support.rs and its existing unit-test module. The semantic clause reader preserves question metadata while its string projection remains unchanged. The raw permission reader owns negative scope, authority, typed ActorAction/ObjectActivity complements, raw list-item spans and intentional exclusions. Existing modal projection and comparison consume that result. The unconditional negative rejection, first-to-only complement assumption, comma-before-extent split, and downstream lexical-to admission shortcut are removed. Original finite modal clauses and separate evidence siblings retain ownership.
+
+The public fixture file records accepted O2 labels and leaves the O3-only sections unexecuted. Contract changes record the operator's selections, implementation correction and evidence. No prompt, model, runtime, schema, writer, storage, input freeze or fallback change is included. The private PDF and frozen documents remain outside the repository.
 
 ## Gap audit
 
-**NOT DONE.** O2 remains accepted fallback. Revision5 O3a/O3b, marker/payload rules, scope costs, fixture labels and complete predictions await independent review and renewed verbatim operator selection. No Phase B. Reproduction, implementation, mutations, Rust gates, actual SAME60 and final exact-head PASS remain. All holds persist.
+**NOT DONE:** offline implementation and local gates are complete; exact-head independent review and required CI remain. O3 is unbuilt, all PR116/126/128 holds persist, and no merge/ready/base change is authorized. This is an offline guard candidate, not production adoption or unseen qualification.
+
+## Approved implementation correction after the O2 replay STOP
+
+The operator approved correcting the unpublished candidate, with oversight confirming it remains inside the accepted O2 contract. Candidate source0419f859 deliberately skipped coordinated may-not object scope, then admission mistook its empty relation list for a failed parse and consulted a lexical `to` shortcut. This caused17 unpredicted ledger withholds and reduced saved validation from31 to23. The A2 prediction remains unchanged; this is an implementation defect, not an accepted precision cost.
+
+Required repair: the existing raw reader retains typed per-clause intentional-exclusion metadata; admission consumes that metadata alongside parsed propositions. Delete the lexical-`to` rejection with no replacement heuristic. A skipped sibling cannot waive comparison of a parsed sibling. No new proposition ownership, O3 condition rule, writer/model/runtime change, corpus or label substitution is allowed.
+
+Verification: public synthetic coordinated may-not/prepositional-to fail-first on0419f859; genuine failed/empty parse controls must withhold; restoring the deleted lexical shortcut must fail the public twin. Repeat required owner mutations and Rust gates, archived C9/A1 and complete ordered SAME60. The latter must have0/825 changes and31 saved validations; any difference is another STOP. One push after passing proof, then independent exact-head review and STOP B, with all holds unchanged. The newly supplied varied-document batch and ContractNLI are not inputs to this repair or its frozen regression gate.
+
+## Phase B offline proof and six-step repair record
+
+1. **Reproduce:** baseline8169514 with the accepted public controls failed both final/reader suites (`o2-fail-before.log`). The unpublished0419f859 candidate then caused17 unexpected ledger withholds in SAME60; its full comparison and source snapshot remain preserved. The public scope regression failed specifically on `excluded_prepositional_to` before the correction (`o2-scope-isolated-fail-before.log`).
+2. **Isolate:** the raw reader intentionally skipped coordinated may-not scope, but returned only an empty proposition list. Admission used a lexical-to test to guess whether that meant a failed parse. The first information loss was that untyped reader result. Earlier negative-prefix rejection/actor-only assumptions came from afabcb9e and afe5fdd2; the lexical shortcut was my own unpublished implementation, with no introducing code commit.
+3. **Explain:** the17 affected claims were deliberately outside O2 ownership. Each contained prepositional-to wording. Treating their empty result as failure created new modal_preservation rejections. This was an implementation defect; the operator accepted its origin repair, without changing O2 labels, prediction or precision costs.
+4. **Fix:** PermissionRead retains typed intentional exclusions beside propositions. Malformed attempted reads remain None. Admission consumes those outcomes and compares every parsed sibling. The lexical-to inference is deleted, with no replacement scanner or heuristic. All existing permission consumers use that one reader; no O3b relation is owned.
+5. **Prove:**115 accepted final controls,21 reader boundaries and7 new scope/failed/mixed cases pass. Final cargo test --locked --lib:916 passed,0 failed,34 ignored. fmt and strict all-target/all-feature Clippy pass. All30 archived C9 verdicts remain unchanged; the original persisted A1 stays Unsupported. SAME60 is identical across all825 ordered verdicts/identities, saved validation31 and all diagnostics. The observed replay bytes retain the baseline SHA256ceee845cb539968ed40b87185484496e08f455057040665352559cf96b2e5b53. Complete change list: **[]**.
+6. **Prevent regression:** required representation, polarity and report-only mutations each fail negated_grant_o2_final_controls. Restoring the lexical-to shortcut fails negated_grant_intentional_scope_skip_is_not_parse_failure specifically on excluded_prepositional_to. Each cargo exit was101; original candidate bytes were restored after every mutation. Subsequent source changes were only three equivalent Clippy-recommended Option-? expressions; the full gates above ran on that final source.
+
+Incidents retained: the first synthetic attempt changed shall-not to may-not and was correctly withheld by the existing modal-strength rule. It was replaced before the repair with equal modal strength plus an owned negative sibling, isolating the actual admission defect. Early list/activation regressions in my unpublished O2 candidate were fixed at their owners before the first frozen run; the stopped frozen run was not discarded. Clippy rejected three verbose Option-propagation expressions; they were replaced without suppressions. No failed attempt is claimed as passing evidence.
+
+### Self-review: owner branches and their falsifying controls
+
+| Owner branch | Public control or retained regression |
+|---|---|
+| Question metadata, conditional/reported/uncertain scope | unowned_interrogative/conditional/uncertain reader controls; question/sibling scope test; exact-surface twins |
+| Categorical auxiliaries/contractions and additive not-only | owned_contraction_alias, owned_shall_not, owned_will_not, additive_not_only and final faithful/inversion pairs |
+| Bounded shall/will coordination and original non-grant modal | HUD inversion/faithful/original-actor controls; will_not_coordinated pair; modal_scope_reset pair |
+| Typed actor versus object, gerund and prepositional-to extent | all26 fictional restriction pairs; conversion_to_is_object; guest_is_actor_action; conversion trap final controls |
+| Simple list item identity/raw span and complete complex extent | object_list_dogs/cats and object_and_list faithful/inversion controls; whole_permission_list and condition twin |
+| Negative ActorAction strict identity, authority and complete action | grantor_mismatch_negative, dropped_negative_qualifier, actor_guest_limits_dropped; existing qualifier fixtures |
+| ObjectActivity O2 flip-only activation | object opposite/mixed/authority cases and all five O2-specific retained negative-pair labels |
+| Cross-form polarity, named authority and no invented object actor | accepted N3 cases; object_modal_positive/negative_no_inferred_verb |
+| Unasserted facts cannot license a permission or shorthand | never/uncertain/conditional/bare-not inversion and exact twins; negative_grant_cannot_license_shorthand |
+| Per-clause evidence aggregation and unused siblings | permission_source_clause_failures_preserve_owned_siblings; permission_activation_preserves_registered_boundary; existing empty-evidence admission |
+| Typed exclusion versus malformed/empty result; no whole-unit waiver | seven intentional_scope cases and direct metadata assertion; lexical-to restoration mutation |
+| Polarity enforcement and same-form activation | representation/polarity/report-only owner mutations |
+
+boundary-probe: faithful and inverted ActorAction/ObjectActivity; empty/malformed actor/action; mixed skipped/faithful/inverted/failed siblings; questions/contractions/conditions; numeric guest-limit retention; raw list spans; no default inferred actor/verb. Reader-produced metadata, not raw text re-scanning, controls intentional exclusion.
+
+effect-trace: reject inverted grants without newly withholding excluded scope | shared raw reader and existing permission comparator | public fail-before/pass-after, four killed mutations and exact complete SAME60 replay. No new quality or production-readiness claim.
+
+### Durable evidence bindings
+
+All artifacts below are under public-evidence alias negated-grant-contract-20261014, except the complete private comparison retained under its heldout alias. Files are mode600 and directories mode700. Source SHA256a48d1411807b40e3e0431f3d8199fe7d6c44d5ac13b25ecb677913888b152f39; executed fixture SHA256b06725fbefd430c8032be29d962c0cd681fe010df0b2e5313e5ac25718fdd5c9. The O3-only fixture records are not executed.
+
+- `o2-final-offline-proof.json` SHA256 `f61ad7dc97c8bd3ebd9a812fc8ed796c739199be07c01fac777de41869de9f18`.
+- `o2-final-public-comparison.json` SHA256 `1539c1d130b609d48a7b8de5b252e118663cf50a585640e59e909816f4d32b43`.
+- `o2-repaired-mutations.json` SHA256 `fd245e878e0f51311dddbd5086bec546681983029695556d90cde55e5ca5b7d8`.
+- `o2-scope-isolated-fail-before.log` SHA256 `8f294919b1e678516c76da11b5c4e9c76be57d30e322f711905a23df05471bd4`.
+
+Private complete comparison alias `o2-final-full-comparison.json` SHA256 `271470699ce6f0caa8dbd76c61469223863815a8edf2a1d031f348581be44d48`. Model generation, delegated preflights and tokenizer calls:0. Exact-head independent review/CI remain pending. STOP B after their clearance; all production, qualification and merge holds remain.

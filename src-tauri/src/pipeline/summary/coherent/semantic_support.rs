@@ -57,6 +57,207 @@ mod relation_guard_tests {
         }
     }
 
+    fn negated_grant_fixtures() -> Value {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/PR-C9-NEGATED-GRANT-PROPOSED-FIXTURES.json"
+        )))
+        .unwrap()
+    }
+
+    #[test]
+    fn negated_grant_o2_final_controls() {
+        let fixtures = negated_grant_fixtures();
+        let mut failures = Vec::new();
+        for row in fixtures["cases"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let items = row["owned_evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let mut item = evidence(text.as_str().unwrap());
+                    item.evidence_id = format!("negated-e{index}");
+                    item
+                })
+                .collect::<Vec<_>>();
+            let claim = CitedClaim {
+                claim_id: name.into(),
+                text: row["claim"].as_str().unwrap().into(),
+                evidence_ids: items.iter().map(|item| item.evidence_id.clone()).collect(),
+            };
+            let mut verdict = [ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Supported,
+            }];
+            apply_semantic_fidelity_guards(&[claim], &items, &mut verdict).unwrap();
+            let expected = row["proposed_expected_supported"]
+                .as_bool()
+                .unwrap_or_else(|| {
+                    row["proposed_expected_supported_by_option"]["O2_FLIP_ONLY"]
+                        .as_bool()
+                        .unwrap()
+                });
+            let actual = verdict[0].verdict == ClaimVerdict::Supported;
+            println!(
+                "NEGATED_O2 case={name} expected_supported={expected} verdict={:?}",
+                verdict[0].verdict
+            );
+            if actual != expected {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "negated O2 final mismatches: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn negated_grant_o2_reader_boundaries() {
+        let fixtures = negated_grant_fixtures();
+        let mut failures = Vec::new();
+        for row in fixtures["unowned_reader_boundaries"].as_array().unwrap() {
+            let name = row["case"].as_str().unwrap();
+            let parsed = permission_propositions(row["text"].as_str().unwrap());
+            let grants = parsed
+                .as_ref()
+                .map(|read| read.propositions.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .filter(|item| item.form == PermissionForm::Grant && item.asserted)
+                .collect::<Vec<_>>();
+            let expected_unowned = row["proposed_expected_unowned"].as_bool().unwrap();
+            let correct = grants.is_empty() == expected_unowned
+                && row["proposed_expected_negated"]
+                    .as_bool()
+                    .is_none_or(|expected| grants.iter().all(|item| item.negated == expected));
+            println!(
+                "NEGATED_READER case={name} expected_unowned={expected_unowned} actual_unowned={}",
+                grants.is_empty()
+            );
+            for item in &grants {
+                if let PermissionComplement::ObjectActivity { items } = &item.complement {
+                    for object in items {
+                        assert_eq!(
+                            permission_form_words(&item.raw_action[object.raw_span.clone()]),
+                            object.identity
+                        );
+                    }
+                }
+            }
+            let kind_correct = row["proposed_expected_complement_kind"]
+                .as_str()
+                .is_none_or(|kind| {
+                    grants.iter().all(|item| {
+                        matches!(
+                            (&item.complement, kind),
+                            (PermissionComplement::ActorAction { .. }, "ActorAction")
+                                | (
+                                    PermissionComplement::ObjectActivity { .. },
+                                    "ObjectActivity"
+                                )
+                        )
+                    })
+                });
+            if !correct || !kind_correct {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "negated O2 reader mismatches: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn negated_grant_scope_preserves_owned_siblings() {
+        let source = evidence("Landlord permits Tenant to enter temporarily. Landlord does not permit Visitor to paint walls.");
+        assert_eq!(
+            permission_equivalence(
+                "Rules allow Tenant to enter for a limited period.",
+                &[&source]
+            ),
+            Some(())
+        );
+        let source = evidence("Landlord does not permit cats. Tenant may enter temporarily.");
+        assert_eq!(
+            permission_equivalence("Tenant may enter temporarily.", &[&source]),
+            Some(())
+        );
+        assert_eq!(
+            permission_equivalence("Visitor may work outside.", &[&source]),
+            Some(())
+        );
+        let source = evidence("Tenant shall not keep cats, or permit cats in the unit.");
+        assert_eq!(
+            permission_equivalence(
+                "Tenant may not keep cats, or allow cats in the unit.",
+                &[&source]
+            ),
+            Some(())
+        );
+        assert!(
+            permission_propositions("Tenant may not keep cats, or allow cats in the unit.")
+                .unwrap()
+                .propositions
+                .is_empty()
+        );
+        let text =
+            "Does Landlord not permit Tenant to keep pets? City permits Visitor to paint walls.";
+        let parts = semantic_clause_parts(text).collect::<Vec<_>>();
+        assert!(parts[0].question);
+        assert!(!parts[1].question);
+        assert_eq!(
+            semantic_clauses(text).collect::<Vec<_>>(),
+            vec![parts[0].text.clone(), parts[1].text.clone()]
+        );
+        let parsed = permission_propositions(text).unwrap();
+        assert!(!parsed.propositions[0].asserted);
+        assert!(parsed.propositions[1].asserted);
+        assert_eq!(parsed.propositions[1].grantor, Some(vec!["city".into()]));
+    }
+
+    #[test]
+    fn negated_grant_intentional_scope_skip_is_not_parse_failure() {
+        let source = evidence("Tenant may not use the unit, or permit its use, for purposes unrelated to the tenancy. Landlord does not permit pets.");
+        let mut failures = Vec::new();
+        for (name, source_text, text, expected) in [
+            ("excluded_prepositional_to", source.exact_quote.as_str(), "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy.", true),
+            ("excluded_without_to", "Tenant may not keep cats, or permit cats in the unit. Landlord does not permit pets.", "Tenant may not keep cats, or allow cats in the unit.", true),
+            ("genuinely_failed_parse", source.exact_quote.as_str(), "Tenant may not.", false),
+            ("empty_actor_action_parse", source.exact_quote.as_str(), "Landlord permits Tenant to.", false),
+            ("mixed_skipped_and_inverted", source.exact_quote.as_str(), "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy. Landlord permits pets.", false),
+            ("mixed_skipped_and_faithful", source.exact_quote.as_str(), "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy. Landlord does not permit pets.", true),
+            ("mixed_skipped_and_failed", source.exact_quote.as_str(), "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy. Tenant may not.", false),
+        ] {
+            let source = evidence(source_text);
+            let claim = CitedClaim { claim_id: name.into(), text: text.into(), evidence_ids: vec![source.evidence_id.clone()] };
+            let mut verdict = [ClaimVerification { claim_id: claim.claim_id.clone(), evidence_ids: claim.evidence_ids.clone(), verdict: ClaimVerdict::Supported }];
+            apply_semantic_fidelity_guards(&[claim], std::slice::from_ref(&source), &mut verdict).unwrap();
+            println!("INTENTIONAL_SCOPE_REASONS case={name} {:?}", relation_guard_rejection_reasons(text, &[&source]));
+            let supported = verdict[0].verdict == ClaimVerdict::Supported;
+            println!("INTENTIONAL_SCOPE case={name} expected_supported={expected} verdict={:?}", verdict[0].verdict);
+            if supported != expected { failures.push(name); }
+        }
+        let skipped = permission_propositions(
+            "Tenant may not use the unit, or allow its use, for purposes unrelated to the tenancy.",
+        )
+        .unwrap();
+        assert!(skipped.propositions.is_empty());
+        assert_eq!(
+            skipped.exclusions,
+            vec![PermissionScopeExclusion::CoordinatedMayNot]
+        );
+        assert!(permission_propositions("Tenant may not.").is_none());
+        assert!(
+            failures.is_empty(),
+            "intentional scope/parse distinction mismatches: {failures:?}"
+        );
+    }
+
     #[test]
     fn approved_relations_preserve_meaning() {
         let fixtures: Value =
@@ -1202,7 +1403,12 @@ fn numeric_relation(words: &[String], start: usize, end: usize) -> Option<Numeri
 // Layout boundaries belong to the relation reader. A single wrapped line is
 // not a proposition boundary; paragraphs, list entries and marked headings are.
 // The iterator is invoked independently for each owned EvidenceItem.
-fn semantic_clauses(text: &str) -> impl Iterator<Item = String> {
+struct SemanticClause {
+    text: String,
+    question: bool,
+}
+
+fn semantic_clause_parts(text: &str) -> impl Iterator<Item = SemanticClause> {
     let mut paragraphs = Vec::new();
     let mut paragraph = String::new();
     for line in text.lines() {
@@ -1232,12 +1438,21 @@ fn semantic_clauses(text: &str) -> impl Iterator<Item = String> {
     }
     paragraphs.into_iter().flat_map(|paragraph| {
         paragraph
-            .split(['.', '?', '!', ';'])
-            .map(str::trim)
-            .filter(|clause| !clause.is_empty())
-            .map(str::to_owned)
+            .split_inclusive(['.', '?', '!', ';'])
+            .filter_map(|part| {
+                let question = part.ends_with('?');
+                let text = part.trim_end_matches(['.', '?', '!', ';']).trim();
+                (!text.is_empty()).then(|| SemanticClause {
+                    text: text.into(),
+                    question,
+                })
+            })
             .collect::<Vec<_>>()
     })
+}
+
+fn semantic_clauses(text: &str) -> impl Iterator<Item = String> {
+    semantic_clause_parts(text).map(|clause| clause.text)
 }
 
 fn claim_propositions(text: &str) -> impl Iterator<Item = String> {
@@ -3542,16 +3757,44 @@ struct PermissionQualification {
 enum PermissionForm {
     Grant,
     May,
+    OriginalModal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PermissionObjectItem {
+    raw_span: std::ops::Range<usize>,
+    identity: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PermissionComplement {
+    ActorAction {
+        subject: Vec<String>,
+        raw_subject: String,
+    },
+    ObjectActivity {
+        items: Vec<PermissionObjectItem>,
+    },
+}
+
+impl PermissionComplement {
+    fn actor(subject: &str) -> Self {
+        Self::ActorAction {
+            subject: permission_subject(subject),
+            raw_subject: subject.trim().into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PermissionProposition {
     form: PermissionForm,
-    subject: Vec<String>,
+    complement: PermissionComplement,
+    grantor: Option<Vec<String>>,
+    asserted: bool,
     action: Vec<String>,
     negated: bool,
     raw_clause: String,
-    raw_subject: String,
     raw_action: String,
     qualifications: Vec<PermissionQualification>,
 }
@@ -3700,78 +3943,315 @@ fn permission_qualifications(action: &str) -> Vec<PermissionQualification> {
 
 fn permission_proposition(
     form: PermissionForm,
-    subject: &str,
+    complement: PermissionComplement,
     action: &str,
     negated: bool,
     clause: &str,
 ) -> PermissionProposition {
     PermissionProposition {
         form,
-        subject: permission_subject(subject),
+        complement,
+        grantor: None,
+        asserted: true,
         action: permission_form_words(action),
         negated,
         raw_clause: clause.into(),
-        raw_subject: subject.trim().into(),
         raw_action: action.into(),
         qualifications: permission_qualifications(action),
     }
 }
 
-// One raw proposition reader owns actor/action identity, raw extent and every
-// qualifier span. Both modal and full permission comparisons consume it.
-fn permission_propositions(text: &str) -> Option<Vec<PermissionProposition>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionScopeExclusion {
+    CoordinatedMayNot,
+}
+
+#[derive(Debug)]
+struct PermissionRead {
+    propositions: Vec<PermissionProposition>,
+    exclusions: Vec<PermissionScopeExclusion>,
+}
+
+// This reader owns clause scope, complement type, authority and polarity.
+// Unasserted negative facts retain their bounded relation, never a permission witness.
+fn permission_propositions(text: &str) -> Option<PermissionRead> {
     let mut result = Vec::new();
-    for clause in semantic_clauses(text) {
-        let spans = permission_word_spans(&clause);
-        if let Some(index) = spans.iter().position(|(_, word)| {
-            matches!(word.as_str(), "allow" | "allows" | "permit" | "permits")
-        }) {
+    let mut exclusions = Vec::new();
+    for part in semantic_clause_parts(text) {
+        for original in independent_propositions(&part.text) {
+            let spans = permission_word_spans(&original);
+            let Some(index) = spans.iter().position(|(_, word)| {
+                matches!(word.as_str(), "allow" | "allows" | "permit" | "permits")
+            }) else {
+                let Some(index) = spans.iter().position(|(_, word)| word == "may") else {
+                    continue;
+                };
+                if index == 0 || index + 1 >= spans.len() || spans[index + 1].1 == "be" {
+                    continue;
+                }
+                let negated = spans[index + 1].1 == "not";
+                let action = spans.get(index + 1 + usize::from(negated))?.0.start;
+                result.push(permission_proposition(
+                    PermissionForm::May,
+                    PermissionComplement::actor(&original[..spans[index].0.start]),
+                    &original[action..],
+                    negated,
+                    &original,
+                ));
+                continue;
+            };
             if index > 0 && spans[index - 1].1 == "to" {
                 continue;
             }
+            // A contrast or a new finite grantor terminates preceding negative scope.
+            let reset = spans[..index]
+                .iter()
+                .rposition(|(_, word)| matches!(word.as_str(), "but" | "whereas"))
+                .map_or(0, |i| i + 1);
+            let clause = &original[spans.get(reset).map_or(0, |(span, _)| span.start)..];
+            let spans = permission_word_spans(clause);
+            let index = index - reset;
             let prefix = spans[..index]
                 .iter()
-                .map(|(_, word)| word.clone())
+                .map(|(_, word)| word.as_str())
                 .collect::<Vec<_>>();
-            if negation_present(&prefix) {
+            let additive = prefix.ends_with(&["not", "only"]);
+            let contraction = prefix.ends_with(&["doesn", "t"]) || prefix.ends_with(&["don", "t"]);
+            let direct = contraction
+                || prefix.len() >= 2
+                    && prefix[prefix.len() - 1] == "not"
+                    && matches!(prefix[prefix.len() - 2], "do" | "does" | "shall" | "will");
+            let negative = !additive
+                && (contraction || prefix.iter().any(|word| matches!(*word, "not" | "never")));
+            let auxiliary = prefix.iter().position(|word| {
+                matches!(
+                    *word,
+                    "do" | "does"
+                        | "shall"
+                        | "will"
+                        | "don"
+                        | "doesn"
+                        | "may"
+                        | "might"
+                        | "could"
+                        | "would"
+                        | "not"
+                        | "never"
+                )
+            });
+            let coordinated = prefix.last() == Some(&"or")
+                && auxiliary.is_some_and(|i| {
+                    matches!(prefix[i], "shall" | "will")
+                        && prefix.get(i + 1) == Some(&"not")
+                        && !prefix[i + 2..prefix.len() - 1]
+                            .iter()
+                            .any(|word| is_modal_anchor(word))
+                });
+            // Coordinated may-not object requests were explicitly left outside
+            // N1; the separately proposed O3b reader extension remains unbuilt.
+            if prefix.last() == Some(&"or")
+                && auxiliary.is_some_and(|i| {
+                    prefix[i] == "may"
+                        && prefix.get(i + 1) == Some(&"not")
+                        && i + 2 < prefix.len() - 1
+                })
+            {
+                exclusions.push(PermissionScopeExclusion::CoordinatedMayNot);
+                continue;
+            }
+            let embedded = part.question
+                || prefix.iter().any(|word| {
+                    matches!(
+                        *word,
+                        "if" | "unless" | "whether" | "said" | "says" | "reported" | "reports"
+                    )
+                })
+                || prefix
+                    .first()
+                    .is_some_and(|word| matches!(*word, "do" | "does"));
+            let negative_count = prefix
+                .iter()
+                .filter(|word| matches!(**word, "not" | "never"))
+                .count();
+            let asserted =
+                !embedded && (!negative || (direct || coordinated) && negative_count <= 1);
+            let grantor_start = usize::from(
+                prefix
+                    .first()
+                    .is_some_and(|word| matches!(*word, "if" | "do" | "does")),
+            );
+            let grantor_end = if additive {
+                prefix.len() - 2
+            } else {
+                auxiliary.unwrap_or(prefix.len())
+            };
+            // Questions can put their auxiliary before the grantor.
+            let grantor_end = if embedded && grantor_end < grantor_start {
+                prefix
+                    .iter()
+                    .position(|word| *word == "not")
+                    .unwrap_or(prefix.len())
+            } else {
+                grantor_end
+            };
+            let grantor = (grantor_end > grantor_start).then(|| {
+                permission_subject(
+                    &clause[spans[grantor_start].0.start..spans[grantor_end - 1].0.end],
+                )
+            });
+            let begin = spans.get(index + 1).map(|(span, _)| span.start)?;
+            let raw_complement = clause[begin..].trim();
+            let complement_spans = permission_word_spans(raw_complement);
+            let to = complement_spans.iter().position(|(_, word)| word == "to");
+            if to == Some(0) || to.is_some_and(|i| i + 1 == complement_spans.len()) {
                 return None;
             }
-            let begin = spans.get(index + 1)?.0.start;
-            for item in clause[begin..].split(',') {
-                let item = item.trim();
-                let item = item.strip_prefix("and ").unwrap_or(item);
-                let item_spans = permission_word_spans(item);
-                let to = item_spans.iter().position(|(_, word)| word == "to")?;
-                if to == 0 || to + 1 >= item_spans.len() {
-                    return None;
+            // Articles/pronouns following to are nominal destinations, not infinitives.
+            let actor_action = to.filter(|i| {
+                !complement_spans[0].1.ends_with("ing")
+                    && !matches!(
+                        complement_spans[i + 1].1.as_str(),
+                        "a" | "an" | "the" | "his" | "her" | "their" | "our" | "my" | "your"
+                    )
+            });
+            let mut proposition = if let Some(to) = actor_action {
+                // Only another explicit actor-to-infinitive starts a list item.
+                // Commas inside an action (including HUD's shared object) stay attached.
+                let mut ranges = Vec::new();
+                let mut item_start = 0;
+                for (comma, _) in raw_complement.match_indices(',') {
+                    let tail = raw_complement[comma + 1..].trim_start();
+                    let item = tail
+                        .strip_prefix("and ")
+                        .or_else(|| tail.strip_prefix("or "))
+                        .unwrap_or(tail);
+                    let words = permission_word_spans(item);
+                    if words
+                        .iter()
+                        .position(|(_, word)| word == "to")
+                        .is_some_and(|i| i > 0 && i + 1 < words.len())
+                        && !words[..words.iter().position(|(_, word)| word == "to").unwrap()]
+                            .iter()
+                            .any(|(_, word)| is_modal_anchor(word))
+                    {
+                        ranges.push(item_start..comma);
+                        item_start = raw_complement.len() - item.len();
+                    }
                 }
-                result.push(permission_proposition(
+                ranges.push(item_start..raw_complement.len());
+                let mut parsed = Vec::new();
+                for bounds in ranges {
+                    let item = raw_complement[bounds].trim().trim_end_matches(',').trim();
+                    let words = permission_word_spans(item);
+                    let to = words.iter().position(|(_, word)| word == "to")?;
+                    let action_start = words.get(to + 1).map(|(span, _)| span.start)?;
+                    let action = item[action_start..].trim_start_matches(',').trim();
+                    parsed.push(permission_proposition(
+                        PermissionForm::Grant,
+                        PermissionComplement::actor(&item[..words[to].0.start]),
+                        action,
+                        negative,
+                        clause,
+                    ));
+                }
+                // Retain the finite subject's original non-grant prohibition. A
+                // shared object is attached only when the stated predicates match.
+                if coordinated {
+                    if let Some(aux) = auxiliary {
+                        let predicate = aux + 2;
+                        if predicate < prefix.len() - 1 {
+                            let mut action = clause
+                                [spans[predicate].0.start..spans[index - 1].0.start]
+                                .trim()
+                                .trim_end_matches(',')
+                                .trim()
+                                .to_owned();
+                            if action == complement_spans[to + 1].1 {
+                                let suffix = &raw_complement[complement_spans[to + 1].0.end..];
+                                action.push(' ');
+                                action.push_str(suffix.trim_start_matches(',').trim());
+                            }
+                            if let Some(grantor_end) = auxiliary.filter(|i| *i > 0) {
+                                let subject = &clause[..spans[grantor_end].0.start];
+                                let raw =
+                                    format!("{} {} not {}", subject.trim(), prefix[aux], action);
+                                result.push(permission_proposition(
+                                    PermissionForm::OriginalModal,
+                                    PermissionComplement::actor(subject),
+                                    &action,
+                                    true,
+                                    &raw,
+                                ));
+                            }
+                        }
+                    }
+                }
+                let first = parsed.remove(0);
+                for mut item in parsed {
+                    item.grantor = grantor.clone();
+                    item.asserted = asserted;
+                    result.push(item);
+                }
+                first
+            } else {
+                // Only a complete simple nominal list exposes per-item identity;
+                // complex/shared-head lists retain the whole owned extent.
+                let mut separators = raw_complement
+                    .match_indices(',')
+                    .map(|(index, _)| index..index + 1)
+                    .chain(
+                        complement_spans
+                            .iter()
+                            .filter(|(_, word)| matches!(word.as_str(), "and" | "or"))
+                            .map(|(span, _)| span.clone()),
+                    )
+                    .collect::<Vec<_>>();
+                separators.sort_by_key(|span| span.start);
+                let mut start = 0;
+                let mut items = Vec::new();
+                for separator in separators
+                    .into_iter()
+                    .chain(std::iter::once(raw_complement.len()..raw_complement.len()))
+                {
+                    let raw = &raw_complement[start..separator.start];
+                    let trimmed = raw.trim();
+                    if !trimmed.is_empty() {
+                        let begin = start + raw.len() - raw.trim_start().len();
+                        items.push(PermissionObjectItem {
+                            raw_span: begin..begin + trimmed.len(),
+                            identity: permission_form_words(trimmed),
+                        });
+                    }
+                    start = separator.end;
+                }
+                let simple = items.len() > 1
+                    && items.iter().all(|item| {
+                        !item.identity.is_empty()
+                            && item.identity.len() <= 2
+                            && item
+                                .identity
+                                .iter()
+                                .all(|word| is_context_word(word) && !is_modal_anchor(word))
+                    });
+                permission_proposition(
                     PermissionForm::Grant,
-                    &item[..item_spans[to].0.start],
-                    &item[item_spans[to + 1].0.start..],
-                    false,
-                    &clause,
-                ));
-            }
-        } else {
-            let Some(index) = spans.iter().position(|(_, word)| word == "may") else {
-                continue;
+                    PermissionComplement::ObjectActivity {
+                        items: if simple { items } else { Vec::new() },
+                    },
+                    raw_complement,
+                    negative,
+                    clause,
+                )
             };
-            if index == 0 || index + 1 >= spans.len() || spans[index + 1].1 == "be" {
-                continue;
-            }
-            let negated = spans[index + 1].1 == "not";
-            let action = spans.get(index + 1 + usize::from(negated))?.0.start;
-            result.push(permission_proposition(
-                PermissionForm::May,
-                &clause[..spans[index].0.start],
-                &clause[action..],
-                negated,
-                &clause,
-            ));
+            proposition.grantor = grantor;
+            proposition.asserted = asserted;
+            result.push(proposition);
         }
     }
-    Some(result)
+    Some(PermissionRead {
+        propositions: result,
+        exclusions,
+    })
 }
 
 struct OwnedPermissions<'a> {
@@ -3811,7 +4291,8 @@ fn permission_action_projection(
         let licensed = !qualifier.declared
             || source_side
                 && owner.permissions.iter().any(|witness| {
-                    !witness.negated
+                    witness.asserted
+                        && !witness.negated
                         && witness.qualifications.iter().any(|other| {
                             !other.declared
                                 && other.adjective == qualifier.adjective
@@ -3893,8 +4374,29 @@ fn permission_propositions_match(
     claim: &PermissionProposition,
     owner: &OwnedPermissions<'_>,
 ) -> bool {
-    if source.subject != claim.subject || source.negated != claim.negated {
+    if !source.asserted || !claim.asserted || source.negated != claim.negated {
         return false;
+    }
+    if (source.negated || claim.negated)
+        && claim.form == PermissionForm::Grant
+        && (source.form != PermissionForm::Grant || source.grantor != claim.grantor)
+    {
+        return false;
+    }
+    match (&source.complement, &claim.complement) {
+        (
+            PermissionComplement::ActorAction { subject: a, .. },
+            PermissionComplement::ActorAction { subject: b, .. },
+        ) if a == b => {}
+        (
+            PermissionComplement::ObjectActivity { items },
+            PermissionComplement::ObjectActivity { .. },
+        ) => {
+            return source.grantor == claim.grantor
+                && (source.action == claim.action
+                    || items.iter().any(|item| item.identity == claim.action));
+        }
+        _ => return false,
     }
     if source.action == claim.action {
         return true;
@@ -3917,32 +4419,49 @@ fn permission_propositions_match(
 // bounded modal contexts. The raw source remains owned by its EvidenceItem;
 // the permission matcher retains the complete action for its separate comparison.
 fn verify_proposition_clauses(text: &str, claim_side: bool) -> Vec<String> {
-    let clauses = if claim_side {
-        claim_propositions(text).collect::<Vec<_>>()
-    } else {
-        semantic_clauses(text).collect::<Vec<_>>()
-    };
-    clauses
-        .into_iter()
-        .flat_map(|clause| {
-            if permission_forms(&clause).contains(&PermissionForm::Grant) {
-                if let Some(propositions) =
-                    permission_propositions(&clause).filter(|items| !items.is_empty())
-                {
-                    return propositions
-                        .into_iter()
-                        .map(|item| {
-                            format!(
+    semantic_clause_parts(text)
+        .flat_map(|part| {
+            let owned_text = if part.question {
+                format!("{}?", part.text)
+            } else {
+                part.text.clone()
+            };
+            let parsed = permission_propositions(&owned_text);
+            if let Some(propositions) = parsed.filter(|read| {
+                read.propositions
+                    .iter()
+                    .any(|item| item.form == PermissionForm::Grant)
+            }) {
+                let mut projected = Vec::new();
+                for item in propositions.propositions {
+                    if !item.asserted {
+                        continue;
+                    }
+                    match (&item.complement, item.form) {
+                        (_, PermissionForm::OriginalModal) => projected.push(item.raw_clause),
+                        (
+                            PermissionComplement::ActorAction { raw_subject, .. },
+                            PermissionForm::Grant,
+                        ) => {
+                            projected.push(format!(
                                 "{} may {}{}",
-                                item.raw_subject,
+                                raw_subject,
                                 if item.negated { "not " } else { "" },
                                 item.raw_action
-                            )
-                        })
-                        .collect::<Vec<_>>();
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                if !projected.is_empty() {
+                    return projected;
                 }
             }
-            vec![clause]
+            if claim_side {
+                independent_propositions(&part.text)
+            } else {
+                vec![part.text]
+            }
         })
         .collect()
 }
@@ -3953,37 +4472,49 @@ fn permission_equivalence(claim: &str, evidence: &[&EvidenceItem]) -> Option<()>
         .iter()
         .map(|item| OwnedPermissions {
             evidence_id: &item.evidence_id,
-            permissions: semantic_clauses(&item.exact_quote)
-                .filter_map(|clause| permission_propositions(&clause))
-                .flatten()
+            // A malformed clause cannot erase its separately owned siblings.
+            permissions: semantic_clause_parts(&item.exact_quote)
+                .flat_map(|part| {
+                    let text = if part.question {
+                        format!("{}?", part.text)
+                    } else {
+                        part.text
+                    };
+                    permission_propositions(&text)
+                        .map(|read| read.propositions)
+                        .unwrap_or_default()
+                })
                 .collect(),
             forms: permission_forms(&item.exact_quote),
         })
         .collect::<Vec<_>>();
-    // The registered comparator covers cross-form permissions only. Keep the
-    // source form at the origin; explicit-grant/source-grant is report-only.
-    // Modal readers still receive actor/may/action identity independently.
     let required_source_form = if explicit_claim {
         PermissionForm::May
     } else {
         PermissionForm::Grant
     };
-    if owners
+    let legacy_active = owners
         .iter()
-        .all(|owner| !owner.forms.contains(&required_source_form))
-        || owners.iter().all(|owner| owner.permissions.is_empty())
-        || explicit_claim && !words(claim).iter().any(|word| word == "to")
-    {
+        .any(|owner| owner.forms.contains(&required_source_form))
+        && owners.iter().any(|owner| !owner.permissions.is_empty());
+    let requests = permission_propositions(claim);
+    let negative_family = owners
+        .iter()
+        .flat_map(|owner| &owner.permissions)
+        .chain(requests.iter().flat_map(|read| &read.propositions))
+        .any(|item| item.negated && item.form == PermissionForm::Grant);
+    if !legacy_active && !negative_family {
         return Some(());
     }
-    let requests =
-        permission_propositions(&claim_propositions(claim).collect::<Vec<_>>().join("; "))?;
-    if explicit_claim && requests.is_empty() {
+    let requests = requests?;
+    if explicit_claim && requests.propositions.is_empty() && requests.exclusions.is_empty() {
         return None;
     }
+    // Intentional exclusions carry no relation to compare. They cannot waive
+    // comparison of parsed siblings, and a malformed read returned None above.
     let mut used = HashSet::new();
-    for request in requests {
-        let candidates = owners
+    for request in requests.propositions {
+        let sources = owners
             .iter()
             .flat_map(|owner| {
                 owner
@@ -3992,13 +4523,81 @@ fn permission_equivalence(claim: &str, evidence: &[&EvidenceItem]) -> Option<()>
                     .enumerate()
                     .map(move |(index, source)| (owner, index, source))
             })
-            .filter(|(_, _, source)| {
-                explicit_claim
-                    || source.subject == request.subject
-                        && source.action.first() == request.action.first()
+            .collect::<Vec<_>>();
+        if !request.asserted {
+            // A literal unowned surface can retain its old verdict, but cannot
+            // become a newly asserted positive or negative permission.
+            if sources
+                .iter()
+                .any(|(_, _, source)| source.raw_clause == request.raw_clause)
+            {
+                continue;
+            }
+            return None;
+        }
+        if let PermissionComplement::ObjectActivity { .. } = &request.complement {
+            let aligned = sources.iter().filter(|(_,_,source)| {
+                matches!(source.complement,PermissionComplement::ObjectActivity {..})
+                    && (source.action == request.action || matches!(&source.complement,
+                        PermissionComplement::ObjectActivity {items} if items.iter().any(|item|item.identity == request.action)))
+            }).collect::<Vec<_>>();
+            // O2 compares only opposite-polarity objects. Same-polarity object
+            // wording, authority drift and omitted exceptions remain report-only.
+            if !aligned
+                .iter()
+                .any(|(_, _, source)| source.negated != request.negated)
+            {
+                continue;
+            }
+            if !aligned
+                .iter()
+                .any(|(owner, _, source)| permission_propositions_match(source, &request, owner))
+            {
+                return None;
+            }
+            continue;
+        }
+        let PermissionComplement::ActorAction { subject, .. } = &request.complement else {
+            unreachable!()
+        };
+        let candidates = sources
+            .into_iter()
+            .filter(|(_, _, source)| match &source.complement {
+                PermissionComplement::ActorAction { subject: other, .. } => {
+                    explicit_claim
+                        || other == subject && source.action.first() == request.action.first()
+                }
+                PermissionComplement::ObjectActivity { .. } => false,
             })
             .collect::<Vec<_>>();
+        let strict = request.negated && request.form == PermissionForm::Grant
+            || candidates.iter().any(|(_, _, source)| {
+                source.negated
+                    && (source.form == PermissionForm::Grant
+                        || source.form == PermissionForm::OriginalModal)
+                    && matches!(&source.complement, PermissionComplement::ActorAction {subject: other,..}
+                        if other == subject && source.action.first() == request.action.first())
+            });
+        if !legacy_active && !strict {
+            continue;
+        }
         if candidates.is_empty() && !explicit_claim {
+            // An object prohibition supplies no modal actor or action. It cannot
+            // act as a witness for a modal request, in either polarity.
+            if owners
+                .iter()
+                .flat_map(|owner| &owner.permissions)
+                .any(|source| {
+                    source.negated
+                        && matches!(
+                            source.complement,
+                            PermissionComplement::ObjectActivity { .. }
+                        )
+                        && request.action.ends_with(&source.action)
+                })
+            {
+                return None;
+            }
             continue;
         }
         let (owner, index, _) = candidates.into_iter().find(|(owner, index, source)| {
