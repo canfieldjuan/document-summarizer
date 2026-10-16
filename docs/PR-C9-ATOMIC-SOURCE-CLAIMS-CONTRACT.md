@@ -1,317 +1,426 @@
-# C9: atomic source-bound claims and per-claim admission
+# C9: whole-document coverage and atomic source-bound claims
 
-## Status and authority
+## Status, inventory first, and authority
 
-**PROPOSED — contract only. No implementation or live dispatch accepted.**
+**PROPOSED revision — contract only; stop for operator acceptance.**
+No implementation, test execution or live dispatch is authorized by this revision.
 
-This proposal follows the operator's three decisions relayed in
-[PR132 comment 6221656443](https://github.com/canfieldjuan/document-summarizer/pull/132#issuecomment-6221656443):
-“Smaller claims (Recommended)”; “Mark it, keep the rest (Recommended)” for a
-single governing clause over 4,096; and “Open an issue, build later
-(Recommended)” for encrypted PDFs. Acceptance of this document is a separate
-step. All implementation choices below, including the overflow signal and
-remaining admission-size cases, are proposals for that acceptance.
+The operator's [match-preproduction decision](https://github.com/canfieldjuan/document-summarizer/pull/132#issuecomment-6222114647)
+supersedes “Pick top 8, disclose”. The eight-claim ceiling, fixed 16,000-character
+writer cap and `claim_capacity_exceeded` proposal from the previous revision
+are withdrawn. The [earlier extension decision](https://github.com/canfieldjuan/document-summarizer/pull/132#issuecomment-6222032831)
+retains per-claim withholding for every size reason. Encrypted PDFs stay in #133.
 
-Code citations below are against `fcf7580bbb0ae90ba56b12cc46731782002f1cb8`.
-Paths beginning `summary/` are under `src-tauri/src/pipeline/`; `summary.rs`
-and `contracts.rs` are in that same directory. This is a General-profile
-candidate only. PR116/126/128/132 holds and draft status remain unchanged.
+The later oversight mailbox correction `0bfa6682`, 2026-10-16 18:53:10 UTC,
+invokes the operator's standing rule against weakened alternatives. It directs
+one full-section-coverage proposal for over-context input, replacing the public
+comment's earlier request for options. It is a later design direction, not
+operator acceptance of a detailed implementation. This document proposes that
+single path and returns to the operator. The earlier “build once it matches”
+sequence does not bypass this acceptance boundary.
 
-## 1. Root cause: current behavior and measured reproduction
+Code references are against `67cf1611a4619ca35625bd1299c9ae93a946cfb0`.
+Paths below are relative to `src-tauri/src/pipeline/` unless prefixed `docs/`.
+All PR116/126/128/132 holds, draft status and the ordinary-build gate remain.
 
-The writer is told to combine related information into paragraphs containing
-one or two sentences (`summary/coherent.rs:80`, `GENERAL_SYSTEM_PROMPT`).
-`RawUnit` assigns one `source_ids` list to the whole paragraph
-(`summary/coherent.rs`, `RawResponse`/`RawUnit`).
-`parse_response_with_limits` turns each such unit into one `ValidatedClaim`
-(`summary/coherent.rs:6845`); `materialize_cited_claims` preserves that boundary
-and derives a durable identity (`summary.rs:3646`). It does not know which
-source belongs to which proposition within the paragraph. Consequently the
-comparison must include the union of those sources, with their complete owned
-contexts (`summary/coherent/verification.rs:4`, `summary/comparisons.rs:147`).
+## 1. Canonical preproduction inventory
 
-Measured at the unchanged owners: all nine existing A/B claims fit the 4,096
-combined-scalar cap. Seven fail the source enum union cap; B4 and B5 fail the
-schema-byte cap. Their individual source catalogs fit, which does **not** prove
-that each source plus a smaller claim fits its complete request schema. DV10
-has one effective source context over 4,096; DV15 has eleven. These source-size
-counts are lower-bound inventory, not measured admission of new DV claims.
+SAME60 is one regression packet; it is not the whole preproduction baseline.
+The following experiments have different inputs, protocols and runtime settings.
+Do not combine their claims of proof. Durable aliases are in the existing
+`document-summarizer` evidence namespace unless marked private.
 
-The next loss of information occurs in `comparisons::plan`
-(`summary/comparisons.rs:376`): collecting a `Result` aborts the whole plan on
-one size failure. `coherent_verification_exceeds_runtime_context`
-(`summary.rs:2009`) turns that into a whole-summary fallback at synthesis
-(`summary/coherent.rs:3195`). After Verify, the separate
-`apply_verified_delivery_coverage_fallback` (`summary.rs:3859`) can replace a
-coherent result with a ledger and clear its summary claims. Both consumers
-must honor the proposed per-claim policy; catching a size error only at final
-rendering would leave the origin defect intact.
+### Whole-document synthesis: capacity and reproducibility reference
 
-This is a representation and admission-policy change. The measurements do not
-establish a new model limitation or prove that the proposed writer is faithful.
+- Public `synthesis-port-inventory-20261007/inventory.json`, SHA256
+  `cf911522bbed1e680562b2b48e8a8280c1ef7002e4014c2a7fe448ab85364879`;
+  production inventory revision `43d3fca56a6950a2e4ea9df27965c33b53aac225`.
+- Private recovery packet `preproduction-proof-recovery-20261007/summary-rerun/`:
+  `summary_run.py` SHA256
+  `fb2fff0b00079aa359eda1d634ec9c0ce552c53d912527e29ce4b297de284015`;
+  actual `summary_models.json` SHA256
+  `e2f78fcf5d42b0153f1cfb534e424ec428e9a661fcfd822251b82ad99a60593b`;
+  `summary_facts.py` SHA256
+  `81348c4600e62d93a7015f67e9421dbf1c7a489e11a352466828f29b9cc90c17`.
+- Saved `execution.json` SHA256
+  `7e3bc6b28a5ed6e9511e94ed0e21980c02f760649f9a467b670c576c9ae290fb`.
+  Capture manifest SHA256
+  `a4cec3166ebe9d883a3b9321e7ae0ab357a9ec114efe41e1cf07111fa9522d24`
+  binds both requests, wire payloads, raw responses, templates, tokens and props.
+- Original invocation reference: `python summary_run.py qwen35-9b`. The preserved
+  capture wrapper sets that argv; SHA256
+  `01b089ac6327400cccb62a74659009cda5d41ca464edd8571b467b693f7da65c`.
+  These are command references, not dispatch authorization.
+- Whole contracts in one request: 8,587 and 18,420 prompt tokens; 773 and 939
+  output tokens. Freeform brief, fixed 1,500 output allowance, temperature zero,
+  omitted seed with captured default 4294967295, context 32,768, thinking off,
+  Jinja chat, TCP, four observed slots, offload 99, flash attention on.
+  Captured build: `b1-c1d0e7a`.
+- Corrected native adapter reproduced both outputs byte-for-byte at source
+  `456fa8aa9ee5e677997a3c46132c86e583777326`. Receipt
+  `native-message-boundary-repair-20261007/result-summary.json`, SHA256
+  `8cc43e004e2ec3a0f644a7a2d694b1be55ba6922757c38585bea4a11b497662e`.
+  Two calls, normal finishes, no retries. Accepted adapter contract and registry:
+  `docs/PR-NATIVE-SUMMARY-PARITY.md` and
+  `summary/comparisons/fixtures/native-summary-parity-manifest.json`.
 
-## 2. Proven setup inventory, before any port
+Model SHA256 is
+`cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13`;
+server SHA256 is
+`0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099`.
+These two inputs establish same-input reproduction and demonstrated capacity.
+Their summaries exceed the requested word limit; saved ratings retain omissions
+and a modality issue. The lexical scorer is not independent fidelity gold.
+Historical harness Git provenance and complete original raw captures remain
+incomplete; the preserved source/config bytes and fresh capture receipt are the
+binding references. Do not substitute the production inventory revision for a
+missing historical harness revision. No safe page ceiling follows from them.
 
-Reuse the existing harnesses and evidence in
-`PR-C9-PREPRODUCTION-PARITY.md` and `PR-C9-QUALIFICATION-READINESS.md`, not a
-replacement scorer. Durable aliases below are in the public
-`document-summarizer` evidence namespace; private artifacts stay private.
+### C9 comparator and current guard/admission regressions
 
-| Proven work | Recorded result and scope |
+| Packet | Binding and proof scope |
 | --- | --- |
-| Original joint C9 bounded-excerpt runner; `c9-preproduction-parity-20261007/gateway-restored/receipt.json`, SHA256 `54977626b64ee78505f49d26e07b99c2d1e5655bcba8c67fc0eb11bc61e3cd47` | 30/30 verdict matches, 29 adjudicated cases plus one unresolved label; 111/120 relation matches and 227/250 reference containment. This is a case-specific baseline, not perfect passage accuracy or full-document qualification. |
-| Corrected native message framing; inventory and E3/E9 receipts in `PR-C9-QUALIFICATION-READINESS.md` | Native diagnostic cases passed their recorded checks; the later stage lane stopped. Historical freeform A/B parity does not qualify a new cited JSON writer. |
-| Current parser/guard and source/admission seams; `c9-qualification-readiness-20261016/seams-measurement-report.json`, SHA256 `57ce54ed63953ad08883fb165c1a515b17e35740901bbedf4952f1e310275e5e` | Zero generation/startup/native preflights. Frozen A1 raw response parses Supported, then becomes Unsupported for `evaluation_or_causal_relation`; draft bytes unchanged. A/B and DV results above are admission/source measurements only. |
-| SAME60 receipt in `c9-qualification-readiness-20261016/seams-final-proof.json`, SHA256 `5e6884714cedf3781bb985abded7af61afcf9be889079429e` | Full JSON equality across 60 candidates, 825 verdicts, 31 validated summaries. Existing library, ordinary-build gate, format and strict Clippy checks passed on the preceding implementation. No new writer proof. |
+| Original C9 | `c9-preproduction-parity-20261007/original-c9/manifest.json`, SHA256 `731b18c54a45f34ada58a8964fd0e599eecfcdd4d3a2ae1e6f15a245b01cca4c`; tracked manifest records original source `a25b22f6c5242c311474681d289d724db0de33a9`. Original 30 cases, ordering, raw requests and results; later controls/adjudication stay distinct. |
+| Restored production comparator | `c9-preproduction-parity-20261007/gateway-restored/receipt.json`, SHA256 `54977626b64ee78505f49d26e07b99c2d1e5655bcba8c67fc0eb11bc61e3cd47`; source `eec58548a632ade9666fe4347eaccf639817753c`. 30/30 verdict parity, 29 adjudicated cases plus one unresolved; 111/120 relations and 227/250 passage containment. Not perfect passage accuracy or current full-document qualification. |
+| Current saved-response/source measurement | `c9-qualification-readiness-20261016/seams-measurement-report.json`, SHA256 `57ce54ed63953ad08883fb165c1a515b17e35740901bbedf4952f1e310275e5e`. A1 parses Supported then becomes Unsupported at the relation guard. All nine existing A/B claims fail enum/schema admission, despite fitting the scalar cap. DV claim admission is unmeasured. |
+| Current SAME60 and test receipt | `c9-qualification-readiness-20261016/seams-final-proof.json`, SHA256 `5e6884714cedf3781bb985abded7af61afcf9be889f1a5b7c2b726889079429e`. Tested implementation `fcf7580bbb0ae90ba56b12cc46731782002f1cb8`; full equality of 60 candidates' 825 ordered verdicts and 31 validations. Private complete `seams-same60.json` SHA256 `ceee845cb539968ed40b87185484496e08f455057040665352559cf96b2e5b53`; preserve all lists/reasons, not counts alone. |
 
-Preserve the proven Qwen3.5-9B profile `qwen35-9b-q4km-v1`, model SHA256
-`cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13`,
-server SHA256 `0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099`,
-tokenizer `qwen35-pre-cc5fb918-v2`, context 32,768, seed 7, temperature 0,
-closed thinking, corrected message boundaries, one slot, offload 999, reasoning
-off, no warmup and `cache_prompt=true`. Freeze the complete inherited runtime,
-library pins and effective stage allowances from those receipts before any
-future run; omitted defaults are not permission to change them. Verify's
-output allowance remains 4,096 tokens. The writer retains its existing budget
-owner and effective allowance; no output-cap increase is part of this design.
+C9 retains joint four-dimension exact-excerpt selection, seed 7, temperature zero,
+closed thinking, 32,768 context, 4,096 output tokens. The native owner uses one
+slot, offload 999, reasoning off, no warmup and corrected framing; the gateway
+has its separately bound deployment/profile/template/settings receipts. These
+are not the whole-document runner's seed/slot/transport settings. Preserve the
+current pinned profile, tokenizer `qwen35-pre-cc5fb918-v2`, library identities,
+framing, samplers and request-seed policy. No runtime-setting experiment here.
 
-### Every proposed departure
+## 2. Root cause and every proposed departure
 
-1. General writer instructions require a proposition per output unit instead
-   of combined paragraphs; a new writer-only overflow field and schema identity
-   make capacity refusal representable. The C9 response schema is unchanged.
-2. General writer allocation can use up to the existing eight units, replacing
-   its smaller `source_count.div_ceil(3)` ceiling for this revision. Eight is
-   still a ceiling, not a target; source, window and framing constraints remain.
-3. Comparison admission gains an ordered, typed per-claim size outcome.
-   Admitted requests keep the proven prompt, schema, exact excerpt choices and
-   parser. One failed admission no longer removes its admitted siblings.
-4. New General synthesis/verification identities bind persistence, notices and
-   partial delivery to this policy. Historical artifacts and other profiles
-   retain their old policy; shared version constants are not blindly bumped.
-   Route version-sensitive prompt projection, clause/furniture handling,
-   checkpoint validation and schema support through that identity without
-   reactivating a historical feature or bypassing the ordinary-build gate.
+Current app-side differences from the whole-document capacity reference:
 
-All four departures require proof below. No other prompt, framing, schema,
-sampler, model, clause-boundary, source-selection or limit change is proposed.
+- `summary.rs:101`, `generation_input_character_limit_for_context` at `:1257`:
+  caps synthesis input at 16,000 characters even when runtime context admits more.
+- `summary/coherent.rs:19`, `maximum_summary_units` at `:75` and
+  `maximum_initial_summary_units_for_catalog`: hard eight-unit ceiling, with a
+  smaller source-count compression heuristic. These are not measured 9B limits.
+- `source_catalog_for_profile` at `coherent.rs:7564` and
+  `page_balanced_catalog` at `:6674` supply selected quote fragments instead of
+  the complete normalized document. The current quote segmentation can also
+  omit overlong sentence units (`summary.rs`, `analysis_quote_segments_v13`).
+- The writer combines propositions into paragraphs sharing one source list;
+  `parse_response_with_limits` at `coherent.rs:6845` makes one claim per unit.
+  `materialize_cited_claims` at `summary.rs:3646` preserves those boundaries.
+- `comparisons::Prepared::new`/`plan` at `summary/comparisons.rs:147,376` admit
+  a union of complete governing sources; one size failure aborts the full plan.
+  Synthesis preflight (`summary.rs:2009`, `coherent.rs:3195`) and later delivery
+  coverage (`summary.rs:3859`) can replace the whole result with a ledger.
+  Connect completion also calls `delivery_claim_prefix_coverage_satisfied`
+  (`summary.rs:2864`, `connect/provider.rs:2048`), which checks cited-page
+  coverage again. All consumers must use the same versioned admission policy.
 
-## 3. Required change surface and behavior
+Proposed changes are: whole normalized writer input; context-derived admission;
+atomic units up to 64; complete citation/source association; section drafting and
+one bounded consolidation for over-context input; typed per-claim size holds;
+versioned persistence and partial verification notices. All are new behavior
+requiring acceptance and proof. The new cited atomic writer is not the old
+freeform task; section drafting/consolidation has no preproduction qualification.
+No other prompt, schema, sampler, model, runtime, clause-recognition or profile
+change is included. Existing shared owners are reused, not copied.
 
-### Writer and materialization: establish the boundary once
+The shortened receipt hash in the previous proposal was this session's error,
+introduced at `67cf161`, this document's former line 65. It is corrected above
+from the saved file's SHA256; frozen evidence is unchanged. No test is appropriate
+for that documentation transcription correction.
 
-At `GENERAL_SYSTEM_PROMPT`, `prompt_and_schema_for_version`, `RawResponse` and
-`parse_response_with_limits` in `summary/coherent.rs`, the new General revision
-must emit one independently checkable proposition per unit, with its own
-`source_ids`. Actor, action, object, modality and every necessary condition,
-exception, exclusion or explicit relationship stay together. A condition is
-not a separate optional claim. A fact needing several clauses retains every
-necessary clause, even when that causes admission to fail.
+## 3. Required change surface: complete input and exact citations
 
-The writer performs the semantic separation directly. Rust preserves each
-emitted boundary and validates IDs, exact source ownership, count, size, window
-and framing constraints before `materialize_cited_claims`. It does not split
-sentences afterward, assign citations by word overlap, or trim clause text to
-fit. The generic materializer remains one validated unit to one durable claim.
-Schema validation cannot prove semantic atomicity, completeness or fidelity;
-those remain independent review gates, with missing exclusions treated as
-failures rather than justified by smaller output.
+### Whole-document mode
 
-**More than eight necessary claims:** propose a required writer response field
-`claim_capacity_exceeded: boolean` in the new General schema. `false` requires
-one through eight units; `true` requires an empty units array and becomes an
-explicit synthesis capacity failure. Unknown fields, a missing flag, a false
-flag with no units, or a true flag with units fail parsing. There is no silent
-prefix, cap increase, automatic combination back into compound claims, or new
-repair loop. The notice says a summary could not be produced within the claim
-limit; no completed qualified summary is stored. The model can misreport this
-flag or omit facts, so public nine-fact controls and independent whole-draft
-review must test it. A grammar limit alone cannot establish completeness.
+For the new General revision, construct the writer input from every normalized
+page and block in canonical order, including all text. Retain page/block/span
+identity and structural ancestry. Furniture can be labelled by its existing
+owner; it does not authorize deleting source text from this full-input payload.
+Show source content once, with a compact exact-ID registry pointing into it;
+include complete governing context and parent lead-ins through the existing
+`whole_clauses::Clauses` owner. Source text remains untrusted data.
 
-### Admission: one owner and an outcome for every claim
+Use `source_catalog_with_furniture_policy`, canonical quote/span identity and
+materialization owners for citations. The new revision bypasses page balancing
+and relevance selection as input coverage decisions. Citation IDs identify exact
+owned quotations, not guessed passages or model-supplied offsets. Do not assign
+IDs by text similarity. Keep existing quotation/ownership bounds; expose the
+existing omitted/uncitable status instead of silently pretending the registry
+covers every fact. Any benchmark fact lacking a usable owned citation blocks
+that benchmark and requires an origin amendment; full-text input alone cannot
+repair missing citable evidence. Do not rewrite historical source catalogs.
 
-Refactor the real `Prepared::new`/`plan` owners in
-`summary/comparisons.rs` to distinguish invalid input from capacity limits.
-Return an ordered plan entry for every claim: an unchanged admitted request,
-or `AdmissionWithheld` with claim/evidence identity, a typed reason and the
-measured limit. The source owner remains `summary/coherent/verification.rs`.
-No second size scanner or text-based fallback rule is introduced.
+The full input and citation registry must coexist in the actual admitted request.
+A fact visible in full text but absent from the registry cannot be delivered with
+an unrelated citation. Retain every necessary governing clause for each claim;
+source fragments are citation anchors, never permission to shorten Verify context.
 
-The accepted direction requires withholding any claim whose single complete
-governing clause exceeds 4,096. **Proposed extension within this contract:**
-apply the same per-claim capacity treatment when the unchanged combined-scalar,
-enum, schema-byte or deterministic request-context check rejects that claim.
-This matters for A/B: only handling individually oversized clauses would leave
-their measured failures unresolved. These reasons must remain separately
-reported, not called model disagreement. Even a one-source atomic claim may
-still be too large. Unsupported protocol, missing/invalid source ownership,
-parser failures, cancellation and infrastructure failures remain errors; they
-are never converted into admission withholds. A runtime preflight rejection
-after a supposedly admitted frozen plan also remains an error to investigate.
+At `summary/coherent.rs::prompt_and_schema_for_version` and `budget::admit`,
+measure the actual framed request plus schema, IDs, output allowance and existing
+reserves against the pinned 32,768 runtime context. Retain the existing budget
+owner's preflight semantics; remove the fixed 16,000-character ceiling only for
+this General policy, not globally for Story/Contract/legacy paths. A raw document
+fitting the context does not imply that its larger cited request fits. No caller
+may independently estimate characters, sample source or reduce coverage to pass.
 
-Consume this plan at synthesis admission and Verify. Do not run comparison or
-trim-contribution model calls for an admission-held claim. Preflight every
-admitted request before generation, preserve request ordering and seed rules,
-and bind actual bodies to the plan. Merge results by exact claim identity into
-the full original order; no filtered-vector `zip` or sibling verdict reuse.
-Semantic guards may reject admitted claims but cannot promote held entries.
+### Atomic claims and scaling
 
-### Persist, reload and deliver the same result
+The writer directly emits one proposition per existing `units` entry, with its
+own `source_ids`. Actor, action, object, modality, condition, exception, exclusion
+and stated relationship stay together. Separate independently checkable facts
+semantically, never by a character cut or a later punctuation parser. Several
+necessary source clauses remain attached even if their union cannot be verified.
+Rust validates boundaries/IDs/counts/ownership and preserves each unit through the
+existing materializer; it cannot prove semantic atomicity or completeness.
 
-Propose an optional typed `admission_withhold` record on `ClaimVerification`
-(`contracts.rs:511`), present only for the new General policy. It records the
-reason and measured bound, not a model-produced quote. Its verdict must be
-`Ambiguous` for compatibility with the current three-value internal verdict
-enum, but reports and warnings count it separately as **not verified**, never
-as a model's ambiguous judgment. No record may combine an admission withhold
-with Supported or Unsupported. Missing records mean the historical policy,
-not permission to reinterpret an old artifact.
+The new General ceiling is 64 atomic claims, using the existing verification
+batch bound as the shared ceiling. It is not a target and not a fixed top-N
+selection policy. Actual count follows the necessary propositions in the
+independently reviewed coverage specification and grows with document content.
+There is no smaller page/source-count ceiling on this new path. Extend the real
+schema, parser, budget structure estimator, request planner and persisted count
+validation coherently; keep the old eight-claim policy for historical versions
+and other profiles. No overflow field or top-eight path is added. Rust rejects
+more than 64; it never takes the first 64 or recombines unrelated facts to fit.
 
-`verify`, `verification_warnings`, `validate_coherent_verified_document`,
-version compatibility and completion owners in `summary.rs` must enforce that
-record against the saved claim, sources, policy and effective limit. Recompute
-the deterministic admission decision through the same owner on reload;
-no generation or native startup. Tampered/missing/duplicate records, changed
-source bindings, unsupported version pairs, or held prose inserted into the
-supported list fail validation. Old records remain readable under their
-existing rules and are not relabelled or silently upgraded. The storage/DB
-round trip must exercise the actual serializers; no database migration is
-authorized merely to add optional artifact metadata.
+If a measured necessary fact inventory exceeds 64, report the exact count, source
+binding and cost at the shared claim/batch owner before implementation proceeds
+on that case. The proposed remedy is a separately accepted increase at that one
+owner, with corresponding schema, budget, persistence and regression proof. Do
+not quietly introduce multiple 64-claim plans to evade the cap or offer partial
+coverage as the substitute. Whether this limit is reached is currently unmeasured.
 
-For a mixed result, render only Supported claims with their original citations
-and order. Emit a bounded notice identifying each held claim ordinal, such as
-“Claim 2: too long to verify; omitted from this summary.” Distinguish the
-actual size reason in typed diagnostics. Do not repeat the withheld prose
-as if it were verified. Derive notices from the typed outcome, not parsed
-warning text. Use existing warning delivery to desktop and Connect; no public
-wire-shape change. Prove the warnings fit its existing limits.
+## 4. Single over-context design: all sections, then one consolidation
 
-For this new policy, admission-caused coverage loss is disclosed partial
-coverage, not a reason to replace all supported prose with a ledger. Update
-both fallback consumers named in section 1 and their saved-result validator.
-Keep the original coverage denominator and omitted-source disclosures. Do not
-count a held claim as covered, or waive an unrelated coverage failure. If
-there are no Supported summary claims, retain the existing
-`NO_SEMANTICALLY_SUPPORTED_CLAIMS` completion failure (`summary.rs:918`), with
-admission diagnostics preserved; an empty result or a notice is not a successful
-summary. No admission-held-only re-synthesis retry is introduced.
+This is a proposed extension beyond the two one-pass baseline inputs.
 
-## 4. Unchanged limits, costs and explicit non-scope
+1. **Source ledger first.** Build an ordered inventory of every normalized span,
+   exact citation identity, existing structure node and owning clause/parents.
+   `structure.rs::DeterministicStructureInterpreter`, `chunk.rs` and
+   `coherent/whole_clauses.rs` own those boundaries. A model does not choose
+   which sections enter the plan. Every span is assigned to a draft request;
+   duplicated parent/dependency context is marked as context, not new coverage.
+2. **Sections admitted by the same budget owner.** Use structure/whole-clause
+   boundaries and canonical chunk order as the partition candidates. Pack
+   adjacent complete governing units while the actual framed request admits.
+   Existing 12,000-character chunks are a traversal aid, not token admission
+   proof. Do not invent another heading or number parser. Unrecognized layouts
+   retain ordered blocks; they are not omitted. Splitting a governing unit is
+   not an implicit fallback: if its complete required context cannot fit even
+   alone, record that genuine capacity limit and return for an owner amendment.
+3. **Boundary and cross-section facts.** Each section receives its complete
+   parent lead-ins and app-owned dependency context. Preserve original global
+   source IDs across requests. Relationships requiring clauses in different
+   sections must retain both identities and complete texts in a request that
+   admits; neither a section title nor another generated summary substitutes
+   for them. Existing clause ancestry does not resolve arbitrary non-parent
+   cross-references. Unresolved dependencies are explicit planning blockers,
+   not permission to assume independence or omit an exception. Any needed
+   dependency-reader change belongs at that source owner and requires an
+   explicit amendment before implementation, not a downstream phrase rule.
+4. **Draft every section.** Section outputs use the same atomic unit/source-ID
+   semantics. Persist their request/source bindings and completion status. A
+   missing, failed, incomplete or stale section prevents the whole-document
+   completion claim. No seed-only retry, skipped section or first-window
+   success path is added. The source-coverage ledger retains its denominator.
+5. **One bounded consolidation request.** Supply all section candidates in
+   canonical order with original citation bindings and complete source context
+   needed to reconcile cross-section facts. The consolidator emits the same
+   atomic `units` shape; generated section text is drafting input, not evidence.
+   Materialize from the original source registry. Deduplicate only exact text
+   plus identical complete governing-source sets deterministically; keep
+   different conditions, actors, dates, exceptions and source identities.
+   Retain lineage from every section candidate to its final claim or exact
+   duplicate. No silently dropped candidate or semantic dedup heuristic.
+6. **Check final claims.** Check every admitted final claim against its original
+   complete governing sources through unchanged C9. Not the section summaries.
+   Preserve source order; render supported claims with their original citations.
+   Independent whole-draft review still rejects lost conditions or coverage.
 
-| Constraint | Retained boundary |
+The actual consolidation request must fit input, schema and output budgets.
+This is a real additional limit: section coverage alone does not prove that all
+candidates and required source context fit one merge. Preflight its actual bytes
+before its sole invocation; a failure stops, retaining all drafts. No dropping
+candidates, repeated compression or unreviewed recursive merge is permitted.
+If the bound is hit, record the measured excess at the request/budget owner and
+return for an amendment of consolidation there. No claim of unlimited-document
+support is made. This path is not ready for implementation until its unresolved
+source/dependency and planning proof requirements are reviewed and accepted.
+
+## 5. Per-claim admission, persistence and delivery
+
+Extend the actual `Prepared::new`/`plan` owners with typed capacity outcomes:
+ordered entries are admitted requests or `AdmissionWithheld`, retaining exact
+claim/evidence identity, reason and measured bound. Apply it to all size reasons:
+single governing clause, combined scalars, enum, schema and deterministic request
+context. Do not add a second scanner. Invalid source ownership, unsupported
+protocol, parser/infrastructure errors and cancellation remain errors. A runtime
+preflight failure after a supposedly admitted plan remains a finding, not a
+quiet size withhold. Preflight all admitted requests before generation.
+
+Consume the plan at synthesis preflight, Verify, both coverage-fallback
+consumers and Connect completion. Propagate its typed coverage outcome through
+saved artifact construction; do not re-parse warning prose at the provider.
+Held claims consume no comparison or trim-contribution generation.
+Merge results by exact identity in original order; semantic guards cannot promote
+held entries. Add optional typed `admission_withhold` metadata to
+`contracts.rs::ClaimVerification`. Use Ambiguous only as the existing enum's
+storage carrier; report these separately as not verified, not model ambiguity.
+A record combined with Supported or Unsupported fails validation.
+
+Version the new General writer/verification policy together without blindly
+bumping other profiles. Bind saved outcomes to sources, limits and policy; reload
+through `validate_coherent_verified_document` and the same deterministic admission
+owner, without generation/startup. Check missing/duplicate/tampered metadata and
+source bindings; old artifacts keep their old behavior. Exercise the actual DB
+serializers. No database migration or public wire-shape change is authorized.
+
+For a mixed result, keep supported siblings and a bounded notice such as
+“Claim 2: too long to verify; omitted from this summary.” Preserve all original
+coverage and omission disclosures. Derive notices from typed outcomes. Their
+verification loss must not trigger a whole-summary ledger replacement or a new
+re-synthesis, but it also cannot excuse an unrelated missing section or lost fact.
+No Supported claims means the existing `NO_SEMANTICALLY_SUPPORTED_CLAIMS` completion
+failure, with diagnostics retained. A notice is not verified substantive prose.
+Prove desktop and actual Connect completion agree on that distinction. Preserve
+the delivery byte/warning bounds; a delivery prefix must not drop additional
+Supported claims and still claim this policy's complete supported result. Record
+any actual output-bound failure at its existing delivery owner for an amendment.
+
+## 6. Limits, costs, assumptions and explicit non-scope
+
+| Boundary | Treatment |
 | --- | --- |
-| Summary claims | 8 maximum; 1,200 characters per unit and 8 sources per unit remain |
-| C9 input | 4,096 Unicode scalars across claim and unique complete source strings |
-| Catalog | 8,192 values per enum; existing exact token excerpts of up to 240 scalars |
-| Response choices | Four selections per side per dimension; joint four-dimension response |
-| Schema bytes | Native comparison ceiling 1,048,576; gateway ceiling 250,000; actual runtime limit if lower |
-| Verification batches | Existing 64 cap; never enlarge or evade it by splitting plans |
+| General writer input | Remove fixed 16,000-character cap; actual framed context/output admission at 32,768 through existing budget owner |
+| General atomic claims | Scale by necessary content, maximum 64; no top-eight selection or silent prefix |
+| Other unit bounds | Existing 1,200-character maximum and eight sources per unit; actual admitted schema may be smaller under the existing budget owner, never permission to clip meaning |
+| C9 | Unchanged 4,096 combined scalars, 8,192 values per enum, exact excerpts up to 240 scalars, four selections per side/dimension, joint response |
+| Schema bytes | Existing native comparison ceiling 1,048,576 and gateway 250,000; writer's existing non-comparison schema cap also stays |
+| Runtime | Existing pinned weights/server/libraries/tokenizer/framing/sampling and output-limit rejection; no new profile or setting |
+| Batch bound | 64 final comparison claims; preserve actual callers' existing batch gates; no claim that 64 bounds the entire pipeline |
 
-For `n` materialized atomic claims, `a` admitted and `h` admission-held, `a+h=n`
-and `n<=8`. The C9 comparison component makes `a` completions, one per admitted
-claim, and zero for held claims. A/B currently have three and six compound
-claims, all rejected before generation. Eight admitted atomic claims would
-cost eight comparison calls each, versus zero today. Relative to their old
-planned claim counts, that is five and two additional requests respectively,
-not measured runtime spend. These are upper bounds, not predictions of the
-new writer's output or latency. Ledger verification, source selection,
-existing synthesis repairs and trimmed-source contributions are separate
-owners (`summary.rs:1279`, `summary/coherent/trim.rs:155`). The 64 batch cap is
-not a bound for the entire multi-stage pipeline. No additional retry, repair,
-token budget or live call reservation is authorized here. A future execution
-contract must enumerate those requests/preflights and actual totals from its
-frozen inputs before dispatch.
+Let S be the actually admitted section count, N final atomic claims and H
+admission-held claims. C9 completions = N-H, with N<=64. Synthesis completions
+are one when the whole cited input admits, otherwise S+1 including the sole
+consolidation. Thus this component's completions are 1+(N-H) or S+1+(N-H).
+For illustration only: 4 sections and 24 admitted final claims cost 29 calls;
+10 sections and 64 admitted final claims cost 75 calls. These are arithmetic
+examples, not observed counts or authorized budgets. Analyze, ledger checks,
+existing repair paths and contribution checks are separate; enumerate them too.
 
-No encrypted-PDF implementation: [issue133](https://github.com/canfieldjuan/document-summarizer/issues/133)
-is deferred. DV09/DV11 remain unmeasured and their four frozen cases cannot
-admit; there is no substitution. No new DV claims, label access, relabelling,
-O3 rules, #129/#131 repair, model/profile retirement, gateway deployment,
-installed-app change, production activation, merge or hold release. Story and
-Contract behavior, full clause lists and source selection remain unchanged.
+Latency is the sum of all serialized draft, consolidation and Verify durations
+plus planning/preflight/tokenization; it grows with both document tokens and
+claim count. Do not extrapolate a fixed seconds-per-call from another prompt.
+Future receipts must report each request's input/output tokens, allowance,
+preflights, completions and observed latency, including failed/rejected work.
+Before live work, a separate contract freezes the exact finite budget, requests,
+actual before-send gates, runtime identity and no-retry stop rules. Budget-owner
+preflight searches count as preflights, separately from model completions.
+This revision grants zero live calls and no GPU use.
 
-## 5. Verification plan and stop conditions
+Assumptions/blockers: exact source IDs must cover the benchmark facts; arbitrary
+cross-references, indivisible over-context governing units, necessary counts above
+64 and merge capacity have not been proven. Do not hide these behind page counts
+or a fallback. Freeze and review the required dependency/coverage policy before
+code, and amend at its origin if the current owner cannot represent it.
 
-After explicit acceptance, first commit the acceptance record. Then follow
-reproduce → isolate → explain → fix → prove → prevent regression at the owners
-above, with public fixtures and declared fail-first probes before editing
-behavior. Record the introducing owner/commit for any own-code finding; remove
-the old compound-paragraph instruction and all-or-nothing capacity propagation
-for this revision instead of stacking downstream phrase rules. Do not remove
-unrelated guards or historical readers.
+No new model/runtime/settings experiment, O3 work, #129/#131 fix, scan/OCR or
+#133 implementation, profile retirement, installed app, production activation,
+public DTO/dependency change, merge or hold release. DV labels remain frozen and
+unopened; no generated DV claims or substitutions. DV09/DV11 still block their
+four unseen cases. The unseen protocol's live run remains unauthorized.
 
-1. **Writer boundary controls:** independent propositions with distinct
-   sources; one proposition requiring several clauses; conditions, exceptions,
-   modality and parent lead-ins that must stay attached. Faithful positives
-   and dropped-limiter/changed-actor twins. Assert exact frozen writer prompt
-   and schema at the production request owner. Exercise parser/materializer
-   boundaries with empty, one, eight, nine units and every flag/units mismatch.
-   Check real native grammar and gateway schema admission for the new writer
-   format without generation, including malformed responses; preserve the
-   existing C9 grammar and its negative controls. Hand-authored outputs prove
-   parser behavior, not writer fidelity.
-2. **Actual admission and worker path:** all-fitting, mixed and all-held
-   public documents, including one fitting claim and one over-limit single
-   clause. Assert requests, generation/preflight counts, result ordering,
-   truthful notices, supported prose and actual completion status. Probe both
-   sides of every size bound, Unicode scalars versus bytes, duplicate sources,
-   mixed invalid ownership, enum/schema limits below 4,096, and non-capacity
-   failures that must still abort. No test-only replacement planner.
-3. **Persistence and delivery:** save/reload mixed and all-held results
-   through the existing store; retry/resume must preserve holds and must not
-   dispatch held claims. Tamper verdicts, policy, source/claim identity,
-   measured bound and rendered text. Verify fresh and reloaded results agree,
-   including coverage shortfall, zero Supported claims, and warning delivery
-   through actual desktop/Connect builders with their unchanged limits.
-4. **Mutation checks:** bypass atomic-schema/overflow validation, restore
-   whole-plan failure, promote or drop a held entry, restore either admission-
-   caused whole-summary fallback, suppress its notice, or ignore the saved
-   admission record. The corresponding public regression must fail. Keep
-   mutation source hashes identical to the published tested bodies.
-5. **Reuse offline measurements:** rerun A/B's frozen existing nine claims
-   with the same readiness seam: their seven enum and two schema rejections
-   remain the baseline; the new policy may represent them individually as
-   held but cannot claim they now fit. Rerun only the previously allowed DV
-   source inventory, recording identical contexts, quote-only fallbacks and
-   omitted-source counts. No saved DV claim sets exist: report their claim
-   admission as unmeasured, never generate claims or inspect frozen labels to
-   fill that gap. Candidate A/B writer outputs require a separately accepted
-   live contract; once frozen, measure their actual claim/source requests
-   through this same seam. Do not count synthetic splits as model results.
-6. **Regression gates:** full required Rust suite, ordinary-build disabled
-   gate, format and strict Clippy. Replay the original 30-case packet through
-   the actual parser/guards and SAME60 by complete ordered results, not counts
-   alone. Expected verdict changes: **none** on those saved inputs. Retain
-   their historical policy identities. New atomic and per-claim admission
-   behavior belongs in separate public controls, not edited old fixtures.
-   Any unexpected change is a finding: stop and trace the port first.
+## 7. Verification plan: reuse proof and stop on gaps
 
-Independent whole-draft fidelity review must precede any verifier-based claim
-of success for a future writer run. Its fixed criteria must reject missing
-exclusions and reversed relations; passing the C9 comparator is insufficient.
-Freeze the new prompt/schema, requests, sources, complete effective runtime
-settings, budget and before-send gates in that later contract. It must state
-an exact live budget and stop on failure; this proposal grants **zero** live
-calls or GPU work. The unseen 94-call protocol remains unauthorized and blocked
-on readiness and #133. Frozen labels remain oversight-owned and unopened.
+Before behavior code: operator acceptance of the revised complete design,
+including the unresolved dependencies/capacity boundaries; acceptance-record
+commit; independent source-derived benchmark fact inventory. Then implement
+reproduce → isolate → explain → fix → prove → prevent regression at the actual
+owners. Group own-code findings by concept and introducing commit before edits.
 
-## 6. Implementation summary
+1. Public fail-first controls at the writer/catalog/budget owners: material
+   facts beyond the former eighth position; middle-page citation excluded by
+   page balancing; full input beyond 16,000 characters that fits real context;
+   facts needing several sources, parents, conditions, modality and exceptions.
+   Faithful controls and unfaithful twins use real parsers/materializers and
+   validators. An input fitting text alone but failing full framed admission
+   must not be falsely marked admitted. No second budgeting implementation.
+2. Full-section offline planning proof through the actual proposed shared
+   planner: pin the public long fixture and source artifacts; union of primary
+   assigned spans equals the full normalized inventory, with canonical order,
+   no skipped section, exact labelled context duplication, correct dependencies
+   and token/schema/output admission for every planned draft. If the DOL fixture
+   fits as a whole, also freeze an equivalent genuinely over-context public
+   input; page count is not the test. Bound consolidation capacity with frozen
+   candidate responses before any separately accepted live invocation. Missing
+   owner seams require acceptance before adding code, not a Python substitute.
+3. Save/reload section progress and all-fit/mixed/all-held Verify outcomes.
+   Exercise actual completion, coverage and desktop/Connect notice owners.
+   Probe 0/1/8/9/63/64/65 claims, every size boundary, Unicode scalar versus
+   byte counts, duplicate sources, mixed invalid entries, stale/partial records,
+   ordering, cancellation and infrastructure errors. No downgrade to a warning
+   for a protocol or ownership defect. All-held is not successful completion.
+4. Mutations must kill restoration of the eight-unit or 16,000-character
+   restrictions, source/page sampling, skipped section/dependency, false coverage
+   denominator, dropped candidate, changed citation binding, suppressed notice,
+   whole-plan size failure, either admission-caused whole-summary fallback,
+   a mismatched Connect coverage policy, held-claim promotion or ignored saved
+   metadata. Mutated bodies must match
+   the published tested source, with before/after proof at the owner.
+5. Reuse current offline seams for existing A/B claims and permitted DV source
+   inventory. Old A/B failures remain seven enum and two schema rejections;
+   changing their policy representation is not proof that they fit. No saved
+   new DV claims exist; their claim admission remains unmeasured. After a
+   separately accepted writer run, freeze its actual A/B outputs and remeasure
+   actual claims/source sets through the same owner. No synthetic splits counted
+   as model outputs. Whole-document/citation coverage is an additional gate.
+6. Preserve original C9 30-case protocol, actual parser/guard replays and SAME60
+   complete 825 ordered verdict lists/reasons and 31 saved validations unchanged.
+   Expected changes on those frozen inputs: none. Historical policies remain
+   versioned; do not edit old fixtures to accommodate the new writer. Run required
+   Rust suite, ordinary-build gate, format and strict Clippy after accepted code.
 
-This commit adds only this proposed contract. No source, test, configuration,
-dependency, fixture or generated artifact changes; no new measurements, model
-calls or GPU use. Existing test evidence belongs to the tested `fcf7580` head
-and is not evidence that any proposed behavior works.
+The two whole-contract preproduction inputs and their saved summaries are the
+coverage benchmark. An independent reviewer freezes necessary facts from both
+summaries AND original sources, correcting their recorded omissions/modality
+rather than enshrining old errors as gold. New output must cover that inventory,
+retain all material qualifications, and deliver no unsupported claim. Independent
+whole-draft review precedes reliance on any Verify result. No prompt tuning,
+label change or replacement run to obtain acceptance. New task/request differences
+are listed and judged; a changed JSON writer cannot claim byte-equal freeform
+parity. Existing same-input native adapter proof remains intact.
 
-## 7. Cold diff audit
+## 8. Current evidence, implementation summary and cold diff audit
 
-`docs/PR-C9-ATOMIC-SOURCE-CLAIMS-CONTRACT.md`: records the selected direction,
-current origin, proven inventory, each proposed departure, capacity and saved-
-result behavior, costs and gates. Verify the publication diff contains only
-this file and no private text. Code tests are not rerun for this docs-only
-proposal; an empty relevant-source diff binds inherited evidence to `fcf7580`.
+This revision changes this contract only. No behavior/tests/configuration,
+fixtures, dependencies, inference or GPU use. Code evidence remains bound to
+`fcf7580`; do not rerun code suites for this documentation revision.
 
-## 8. Gap audit
+A new read-only inspection of the retained public-long fixture's saved artifacts
+found 111 normalized pages/blocks, 28,033 text scalars and three saved chunks.
+The saved chunk block sequence covers the normalized inventory exactly. This is
+existing chunk provenance, NOT the proposed writer's section/token/merge proof.
+Alias `c9-qualification-readiness-20261016/whole-document-contract-source-inventory.json`,
+SHA256 `38b981ac577a86d47404bf5a818d978fb21052db4df28d71bfa2e4bd65bc5810`.
+The new planner does not exist; its actual request admission is **NOT MEASURED**.
+Neither page count nor these saved chunks prove the fixture exceeds context.
 
-**NOT DONE.** Contract acceptance, implementation, fail-first/regression and
-mutation proof, new writer fidelity/admission measurements, live execution
-budget, unseen qualification and operator hold release are pending. Publish
-this contract-only commit, notify oversight, and stop for operator acceptance.
+Cold diff audit: this file replaces the superseded eight-claim proposal with the
+verified whole-document inventory, selected direction, single section/consolidation
+design, source/dependency requirements, capacity limits, cost and proof plan. The
+receipt transcription is corrected from the actual artifact. Prove no relevant
+source diff and no private text before one publication push; retain evidence in
+the durable namespace. All independent source/fidelity/planning gaps are explicit.
+
+## 9. Gap audit and stop
+
+**NOT DONE.** Revised design acceptance, independent benchmark fact inventory,
+complete source-ID/dependency coverage, actual full-section/token/consolidation
+planning proof, implementation/regressions/mutations, new writer fidelity,
+separate live budget, unseen qualification and operator hold release remain.
+No claim that the existing saved-chunk inspection satisfies new-planner proof.
+Publish the contract-only revision, notify oversight and stop for the operator.
+No automatic build, live run, merge, ready transition or hold-thread edit.
