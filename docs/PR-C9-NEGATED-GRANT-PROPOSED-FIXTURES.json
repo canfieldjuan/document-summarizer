@@ -1,5 +1,5 @@
 {
-  "status": "ACCEPTED revision4 with O2 selected as fallback; Phase B HOLD for proposed O3 revision5 and renewed operator selection",
+  "status": "PROPOSED revision5 O3a/O3b; O2 accepted fallback; renewed STOP A, no Phase B",
   "base_head": "8169514b209fbcb49599de660992886048c3cf7b",
   "cases": [
     {
@@ -1089,7 +1089,9 @@
       "reason": "Drops without executed addenda: strict catches it, flip-only retains historical same-polarity behavior.",
       "proposed_expected_supported_by_option": {
         "O1_STRICT": false,
-        "O2_FLIP_ONLY": true
+        "O2_FLIP_ONLY": true,
+        "O3A_EXISTING_SCOPE": false,
+        "O3B_COORDINATED_SCOPE": false
       }
     },
     {
@@ -1102,7 +1104,9 @@
       "reason": "Drops during quiet hours: strict catches it; flip-only does not newly compare negative pairs.",
       "proposed_expected_supported_by_option": {
         "O1_STRICT": false,
-        "O2_FLIP_ONLY": true
+        "O2_FLIP_ONLY": true,
+        "O3A_EXISTING_SCOPE": false,
+        "O3B_COORDINATED_SCOPE": false
       }
     },
     {
@@ -1135,7 +1139,9 @@
       "reason": "Strict does not equate named authorities; flip-only leaves negative pairs report-only.",
       "proposed_expected_supported_by_option": {
         "O1_STRICT": false,
-        "O2_FLIP_ONLY": true
+        "O2_FLIP_ONLY": true,
+        "O3A_EXISTING_SCOPE": false,
+        "O3B_COORDINATED_SCOPE": false
       }
     },
     {
@@ -1158,7 +1164,9 @@
       "reason": "Strict cannot invent a list item; flip-only keeps pre-existing negative/negative admission.",
       "proposed_expected_supported_by_option": {
         "O1_STRICT": false,
-        "O2_FLIP_ONLY": true
+        "O2_FLIP_ONLY": true,
+        "O3A_EXISTING_SCOPE": false,
+        "O3B_COORDINATED_SCOPE": false
       }
     },
     {
@@ -1241,7 +1249,9 @@
       "reason": "Strict catches unless written renewal dropped; flip-only leaves same-polarity behavior unchanged.",
       "proposed_expected_supported_by_option": {
         "O1_STRICT": false,
-        "O2_FLIP_ONLY": true
+        "O2_FLIP_ONLY": true,
+        "O3A_EXISTING_SCOPE": false,
+        "O3B_COORDINATED_SCOPE": false
       }
     },
     {
@@ -1438,7 +1448,7 @@
       "seam": "raw_permission_reader"
     }
   ],
-  "revision": 4,
+  "revision": 5,
   "reader_boundary_note": "Unowned refers to absence of an asserted Grant proposition, not loss of scoped negative/uncertain facts. The collection also includes explicit owned/nonnegative controls.",
   "public_source_provenance": {
     "url": "https://www.hud.gov/sites/dfiles/OCHCO/documents/90105a.pdf",
@@ -1484,13 +1494,1506 @@
       "re-\nplacements": "replacements"
     }
   },
-  "fixture_option_note": "Common boolean labels apply to both object options. Option-specific labels apply only after the operator selects O1 or O2. This is a contract fixture, not an executable test suite.",
-  "selected_object_comparison_option": "O2_FLIP_ONLY",
+  "fixture_option_note": "Legacy shared labels remain accepted. O3 labels/matrix are proposed manual expectations; no executable candidate or baseline test ran. Select O1/O2/O3a/O3b explicitly after review.",
+  "selected_object_comparison_option": "NOT_SELECTED_FOR_IMPLEMENTATION; O2 remains accepted fallback",
   "revision4_operator_acceptance": {
     "reviewed_head": "51003a3c2144aa7ec11c3315a4466cccf51cd9da",
     "source_comment": "https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6205666709",
     "answer_verbatim": "O2 flip-only (Recommended)",
     "option_text_verbatim": "Block summaries that claim the opposite; faithful rewordings pass as today. No change to the 60 delivered summaries. A restatement that drops an exception isn't newly caught.",
     "later_hold_comment": "https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6206263352"
-  }
+  },
+  "operator_o3_direction": {
+    "answer_verbatim": "Yes, prove O3 first (Recommended)",
+    "source_comment": "https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6206263352"
+  },
+  "candidate_options": [
+    "O1_STRICT",
+    "O2_FLIP_ONLY",
+    "O3A_EXISTING_SCOPE",
+    "O3B_COORDINATED_SCOPE"
+  ],
+  "o3_lease_matrix": {
+    "status": "MANUAL CONTRACT PREDICTION; NO EXECUTABLE CANDIDATE",
+    "source_pdf_sha256": "422219220bd8bbb6bf32a63148d645daebade3dc81707e54b46f2c959ac954ed",
+    "source_text_sha256": "aa50fb04976748e2a49572d523577056d0fd52f616f2e78529a1d6d4d26daec6",
+    "original_normalization": "Whitespace reflow only plus the explicitly listed wrapped-hyphen substitutions; no rewriting of terms, numbers, or qualifiers. PDF remains outside repository.",
+    "hyphen_substitutions": {
+      "sub-\ntenants": "sub-tenants",
+      "in-\ndoors": "indoors",
+      "so-\ncial": "social",
+      "low-\nfrequency": "low-frequency",
+      "trail-\ners": "trailers",
+      "re-\nplacements": "replacements"
+    },
+    "named_condition_markers": {
+      "BELOW": "below",
+      "BY": "by",
+      "DURING": "during",
+      "EXCEPT": "except",
+      "FOR": "for",
+      "IN": "in",
+      "INDOORS": "indoors",
+      "INSIDE": "inside",
+      "INTO": "into",
+      "LONGER_THAN": "longer than",
+      "MORE_THAN": "more than",
+      "NEAR": "near",
+      "ON": "on",
+      "OTHER_THAN": "other than",
+      "OUTSIDE": "outside [of]",
+      "PAST": "past",
+      "PRIOR_TO": "prior to",
+      "THAT": "that",
+      "TO_PREPOSITION": "to (prepositional only, not an infinitive)",
+      "UNLESS": "unless",
+      "WHERE": "where",
+      "WITH": "with",
+      "WITHOUT": "without"
+    },
+    "scope_note": "A marker is grammar only in a complement scope established by the one origin reader. Substrings inside a noun or a different clause do not create conditions. Longest applicable marker first; qualified list/condition alternatives are not new permission items.",
+    "rows": [
+      {
+        "alias": "MOCK-R01",
+        "source_verbatim": "The landlord does not permit early possession prior to the Start Date without executed addenda.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "PRIOR_TO",
+            "raw": "prior to the Start Date",
+            "source_span": [
+              46,
+              69
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          },
+          {
+            "marker_id": "WITHOUT",
+            "raw": "without executed addenda",
+            "source_span": [
+              70,
+              94
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits early possession prior to the Start Date without executed addenda.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow early possession prior to the Start Date without executed addenda.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The landlord does not permit early possession.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "PRIOR_TO",
+              "WITHOUT"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R02",
+        "source_verbatim": "The agreement does not allow automatic conversion to a permanent tenancy past the End Date unless a written renewal is signed.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "TO_PREPOSITION",
+            "raw": "to a permanent tenancy",
+            "source_span": [
+              50,
+              72
+            ],
+            "scope": "destination of automatic conversion; never an actor/infinitive"
+          },
+          {
+            "marker_id": "PAST",
+            "raw": "past the End Date",
+            "source_span": [
+              73,
+              90
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          },
+          {
+            "marker_id": "UNLESS",
+            "raw": "unless a written renewal is signed",
+            "source_span": [
+              91,
+              125
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The agreement allows automatic conversion to a permanent tenancy past the End Date unless a written renewal is signed.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The agreement does not permit automatic conversion to a permanent tenancy past the End Date unless a written renewal is signed.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The agreement does not allow automatic conversion.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "TO_PREPOSITION",
+              "PAST",
+              "UNLESS"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R03",
+        "source_verbatim": "The landlord does not permit partial rent payments.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits partial rent payments.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow partial rent payments.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "status": "N/A",
+            "reason": "Original sentence has no condition in the named marker set. No source condition is fabricated."
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R04",
+        "source_verbatim": "The policy does not allow withholding rent for pending maintenance requests.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "FOR",
+            "raw": "for pending maintenance requests",
+            "source_span": [
+              43,
+              75
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The policy allows withholding rent for pending maintenance requests.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The policy does not permit withholding rent for pending maintenance requests.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The policy does not allow withholding rent.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "FOR"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R05",
+        "source_verbatim": "The landlord does not permit commercial activities, retail storage, or public foot traffic.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits commercial activities, retail storage, or public foot traffic.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow commercial activities, retail storage, or public foot traffic.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "status": "N/A",
+            "reason": "Original sentence has no condition in the named marker set. No source condition is fabricated."
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R06",
+        "source_verbatim": "The agreement does not allow running a client-facing home business, tutoring academy, or fulfillment center.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [],
+        "o3a": {
+          "inversion": {
+            "claim": "The agreement allows running a client-facing home business, tutoring academy, or fulfillment center.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The agreement does not permit running a client-facing home business, tutoring academy, or fulfillment center.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "status": "N/A",
+            "reason": "Original sentence has no condition in the named marker set. No source condition is fabricated."
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R07",
+        "source_verbatim": "The landlord does not permit unauthorized long-term occupants or unregistered sub-tenants.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits unauthorized long-term occupants or unregistered sub-tenants.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow unauthorized long-term occupants or unregistered sub-tenants.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "status": "N/A",
+            "reason": "Original sentence has no condition in the named marker set. No source condition is fabricated."
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R08",
+        "source_verbatim": "The policy does not allow overnight guests to stay longer than 7 consecutive days or more than 14 total days in a calendar year without written consent.",
+        "complement_kind": "ActorAction",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "LONGER_THAN",
+            "raw": "longer than 7 consecutive days",
+            "source_span": [
+              51,
+              81
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          },
+          {
+            "marker_id": "MORE_THAN",
+            "raw": "more than 14 total days in a calendar year",
+            "source_span": [
+              85,
+              127
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          },
+          {
+            "marker_id": "WITHOUT",
+            "raw": "without written consent",
+            "source_span": [
+              128,
+              151
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The policy allows overnight guests to stay longer than 7 consecutive days or more than 14 total days in a calendar year without written consent.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The policy does not permit overnight guests to stay longer than 7 consecutive days or more than 14 total days in a calendar year without written consent.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The policy does not allow overnight guests to stay.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "LONGER_THAN",
+              "MORE_THAN",
+              "WITHOUT"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R09",
+        "source_verbatim": "The landlord does not permit dogs, cats, reptiles, amphibians, caged birds, or livestock.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits dogs, cats, reptiles, amphibians, caged birds, or livestock.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow dogs, cats, reptiles, amphibians, caged birds, or livestock.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "status": "N/A",
+            "reason": "Original sentence has no condition in the named marker set. No source condition is fabricated."
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R10",
+        "source_verbatim": "The agreement does not allow temporary pet sitting, feeding stray animals on balconies, or visiting pet animals inside the unit.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "ON",
+            "raw": "on balconies",
+            "source_span": [
+              74,
+              86
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          },
+          {
+            "marker_id": "INSIDE",
+            "raw": "inside the unit",
+            "source_span": [
+              112,
+              127
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The agreement allows temporary pet sitting, feeding stray animals on balconies, or visiting pet animals inside the unit.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The agreement does not permit temporary pet sitting, feeding stray animals on balconies, or visiting pet animals inside the unit.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The agreement does not allow temporary pet sitting, feeding stray animals , or visiting pet animals.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "ON",
+              "INSIDE"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R11",
+        "source_verbatim": "The landlord does not permit painting walls, driving large toggle bolts into drywall, or replacing permanent light fixtures.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "INTO",
+            "raw": "into drywall",
+            "source_span": [
+              72,
+              84
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits painting walls, driving large toggle bolts into drywall, or replacing permanent light fixtures.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow painting walls, driving large toggle bolts into drywall, or replacing permanent light fixtures.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The landlord does not permit painting walls, driving large toggle bolts , or replacing permanent light fixtures.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "INTO"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R12",
+        "source_verbatim": "The policy does not allow installing exterior security cameras, smart doorbells with local storage overrides, or satellite dishes.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "WITH",
+            "raw": "with local storage overrides",
+            "source_span": [
+              80,
+              108
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The policy allows installing exterior security cameras, smart doorbells with local storage overrides, or satellite dishes.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The policy does not permit installing exterior security cameras, smart doorbells with local storage overrides, or satellite dishes.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The policy does not allow installing exterior security cameras, smart doorbells , or satellite dishes.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "WITH"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R13",
+        "source_verbatim": "The landlord does not permit smoking tobacco, cannabis, clove cigarettes, or hookahs indoors.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "INDOORS",
+            "raw": "indoors",
+            "source_span": [
+              85,
+              92
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits smoking tobacco, cannabis, clove cigarettes, or hookahs indoors.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow smoking tobacco, cannabis, clove cigarettes, or hookahs indoors.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The landlord does not permit smoking tobacco, cannabis, clove cigarettes, or hookahs.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "INDOORS"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R14",
+        "source_verbatim": "The agreement does not allow vaping, e-cigarette aerosol generation, or incense burning near open windows or shared corridors.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "NEAR",
+            "raw": "near open windows or shared corridors",
+            "source_span": [
+              88,
+              125
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The agreement allows vaping, e-cigarette aerosol generation, or incense burning near open windows or shared corridors.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The agreement does not permit vaping, e-cigarette aerosol generation, or incense burning near open windows or shared corridors.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The agreement does not allow vaping, e-cigarette aerosol generation, or incense burning.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "NEAR"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R15",
+        "source_verbatim": "The landlord does not permit loud music, amplified instrument practice, or disruptive social gatherings during quiet hours.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "DURING",
+            "raw": "during quiet hours",
+            "source_span": [
+              104,
+              122
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits loud music, amplified instrument practice, or disruptive social gatherings during quiet hours.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow loud music, amplified instrument practice, or disruptive social gatherings during quiet hours.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The landlord does not permit loud music, amplified instrument practice, or disruptive social gatherings.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "DURING"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R16",
+        "source_verbatim": "The policy does not allow generating persistent cooking odors, chemical fumes, or low-frequency subwoofer vibrations that penetrate adjacent units.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "THAT",
+            "raw": "that penetrate adjacent units",
+            "source_span": [
+              117,
+              146
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The policy allows generating persistent cooking odors, chemical fumes, or low-frequency subwoofer vibrations that penetrate adjacent units.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The policy does not permit generating persistent cooking odors, chemical fumes, or low-frequency subwoofer vibrations that penetrate adjacent units.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The policy does not allow generating persistent cooking odors, chemical fumes, or low-frequency subwoofer vibrations.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "THAT"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R17",
+        "source_verbatim": "The landlord does not permit parking commercial box trucks, recreational vehicles, trailers, or inoperable/unregistered cars on site.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "ON",
+            "raw": "on site",
+            "source_span": [
+              125,
+              132
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits parking commercial box trucks, recreational vehicles, trailers, or inoperable/unregistered cars on site.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow parking commercial box trucks, recreational vehicles, trailers, or inoperable/unregistered cars on site.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The landlord does not permit parking commercial box trucks, recreational vehicles, trailers, or inoperable/unregistered cars.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "ON"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R18",
+        "source_verbatim": "The agreement does not allow performing mechanical repairs, oil changes, or tire replacements in the parking area.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "IN",
+            "raw": "in the parking area",
+            "source_span": [
+              94,
+              113
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The agreement allows performing mechanical repairs, oil changes, or tire replacements in the parking area.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The agreement does not permit performing mechanical repairs, oil changes, or tire replacements in the parking area.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The agreement does not allow performing mechanical repairs, oil changes, or tire replacements.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "IN"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R19",
+        "source_verbatim": "The landlord does not permit storing bicycles, strollers, shoe racks, trash bags, or Amazon boxes outside the unit door.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "OUTSIDE",
+            "raw": "outside the unit door",
+            "source_span": [
+              98,
+              119
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits storing bicycles, strollers, shoe racks, trash bags, or Amazon boxes outside the unit door.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow storing bicycles, strollers, shoe racks, trash bags, or Amazon boxes outside the unit door.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The landlord does not permit storing bicycles, strollers, shoe racks, trash bags, or Amazon boxes.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "OUTSIDE"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R20",
+        "source_verbatim": "The policy does not allow blocking fire suppression equipment or electrical panels.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [],
+        "o3a": {
+          "inversion": {
+            "claim": "The policy allows blocking fire suppression equipment or electrical panels.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The policy does not permit blocking fire suppression equipment or electrical panels.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "status": "N/A",
+            "reason": "Original sentence has no condition in the named marker set. No source condition is fabricated."
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R21",
+        "source_verbatim": "The landlord does not permit subleasing, room rentals, or listing the unit on short-term platforms like Airbnb or Vrbo.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "ON",
+            "raw": "on short-term platforms like Airbnb or Vrbo",
+            "source_span": [
+              75,
+              118
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits subleasing, room rentals, or listing the unit on short-term platforms like Airbnb or Vrbo.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow subleasing, room rentals, or listing the unit on short-term platforms like Airbnb or Vrbo.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The landlord does not permit subleasing, room rentals, or listing the unit.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "ON"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R22",
+        "source_verbatim": "The agreement does not allow handing physical keys, fob credentials, or entry gate codes to unverified third parties.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "TO_PREPOSITION",
+            "raw": "to unverified third parties",
+            "source_span": [
+              89,
+              116
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The agreement allows handing physical keys, fob credentials, or entry gate codes to unverified third parties.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The agreement does not permit handing physical keys, fob credentials, or entry gate codes to unverified third parties.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The agreement does not allow handing physical keys, fob credentials, or entry gate codes.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "TO_PREPOSITION"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R23",
+        "source_verbatim": "The landlord does not permit shutting off climate control systems below 55\u25e6 F during winter months.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "BELOW",
+            "raw": "below 55\u25e6 F",
+            "source_span": [
+              66,
+              77
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          },
+          {
+            "marker_id": "DURING",
+            "raw": "during winter months",
+            "source_span": [
+              78,
+              98
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits shutting off climate control systems below 55\u25e6 F during winter months.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow shutting off climate control systems below 55\u25e6 F during winter months.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The landlord does not permit shutting off climate control systems.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "BELOW",
+              "DURING"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R24",
+        "source_verbatim": "The policy does not allow tampering with shared building utility sub-meters.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "WITH",
+            "raw": "with shared building utility sub-meters",
+            "source_span": [
+              36,
+              75
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The policy allows tampering with shared building utility sub-meters.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The policy does not permit tampering with shared building utility sub-meters.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The policy does not allow tampering.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "WITH"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R25",
+        "source_verbatim": "The landlord does not permit cure periods for repeated unauthorized pet or smoking violations where prohibited by law.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "FOR",
+            "raw": "for repeated unauthorized pet or smoking violations",
+            "source_span": [
+              42,
+              93
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          },
+          {
+            "marker_id": "WHERE",
+            "raw": "where prohibited by law",
+            "source_span": [
+              94,
+              117
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The landlord permits cure periods for repeated unauthorized pet or smoking violations where prohibited by law.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The landlord does not allow cure periods for repeated unauthorized pet or smoking violations where prohibited by law.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The landlord does not permit cure periods.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "FOR",
+              "WHERE"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      },
+      {
+        "alias": "MOCK-R26",
+        "source_verbatim": "The agreement does not allow waiver of breach by the landlord\u2019s acceptance of late rent.",
+        "complement_kind": "ObjectActivity",
+        "conditions_manually_annotated": [
+          {
+            "marker_id": "BY",
+            "raw": "by the landlord\u2019s acceptance of late rent",
+            "source_span": [
+              46,
+              87
+            ],
+            "scope": "original bounded local/list scope; not a whole-unit flag"
+          }
+        ],
+        "o3a": {
+          "inversion": {
+            "claim": "The agreement allows waiver of breach by the landlord\u2019s acceptance of late rent.",
+            "expected_supported": false
+          },
+          "faithful_rewording": {
+            "claim": "The agreement does not permit waiver of breach by the landlord\u2019s acceptance of late rent.",
+            "expected_supported": true,
+            "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
+          },
+          "dropped_conditions": {
+            "claim": "The agreement does not allow waiver of breach.",
+            "expected_supported": false,
+            "removed_marker_ids": [
+              "BY"
+            ]
+          }
+        },
+        "o3b": "same expected labels as o3a for these already-owned original forms"
+      }
+    ],
+    "synthetic_conditioned_companions": [
+      {
+        "original_alias": "MOCK-R03",
+        "provenance": "SYNTHETIC COMPANION: condition added for test design; this is NOT a quotation from the PDF",
+        "source": "The landlord does not permit partial rent payments without written consent.",
+        "faithful_claim": "The landlord does not permit partial rent payments without written consent.",
+        "faithful_expected_supported": true,
+        "dropped_condition_claim": "The landlord does not permit partial rent payments.",
+        "dropped_expected_supported": false
+      },
+      {
+        "original_alias": "MOCK-R05",
+        "provenance": "SYNTHETIC COMPANION: condition added for test design; this is NOT a quotation from the PDF",
+        "source": "The landlord does not permit commercial activities, retail storage, or public foot traffic without written consent.",
+        "faithful_claim": "The landlord does not permit commercial activities, retail storage, or public foot traffic without written consent.",
+        "faithful_expected_supported": true,
+        "dropped_condition_claim": "The landlord does not permit commercial activities, retail storage, or public foot traffic.",
+        "dropped_expected_supported": false
+      },
+      {
+        "original_alias": "MOCK-R06",
+        "provenance": "SYNTHETIC COMPANION: condition added for test design; this is NOT a quotation from the PDF",
+        "source": "The agreement does not allow running a client-facing home business, tutoring academy, or fulfillment center without written consent.",
+        "faithful_claim": "The agreement does not allow running a client-facing home business, tutoring academy, or fulfillment center without written consent.",
+        "faithful_expected_supported": true,
+        "dropped_condition_claim": "The agreement does not allow running a client-facing home business, tutoring academy, or fulfillment center.",
+        "dropped_expected_supported": false
+      },
+      {
+        "original_alias": "MOCK-R07",
+        "provenance": "SYNTHETIC COMPANION: condition added for test design; this is NOT a quotation from the PDF",
+        "source": "The landlord does not permit unauthorized long-term occupants or unregistered sub-tenants without written consent.",
+        "faithful_claim": "The landlord does not permit unauthorized long-term occupants or unregistered sub-tenants without written consent.",
+        "faithful_expected_supported": true,
+        "dropped_condition_claim": "The landlord does not permit unauthorized long-term occupants or unregistered sub-tenants.",
+        "dropped_expected_supported": false
+      },
+      {
+        "original_alias": "MOCK-R09",
+        "provenance": "SYNTHETIC COMPANION: condition added for test design; this is NOT a quotation from the PDF",
+        "source": "The landlord does not permit dogs, cats, reptiles, amphibians, caged birds, or livestock without written consent.",
+        "faithful_claim": "The landlord does not permit dogs, cats, reptiles, amphibians, caged birds, or livestock without written consent.",
+        "faithful_expected_supported": true,
+        "dropped_condition_claim": "The landlord does not permit dogs, cats, reptiles, amphibians, caged birds, or livestock.",
+        "dropped_expected_supported": false
+      },
+      {
+        "original_alias": "MOCK-R20",
+        "provenance": "SYNTHETIC COMPANION: condition added for test design; this is NOT a quotation from the PDF",
+        "source": "The policy does not allow blocking fire suppression equipment or electrical panels without written consent.",
+        "faithful_claim": "The policy does not allow blocking fire suppression equipment or electrical panels without written consent.",
+        "faithful_expected_supported": true,
+        "dropped_condition_claim": "The policy does not allow blocking fire suppression equipment or electrical panels.",
+        "dropped_expected_supported": false
+      }
+    ]
+  },
+  "o3_boundary_cases": [
+    {
+      "case": "o3_consent_form_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit cats without written consent."
+      ],
+      "claim": "Landlord does not allow cats without written consent.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONSENT_FORM"
+    },
+    {
+      "case": "o3_consent_form_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit cats without written consent."
+      ],
+      "claim": "Landlord does not allow cats without oral consent.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONSENT_FORM"
+    },
+    {
+      "case": "o3_consent_authority_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit cats without prior written consent of the City."
+      ],
+      "claim": "Landlord does not allow cats without prior written consent from the City.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONSENT_AUTHORITY; of/from fill the explicit same-authority role, no authority alias"
+    },
+    {
+      "case": "o3_consent_authority_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit cats without prior written consent of the City."
+      ],
+      "claim": "Landlord does not allow cats without prior written consent from the Tenant.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONSENT_AUTHORITY; of/from fill the explicit same-authority role, no authority alias"
+    },
+    {
+      "case": "o3_condition_polarity_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit cats without written consent."
+      ],
+      "claim": "Landlord does not allow cats without written consent.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONDITION_POLARITY"
+    },
+    {
+      "case": "o3_condition_polarity_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit cats without written consent."
+      ],
+      "claim": "Landlord does not allow cats with written consent.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONDITION_POLARITY"
+    },
+    {
+      "case": "o3_numeric_value_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow visits longer than 7 consecutive days."
+      ],
+      "claim": "Rules do not permit visits longer than 7 consecutive days.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "NUMERIC_VALUE"
+    },
+    {
+      "case": "o3_numeric_value_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow visits longer than 7 consecutive days."
+      ],
+      "claim": "Rules do not permit visits longer than 10 consecutive days.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "NUMERIC_VALUE"
+    },
+    {
+      "case": "o3_numeric_unit_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow visits longer than 7 consecutive days."
+      ],
+      "claim": "Rules do not permit visits longer than 7 consecutive days.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "NUMERIC_UNIT"
+    },
+    {
+      "case": "o3_numeric_unit_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow visits longer than 7 consecutive days."
+      ],
+      "claim": "Rules do not permit visits longer than 7 consecutive weeks.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "NUMERIC_UNIT"
+    },
+    {
+      "case": "o3_numeric_operator_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow visits longer than 7 consecutive days."
+      ],
+      "claim": "Rules do not permit visits longer than 7 consecutive days.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "NUMERIC_OPERATOR"
+    },
+    {
+      "case": "o3_numeric_operator_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow visits longer than 7 consecutive days."
+      ],
+      "claim": "Rules do not permit visits below 7 consecutive days.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "NUMERIC_OPERATOR"
+    },
+    {
+      "case": "o3_purpose_complement_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow use of Equipment for any purpose other than performing the Project."
+      ],
+      "claim": "Rules do not permit use of Equipment for any purpose other than performing the Project.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONDITION_COMPLEMENT: same marker kind is insufficient"
+    },
+    {
+      "case": "o3_purpose_complement_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow use of Equipment for any purpose other than performing the Project."
+      ],
+      "claim": "Rules do not permit use of Equipment for any purpose other than selling the Project.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONDITION_COMPLEMENT: same marker kind is insufficient"
+    },
+    {
+      "case": "o3_consent_prior_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit cats without prior written consent."
+      ],
+      "claim": "Landlord does not allow cats without prior written consent.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONSENT_FORM: prior cannot silently disappear"
+    },
+    {
+      "case": "o3_consent_prior_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Landlord does not permit cats without prior written consent."
+      ],
+      "claim": "Landlord does not allow cats without written consent.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONSENT_FORM: prior cannot silently disappear"
+    },
+    {
+      "case": "o3_location_payload_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow storing crates outside the unit door."
+      ],
+      "claim": "Rules do not permit storing crates outside of the unit door.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONDITION_COMPLEMENT and existing outside-of form"
+    },
+    {
+      "case": "o3_location_payload_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow storing crates outside the unit door."
+      ],
+      "claim": "Rules do not permit storing crates outside the garage door.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "CONDITION_COMPLEMENT and existing outside-of form"
+    },
+    {
+      "case": "o3_what_membership_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow cats, dogs or birds without written consent."
+      ],
+      "claim": "Rules do not permit cats without written consent.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "WHAT: explicit list membership only, no noun taxonomy"
+    },
+    {
+      "case": "o3_what_membership_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow cats, dogs or birds without written consent."
+      ],
+      "claim": "Rules do not permit fish without written consent.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "WHAT: explicit list membership only, no noun taxonomy"
+    },
+    {
+      "case": "o3_purpose_nominalization_limit",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Company will not allow use of Equipment for any purpose other than Company's performance of the Project without written consent."
+      ],
+      "claim": "Company will not permit use of Equipment for any purpose other than performing the Project without written consent.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "classification": "Faithful paraphrase deliberately withheld: performance/performing lacks existing canonical identity. Public analogue of the stated corpus cost."
+    },
+    {
+      "case": "o3_coordinated_may_condition_drop",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Operator may not use or permit use of Equipment without written consent."
+      ],
+      "claim": "Operator may not use or permit use of Equipment.",
+      "proposed_expected_supported_by_option": {
+        "O3A_EXISTING_SCOPE": true,
+        "O3B_COORDINATED_SCOPE": false
+      },
+      "rule": "O3a retains unowned old behavior; O3b owns this bounded object coordination and catches missing consent. Labels are proposed, not a baseline observation."
+    },
+    {
+      "case": "o3_coordinated_may_faithful",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Operator may not use or permit use of Equipment without written consent."
+      ],
+      "claim": "Operator may not use or permit use of Equipment without written consent.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "Exact twin preserves the condition and original non-grant use clause."
+    },
+    {
+      "case": "o3_exception_tree_preserved",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow visits except during quiet hours."
+      ],
+      "claim": "Rules do not permit visits except during quiet hours.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "EXCEPTION_TREE: keeping during while dropping except reverses scope; condition topology is preserved."
+    },
+    {
+      "case": "o3_exception_tree_changed",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow visits except during quiet hours."
+      ],
+      "claim": "Rules do not permit visits during quiet hours.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "EXCEPTION_TREE: keeping during while dropping except reverses scope; condition topology is preserved."
+    },
+    {
+      "case": "o3_local_scope_cat_own_condition",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow cats without written consent, or dogs during quiet hours."
+      ],
+      "claim": "Rules do not allow cats without written consent.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "SCOPE_OWNERSHIP: a sibling item cannot supply the condition for this item."
+    },
+    {
+      "case": "o3_local_scope_dog_own_condition",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow cats without written consent, or dogs during quiet hours."
+      ],
+      "claim": "Rules do not allow dogs during quiet hours.",
+      "proposed_expected_supported": true,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "SCOPE_OWNERSHIP: a sibling item cannot supply the condition for this item."
+    },
+    {
+      "case": "o3_local_scope_cat_wrong_condition",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow cats without written consent, or dogs during quiet hours."
+      ],
+      "claim": "Rules do not allow cats during quiet hours.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "SCOPE_OWNERSHIP: a sibling item cannot supply the condition for this item."
+    },
+    {
+      "case": "o3_local_scope_dog_wrong_condition",
+      "seam": "final_semantic_guard",
+      "owned_evidence": [
+        "Rules do not allow cats without written consent, or dogs during quiet hours."
+      ],
+      "claim": "Rules do not allow dogs without written consent.",
+      "proposed_expected_supported": false,
+      "applies_to": [
+        "O3A_EXISTING_SCOPE",
+        "O3B_COORDINATED_SCOPE"
+      ],
+      "rule": "SCOPE_OWNERSHIP: a sibling item cannot supply the condition for this item."
+    }
+  ],
+  "o3_reader_boundaries": [
+    {
+      "case": "o3_coordinated_may_object_scope",
+      "text": "Operator may not use or permit use of Equipment without written consent.",
+      "expected_unowned_by_option": {
+        "O3A_EXISTING_SCOPE": true,
+        "O3B_COORDINATED_SCOPE": false
+      },
+      "owned_complement_kind_if_O3B": "ObjectActivity",
+      "negated_if_owned": true
+    },
+    {
+      "case": "o3_coordinated_may_reported",
+      "text": "The report says Operator may not use or permit use of Equipment without written consent.",
+      "expected_unowned_by_option": {
+        "O3A_EXISTING_SCOPE": true,
+        "O3B_COORDINATED_SCOPE": true
+      }
+    },
+    {
+      "case": "o3_coordinated_may_conditional",
+      "text": "If Operator may not use or permit use of Equipment without written consent.",
+      "expected_unowned_by_option": {
+        "O3A_EXISTING_SCOPE": true,
+        "O3B_COORDINATED_SCOPE": true
+      }
+    },
+    {
+      "case": "o3_coordinated_may_reset",
+      "text": "Operator may not use Equipment, but City permits use of Tools.",
+      "expected_negative_object_from_first_group": false,
+      "reason": "No permit/allow predicate in the first finite group; negation cannot migrate into the new subject."
+    }
+  ],
+  "o3_rule_owner": {
+    "owner": "permission_qualifications at semantic_support.rs:3631, extended as typed declaration/scope metadata at the existing raw reader",
+    "consumers": "permission_propositions and existing permission comparator/projector consume those fields; no post-projection re-scan",
+    "condition_identity": "kind + operator + value/unit + polarity + consent authority/form + bounded complement identity; same-kind alone is insufficient",
+    "unsupported_payload": "Existing canonical forms only; unknown identity withholds in the selected owned negative comparison, not an invented equivalence."
+  },
+  "o3_condition_boundaries": [
+    {
+      "case": "marker_substring",
+      "text": "Rules do not allow incense sticks.",
+      "expected_condition_marker_ids": [],
+      "reason": "IN is not a substring matcher."
+    },
+    {
+      "case": "empty_condition_payload",
+      "text": "Rules do not allow cats without.",
+      "expected_condition_extent": "unknown",
+      "reason": "No empty default consent/qualifier."
+    },
+    {
+      "case": "numeric_zero",
+      "text": "Rules do not allow visits longer than 0 days.",
+      "expected_numeric_value": "0",
+      "reason": "Zero is preserved literally, never replaced by a default."
+    },
+    {
+      "case": "missing_numeric_value",
+      "text": "Rules do not allow visits longer than days.",
+      "expected_numeric_extent": "unknown",
+      "reason": "No default zero."
+    }
+  ]
 }

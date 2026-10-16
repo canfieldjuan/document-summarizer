@@ -1,6 +1,6 @@
-# PR128 separate negated-grant round — contract revision 4
+# PR128 separate negated-grant round — contract revision 5
 
-Status: **ACCEPTED revision4, O2 selected as fallback. Phase B HOLD for O3 revision5 and renewed operator selection.** No product code or tests. The later operator instruction to prove O3 first supersedes the permission to start Phase B now. PR128 stays draft and stacked; all PR116/126/128 production, qualification and merge holds remain. No merge, ready or base change.
+Status: **PROPOSED revision5; O2 remains the accepted fallback. STOP A again. No Phase B.** The operator asked for O3's bounded definition and predictions before choosing O1/O2/O3. This proposal includes O3a (existing reader scope) and O3b (explicit coordinated may-not scope extension). No product code, Rust/policy tests, inference or GPU work. PR128 remains draft/stacked; all PR116/126/128 holds remain. No merge, ready or base change.
 
 ## Verbatim operator acceptance of revision4 and later O3 direction
 
@@ -33,7 +33,7 @@ Adopt N1 modal inclusion and N3 mirrored mapping. Only negative_may_vs_negative_
 - Archived C9 harness: comparisons/parity.rs::archived_c9_verdicts_survive_relation_guard. c9-native-baseline.json SHA256 3351e2bc357853ec389e13220e63497363c4ba404c8c87232784e20564656a2e, recorded-result pin9dc813f6618258a23333b344c295bb43e226d79c5caecc15bc021d5ed33e9936. c9-parity-manifest.json SHA256 c3d186a65d3a28183ed6bd39fb70b3c74b081f6d41a3ba2482902fa79c6937af; public C9 source fixture SHA256 079211fe128c9bced0c52e8c36c4e5fd665f4c506b33995eaee7fa57097de627.
 - The manifest pins the original system prompt7c3b024ddc32922d8fc8b50e0c9b76aab4826cd440950b04b2cce039ce08db48 and gateway runtime/model/settings receipts91a07a2a0302853350fc5c95a12094336241790a5baecf71c0fc00d657b76c40 /8c06536e8971c2872ac27477564e1bc114c69f3e854520296c8594924c6638ec /3be33f0dfc9742436700233d3310154b6943810c857bcee3af319d70ab3fa12e. Archived logical inputs, selectable text/schema and recorded responses remain unchanged. No model or server starts; this is CPU-only policy work.
 
-Every departure from that setup: represent a narrowly owned negative grant; populate its existing negated field for both source and claim; let existing modal and permission consumers compare that polarity; add public regression inputs and a representation-removal mutation. No inference request, prompt, framing, decoder, sampler, profile, runtime or storage departure is allowed.
+Every departure from that setup: represent bounded negative Grants and typed ActorAction/ObjectActivity complements; preserve their grantor, polarity, object/list extent and raw provenance; represent positive objects for the activated negative-family comparison; add typed permission-condition metadata at the same origin and O3 WHAT/polarity/condition comparisons if selected; widen only bounded coordinated may-not object ownership if O3b is selected; add public controls and owner mutations. ActorAction retains its accepted raw projection/comparison; new object-condition fields do not relax it. No inference request, prompt, framing, decoder, sampler, profile, runtime or storage departure is allowed.
 
 ## Revision4 evidence and authority
 
@@ -85,7 +85,7 @@ Exceptions and time/location/extent restrictions remain attached, including with
 
 ActorAction retains accepted revision3 strict behavior: an owned negative Grant on the claim OR cited source side activates the existing comparator for that relation. Preserve grantor, actor, complete action, qualifiers and polarity; faithful exact pairs pass, inversion/grantor mismatch/dropped exception withhold. Unrelated negative actors/actions do not poison owned positive siblings. Positive/positive stays report-only. Keep source-clause aggregation and affirmative-only shorthand licensing (`!witness.negated`).
 
-For ObjectActivity the operator must select **one** policy before code:
+For ObjectActivity, O1/O2 below are the recorded revision4 alternatives. O2 was accepted as fallback; the operator now chooses among these and O3a/O3b below before code:
 
 | Object policy | Same-polarity negative restatements | Opposite-polarity object claims | Missing negative exception / invented negative authority or item | Predicted SAME60 cost |
 |---|---|---|---|---|
@@ -105,6 +105,91 @@ Accepted ActorAction rules stay fixed: positive may against negative Grant withh
 For ObjectActivity versus an actor/modal claim, proposed default is conservative: **no inferred actor or verb and no new support**. Object-only “Landlord does not permit cats” cannot license either “Tenant may keep cats” or “Tenant may not keep cats”; the new modal actor/verb is unowned, so these fixture outcomes are Unsupported under both options. Alternative: infer keep/possess/use from the noun and equate the forms; that reduces false withholds but invents language absent from the source and exceeds the recommended bounded contract. This alternative is not proposed for implementation.
 
 A separately owned original actor/action or explicit non-grant modal clause can still support its own relation through the existing path. Preserve it during projection. This is why a non-grant paraphrase is not rejected just because its cited quote also has an object prohibition. Unowned negative object surfaces retain only the scoped facts established by accepted N1; an outside-window coordinated may-not surface remains unowned, without inventing its scope. O1 requires an owned complement for an explicit grant request in its activated negative family; O2 does not add comparison to that unowned negative restatement. No second matcher or lexical guess joining an arbitrary object to an arbitrary modal verb.
+
+## Revision5 / O3 — compare WHAT, POLARITY and CONDITIONS separately
+
+Authority: [issuecomment-6206263352](https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6206263352), operator verbatim “Yes, prove O3 first (Recommended)”; the full answer/option text is recorded above. Oversight's later boundary clarification agrees that same condition kind alone is insufficient, original conditionless rows need N/A plus explicitly synthetic companions, and existing scope versus a coordinated may-not extension needs separate predictions. These recommendations remain proposed until renewed STOP A acceptance.
+
+### Root and one owner
+
+At executable8169514, `permission_qualifications`(:3631–3699), introduced in afe5fdd, only represents non-/not-declared adjective qualifications. Complete conditions are still present in raw action text; this is a missing typed condition representation, not permission to scan them again downstream. `permission_propositions_match`(:3891–3913) compares full action wording or narrow registered normalizations. `actor_qualification_clause_supported`(:2777) is a different actor-definition rule and can return true when a claim has no condition; it is not proof that a source exception survived. Do not use it as a dropped-exception backstop.
+
+Extend **permission_qualifications** at the raw permission reader as the single owner of typed permission qualification metadata: preserve the existing declaration variant, and add scope-condition nodes with raw spans, owning clause/item, kind, operator/polarity, bounded payload, numeric value/unit and explicit consent authority/form. The complement/list owner supplies extent before token projection. All permission consumers use this result. No second condition tokenizer, per-document regex, whole-unit flag or post-projection scan. The marker table belongs there once; the comparator consumes nodes rather than re-deriving them. Preserve original non-grant modal clauses. Remove redundant unconditional negative rejection, first-to/comma assumptions and no-to bypass only as already specified, not via compensating guards.
+
+### Named bounded rules
+
+**WHAT_IDENTITY:** same owned object/activity or an explicitly owned list item, using existing case/article, numeric, parenthetical/plural and registered relation canonical forms only where applicable. Keep meaningful modifiers, complements and list ownership; no overlap threshold, head-word guess, animal taxonomy or synonym lexicon. Detach only a condition whose scope is established at the origin. This is looser than whole-complement wording equality because the condition is compared separately. A different object is unproved. Same-polarity negative owned requests still require an owned WHAT witness under O3; unknown identity can withhold a faithful paraphrase.
+
+**POLARITY_IDENTITY:** apply the owned positive-versus-prohibited flip check independently. Preserve negative facts and original scope resets. No change to the accepted ActorAction rules or mirrored mapping; no ObjectActivity-to-modal verb/actor inference.
+
+**CONDITION_PRESERVATION:** each source condition on that relation/item must survive as the same bounded kind, operator, polarity and payload identity. Same-kind presence alone does not prove equivalence. Retain multiple conditions and internal and/or structure; a condition on another item cannot discharge it. Do not infer that a condition is absent merely because a parser did not own it. An uncertain typed extent cannot silently become an unconditional permission.
+
+**NUMERIC_OPERATOR / NUMERIC_VALUE / NUMERIC_UNIT:** retain comparison direction, each exact normalized value and its unit/context (including consecutive versus total, and calendar period). 7→10 days, days→weeks or longer-than→below withhold. Missing/malformed quantities never default to zero. Existing numeric canonicalization may normalize spelling, never change the value. No new unit conversion.
+
+**CONSENT_FORM / CONSENT_AUTHORITY / CONDITION_POLARITY:** retain without/with polarity, written versus oral, prior status and any explicitly named authority. `of`/`from` can fill the same explicit consent-authority role; authority identity uses existing case/article forms only. No landlord/policy/agreement equivalence and no assumed unnamed approver. An unknown authority or form is unproved, not an empty/default match.
+
+**CONDITION_COMPLEMENT:** after the kind/operator/value fields match, compare remaining payload using existing canonical forms only. The existing same-governor infinitive/gerund helper can apply in its already bounded role; it does not turn the nominal word performance into performing. Different purposes, recipients, locations, approvals or restriction payloads with the same marker must not pass. Free rewording outside these canonical forms can be faithful and still withhold. No new equivalence lexicon is proposed to remove that cost.
+
+### Exact marker set and scope
+
+The following23 grammar markers are the entire proposed set (listed as IDs so the fixture and eventual single owner can be audited):
+
+BELOW = `below`; BY = `by`; DURING = `during`; EXCEPT = `except`; FOR = `for`; IN = `in`; INDOORS = `indoors`; INSIDE = `inside`; INTO = `into`; LONGER_THAN = `longer than`; MORE_THAN = `more than`; NEAR = `near`; ON = `on`; OTHER_THAN = `other than`; OUTSIDE = `outside [of]`; PAST = `past`; PRIOR_TO = `prior to`; THAT = `that`; TO_PREPOSITION = `to (prepositional only, not an infinitive)`; UNLESS = `unless`; WHERE = `where`; WITH = `with`; WITHOUT = `without`
+
+They operate on complete word/phrase boundaries at established complement scope, not substrings in words. Use longest applicable phrase before its component words. Prepositional TO applies only after the ActorAction/ObjectActivity distinction; it cannot turn guests-to-stay into a destination or automatic-conversion-to-a-tenancy into an actor/action. WITH/WITHOUT consent receive explicit consent fields; other bounded uses retain their complete payload. Relative THAT, purpose FOR and locative/recipient/means nodes retain their original local scope; they do not license new asserted predicates or missing shared verbs.
+
+This set includes grammatical arguments and local restrictions as well as legal-style exceptions: into drywall, with a specified device property, to specified recipients, and by specified conduct are protected payloads. Preserve their actual source scope. Some phrases are ambiguous; conservatively unowned extent is a stated cost. A list-wide qualifier cannot be moved to just the last item, and a local qualifier cannot be spread across an unrelated item. Unknown grammar and free paraphrases outside the set remain uncovered or withheld according to the existing ownership path; the set is not a general English condition parser.
+
+### O3a versus O3b: reader scope must be selected explicitly
+
+- **O3a EXISTING SCOPE (recommended bounded trial):** use O3 checks only on relations already owned by accepted N1/N1b. The17 coordinated may-not object requests remain unowned and retain today's behavior; they gain neither new support nor a new withhold. No condition metadata is invented beyond that ownership. This preserves a blind spot for a dropped condition in those shapes. Original non-grant modal checks remain.
+- **O3b COORDINATED SCOPE:** additionally own a bounded finite subject + may not + original non-grant predicate + or permit/allow + complete ObjectActivity. Stop at new finite subject, contrast/affirmative reset, sentence/semicolon or conditional/reported/question scope. This explicitly widens N1 for object coordination; it is not a silent interpretation of revision3. Preserve the original non-grant predicate and all conditions. Direct standalone may-not grants, other modals and ActorAction do not gain general new ownership from this rule. It catches drops in the newly owned shape but can withhold faithful paraphrases and mis-own a scope if implemented incorrectly; reader controls on both sides are required.
+
+Strict authority wording remains where O3 actually compares. Authority aliases, passive forms and arbitrary condition paraphrases remain out of scope. O3a does not repair ownership gaps by condition scanning; O3b requires operator acceptance of the explicit reader extension.
+
+### Read-only O3 predictions on SAME60, including all four contexts
+
+No executable candidate or comparison ran. Reuse the identical60 frozen records/825 ordered verdict usages and all evidence identities. C01's three summary-catalog usages have aligned object WHAT and retained conditions, but the purpose payload performance versus performing is not established by existing canonical forms. **O3a predicts3 Supported→Unsupported false withholds,0 genuine catches.** Those records already fail saved validation and deliver fallback ledgers, so saved validation remains31 with0 newly rejected records. This is a complete-catalog result, not permission to ignore those three changes.
+
+C02's17 ledger usages remain outside O3a ownership and unchanged. **O3b owns them, then still cannot prove the same purpose payload**, so it predicts20 total false withholds,0 genuine catches, saved validation23 and8 newly rejected records. C03 (four ledger usages) and C04 (three summary usages) have no object Grant claim for the new comparison; both retain existing behavior. A negative object elsewhere in their quote is not a whole-unit reason to reject them.
+
+Full O3a change list:
+
+| Alias | Catalog | Claim hash | Prediction |
+|---|---|---|---|
+| ART0011 | summary | claim-bf1ea5d1528977481659a962d85e8bb71eb058b362e24e65bf2e416511165d57 | supported → unsupported |
+| ART0013 | summary | claim-23286f0aa86cb5740dffb4821fa60d9b69a72f6b1cfe89d6348e5133bb8f6809 | supported → unsupported |
+| ART0014 | summary | claim-15ad79de867da94fc70f6b7003b09efa770ef3ab0fbfa87351e3aa1305dcdf6f | supported → unsupported |
+
+O3b's complete20-item change list is exactly the O1 list above, with the new explicit reader ownership plus unproved purpose payload as its reason. The private complete O3a and O3b predictions each preserve all825 ordered claim/evidence identities; every change is also enumerated in the public prediction. Any actual B4 verdict/identity/validation difference from the selected prediction is a STOP, including an unexpected improvement. No performance/performing rule is authorized to tune the run to zero.
+
+- O3a public alias `a2-public-prediction-revision-5-o3a_existing_scope.json`, SHA256da40591dd10d7cbcc1e8ed0b9d4209488b13de9207f4c4b13427b5248d8e26ec; private complete prediction SHA256bdaf3c329e84c50030798ff3d54c3912839dce1921af82abe07638cf9c3e6af8.
+- O3b public alias `a2-public-prediction-revision-5-o3b_coordinated_scope.json`, SHA256efe1e8287cbd0408396c1dfed3246a392dde02deb1ff0d57d5abbb4a477384ee; private complete prediction SHA256f77448ad024fae2730abe301bd795a6eddefacce45cf0ed5d9ea8ca21c9cbf31.
+
+### Original lease matrix and condition twins
+
+Public alias `o3-lease-condition-matrix-revision-5.json`, SHA256a2532bcf3d3e400f5ded0d480263330291539d4cdc9bc131dd83d342aef42aa5, also embedded in the proposed fixture JSON. All26 original restriction sentences stay verbatim under the documented layout normalization, separate from synthetic additions. Each has a polarity inversion (Unsupported), a faithful rewording using the registered permit/allow alias (Supported), and a dropped-condition slot.
+
+20 original rows have manually annotated conditions: their dropped-condition twins are Unsupported under O3a/O3b. Six originals have no condition to drop; those slots are explicitly N/A. Each has a clearly labelled SYNTHETIC conditioned companion plus an exact faithful twin (Supported) and its missing-condition twin (Unsupported). Nothing added is attributed to the PDF. Original ActorAction guest limits stay strict under every option. The faithful rewordings exercise bounded canonical forms, not diverse unrestricted paraphrase ability.
+
+The five existing object-option-dependent labels take the strict outcomes under O3a/O3b; O2's accepted values remain preserved. Additional29 public boundary cases cover consent form/authority/prior status/polarity, operator/value/unit, purpose/location payload, list membership, a faithful nominalization that remains withheld, the coordinated-scope drop/twin and local-condition ownership twins. Four condition boundary records test substring/empty/zero/missing values. Four O3 reader boundaries expose the a/b ownership choice and exclude reported, conditional and reset cases. These are proposed expected outcomes, not measurements or model gold.
+
+### Four policies side by side — predictions only
+
+| Policy | SAME60 verdict changes | Saved validation | Original26 inversions | Original26 bounded faithful rewordings | Original20 dropped-condition twins | Six synthetic object drop twins | Remaining cost |
+|---|---|---|---|---|---|---|---|
+| O1 STRICT |20 false withholds |31→23 |26 withhold |26 pass |20 withhold |6 withhold |Whole complement/payload proof rejects faithful wording differences |
+| O2 FLIP-ONLY, accepted fallback |0 |31 unchanged |26 withhold |26 pass |Only ActorAction guest drop caught;19 object drops unchanged |Not newly caught |Negative object exception/authority/item loss remains unchecked |
+| O3a EXISTING SCOPE, proposed bounded trial |3 summary-catalog false withholds |31 unchanged;0 newly rejected |26 withhold |26 pass |20 withhold |6 withhold |17 unowned coordinated claims unchanged; unknown payload rewording can withhold |
+| O3b COORDINATED SCOPE |20 false withholds |31→23 |26 withhold |26 pass |20 withhold |6 withhold |Explicit extra reader scope; faithful unknown payloads still withhold |
+
+This is a proposed improvement in dropped-condition coverage, not a claim that O3 solves general fidelity or eliminates all previous costs. A same-kind but different condition must withhold. Authority drift is not solved. Unowned sentence shapes and free condition paraphrase remain limitations. No production quality or unseen qualification claim follows from these paper predictions.
+
+### Revision5 required gates after selection
+
+Record exact operator selection/acceptance of the a/b ownership scope, marker set, condition identity rules, expected labels and full selected prediction before code. Then run all public controls fail-first: wrong inversions/drops must exhibit the registered failure class; faithful controls pin the other direction and need not fail. Extend the existing qualifier owner and comparator once, keeping the raw provenance and removing obsolete assumptions there. No new script or harness.
+
+Reuse the original three mutations plus a condition-preservation bypass (must fail a dropped-condition twin), a kind-only condition mutation (must fail numeric/authority/form countertwins), and an O3b scope-removal mutation only if O3b is selected. Numeric identity probes must include zero, missing/malformed and overflow so no default can turn unknown into a valid value. Probe local/shared-list scope, mixed valid/invalid siblings, marker substrings and prepositional-to boundaries. Full Rust/C9/A1/saved/SAME60 gates and one-push/exact-head oversight PASS/STOP B rules below remain unchanged. No generation or GPU.
 
 ## N4 / N5 — outcome, non-scope and limits
 
@@ -161,9 +246,9 @@ Bound A2 artifacts:
 
 ## Verification plan and acceptance packet
 
-Proposed JSON SHA25698cea98832afb4520b543c9935c9ba923eaf886adff1bf364122e4411d7bf9e0:115 final-verdict controls and21 reader boundaries. Both options share110 final labels;5 labels explicitly differ by selected object option. All26 fictional restrictions have full-sentence inversions and exact faithful twins, plus list-item, exception, authority, mixed-sibling, guest-limit, complement/trap and object/modal boundaries. This is proposed label data, not an executable test suite or model gold. The only changed accepted revision3 label is the listed pets object boundary; the earlier N3 label change was already accepted and committed separately.
+Proposed JSON SHA2565606eb4320f083844a3b7f5c7fe3a29679c90b5776b85d372e8c8ad5e4b523a9:115 legacy final-verdict controls and21 legacy reader boundaries, plus the revision5 packet above. The legacy O1/O2 alternatives share110 final labels;5 labels explicitly differ by selected object option. All26 fictional restrictions have full-sentence inversions and exact faithful twins, plus list-item, exception, authority, mixed-sibling, guest-limit, complement/trap and object/modal boundaries. This is proposed label data, not an executable test suite or model gold. The only changed accepted revision3 label is the listed pets object boundary; the earlier N3 label change was already accepted and committed separately.
 
-Operator acceptance must select O1 or O2, adopt/revise strict grantor wording and conservative ObjectActivity-to-modal handling, approve the explicit boundary change and option-specific/public labels, and accept that option's complete A2 cost. Then record exact relayed acceptance in a contract-only commit **before** Phase B. Oversight recommendations and CI green do not grant this acceptance.
+Revision4 O2 acceptance is recorded above. Revision5 requires a renewed selection of O1/O2/O3a/O3b and acceptance of its labels, limits and complete A2 cost. Record the exact relayed choice before Phase B. Oversight recommendations and CI green do not grant this acceptance.
 
 Phase B after renewed STOP A:
 
@@ -176,8 +261,8 @@ Phase B after renewed STOP A:
 
 ## Implementation summary / cold diff audit
 
-This revision changes only contract text and proposed fixture labels after the separate revision3 acceptance commit. Executable source stays byte-identical to8169514. No Rust tests, candidate policy, inference or GPU work ran. A2 uses read-only frozen input inventory and manual source comparison; no executable comparator was run. The private PDF stays outside the repo; public fixture text is operator-authorized fiction. Each new fixture traces to N1b, N2 or N3 and retains source/provenance. No hardening or unrelated implementation is included.
+Revision5 changes only contract and proposed fixture data after the separately recorded O2 fallback acceptance. It defines a bounded O3 condition representation and two explicit reader scopes; no candidate is implemented. Executable source stays byte-identical to8169514. No Rust tests, candidate policy, inference or GPU work ran. A2 uses read-only frozen input inventory and manual source comparison; no executable comparator was run. The private PDF stays outside the repo; public fixture text is operator-authorized fiction. Each new fixture traces to N1b, N2 or N3 and retains source/provenance. No hardening or unrelated implementation is included.
 
 ## Gap audit
 
-**NOT DONE.** Revision4 O2 and its labels/cost are accepted as fallback. Phase B is held for the separately proposed revision5 O3 comparison and renewed operator selection. All reproduction, policy code, mutations, Rust gates, actual SAME60 and final exact-head PASS remain. No production, qualification or merge hold is released.
+**NOT DONE.** O2 remains accepted fallback. Revision5 O3a/O3b, marker/payload rules, scope costs, fixture labels and complete predictions await independent review and renewed verbatim operator selection. No Phase B. Reproduction, implementation, mutations, Rust gates, actual SAME60 and final exact-head PASS remain. All holds persist.
