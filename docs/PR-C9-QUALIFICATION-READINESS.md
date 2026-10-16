@@ -361,3 +361,45 @@ to build a Phase A harness or consume the proposed budget.
 operator's choices verbatim: admission direction (including offline prerequisites),
 unseen scope/thresholds and call budget. Neither oversight advice nor a green
 check supplies operator acceptance. No merge, ready transition or hold resolution.
+
+## Accepted offline measurement slice (2026-10-16)
+
+Operator acceptance is recorded verbatim in [oversight reply 6208395301](https://github.com/canfieldjuan/document-summarizer/pull/132#issuecomment-6208395301):
+"Add both now (Recommended)"; "Test-only, no production change, no model or GPU. Gives the real #127 result and real size numbers before any design choice."
+The operator then directed this session to "do it".
+
+### Contract
+
+- Root cause: the prior guard-only seam injected Supported instead of parsing
+  the saved A1 answer (`semantic_support.rs:964-988`); the deterministic PDF
+  checkpoint test does not expose the General governing-clause sizes. These
+  are missing measurement paths, not authorization for a semantic repair.
+- Required surface: a cfg(test) readiness module wired from coherent.rs;
+  saved response parsing through existing comparisons::plan/Prepared::parse and
+  apply_semantic_fidelity_guards; a test-only inventory adapter at the General
+  whole_clauses::Clauses owner. Reuse PdfExtractParser, CanonicalNormalizer and
+  Furniture, preserving their original bodies. Output aliases, sizes and hashes.
+- Non-scope: no production body, prompt, schema, runtime, model, cap, label,
+  delivery behavior, installed app or holds change. No GPU/model startup or
+  generation. No unseen run or profile retirement. Do not open or inspect the
+  frozen DV challenge-label file in this slice.
+- Verification plan: commit this acceptance first; fail-first public controls for
+  saved-byte ownership/identity/invalid responses and exact clause-size bounds;
+  prove the generation tripwire; public controls must pass before private input;
+  then replay the frozen A1 bytes and inventory public A/B and DV07-DV18 through
+  actual owners. Missing OCR/claims remain explicit. Mutation checks must catch a
+  bypassed parser, guard or clause inventory. Run focused tests, formatting,
+  strict clippy and the existing C9/SAME60 regression lanes as applicable; prove
+  production bodies unchanged. One push, exact-head review, then report and STOP.
+- Assumptions: A3 measures source-context sizes and unconditional over-limit
+  contexts, not complete claim admission or a page capacity. General and Contract
+  clause readers remain distinct; use only the General owner consumed by Verify.
+
+Admission design remains "Decide after numbers (Recommended)". Unseen protocol
+and 9B scope are accepted directions; dispatch of the proposed 94 calls remains
+unauthorized. Oversight drafts labels; the operator approves them. The mailbox
+reports frozen DV-label SHA256
+`ba5215a3731e6259dd71548e043d540c85dca4b1330af1344413b96b21d688d5`;
+this is a relayed hash only, not a file inspected by this session. All existing
+PR116/126/128 and draft/merge/production holds remain. After the two offline
+measurements, return the numbers for the admission decision and STOP.
