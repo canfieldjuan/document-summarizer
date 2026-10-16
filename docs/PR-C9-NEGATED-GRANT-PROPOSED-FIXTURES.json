@@ -1,5 +1,5 @@
 {
-  "status": "PROPOSED revision5 O3a/O3b; O2 accepted fallback; renewed STOP A, no Phase B",
+  "status": "ACCEPTED revision4 O2 for Phase B; O3a/O3b are unbuilt offline candidates",
   "base_head": "8169514b209fbcb49599de660992886048c3cf7b",
   "cases": [
     {
@@ -927,9 +927,9 @@
       "case": "mock_r23_inversion",
       "seam": "final_semantic_guard",
       "owned_evidence": [
-        "The landlord does not permit shutting off climate control systems below 55\u25e6 F during winter months."
+        "The landlord does not permit shutting off climate control systems below 55◦ F during winter months."
       ],
-      "claim": "The landlord permits shutting off climate control systems below 55\u25e6 F during winter months.",
+      "claim": "The landlord permits shutting off climate control systems below 55◦ F during winter months.",
       "proposed_expected_supported": false,
       "reason": "Fictional lease exact polarity inverse.",
       "fixture_source_alias": "MOCK-R23",
@@ -939,9 +939,9 @@
       "case": "mock_r23_faithful",
       "seam": "final_semantic_guard",
       "owned_evidence": [
-        "The landlord does not permit shutting off climate control systems below 55\u25e6 F during winter months."
+        "The landlord does not permit shutting off climate control systems below 55◦ F during winter months."
       ],
-      "claim": "The landlord does not permit shutting off climate control systems below 55\u25e6 F during winter months.",
+      "claim": "The landlord does not permit shutting off climate control systems below 55◦ F during winter months.",
       "proposed_expected_supported": true,
       "reason": "Exact fictional restriction retains every item and qualifier.",
       "fixture_source_alias": "MOCK-R23",
@@ -999,9 +999,9 @@
       "case": "mock_r26_inversion",
       "seam": "final_semantic_guard",
       "owned_evidence": [
-        "The agreement does not allow waiver of breach by the landlord\u2019s acceptance of late rent."
+        "The agreement does not allow waiver of breach by the landlord’s acceptance of late rent."
       ],
-      "claim": "The agreement allows waiver of breach by the landlord\u2019s acceptance of late rent.",
+      "claim": "The agreement allows waiver of breach by the landlord’s acceptance of late rent.",
       "proposed_expected_supported": false,
       "reason": "Fictional lease exact polarity inverse.",
       "fixture_source_alias": "MOCK-R26",
@@ -1011,9 +1011,9 @@
       "case": "mock_r26_faithful",
       "seam": "final_semantic_guard",
       "owned_evidence": [
-        "The agreement does not allow waiver of breach by the landlord\u2019s acceptance of late rent."
+        "The agreement does not allow waiver of breach by the landlord’s acceptance of late rent."
       ],
-      "claim": "The agreement does not allow waiver of breach by the landlord\u2019s acceptance of late rent.",
+      "claim": "The agreement does not allow waiver of breach by the landlord’s acceptance of late rent.",
       "proposed_expected_supported": true,
       "reason": "Exact fictional restriction retains every item and qualifier.",
       "fixture_source_alias": "MOCK-R26",
@@ -1495,7 +1495,7 @@
     }
   },
   "fixture_option_note": "Legacy shared labels remain accepted. O3 labels/matrix are proposed manual expectations; no executable candidate or baseline test ran. Select O1/O2/O3a/O3b explicitly after review.",
-  "selected_object_comparison_option": "NOT_SELECTED_FOR_IMPLEMENTATION; O2 remains accepted fallback",
+  "selected_object_comparison_option": "O2_FLIP_ONLY",
   "revision4_operator_acceptance": {
     "reviewed_head": "51003a3c2144aa7ec11c3315a4466cccf51cd9da",
     "source_comment": "https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6205666709",
@@ -2307,12 +2307,12 @@
       },
       {
         "alias": "MOCK-R23",
-        "source_verbatim": "The landlord does not permit shutting off climate control systems below 55\u25e6 F during winter months.",
+        "source_verbatim": "The landlord does not permit shutting off climate control systems below 55◦ F during winter months.",
         "complement_kind": "ObjectActivity",
         "conditions_manually_annotated": [
           {
             "marker_id": "BELOW",
-            "raw": "below 55\u25e6 F",
+            "raw": "below 55◦ F",
             "source_span": [
               66,
               77
@@ -2331,11 +2331,11 @@
         ],
         "o3a": {
           "inversion": {
-            "claim": "The landlord permits shutting off climate control systems below 55\u25e6 F during winter months.",
+            "claim": "The landlord permits shutting off climate control systems below 55◦ F during winter months.",
             "expected_supported": false
           },
           "faithful_rewording": {
-            "claim": "The landlord does not allow shutting off climate control systems below 55\u25e6 F during winter months.",
+            "claim": "The landlord does not allow shutting off climate control systems below 55◦ F during winter months.",
             "expected_supported": true,
             "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
           },
@@ -2432,12 +2432,12 @@
       },
       {
         "alias": "MOCK-R26",
-        "source_verbatim": "The agreement does not allow waiver of breach by the landlord\u2019s acceptance of late rent.",
+        "source_verbatim": "The agreement does not allow waiver of breach by the landlord’s acceptance of late rent.",
         "complement_kind": "ObjectActivity",
         "conditions_manually_annotated": [
           {
             "marker_id": "BY",
-            "raw": "by the landlord\u2019s acceptance of late rent",
+            "raw": "by the landlord’s acceptance of late rent",
             "source_span": [
               46,
               87
@@ -2447,11 +2447,11 @@
         ],
         "o3a": {
           "inversion": {
-            "claim": "The agreement allows waiver of breach by the landlord\u2019s acceptance of late rent.",
+            "claim": "The agreement allows waiver of breach by the landlord’s acceptance of late rent.",
             "expected_supported": false
           },
           "faithful_rewording": {
-            "claim": "The agreement does not permit waiver of breach by the landlord\u2019s acceptance of late rent.",
+            "claim": "The agreement does not permit waiver of breach by the landlord’s acceptance of late rent.",
             "expected_supported": true,
             "rewording": "Registered permit/allow form alias only; no free paraphrase claim."
           },
@@ -2995,5 +2995,12 @@
       "expected_numeric_extent": "unknown",
       "reason": "No default zero."
     }
-  ]
+  ],
+  "phase_b_operator_decision": {
+    "decision": "Build O2, O3a offline (Recommended)",
+    "comment": "https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6207435113",
+    "scope": "Accepted revision3/revision4 O2 only; no O3 implementation",
+    "target": "0/825 changes; 31 saved validations",
+    "stop": "Exact-head oversight PASS, then STOP B; all holds remain"
+  }
 }

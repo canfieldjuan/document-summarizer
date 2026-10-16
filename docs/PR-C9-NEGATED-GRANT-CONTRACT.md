@@ -1,6 +1,16 @@
 # PR128 separate negated-grant round — contract revision 5
 
-Status: **PROPOSED revision5; O2 remains the accepted fallback. STOP A again. No Phase B.** The operator asked for O3's bounded definition and predictions before choosing O1/O2/O3. This proposal includes O3a (existing reader scope) and O3b (explicit coordinated may-not scope extension). No product code, Rust/policy tests, inference or GPU work. PR128 remains draft/stacked; all PR116/126/128 holds remain. No merge, ready or base change.
+Status: **ACCEPTED revision4 O2; Phase B authorized. Revision5 O3a/O3b remain unbuilt offline candidates.** All PR116/126/128 production, qualification and merge holds remain. No merge, ready or base change; no inference, live preflight, tokenizer or GPU work.
+
+## Operator decision: build O2; O3 offline
+
+Oversight relayed the operator's decision verbatim in [issuecomment-6207435113](https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6207435113): **“Build O2, O3a offline (Recommended)”**.
+
+Option text: **“Session builds the accepted O2 (flip-only) now. O3a stays a documented offline candidate, not built, until independently labelled summaries (natural rewordings, harmless shortening, real dropped exceptions/changed values) show it tells them apart. Production holds unchanged.”**
+
+Implement accepted revision4 O2 with all unchanged revision3/revision4 choices. ActorAction remains strict; ObjectActivity checks opposite polarity only and preserves today's negative/negative behavior. The complete ordered A2 target is zero changes across825 verdict usages and31 saved validations. Any difference is a STOP. Public fail-first controls, origin repair, required mutations, Rust gates and SAME60 precede one push and oversight's exact-head PASS. Then STOP B; no merge or ready.
+
+O3a and O3b below are historical offline proposals, not implementation scope. Their adoption gate requires independent labels covering natural rewordings, harmless shortening, real dropped exceptions and changed condition values; the present corpus does not measure real-world false-withhold frequency. No O3 condition marker set, condition comparator or coordinated may-not extension is built here.
 
 ## Verbatim operator acceptance of revision4 and later O3 direction
 
@@ -12,7 +22,7 @@ Acceptance relayed in [issuecomment-6205666709](https://github.com/canfieldjuan/
 
 Subsequent decision relayed in [issuecomment-6206263352](https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6206263352): **“Yes, prove O3 first (Recommended)”**. Option text: **“One more contract-only revision with O3 defined and predicted against the 60 summaries and the 26 lease restrictions plus dropped-exception versions. You then pick O1, O2 or O3. No code until then; O2 stays as the fallback.”**
 
-This commit records the accepted fallback and the later HOLD. It does not select or implement O3. Renewed STOP A applies to revision5.
+That HOLD was superseded by the explicit build-O2 decision above. Revision5 remains an unbuilt offline proposal.
 
 ## Verbatim operator acceptance of revision3
 
@@ -33,7 +43,7 @@ Adopt N1 modal inclusion and N3 mirrored mapping. Only negative_may_vs_negative_
 - Archived C9 harness: comparisons/parity.rs::archived_c9_verdicts_survive_relation_guard. c9-native-baseline.json SHA256 3351e2bc357853ec389e13220e63497363c4ba404c8c87232784e20564656a2e, recorded-result pin9dc813f6618258a23333b344c295bb43e226d79c5caecc15bc021d5ed33e9936. c9-parity-manifest.json SHA256 c3d186a65d3a28183ed6bd39fb70b3c74b081f6d41a3ba2482902fa79c6937af; public C9 source fixture SHA256 079211fe128c9bced0c52e8c36c4e5fd665f4c506b33995eaee7fa57097de627.
 - The manifest pins the original system prompt7c3b024ddc32922d8fc8b50e0c9b76aab4826cd440950b04b2cce039ce08db48 and gateway runtime/model/settings receipts91a07a2a0302853350fc5c95a12094336241790a5baecf71c0fc00d657b76c40 /8c06536e8971c2872ac27477564e1bc114c69f3e854520296c8594924c6638ec /3be33f0dfc9742436700233d3310154b6943810c857bcee3af319d70ab3fa12e. Archived logical inputs, selectable text/schema and recorded responses remain unchanged. No model or server starts; this is CPU-only policy work.
 
-Every departure from that setup: represent bounded negative Grants and typed ActorAction/ObjectActivity complements; preserve their grantor, polarity, object/list extent and raw provenance; represent positive objects for the activated negative-family comparison; add typed permission-condition metadata at the same origin and O3 WHAT/polarity/condition comparisons if selected; widen only bounded coordinated may-not object ownership if O3b is selected; add public controls and owner mutations. ActorAction retains its accepted raw projection/comparison; new object-condition fields do not relax it. No inference request, prompt, framing, decoder, sampler, profile, runtime or storage departure is allowed.
+Every departure from that setup: represent bounded negative Grants and typed ActorAction/ObjectActivity complements; preserve their grantor, polarity, object/list extent and raw provenance; represent positive objects for the activated negative-family comparison; add public controls and owner mutations. ActorAction retains its accepted raw projection/comparison; new object-condition fields do not relax it. No inference request, prompt, framing, decoder, sampler, profile, runtime or storage departure is allowed.
 
 ## Revision4 evidence and authority
 
