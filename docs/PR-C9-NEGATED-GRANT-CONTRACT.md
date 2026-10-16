@@ -1,6 +1,16 @@
 # PR128 separate negated-grant round — contract revision 3
 
-Status: PROPOSED, NOT ACCEPTED. Supersedes the local582b4ec proposal only after explicit operator acceptance relayed verbatim by oversight, including the corrected labels and N1–N5 choices below. No executable candidate before STOP A. Prior consolidation PASS remains bound to8169514b209fbcb49599de660992886048c3cf7b. Contract scope is the operator's separate round, issuecomment-6159036013; review corrections are6177293976. The original proposal is preserved on codex/negated-grant-proposal-v1 and in durable evidence; no Git history was rewritten.
+Status: ACCEPTED revision 3 with the operator amendments recorded below. Phase B is ON HOLD pending revision4 for object/activity forms and renewed STOP A acceptance; this commit does not start implementation. Prior consolidation remains8169514b209fbcb49599de660992886048c3cf7b. Original proposals and Git history remain preserved.
+
+## Verbatim operator acceptance of revision3
+
+Relayed by oversight in [issuecomment-6204935953](https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6204935953), reviewing76aa2d7:
+
+1. N1 answer: **“Yes, include it (Recommended)”**. Option text: “'shall not / will not permit|allow' is recognized and checked exactly like 'does not permit'. Conditional or reported wording still stays out.”
+2. N3 answer: **“Pass it (Recommended)”**. Option text: “Mirrors what the checker already accepts for the positive case ('Landlord permits Tenant to sublet' → 'Tenant may sublet'). Consistent and matches how people summarize leases.”
+3. Acceptance answer: **“Accept (Recommended)”**. Option text: “The session records your answers, adds the passive-wording 'not covered' note, then writes failing tests first and builds the fix. No merge; it stops at my final review.”
+
+Adopt N1 modal inclusion and N3 mirrored mapping. Only negative_may_vs_negative_grant changes label, to Supported; the remaining53 proposed labels carry over. Subsequent operator decision [issuecomment-6205088924](https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6205088924) adds object/activity forms and requires contract revision4 plus renewed acceptance before code. This historical acceptance remains valid for its unchanged decisions.
 
 ## Inventory first: proven setup and results
 
@@ -31,7 +41,7 @@ Options:
 
 Exact recommended window/forms: immediately before permit/permits/allow/allows, own do or does followed by not (two word tokens), or the matching contraction alias as its same two-token expansion. Auxiliary forms use the uninflected permit/allow spelling. Grantor and explicit actor-to-action extent must be established. Store Grant, the existing negated=true, raw grantor, actor and complete action/qualifier spans at this one reader. Ordinary positive grants keep their current representation and behavior.
 
-**Explicit modal option for STOP A (recommended include):** shall not / will not immediately before permit/allow use the same negative Grant field, with original modal wording retained; this does not license replacing a prohibition or future statement with a claim about historical conduct. Also own a single finite subject + shall/will not + first predicate, followed by a coordinated `or permit/allow` predicate whose explicit actor-to-action extent is present. The window is that same finite coordinated predicate group, ending at a sentence/semicolon boundary, a new finite subject, a conditional/reported scope, or a contrasting/affirmative scope reset. Do not propagate negation across those boundaries. Never infer a missing actor/to/action. Conditional, reported, uncertain and interrogative scope stays unowned. This is an explicit N1 grammar option, not implied by the earlier do/does-not recommendation.
+**Adopted modal option (operator: Yes, include it):** shall not / will not immediately before permit/allow use the same negative Grant field, with original modal wording retained; this does not license replacing a prohibition or future statement with a claim about historical conduct. Also own a single finite subject + shall/will not + first predicate, followed by a coordinated `or permit/allow` predicate whose explicit actor-to-action extent is present. The window is that same finite coordinated predicate group, ending at a sentence/semicolon boundary, a new finite subject, a conditional/reported scope, or a contrasting/affirmative scope reset. Do not propagate negation across those boundaries. Never infer a missing actor/to/action. Conditional, reported, uncertain and interrogative scope stays unowned. This is an explicit N1 grammar option, not implied by the earlier do/does-not recommendation.
 
 The public control is HUD-90105a, section 24 ([official PDF](https://www.hud.gov/sites/dfiles/OCHCO/documents/90105a.pdf)), SHA256 ae735de3c9619a2bb7f2431db1d06e2476468d627e82232fe463815b08b78754. Its sentence is quoted in the proposed fixture with an exact faithful twin. The positive inversion “The Tenant may permit his/her family or guests to undertake hazardous acts.” must be Unsupported. The faithful complete sentence must remain Supported. A second inversion, “The Tenant may undertake hazardous acts.”, must also withhold: the original Tenant prohibition cannot disappear when the coordinated grant is represented. The reader owns coordinated raw extent, including the comma between `undertake` and its object; do not treat that comma as a missing-action failure or add a downstream repair. Preserve every original non-grant modal obligation in the Verify projection; do not replace an entire compound clause with only its grant projection.
 
@@ -62,7 +72,7 @@ Recommended decisions:
 - Positive may claim against an aligned negative Grant source: Unsupported; the cited negative grant does not license that positive permission. Do not call this independent proof of a universal prohibition.
 - Negated may claim against an aligned positive Grant source: Unsupported; opposite polarity.
 - Named negative Grant claim against a source that states only negative may: Unsupported, because the claim invents a grantor. This corrects the prior proposal's mislabeled Supported case.
-- Negative may claim against only a named negative Grant: **recommended conservative option is Unsupported**. Absence of permission from one authority need not establish a categorical actor prohibition. Alternative: explicitly accept the mirrored positive-grant mapping and label this Supported. That has fewer false withholds but can falsely approve the broader categorical statement; it is a semantic decision for the operator, not punctuation normalization. The proposed fixture uses the conservative option and requires explicit acceptance or revision.
+- Negative may claim against only a named negative Grant: **Supported, mirrored mapping adopted by the operator**. This matches the existing positive-grant mapping for the same actor/action. It reduces false withholds for faithful lease summaries. The explicit semantic cost is treating the named authority's negative grant as licensing this modal shorthand. The conservative alternative would withhold it; the operator did not choose that option.
 
 Faithful negative grant/grant, faithful positive grant/grant and existing positive may controls retain their expected results. The existing positive unnamed-grantor equivalent is a documented pre-existing gap in #129; do not encode it as newly endorsed gold or silently fix it in this negative round.
 
@@ -74,7 +84,7 @@ Alternative: introduce a new contradiction delivery state/reason. That would wid
 
 ## A1 / N5 — non-scope, budget and stop
 
-No general English entailment or new lexicon beyond N1; no ensuring blacklist, A1-specific exception, whole-unit flag, writer/prompt/model/schema/decoder/sampler/profile/gateway/native/tokenizer change, source reassociation or source shortening. No new scripts, harness tooling or diagnostic code in the repo. Keep both prior non-blocking P3s outside this repair. No global positive grant comparison and no #129 implementation in this goal.
+No general English entailment or new lexicon beyond N1; no ensuring blacklist, A1-specific exception, whole-unit flag, writer/prompt/model/schema/decoder/sampler/profile/gateway/native/tokenizer change, source reassociation or source shortening. No new scripts, harness tooling or diagnostic code in the repo. Keep both prior non-blocking P3s outside this repair. No global positive grant comparison and no #129 implementation in this goal. Passive “is not permitted to …” and “no pets are allowed” / “no X are allowed” are explicit non-scope: their behavior remains unchanged on both sides, tracked as #129 follow-up, not claimed covered by this round.
 
 N5 is fixed by the objective, not permission to choose a broader fix. Alternative general-language or writer work is a separate accepted scope. Keeping N5 bounds can leave faithful paraphrases withheld, while expanding them without proof could falsely approve claims; neither is hidden by a new exception.
 
@@ -90,7 +100,7 @@ Public A2 aliases/hashes are appended below. Private ownership classifications a
 
 ## Proposed controls and approval
 
-The revised JSON contains39 final-guard controls and15 reader boundaries, all proposed labels, not model-generated gold. It adds final inversion controls for every uncertain/unowned spelling, faithful negative-surface twins, grantor mismatch and dropped negative scope, plus conditional/question inversions. Contraction is proposed as an owned spelling alias. Revision3 adds the verified public HUD inversion, exact faithful twin and original-actor prohibition control, direct shall-not/will-not twins and a coordinated will-not twin; four modal reader controls bind the recommended include option. A contrasting-new-subject positive control and false-negative twin prevent negation from crossing its owning predicate group. Additive not-only remains nonnegative. The conservative N3 label is an explicit choice, not an accepted rule yet. Original v1 artifacts/labels remain preserved in durable evidence. Independent label review and verbatim relayed operator acceptance of this exact revision precede any executable tests or policy changes.
+The revised JSON contains39 final-guard controls and15 reader boundaries, all proposed labels, not model-generated gold. It adds final inversion controls for every uncertain/unowned spelling, faithful negative-surface twins, grantor mismatch and dropped negative scope, plus conditional/question inversions. Contraction is proposed as an owned spelling alias. Revision3 adds the verified public HUD inversion, exact faithful twin and original-actor prohibition control, direct shall-not/will-not twins and a coordinated will-not twin; four modal reader controls bind the recommended include option. A contrasting-new-subject positive control and false-negative twin prevent negation from crossing its owning predicate group. Additive not-only remains nonnegative. The N3 mirrored label is now explicitly accepted; its earlier conservative rationale is superseded. Original v1 artifacts/labels remain preserved in durable evidence. Independent revision3 label review and verbatim operator acceptance are recorded above. The later revision4 scope still requires renewed acceptance before any executable tests or policy changes.
 
 ## Phase B gates after STOP A
 
@@ -107,10 +117,10 @@ Revision3 is contract and proposed labels only, following preserved582b4ec and e
 
 ## Gap audit
 
-NOT DONE. STOP A: full contract and corrected39+15 labels and the explicit N1 modal include/exclude choice await independent review and the operator's verbatim relayed acceptance. Then reproduction, implementation, mutations, full gates, actual SAME60 parity and final exact-head oversight PASS remain. The earlier N2 bounded-direction decision does not accept this complete contract.
+NOT DONE. Revision3 choices and39+15 labels are accepted with the one N3 change. Phase B is held for revision4 object/activity scope and renewed STOP A acceptance. Reproduction, implementation, mutations, full gates, actual SAME60 parity and final exact-head oversight PASS remain.
 
 ## Revision3 bound artifacts
 
-- Proposed fixture SHA256: 7b146cf41b9387aab62038060cf02b96035fc407e9f21495b76a480c3cc6d9ec
+- Proposed fixture SHA256: b8baa43d44e0b8a2be1eee6c725eac6eb64f9f8e1b906aff541f23a80bc0aab9
 - Public A2 prediction SHA256: bea479417ec81e51acbf477305098dc3ac4c43b22543ec03823c79951d6468e5
 - Private complete ordered prediction SHA256: e3c85968d1cbdeebb180c133700582d78bfbeeef9b85221f32a2cf21482e7c82

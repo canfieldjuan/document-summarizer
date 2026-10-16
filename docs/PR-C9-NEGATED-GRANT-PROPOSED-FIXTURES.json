@@ -1,5 +1,5 @@
 {
-  "status": "REVISED PROPOSAL; not accepted; no executable fixture binding",
+  "status": "ACCEPTED revision 3, as amended by operator answers relayed verbatim; Phase B HOLD for revision 4",
   "base_head": "8169514b209fbcb49599de660992886048c3cf7b",
   "cases": [
     {
@@ -79,8 +79,8 @@
         "Landlord does not permit Tenant to keep pets."
       ],
       "claim": "Tenant may not keep pets.",
-      "proposed_expected_supported": false,
-      "reason": "Recommended conservative N3 policy: absence of a named grant does not alone establish a categorical actor prohibition. Operator may explicitly choose the mirrored mapping instead."
+      "proposed_expected_supported": true,
+      "reason": "Operator accepted mirrored N3 mapping: named negative Grant licenses negative may for the same actor/action, consistently with the existing positive mapping."
     },
     {
       "case": "negative_grant_vs_negative_may",
@@ -518,5 +518,15 @@
     "work": "HUD-90105a Model Lease for Subsidized Programs",
     "rights": "United States federal government work; public domain",
     "faithful_twin": "Exact normalized original sentence, not a model paraphrase"
+  },
+  "operator_acceptance": {
+    "revision": 3,
+    "head_reviewed": "76aa2d7b56c956f6b164031d521f332d24d980cf",
+    "source_comment": "https://github.com/canfieldjuan/document-summarizer/pull/128#issuecomment-6204935953",
+    "answers_verbatim": [
+      "Yes, include it (Recommended)",
+      "Pass it (Recommended)",
+      "Accept (Recommended)"
+    ]
   }
 }
