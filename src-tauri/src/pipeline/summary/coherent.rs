@@ -6,6 +6,8 @@ use super::*;
 
 mod budget;
 pub(super) mod page_furniture;
+#[cfg(test)]
+mod readiness;
 mod semantic_support;
 mod trim;
 mod verification;

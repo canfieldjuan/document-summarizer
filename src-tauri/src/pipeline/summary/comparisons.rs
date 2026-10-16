@@ -463,4 +463,17 @@ pub(super) fn fixture_verdict_response(request: &ModelRequest, verdict: ClaimVer
 }
 
 #[cfg(test)]
+pub(super) fn readiness_catalog_size(texts: &[&str]) -> Result<usize, PipelineFailure> {
+    span_catalog(texts).map(|catalog| catalog.len())
+}
+
+#[cfg(test)]
+pub(super) fn readiness_prepared_admits(
+    input: &PromptVerificationClaim,
+    schema_limit: usize,
+) -> bool {
+    Prepared::new(input, schema_limit).is_ok()
+}
+
+#[cfg(test)]
 mod tests;

@@ -1,6 +1,8 @@
 # C9 qualification readiness — Phase A
 
-Status: **PROPOSAL; NOT QUALIFIED; STOP A after publication.** No implementation,
+Status: **Offline seams accepted and measured; exact-head review pending; NOT QUALIFIED.**
+The original Phase A proposal below is retained as its historical inventory.
+The accepted measurement results at the end supersede its A2/A3 unknowns. No implementation,
 generation, GPU use, runtime startup, activation or hold release is authorized.
 Audit base: `4fdb5191d35b43f1dc810527d1ecc68fc30852a5`, the passed PR128 head.
 All code citations below refer to that revision. Historical receipts are identified
@@ -403,3 +405,145 @@ reports frozen DV-label SHA256
 this is a relayed hash only, not a file inspected by this session. All existing
 PR116/126/128 and draft/merge/production holds remain. After the two offline
 measurements, return the numbers for the admission decision and STOP.
+
+Measurement detail: A/B rejection below the scalar cap requires inspecting the
+existing excerpt-catalog admission. A cfg(test) wrapper in comparisons.rs calls
+span_catalog unchanged and returns only its size/error. The adapter compares
+individual-source and union admission to identify an enum-union overflow without
+duplicating tokenization or enumerating excerpts independently. No production
+body or cap changes. This remains within the accepted offline measurement scope.
+
+## Accepted offline results — return admission decision to operator
+
+### A2: actual saved-response replay
+
+The frozen A1 logical request matches the current planner exactly, including
+system/user bytes, schema, decoder serialization, seed, ordinal and output cap.
+The draft is unchanged. The real comparison parser returns **Supported**; the
+existing semantic guard returns final **Unsupported**, with diagnostic reason
+`evaluation_or_causal_relation`. The verdict-changing owner is
+`src-tauri/src/pipeline/summary/coherent/semantic_support.rs:4878-4879`.
+`coherent/readiness.rs:103-115` feeds the actual parsed verdict to that owner;
+it does not inject Supported. This is offline evidence, not a live model or
+full completion/delivery qualification.
+
+### A3: General source-owner size inventory
+
+Counts below deduplicate effective full source strings, just as admission does.
+An expanded context comes from General `Clauses::context`; quote-only means that
+owner supplies no larger context and the verifier retains its existing exact-
+quote fallback. It does not mean the document has no logical clause or heading.
+The inventory calls General `Clauses::segment/context` with the current Furniture
+policy, not the separate Contract heading reader. Sizes are Unicode scalars.
+P50/P90 use nearest rank. A/B use their frozen public normalized artifacts;
+DV PDFs go through the actual parser and canonical normalizer, without OCR/model.
+
+| Alias | Effective source values | Expanded / quote-only | Min / P50 / P90 / max | Values >4,096 | Omitted source units |
+| --- | ---: | ---: | --- | ---: | ---: |
+| A | 12 | 0 / 12 | 418 / 433 / 476 / 480 | 0 | 0 |
+| B | 24 | 0 / 24 | 401 / 433 / 485 / 493 | 0 | 0 |
+| DV07 | 33 | 0 / 33 | 81 / 441 / 569 / 595 | 0 | 9 |
+| DV08 | 5 | 0 / 5 | 89 / 143 / 1070 / 1070 | 0 | 2 |
+| DV09 | unmeasured | unmeasured | `ENCRYPTED_PDF_UNSUPPORTED` | unmeasured | unmeasured |
+| DV10 | 6 | 1 / 5 | 344 / 495 / 4886 / 4886 | 1 | 1 |
+| DV11 | unmeasured | unmeasured | `ENCRYPTED_PDF_UNSUPPORTED` | unmeasured | unmeasured |
+| DV12 | 27 | 1 / 26 | 114 / 374 / 970 / 2207 | 0 | 0 |
+| DV13 | 2 | 0 / 2 | 545 / 545 / 585 / 585 | 0 | 1 |
+| DV14 | 211 | 0 / 211 | 5 / 352 / 544 / 600 | 0 | 485 |
+| DV15 | 50 | 39 / 11 | 28 / 1626 / 5102 / 13569 | 11 | 3 |
+| DV16 | 115 | 0 / 115 | 17 / 434 / 562 / 595 | 0 | 99 |
+| DV17 | 30 | 0 / 30 | 29 / 444 / 566 / 589 | 0 | 9 |
+| DV18 | 9 | 0 / 9 | 15 / 141 / 585 / 585 | 0 | 6 |
+
+DV09 and DV11 are **unmeasured**, not zero. The real native parser refuses them
+at `src-tauri/src/pipeline/parser.rs:82-87` with `ENCRYPTED_PDF_UNSUPPORTED`.
+Under the accepted unseen protocol every case must admit, so their **four
+required challenge claims currently fail readiness**. This is a product gap;
+there is no decryption, replacement, scan conversion or label substitution here.
+
+DV10 has one source context of 4,886 scalars; DV15 has eleven over-limit contexts,
+maximum 13,569. Any claim needing those whole contexts is inadmissible regardless
+of how short its prose becomes. The other observed zero counts do not establish
+capacity: the owner often uses quote-only values and reports omitted source units.
+No DV model-generated claim/source set exists, so DV claim-level admission counts
+remain unknown. No page limit or admission success rate follows from this table.
+
+### Public A/B: first rejecting limit for each real saved claim
+
+All nine claim-plus-source totals are below 4,096. The existing `span_catalog`
+owner rejects seven source unions: every individual source catalog admits, but
+the union exceeds 8,192 values (`comparisons.rs:122-125`). For the other two,
+both source and claim catalogs admit and the actual `Prepared::new` rejects at
+its schema-byte gate (`comparisons.rs:198-204`), with native 1,048,576 and gateway
+250,000 byte caps unchanged. The diagnostic uses the planner's full-source
+projection; it does not enumerate spans or build a replacement schema.
+
+| Claim ordinal | Claim + unique sources (scalars) | First rejection on native and gateway |
+| --- | ---: | --- |
+| A1 | 2897 | source enum >8,192 |
+| A2 | 2971 | source enum >8,192 |
+| A3 | 2653 | source enum >8,192 |
+| B1 | 2527 | source enum >8,192 |
+| B2 | 2635 | source enum >8,192 |
+| B3 | 2689 | source enum >8,192 |
+| B4 | 2534 | schema bytes >1,048,576 (native), >250,000 (gateway) |
+| B5 | 2547 | schema bytes >1,048,576 (native), >250,000 (gateway) |
+| B6 | 2762 | source enum >8,192 |
+
+These are fresh deterministic planner observations, not the old document-level
+A/B rejection reused as a per-claim count. No preflight or generation ran.
+
+### Verification, cold diff audit and remaining gap
+
+- Acceptance-only commit `3924ff4` preceded code. The two missing-measurement
+  probes failed first: absent replay and empty size inventory.
+- Eight public controls cover supported/unsupported paths, modality demotion,
+  malformed/missing/foreign responses, exact request binding, empty input,
+  4,095/4,096/4,097 Unicode scalar sizes, parent/cross-block ownership, partial
+  visual pages, catalog boundaries and generation/preflight/startup tripwires.
+  Public controls passed before the private measurements.
+- All three mutations were caught: fabricated parser result, bypassed guard,
+  and byte counting instead of scalars. Sources were restored. A mutation-runner
+  selector initially matched two expressions and stopped; only its selection
+  was narrowed before the remaining probe. A new negative assertion initially
+  used the wrong parser error-code name; it was corrected to the existing
+  `MODEL_VERIFICATION_RESPONSE_INVALID`, without weakening rejection.
+- `cargo test --lib`: **924 passed, 0 failed, 35 ignored**, including the archived
+  30-case C9 regression. Formatting and all-target/all-feature strict Clippy pass.
+  Ordinary-library `c9_production_gate` with all features: **5 passed**.
+- Fresh existing SAME60 replay: all **825 ordered verdicts and full JSON rows
+  equal** the prior O2 result; **31/60** saved summaries validate. The result hash
+  is unchanged. It was rerun because literal source-file identity was not met.
+- Cold diff: `coherent.rs:9-10` adds only cfg(test) module wiring;
+  `comparisons.rs:465-476` adds only cfg(test) catalog/Prepared inspection wrappers;
+  `coherent/readiness.rs` contains the adapters, public controls and ignored
+  private runner. Existing production bodies are byte-identical after removing
+  only those added cfg(test) items. Per-file comparison covers every existing
+  source file. This document records acceptance/results. No dependency, workflow,
+  prompt, model, schema, cap, settings, saved-input or installed-app change.
+- Actual offline measurement: **zero model completions, native preflights and
+  runtime startups; no GPU**. Frozen DV label file was not opened or inspected.
+
+Evidence aliases under `c9-qualification-readiness-20261016`:
+
+| Alias | SHA256 |
+| --- | --- |
+| `seams-measurement-report.json` | `57ce54ed63953ad08883fb165c1a515b17e35740901bbedf4952f1e310275e5e` |
+| `seams-production-source-proof.json` | `a2126fb9b15716ab814b8eb6f97862d2d0482a8568e708aab382078e8f29d4fd` |
+| `seams-mutations.json` | `e3d1b17452a13df93d4a534e4e2464e177b6b6bfe0c1c91902124334606c815d` |
+| `seams-lib.log` | `a98a023658cb2c5d1888c288c303931f3dc0bbb2dfffd3e9d5a4b60f37c64bc8` |
+| `seams-clippy.log` | `971ad18b6a3701313515dc2c9dc287aa1f48af656214b4558ae80c58eb3f5e16` |
+| `seams-ordinary-gate.log` | `3ca19da0a79ecf715e4dd2b0487587e584bcf3f860fb9fdc518ecf68e212b28f` |
+| `seams-fail-first.log` | `ac39c3e79ac5066155e954039b728f19fc73910f5388928ddfd62a23b5f08943` |
+| `private/seams-same60.json` | `ceee845cb539968ed40b87185484496e08f455057040665352559cf96b2e5b53` |
+| `private/seams-input-packet.json` | `4372001f47546db0a8e74a42b8ef5fa7d0ed48056f3dfe294fb675f8cc74c630` |
+| `tracked/readiness.rs` | `01f99f20dc96b499fc910eb0477b471c2b42e6f993f945b65c52c41e855a742d` |
+
+**NOT DONE for qualification.** The accepted offline measurements and local
+verification are complete; exact-head CI/review follows the single push. The
+unseen run is not ready: four challenge cases cannot admit due to encrypted
+inputs, and full-document admission remains unsolved. Return these measured
+limits to the operator before selecting a design. Smaller claims alone cannot
+solve an indispensable oversized source or guarantee enum/schema admission.
+No behavioral repair, unseen generation, profile retirement, ready transition,
+merge or hold release is authorized. **STOP after reporting A2/A3 and review.**
