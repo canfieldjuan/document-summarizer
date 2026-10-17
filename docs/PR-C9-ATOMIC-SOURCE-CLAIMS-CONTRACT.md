@@ -492,7 +492,8 @@ for the new General revision. Keep historical General contexts, Contract's full
 clause list, heading grammar and extraction categories unchanged.
 
 - One resolver handles explicit `Section N`, `Sections N`, `§ N`, `Article N`,
-  enumerated lists (`N and N`; `N, N and N`) and ranges (`N through N`). Each
+  enumerated lists (`N and N`; `N, N and N`) and ranges (`N through N`,
+  hyphen or en dash). Each
   list/range member resolves to its own owned target. Reuse the existing decimal
   and Article identity parsers and source-heading ownership; do not add another
   number parser or infer a dependency by shared words, actors or model output.
@@ -510,13 +511,13 @@ clause list, heading grammar and extraction categories unchanged.
   parent context. A missing or duplicate in-document target, unclear boundary,
   or other genuinely unresolvable in-document reference is `unresolved` and
   blocks the affected plan. An explicit in-document reference form the resolver
-  does not support (for example paragraph, subsection (b), Exhibit or Schedule
-  pointing inside the supplied document) is `unresolved` with reason
+  does not support (for example paragraph or subsection (b) pointing inside the
+  supplied document) is `unresolved` with reason
   `unsupported_form` and blocks the affected plan. It is never silently treated
   as independent. This does not claim to solve arbitrary semantic references
   in prose.
-- Only a reference qualified to a document not supplied is `external`, not an internal
-  missing-target error. Preserve its exact text and document identity; do not
+- A reference qualified to a document not supplied, or an absent annex under the
+  accepted annex rule below, is `external`, not an internal missing-target error. Preserve its exact text and document identity; do not
   attach a same-number clause from this document, invent external source IDs,
   or fetch the absent document. Keep the reference with its governing unit and
   disclose it in source coverage as “text not in this document”. This status is
@@ -534,6 +535,43 @@ clause list, heading grammar and extraction categories unchanged.
   owner repair; do not skip the clause, cut context or claim complete coverage.
   Whole-document input does not make a guessed dependency acceptable. External
   status cannot conceal an ambiguous internal reference.
+
+### Accepted annex-reference amendment — local text-match review required
+
+Oversight relayed the operator decision verbatim in mailbox `52f39bc6`:
+“Accept (Recommended)”. The chosen option was: “Doc Sum adds
+attachment/appendix/exhibit/schedule references under that rule, with tests,
+offline. Everything else stays held.” This is the acceptance record before any
+annex implementation; mail this contract-only local commit for worktree match
+review. It travels with the round's single later push, not a separate push.
+
+At the same source/heading/resolver owner, recognize attachment, appendix,
+exhibit and schedule references with their exact labels. A reference resolves
+only to a single in-document annex heading carrying that exact label. The
+resolved annex's full governing text, parents and dependencies travel in the
+existing source-owned closure. Duplicate labels or an unclear annex boundary
+remain `unresolved` and block. Do not select one duplicate or suppress uncertainty.
+
+When no matching annex is supplied, return typed `external` status for an absent
+annex. Preserve the exact reference and label with its governing unit, disclose
+“attachment not included in this document”, and do not block on absence alone.
+The summary may name that obligation/reference; it must never assert the absent
+annex's content. No fetch, invented source, guessed annex or same-label attachment
+from outside the supplied document. This explicit accepted exception supersedes
+T1's earlier unsupported-form treatment for these four annex kinds only.
+
+Public synthetic twins must cover a unique included annex, an absent annex
+(non-blocking, faithful reference versus unsupported absent-content assertion),
+duplicate labels, and an unclear annex boundary. Preserve exact spans, source
+order, closures, the unsupported status of other unsupported internal forms,
+and unchanged historical General/Contract outputs. The heading interpretation
+change is versioned at its owner; it is not a downstream annex re-scan.
+
+All already accepted scanner/qualifier/range and heading-origin repairs remain
+required, with fail-first public twins. Re-measure both original inputs through
+the actual owner, zero generation. Any unresolved reference or boundary still
+blocks dependent work; report reasons without tuning the count toward zero.
+All freeze, private-evidence, live-budget, production, merge and ready holds stay.
 
 ### Proof, compatibility and measurement gates
 
