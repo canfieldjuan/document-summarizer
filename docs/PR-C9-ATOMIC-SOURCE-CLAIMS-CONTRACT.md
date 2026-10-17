@@ -952,3 +952,28 @@ variants, and real DB reload. Reuse the original rejected request as the capacit
 regression; do not reframe it as an admitted model request. Finish the remaining
 accepted offline build and its original C9/SAME60/full verification gates before
 the round's single code push and exact-head review. Until acceptance: STOP.
+
+
+## Recorded operator acceptance — deterministic assembly
+
+ACCEPTED: oversight mailbox `671e6ba2`, 2026-10-17, relays Juan's explicit
+**Accept (Recommended)** for the proposal at local contract-only commit
+`4884e453c1db4823ba8d41b53da65553fee069ee`, contract SHA256
+`29cb08a2eba2423cd4f7030a91fac84771be0dcf691b5f16e5c71597b007aaa0`.
+This supersedes that proposal's pending-acceptance stop only.
+
+Replace the consolidation model call with deterministic assembly: every section's
+claims remain in document order; only exact duplicates with identical text,
+quotes and governing sources may be removed; every origin retains full lineage.
+Each final claim still receives complete governing source at C9. More than the
+accepted distinct-claim ceiling stops the summary without selecting a subset.
+Near-duplicates remain separate and may make the result repetitive; this is the
+operator-accepted trade-off.
+
+Record this acceptance in a contract-only commit before assembler behavior code.
+Proceed test-first offline, replay the frozen public candidate packet with zero
+generation, retain the rejected-request boundary regression, and complete the
+amendment's boundary/invalid/stale/reload proofs and remaining original offline
+build. The one code push and exact-head review wait for the complete original
+C9/SAME60/full gates. PR116, production, live, merge, ready and freeze holds all
+remain unchanged. No live budget is granted.
