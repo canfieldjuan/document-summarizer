@@ -509,10 +509,13 @@ clause list, heading grammar and extraction categories unchanged.
   preserve canonical source order. Retain complete governing exceptions and
   parent context. A missing or duplicate in-document target, unclear boundary,
   or other genuinely unresolvable in-document reference is `unresolved` and
-  blocks the affected plan. Unsupported explicit internal forms are reported,
-  never silently treated as independent. This does not claim to solve arbitrary
-  semantic references in prose.
-- A reference into a document not supplied is `external`, not an internal
+  blocks the affected plan. An explicit in-document reference form the resolver
+  does not support (for example paragraph, subsection (b), Exhibit or Schedule
+  pointing inside the supplied document) is `unresolved` with reason
+  `unsupported_form` and blocks the affected plan. It is never silently treated
+  as independent. This does not claim to solve arbitrary semantic references
+  in prose.
+- Only a reference qualified to a document not supplied is `external`, not an internal
   missing-target error. Preserve its exact text and document identity; do not
   attach a same-number clause from this document, invent external source IDs,
   or fetch the absent document. Keep the reference with its governing unit and
@@ -552,15 +555,25 @@ copying the resolver. Re-run unchanged historical C9 and SAME60 full verdict
 lists after implementation; expected changes on those frozen inputs: none.
 No new model prompt, comparator, cap, model/runtime/settings, labels or live budget.
 
-The accepted review additionally requires **before building** an offline,
-zero-generation measurement that both original frozen pre-production source
-inputs plan with no blocking unresolved references. Report per input the
-resolved/external/unresolved counts, excluded heading occurrences, each blocking
-reason and source bindings. Use source inputs only, never the independently
-frozen benchmark fact labels. Counts are observations, not targets to tune for:
-any genuine ambiguity is reported and blocks; never force it to zero.
+The accepted review requires an offline, zero-generation measurement through
+the actual source owner that both original frozen pre-production source inputs
+plan with no blocking unresolved references. Oversight clarified in mailbox
+`1d09f424` that this follows the test-first resolver implementation and precedes
+dependent planner, writer and Verify-consumer work. A manual inventory or a
+second parser is not executable planning proof.
 
-### Current implementation and sequencing blocker
+The private detailed report retains exact reference text, source bindings and
+fragments, status counts, excluded heading occurrences and every blocking reason.
+Store it under the private heldout evidence directory with the required private
+permissions. On public GitHub, publish only input aliases, counts and reason
+codes, plus the SHA256 of that private report. Use source inputs only, never the
+independently frozen benchmark fact labels or DV labels. Counts are observations,
+not targets to tune for: any genuine ambiguity is reported and blocks; never
+force it to zero. If both inputs have zero blocking `unresolved`, mail the counts
+and continue without waiting; otherwise STOP and report each reason for an owner
+repair before dependent work.
+
+### Current implementation and clarified sequence
 
 The new-protocol schema and budget capacity controls have fail-before/pass-after
 logs. They are preliminary local work, not a completed writer or pipeline fix.
@@ -568,14 +581,16 @@ Parser, persistence, planning and delivery work remain incomplete. The dependenc
 probe is intentionally still failing and unpublished; do not weaken or skip it.
 No reader fix has been made. No behavior code from this work is published yet.
 
-**NOT DONE:** the new dependency resolver/planner does not exist, so its actual
-two-input no-blocking measurement has not been performed. Oversight's requested
-before-building timing must be reconciled with that missing owner; a manual form
-inventory is not executable planning proof. Report this ordering issue for
-oversight clarification at the text-match review, before any reader code. Do not
-silently substitute an independent parser or describe a planned test as passed.
+**NOT DONE:** the resolver and its actual two-input measurement remain unbuilt
+and unmeasured. Oversight's text-match review of `5c70289` in mailbox `1d09f424`
+requires the unsupported-form and privacy tightenings above in one local
+contract-only commit, reviewed in this worktree without a separate push. Send
+that hash for review before reader code. Then: source-owner fail-first public
+regressions; resolver and transitive closure; actual source-only two-input
+measurement; only after its no-blocking gate, dependent consumers and unchanged
+historical C9/SAME60 replays; one push, exact-head review, STOP. Do not silently
+substitute a parser, weaken a probe or describe a planned test as passed.
 
-Publish this contract-only revision and acceptance record for oversight's match
-review. Reader implementation remains paused until that match and sequencing
-clarification. The previously accepted benchmark and live-run freezes, all
-production/merge holds, and the source-owner amendment requirement remain binding.
+The previously accepted benchmark and live-run freezes, all production/merge
+holds, and the source-owner amendment requirement remain binding. This contract
+match is not an exact-head PASS or permission to start any live run.
