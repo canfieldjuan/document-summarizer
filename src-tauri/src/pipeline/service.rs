@@ -867,18 +867,58 @@ mod tests {
     struct CountingFixtureRuntime {
         generate_calls: AtomicU32,
         health_calls: AtomicU32,
+        requests: Mutex<Vec<ModelRequest>>,
     }
 
     impl CountingFixtureRuntime {
         fn reset(&self) {
             self.generate_calls.store(0, Ordering::Relaxed);
             self.health_calls.store(0, Ordering::Relaxed);
+            self.requests.lock().unwrap().clear();
+        }
+
+        fn assert_single_verification_sequence(&self) {
+            let requests = self.requests.lock().unwrap();
+            let verification: Vec<_> = requests
+                .iter()
+                .filter(|request| request.stage == PipelineStage::Verify)
+                .collect();
+            assert_eq!(verification.len(), 2, "one ledger and one joint comparison");
+            let crate::pipeline::contracts::ModelOutputFormat::JsonSchema { name, .. } =
+                &verification[0].output_format
+            else {
+                panic!("ledger verification must require structured output");
+            };
+            assert_eq!(name, "document_claim_verdicts_v1");
+            let crate::pipeline::contracts::ModelOutputFormat::JsonSchema { name, schema } =
+                &verification[1].output_format
+            else {
+                panic!("joint comparison must require structured output");
+            };
+            assert_eq!(
+                name,
+                crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME
+            );
+            let input: serde_json::Value =
+                serde_json::from_str(&verification[1].user_prompt).unwrap();
+            assert_eq!(input["claims"].as_array().unwrap().len(), 1);
+            assert!(input.get("dimension").is_none());
+            let dimensions =
+                &schema["properties"]["verdicts"]["items"]["properties"]["comparisons"]["required"];
+            assert_eq!(
+                dimensions,
+                &serde_json::json!(["stage", "conditions", "qualifiers", "scope"])
+            );
+            let ordinals: Vec<_> = verification.iter().map(|r| r.ordinal).collect();
+            assert_eq!(ordinals, [0, 1]);
+            println!("CONTINUATION_VERIFICATION one ledger; one joint comparison; dimensions={dimensions}; ordinals={ordinals:?}");
         }
     }
 
     impl ModelRuntime for CountingFixtureRuntime {
         fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
             self.generate_calls.fetch_add(1, Ordering::Relaxed);
+            self.requests.lock().unwrap().push(request.clone());
             Ok(ModelResponse {
                 text: crate::pipeline::summary::fixture_model_output(request),
                 runtime_id: self.runtime_id().to_string(),
@@ -1305,6 +1345,9 @@ mod tests {
                     assert!(runtime.generate_calls.load(Ordering::Relaxed) > 1);
                     assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 4);
                 }
+            }
+            if checkpoint != ContinuationCheckpoint::Verified {
+                runtime.assert_single_verification_sequence();
             }
         }
     }
@@ -1801,6 +1844,7 @@ mod tests {
         };
         assert_eq!(runtime.generate_calls.load(Ordering::Relaxed), 2);
         assert_eq!(runtime.health_calls.load(Ordering::Relaxed), 2);
+        runtime.assert_single_verification_sequence();
 
         let reopened = init_db(&database.0).expect("completed database should reopen again");
         assert_eq!(

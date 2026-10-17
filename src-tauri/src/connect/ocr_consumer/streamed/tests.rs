@@ -602,6 +602,7 @@ fn startup_recovery_cancellation_interrupts_stalled_body_and_releases_roots() {
             false,
         ),
     ];
+    let slow_status_path = format!("/v3/jobs/{}", second.provider_job_id);
     let (stalled, stall_ready) = mpsc::channel();
     let server = thread::spawn(move || {
         let mut paths = Vec::new();
@@ -643,12 +644,22 @@ fn startup_recovery_cancellation_interrupts_stalled_body_and_releases_roots() {
             assert!(request
                 .to_ascii_lowercase()
                 .contains("authorization: bearer fixture-token"));
+            // A later root may legitimately be slow after cancellation has succeeded.
+            if reply.path == slow_status_path {
+                thread::sleep(Duration::from_millis(1100));
+            }
             paths.push(reply.path);
             socket.write_all(reply.headers.as_bytes()).unwrap();
             if stall {
                 stalled.send(()).unwrap();
                 // Correct cancellation closes this socket without waiting for the timeout.
-                let _ = socket.read(&mut [0]);
+                let closed = socket.read(&mut [0]);
+                println!("stalled socket read after cancellation: {closed:?}");
+                assert!(
+                    closed.as_ref().is_ok_and(|count| *count == 0)
+                        || closed.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::ConnectionReset),
+                    "cancellation must close the stalled socket before its read timeout: {closed:?}"
+                );
             } else {
                 socket.write_all(&reply.body).unwrap();
             }
@@ -682,10 +693,8 @@ fn startup_recovery_cancellation_interrupts_stalled_body_and_releases_roots() {
     let elapsed = start.elapsed();
     assert_eq!(server.join().unwrap().len(), 6);
     println!("startup cancellation and next-root recovery elapsed={elapsed:?}");
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "recovery cancellation waited for the stalled body: {elapsed:?}"
-    );
+    // The server already proved cancellation by observing socket closure.
+    // This duration includes the deliberately slow second root's recovery.
     assert!(!manager.is_active(&first.root_run_id).unwrap());
     assert!(!manager.is_active(&second.root_run_id).unwrap());
     let conn = db::init_db(&database).unwrap();

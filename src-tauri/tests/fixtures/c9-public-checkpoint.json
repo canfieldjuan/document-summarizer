@@ -1,0 +1,550 @@
+{
+  "provenance": {
+    "source_commit": "3b17a09a074415c28a961f9ae90be5cfcce1a0ff",
+    "public_text_only": true,
+    "scripted_responses_not_model_evidence": true
+  },
+  "common": {
+    "analyzed_documents": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "analysis_version": "14.0.0",
+        "artifact_hash": "7292af9937a11aed27b0cec1f5dd2cb05f7af29678993e014235c170013e2116",
+        "analyzed_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"analysis_version\":\"14.0.0\",\"runtime_id\":\"gate-fixture\",\"model_id\":\"gate-fixture\",\"chunks\":[{\"chunk_id\":\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\",\"summary_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"source_spans\":[{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}],\"evidence\":[{\"evidence_id\":\"evidence-41c073c56c095b00fa9409f8043fd7af084088d0138e836c6f110b2b55ec3b64\",\"chunk_id\":\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\",\"block_id\":\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\",\"claim_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"exact_quote\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"source_span\":{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}}]}],\"warnings\":[],\"inspected_pages\":[1]}",
+        "created_at": "2026-10-06T13:45:44.665111818+00:00"
+      }
+    ],
+    "chunked_documents": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "chunking_version": "1.0.0",
+        "artifact_hash": "99673fdd6d2304375427ea92275c3967a18966215b2f9657e259fc5efbd77fb0",
+        "chunked_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"chunking_version\":\"1.0.0\",\"chunks\":[{\"chunk_id\":\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\",\"ordinal\":1,\"structure_node_id\":\"sn-5d10dc5ae79e83c8b33c23ccd1d4f0ef0bd1a1c8c77c6b4d084b25e4c0860550\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"block_ids\":[\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\"],\"source_spans\":[{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}],\"warnings\":[]}],\"warnings\":[]}",
+        "created_at": "2026-10-06T13:45:44.574860626+00:00"
+      }
+    ],
+    "documents": [
+      {
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "original_filename": "structured_report.pdf",
+        "file_type": "pdf",
+        "byte_size": 5443,
+        "content_hash": "34aa217d7a21a0ec31abd90d0d7700d42924f334ce107912850398ac3f23d7ea",
+        "local_source_path": "public-fixture.pdf",
+        "created_at": "2026-10-06T13:45:44.197842801+00:00",
+        "source_type": "native_text"
+      }
+    ],
+    "normalized_documents": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "normalization_version": "1.0.0",
+        "artifact_hash": "bba4928dc735eb5b064f5b2d7b9d87e6d7c909cf6ad0c5fe79ba0013533bb211",
+        "normalized_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"normalization_version\":\"1.0.0\",\"pages\":[{\"page_number\":1,\"content\":[{\"block_id\":\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\",\"kind\":\"Text\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"source\":{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}}],\"warnings\":[],\"requires_visual_processing\":false}],\"warnings\":[]}",
+        "created_at": "2026-10-06T13:45:44.394777080+00:00"
+      }
+    ],
+    "parsed_documents": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "parser_id": "qualification-gate-fixture",
+        "parser_version": "1",
+        "parsed_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"parser_id\":\"qualification-gate-fixture\",\"parser_version\":\"1\",\"source_type\":\"NativeText\",\"pages\":[{\"page_number\":1,\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"warnings\":[],\"requires_visual_processing\":false}],\"warnings\":[]}",
+        "created_at": "2026-10-06T13:45:44.283760445+00:00"
+      }
+    ],
+    "pipeline_run_summary_profiles": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "summary_profile": "\"general\"",
+        "created_at": "2026-10-06T13:45:44.198347507+00:00"
+      }
+    ],
+    "structured_documents": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "structure_version": "1.0.0",
+        "artifact_hash": "acc8da12aa25956cc14954e8a207a997bc1cc5cec4034f35688dea263b6cc134",
+        "structured_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"structure_version\":\"1.0.0\",\"pages\":[{\"page_number\":1,\"warnings\":[],\"requires_visual_processing\":false}],\"nodes\":[{\"node_id\":\"sn-4b15275ce8ee0517ff9b902d1c365615b9ee00f3e615deb4e68591069009f32f\",\"kind\":\"Document\",\"title\":null,\"level\":0,\"block_ids\":[],\"source_spans\":[],\"children\":[{\"node_id\":\"sn-5d10dc5ae79e83c8b33c23ccd1d4f0ef0bd1a1c8c77c6b4d084b25e4c0860550\",\"kind\":\"Unstructured\",\"title\":null,\"level\":1,\"block_ids\":[\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\"],\"source_spans\":[{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}],\"children\":[]}]}],\"warnings\":[]}",
+        "created_at": "2026-10-06T13:45:44.488600155+00:00"
+      }
+    ],
+    "summary_synthesis_attempts": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "attempt_ordinal": 0,
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "synthesis_version": "14.0.0",
+        "artifact_hash": "823f8e979d475a47273c6d7cdd2f6530aea2431a9b5226219dbf47b5e0afc482",
+        "synthesized_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"synthesis_version\":\"14.0.0\",\"runtime_id\":\"gate-fixture\",\"model_id\":\"gate-fixture\",\"presentation_mode\":\"coherent\",\"summary_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record. [p. 1]\",\"source_chunk_ids\":[\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\"],\"summary_claims\":[{\"claim_id\":\"claim-50263e287aba020e96d42f2ca6e9b0b62c0720540495007ed9309e0b67f35f7d\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\"]}],\"synthesis_evidence\":[{\"evidence_id\":\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\",\"chunk_id\":\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\",\"block_id\":\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\",\"claim_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"exact_quote\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"source_span\":{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}}],\"claims\":[{\"claim_id\":\"claim-4f53c3c9a712dbf792f0e2719f19473a0901e1130ed4015e6eeaceaa49771402\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"evidence-41c073c56c095b00fa9409f8043fd7af084088d0138e836c6f110b2b55ec3b64\"]}],\"warnings\":[]}",
+        "created_at": "2026-10-06T13:45:44.758642904+00:00"
+      }
+    ],
+    "synthesized_documents": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "synthesis_version": "14.0.0",
+        "artifact_hash": "823f8e979d475a47273c6d7cdd2f6530aea2431a9b5226219dbf47b5e0afc482",
+        "synthesized_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"synthesis_version\":\"14.0.0\",\"runtime_id\":\"gate-fixture\",\"model_id\":\"gate-fixture\",\"presentation_mode\":\"coherent\",\"summary_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record. [p. 1]\",\"source_chunk_ids\":[\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\"],\"summary_claims\":[{\"claim_id\":\"claim-50263e287aba020e96d42f2ca6e9b0b62c0720540495007ed9309e0b67f35f7d\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\"]}],\"synthesis_evidence\":[{\"evidence_id\":\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\",\"chunk_id\":\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\",\"block_id\":\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\",\"claim_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"exact_quote\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"source_span\":{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}}],\"claims\":[{\"claim_id\":\"claim-4f53c3c9a712dbf792f0e2719f19473a0901e1130ed4015e6eeaceaa49771402\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"evidence-41c073c56c095b00fa9409f8043fd7af084088d0138e836c6f110b2b55ec3b64\"]}],\"warnings\":[]}",
+        "created_at": "2026-10-06T13:45:44.758468436+00:00"
+      }
+    ]
+  },
+  "pending": {
+    "pipeline_events": [
+      {
+        "event_id": "9030a7ec-de3b-4865-b87d-7c16e4beba45",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 0,
+        "previous_state": null,
+        "next_state": "\"Received\"",
+        "timestamp": "2026-10-06T13:45:44.197842801+00:00",
+        "stage": null,
+        "work_unit_id": null,
+        "reason": "run_created"
+      },
+      {
+        "event_id": "3d3ee2b3-e2e4-4e80-8754-e0e854c0c72a",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 1,
+        "previous_state": "\"Received\"",
+        "next_state": "\"Ingesting\"",
+        "timestamp": "2026-10-06T13:45:44.198207508+00:00",
+        "stage": "\"Ingest\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "d7216a44-d403-46d2-88fe-0d180ffc51d0",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 2,
+        "previous_state": "\"Ingesting\"",
+        "next_state": "\"Ingested\"",
+        "timestamp": "2026-10-06T13:45:44.198293757+00:00",
+        "stage": "\"Ingest\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "83c8bde5-060c-496f-8669-8445c9ba2460",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 3,
+        "previous_state": "\"Ingested\"",
+        "next_state": "\"Parsing\"",
+        "timestamp": "2026-10-06T13:45:44.244183282+00:00",
+        "stage": "\"Parse\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "7a0a446e-c4ca-42ec-b826-3c02b9abce89",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 4,
+        "previous_state": "\"Parsing\"",
+        "next_state": "\"Parsed\"",
+        "timestamp": "2026-10-06T13:45:44.283906884+00:00",
+        "stage": "\"Parse\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "605034dd-85f9-4df5-aa52-1dd4f09dedfb",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 5,
+        "previous_state": "\"Parsed\"",
+        "next_state": "\"Normalizing\"",
+        "timestamp": "2026-10-06T13:45:44.345675349+00:00",
+        "stage": "\"Normalize\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "a54679d2-12c7-42b3-a876-2e082ac5d6fd",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 6,
+        "previous_state": "\"Normalizing\"",
+        "next_state": "\"Normalized\"",
+        "timestamp": "2026-10-06T13:45:44.394950039+00:00",
+        "stage": "\"Normalize\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "ed4e5956-35a3-4fd8-801c-1e40088c21cf",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 7,
+        "previous_state": "\"Normalized\"",
+        "next_state": "\"Structuring\"",
+        "timestamp": "2026-10-06T13:45:44.441809476+00:00",
+        "stage": "\"Structure\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "fb98a103-cdb0-43a4-ab23-a26fe7787dbc",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 8,
+        "previous_state": "\"Structuring\"",
+        "next_state": "\"Structured\"",
+        "timestamp": "2026-10-06T13:45:44.488742564+00:00",
+        "stage": "\"Structure\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "9d536adc-5c90-402a-9bba-db3a6770dd25",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 9,
+        "previous_state": "\"Structured\"",
+        "next_state": "\"Chunking\"",
+        "timestamp": "2026-10-06T13:45:44.535978538+00:00",
+        "stage": "\"Chunk\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "7958cd4a-9aa1-48ff-bb7f-c1d7b99222ab",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 10,
+        "previous_state": "\"Chunking\"",
+        "next_state": "\"Chunked\"",
+        "timestamp": "2026-10-06T13:45:44.575002655+00:00",
+        "stage": "\"Chunk\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "8d10ab6e-ec2f-475d-9f3f-eaa7d4b800e2",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 11,
+        "previous_state": "\"Chunked\"",
+        "next_state": "\"Analyzing\"",
+        "timestamp": "2026-10-06T13:45:44.615474941+00:00",
+        "stage": "\"Analyze\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "5ac2a8fb-f734-4516-9492-1f1e25abbd5d",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 12,
+        "previous_state": "\"Analyzing\"",
+        "next_state": "\"Analyzed\"",
+        "timestamp": "2026-10-06T13:45:44.665259646+00:00",
+        "stage": "\"Analyze\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "ae0156a0-f3e2-42b2-97da-31735be8800e",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 13,
+        "previous_state": "\"Analyzed\"",
+        "next_state": "\"Synthesizing\"",
+        "timestamp": "2026-10-06T13:45:44.706235348+00:00",
+        "stage": "\"Synthesize\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "df81a79f-bc2c-4f76-b6cc-77c002953af1",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 14,
+        "previous_state": "\"Synthesizing\"",
+        "next_state": "\"Synthesized\"",
+        "timestamp": "2026-10-06T13:45:44.758744744+00:00",
+        "stage": "\"Synthesize\"",
+        "work_unit_id": null,
+        "reason": null
+      }
+    ],
+    "pipeline_runs": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "state": "\"Synthesized\"",
+        "state_version": 15,
+        "pipeline_version": "1.0",
+        "created_at": "2026-10-06T13:45:44.197842801+00:00",
+        "started_at": "2026-10-06T13:45:44.198207508+00:00",
+        "updated_at": "2026-10-06T13:45:44.758744744+00:00",
+        "completed_at": null,
+        "current_stage": "\"Synthesize\"",
+        "progress": "{\"total_units\":0,\"completed_units\":0,\"failed_units\":0}",
+        "warnings": "[]",
+        "failure": null,
+        "cancellation_requested": 0,
+        "resumable": 1
+      }
+    ]
+  },
+  "completed": {
+    "citation_artifacts": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "citation_version": "4.0.0",
+        "summary_integrity_hash": "bd11c829c8e2568a085bbd53b5c57f5d18cef98218da9e51cd72bd77268a4062",
+        "artifact_hash": "b247a6092550cd591bd276a544cfe668bad9c46f91b4f0aaadc41214a708f9b2",
+        "citation_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"citation_version\":\"4.0.0\",\"summary_integrity_hash\":\"bd11c829c8e2568a085bbd53b5c57f5d18cef98218da9e51cd72bd77268a4062\",\"rendered_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record. [p. 1]\",\"presentation_mode\":\"coherent\",\"summary_claims\":[{\"claim_id\":\"claim-50263e287aba020e96d42f2ca6e9b0b62c0720540495007ed9309e0b67f35f7d\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\"]}],\"claims\":[{\"claim_id\":\"claim-4f53c3c9a712dbf792f0e2719f19473a0901e1130ed4015e6eeaceaa49771402\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"evidence-41c073c56c095b00fa9409f8043fd7af084088d0138e836c6f110b2b55ec3b64\"]}],\"evidence\":[{\"evidence_id\":\"evidence-41c073c56c095b00fa9409f8043fd7af084088d0138e836c6f110b2b55ec3b64\",\"chunk_id\":\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\",\"block_id\":\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\",\"claim_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"exact_quote\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"source_span\":{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}},{\"evidence_id\":\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\",\"chunk_id\":\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\",\"block_id\":\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\",\"claim_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"exact_quote\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"source_span\":{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}}],\"created_at\":\"2026-10-06T13:45:44.899247427Z\",\"integrity_hash\":\"c209bebb3c4675cb9c1aa2dde611d0230396db222c7b6f071854291f77f42048\"}",
+        "created_at": "2026-10-06T13:45:44.899247427+00:00"
+      }
+    ],
+    "pipeline_events": [
+      {
+        "event_id": "9030a7ec-de3b-4865-b87d-7c16e4beba45",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 0,
+        "previous_state": null,
+        "next_state": "\"Received\"",
+        "timestamp": "2026-10-06T13:45:44.197842801+00:00",
+        "stage": null,
+        "work_unit_id": null,
+        "reason": "run_created"
+      },
+      {
+        "event_id": "3d3ee2b3-e2e4-4e80-8754-e0e854c0c72a",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 1,
+        "previous_state": "\"Received\"",
+        "next_state": "\"Ingesting\"",
+        "timestamp": "2026-10-06T13:45:44.198207508+00:00",
+        "stage": "\"Ingest\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "d7216a44-d403-46d2-88fe-0d180ffc51d0",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 2,
+        "previous_state": "\"Ingesting\"",
+        "next_state": "\"Ingested\"",
+        "timestamp": "2026-10-06T13:45:44.198293757+00:00",
+        "stage": "\"Ingest\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "83c8bde5-060c-496f-8669-8445c9ba2460",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 3,
+        "previous_state": "\"Ingested\"",
+        "next_state": "\"Parsing\"",
+        "timestamp": "2026-10-06T13:45:44.244183282+00:00",
+        "stage": "\"Parse\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "7a0a446e-c4ca-42ec-b826-3c02b9abce89",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 4,
+        "previous_state": "\"Parsing\"",
+        "next_state": "\"Parsed\"",
+        "timestamp": "2026-10-06T13:45:44.283906884+00:00",
+        "stage": "\"Parse\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "605034dd-85f9-4df5-aa52-1dd4f09dedfb",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 5,
+        "previous_state": "\"Parsed\"",
+        "next_state": "\"Normalizing\"",
+        "timestamp": "2026-10-06T13:45:44.345675349+00:00",
+        "stage": "\"Normalize\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "a54679d2-12c7-42b3-a876-2e082ac5d6fd",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 6,
+        "previous_state": "\"Normalizing\"",
+        "next_state": "\"Normalized\"",
+        "timestamp": "2026-10-06T13:45:44.394950039+00:00",
+        "stage": "\"Normalize\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "ed4e5956-35a3-4fd8-801c-1e40088c21cf",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 7,
+        "previous_state": "\"Normalized\"",
+        "next_state": "\"Structuring\"",
+        "timestamp": "2026-10-06T13:45:44.441809476+00:00",
+        "stage": "\"Structure\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "fb98a103-cdb0-43a4-ab23-a26fe7787dbc",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 8,
+        "previous_state": "\"Structuring\"",
+        "next_state": "\"Structured\"",
+        "timestamp": "2026-10-06T13:45:44.488742564+00:00",
+        "stage": "\"Structure\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "9d536adc-5c90-402a-9bba-db3a6770dd25",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 9,
+        "previous_state": "\"Structured\"",
+        "next_state": "\"Chunking\"",
+        "timestamp": "2026-10-06T13:45:44.535978538+00:00",
+        "stage": "\"Chunk\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "7958cd4a-9aa1-48ff-bb7f-c1d7b99222ab",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 10,
+        "previous_state": "\"Chunking\"",
+        "next_state": "\"Chunked\"",
+        "timestamp": "2026-10-06T13:45:44.575002655+00:00",
+        "stage": "\"Chunk\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "8d10ab6e-ec2f-475d-9f3f-eaa7d4b800e2",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 11,
+        "previous_state": "\"Chunked\"",
+        "next_state": "\"Analyzing\"",
+        "timestamp": "2026-10-06T13:45:44.615474941+00:00",
+        "stage": "\"Analyze\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "5ac2a8fb-f734-4516-9492-1f1e25abbd5d",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 12,
+        "previous_state": "\"Analyzing\"",
+        "next_state": "\"Analyzed\"",
+        "timestamp": "2026-10-06T13:45:44.665259646+00:00",
+        "stage": "\"Analyze\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "ae0156a0-f3e2-42b2-97da-31735be8800e",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 13,
+        "previous_state": "\"Analyzed\"",
+        "next_state": "\"Synthesizing\"",
+        "timestamp": "2026-10-06T13:45:44.706235348+00:00",
+        "stage": "\"Synthesize\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "df81a79f-bc2c-4f76-b6cc-77c002953af1",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 14,
+        "previous_state": "\"Synthesizing\"",
+        "next_state": "\"Synthesized\"",
+        "timestamp": "2026-10-06T13:45:44.758744744+00:00",
+        "stage": "\"Synthesize\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "93e62fe6-3910-4498-ace0-4ff225ae546d",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 15,
+        "previous_state": "\"Synthesized\"",
+        "next_state": "\"Verifying\"",
+        "timestamp": "2026-10-06T13:45:44.803955094+00:00",
+        "stage": "\"Verify\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "156568ac-0ae2-4040-9132-efcb9736d126",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 16,
+        "previous_state": "\"Verifying\"",
+        "next_state": "\"Verified\"",
+        "timestamp": "2026-10-06T13:45:44.853882448+00:00",
+        "stage": "\"Verify\"",
+        "work_unit_id": null,
+        "reason": null
+      },
+      {
+        "event_id": "e0fd1c2b-ee73-4534-9bd1-39452ac122dc",
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "sequence_no": 17,
+        "previous_state": "\"Verified\"",
+        "next_state": "\"Complete\"",
+        "timestamp": "2026-10-06T13:45:44.900626457+00:00",
+        "stage": "\"Verify\"",
+        "work_unit_id": null,
+        "reason": null
+      }
+    ],
+    "pipeline_runs": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "state": "\"Complete\"",
+        "state_version": 18,
+        "pipeline_version": "1.0",
+        "created_at": "2026-10-06T13:45:44.197842801+00:00",
+        "started_at": "2026-10-06T13:45:44.198207508+00:00",
+        "updated_at": "2026-10-06T13:45:44.900626457+00:00",
+        "completed_at": "2026-10-06T13:45:44.900626457+00:00",
+        "current_stage": "\"Verify\"",
+        "progress": "{\"total_units\":0,\"completed_units\":0,\"failed_units\":0}",
+        "warnings": "[]",
+        "failure": null,
+        "cancellation_requested": 0,
+        "resumable": 1
+      }
+    ],
+    "summary_artifacts": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "summary_version": "8.0.0",
+        "artifact_hash": "499ee898add9c7d3f3d455759b4d7f75b24c47fe09849f18b01b23e4b7c663b2",
+        "summary_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"summary_version\":\"8.0.0\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record. [p. 1]\",\"warnings\":[],\"created_at\":\"2026-10-06T13:45:44.899212228Z\",\"integrity_hash\":\"bd11c829c8e2568a085bbd53b5c57f5d18cef98218da9e51cd72bd77268a4062\"}",
+        "created_at": "2026-10-06T13:45:44.900223290+00:00"
+      }
+    ],
+    "summary_verification_attempts": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "attempt_ordinal": 0,
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "verification_version": "15.0.0",
+        "artifact_hash": "afba8955b9282cdf6cb8d57c0ec8a3982e0f92efbc978a5dc1b314e1694ade71",
+        "verified_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"verification_version\":\"15.0.0\",\"synthesis_attempt_ordinal\":0,\"runtime_id\":\"gate-fixture\",\"model_id\":\"gate-fixture\",\"presentation_mode\":\"coherent\",\"summary_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record. [p. 1]\",\"source_chunk_ids\":[\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\"],\"summary_claims\":[{\"claim_id\":\"claim-50263e287aba020e96d42f2ca6e9b0b62c0720540495007ed9309e0b67f35f7d\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\"]}],\"synthesis_evidence\":[{\"evidence_id\":\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\",\"chunk_id\":\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\",\"block_id\":\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\",\"claim_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"exact_quote\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"source_span\":{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}}],\"summary_claim_verifications\":[{\"claim_id\":\"claim-50263e287aba020e96d42f2ca6e9b0b62c0720540495007ed9309e0b67f35f7d\",\"evidence_ids\":[\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\"],\"verdict\":\"supported\"}],\"claims\":[{\"claim_id\":\"claim-4f53c3c9a712dbf792f0e2719f19473a0901e1130ed4015e6eeaceaa49771402\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"evidence-41c073c56c095b00fa9409f8043fd7af084088d0138e836c6f110b2b55ec3b64\"]}],\"claim_verifications\":[{\"claim_id\":\"claim-4f53c3c9a712dbf792f0e2719f19473a0901e1130ed4015e6eeaceaa49771402\",\"evidence_ids\":[\"evidence-41c073c56c095b00fa9409f8043fd7af084088d0138e836c6f110b2b55ec3b64\"],\"verdict\":\"supported\"}],\"warnings\":[]}",
+        "created_at": "2026-10-06T13:45:44.853587481+00:00"
+      }
+    ],
+    "verified_documents": [
+      {
+        "run_id": "1135440c-6a0b-428a-bc38-232ab76fcd87",
+        "document_id": "b384c38c-9cb3-469e-bfb5-a8b3ebfe5150",
+        "verification_version": "15.0.0",
+        "artifact_hash": "afba8955b9282cdf6cb8d57c0ec8a3982e0f92efbc978a5dc1b314e1694ade71",
+        "verified_artifact": "{\"document_id\":\"b384c38c-9cb3-469e-bfb5-a8b3ebfe5150\",\"verification_version\":\"15.0.0\",\"synthesis_attempt_ordinal\":0,\"runtime_id\":\"gate-fixture\",\"model_id\":\"gate-fixture\",\"presentation_mode\":\"coherent\",\"summary_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record. [p. 1]\",\"source_chunk_ids\":[\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\"],\"summary_claims\":[{\"claim_id\":\"claim-50263e287aba020e96d42f2ca6e9b0b62c0720540495007ed9309e0b67f35f7d\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\"]}],\"synthesis_evidence\":[{\"evidence_id\":\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\",\"chunk_id\":\"ch-5a5805e631bcee841dee8a8a74978910bfeb553652719c979c292aebe121b9eb\",\"block_id\":\"nb-7174dc91e0cae568657356ec4b49190391815835d7798e1636f56b868d3358d3\",\"claim_text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"exact_quote\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"source_span\":{\"page_start\":1,\"page_end\":1,\"section_id\":null,\"source_type\":\"NativeText\"}}],\"summary_claim_verifications\":[{\"claim_id\":\"claim-50263e287aba020e96d42f2ca6e9b0b62c0720540495007ed9309e0b67f35f7d\",\"evidence_ids\":[\"summary-evidence-09e41ccd8fe4435e7994bc2830ef5f62cfc1763d9e8b8c831e0ce9b258a5ce71\"],\"verdict\":\"supported\"}],\"claims\":[{\"claim_id\":\"claim-4f53c3c9a712dbf792f0e2719f19473a0901e1130ed4015e6eeaceaa49771402\",\"text\":\"The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.\",\"evidence_ids\":[\"evidence-41c073c56c095b00fa9409f8043fd7af084088d0138e836c6f110b2b55ec3b64\"]}],\"claim_verifications\":[{\"claim_id\":\"claim-4f53c3c9a712dbf792f0e2719f19473a0901e1130ed4015e6eeaceaa49771402\",\"evidence_ids\":[\"evidence-41c073c56c095b00fa9409f8043fd7af084088d0138e836c6f110b2b55ec3b64\"],\"verdict\":\"supported\"}],\"warnings\":[]}",
+        "created_at": "2026-10-06T13:45:44.853789809+00:00"
+      }
+    ]
+  }
+}

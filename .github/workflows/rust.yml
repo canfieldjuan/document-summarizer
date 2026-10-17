@@ -49,6 +49,8 @@ jobs:
       - name: Test all targets and features
         working-directory: src-tauri
         run: cargo test --locked --all-targets --all-features
+      - name: Test C9 qualification receipt boundaries
+        run: python3 -m unittest discover -s scripts -p 'test_c9_preproduction_parity.py'
       - name: Deny clippy warnings
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets --all-features -- -D warnings

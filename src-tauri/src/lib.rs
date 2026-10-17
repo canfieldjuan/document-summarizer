@@ -261,13 +261,11 @@ fn bind_profile_suggestion_request_owner(
     db_path: &Path,
     source_content_hash: &str,
 ) -> Result<String, CommandError> {
+    let contract = runtime.request_owner_contract(PROFILE_SUGGESTION_TASK_CONTRACT_VERSION);
     let mut conn = init_db(db_path).map_err(CommandError::from)?;
-    let owner_id = get_or_create_profile_suggestion_owner(
-        &mut conn,
-        source_content_hash,
-        PROFILE_SUGGESTION_TASK_CONTRACT_VERSION,
-    )
-    .map_err(CommandError::from)?;
+    let owner_id =
+        get_or_create_profile_suggestion_owner(&mut conn, source_content_hash, &contract)
+            .map_err(CommandError::from)?;
     runtime.bind_request_owner(&owner_id);
     Ok(owner_id)
 }

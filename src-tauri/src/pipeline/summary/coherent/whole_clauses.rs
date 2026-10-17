@@ -152,7 +152,7 @@ impl Clauses {
     pub(super) fn context(&self, block_id: &str, quote: &str) -> Option<String> {
         self.contexts
             .get(&(block_id.to_string(), quote.to_string()))
-            .filter(|text| !text.is_empty())
+            .filter(|text| !text.is_empty() && text.as_str() != quote)
             .cloned()
     }
 }
