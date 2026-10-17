@@ -713,12 +713,27 @@ and report it without guessing or tuning. All benchmark-label, live-generation,
 production, readiness, merge and PR116 holds remain unchanged.
 
 
-## PROPOSED quote-owner amendment: contextual citation anchors
+## Accepted quote-owner amendment: contextual citation anchors
 
-**NOT ACCEPTED. No behavior implementation is authorized by this proposal.**
-The dependent build is stopped at the citation-coverage gate pending independent
-review and an explicit operator decision. This does not change any live budget
-or release a hold.
+Operator acceptance was relayed verbatim by oversight in mailbox `128db446`
+on 2026-10-17: Juan selected **Accept (Recommended)** for the proposal at
+local contract-only commit `33fc0f8`, with the delivery condition below.
+This authorizes the source-owner repair and its offline proof. The dependent
+build remains stopped until oversight independently rechecks every required
+fact against the new anchor inventory. No live budget or hold changes.
+
+### Accepted delivery condition: partial excerpts
+
+A displayed anchor that does not cover its whole governing sentence must be
+labelled **partial excerpt**. The label is derived from range metadata created
+by the quote owner and consumed at the delivery/presentation owner, never by
+searching the source text. It does not alter source bytes and must not be
+applied to an anchor that covers the whole sentence. Public controls must prove
+both directions: a fragment is labelled, and a complete anchor is not.
+Persisted/reloaded citations must preserve and validate that distinction.
+
+Acceptance and this additional condition are recorded in a contract-only
+commit before behavior implementation. All other scope boundaries remain.
 
 ### Root cause and reproduced evidence
 
