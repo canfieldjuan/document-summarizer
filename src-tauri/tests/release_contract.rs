@@ -4,16 +4,45 @@ use std::path::Path;
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
-fn copy_executable_fixture(source: &Path, destination: &Path) {
-    // Keep the writable descriptor out of this parallel test process. CLOEXEC
-    // alone cannot prevent another thread's fork from retaining it before exec.
-    assert!(Command::new("cp")
-        .arg("--")
-        .arg(source)
-        .arg(destination)
-        .status()
-        .unwrap()
-        .success());
+enum ExecutableFixture<'a> {
+    Copy(&'a Path),
+    Bytes(&'a [u8], u32),
+}
+
+#[cfg(target_os = "linux")]
+fn create_executable_fixture(destination: &Path, fixture: ExecutableFixture<'_>) {
+    match fixture {
+        ExecutableFixture::Copy(source) => {
+            assert!(Command::new("cp")
+                .arg("--")
+                .arg(source)
+                .arg(destination)
+                .status()
+                .unwrap()
+                .success());
+        }
+        ExecutableFixture::Bytes(bytes, initial_mode) => {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+            // Like fs::write, rewriting a fixture preserves its existing mode.
+            let mode = match std::fs::metadata(destination) {
+                Ok(metadata) => metadata.permissions().mode() & 0o7777,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => initial_mode,
+                Err(error) => panic!("fixture metadata: {error}"),
+            };
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg("set -eu\ncat > \"$1\"\nchmod \"$2\" \"$1\"")
+                .arg("executable-fixture")
+                .arg(destination)
+                .arg(format!("{mode:o}"))
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(bytes).unwrap();
+            assert!(child.wait().unwrap().success());
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -23,7 +52,7 @@ fn executable_fixture_copy_preserves_bytes_and_has_independent_ownership() {
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("fixture with spaces");
     let source = Path::new("/bin/true");
-    copy_executable_fixture(source, &destination);
+    create_executable_fixture(&destination, ExecutableFixture::Copy(source));
     assert_eq!(
         std::fs::read(source).unwrap(),
         std::fs::read(&destination).unwrap()
@@ -37,6 +66,36 @@ fn executable_fixture_copy_preserves_bytes_and_has_independent_ownership() {
     assert_ne!(copied.mode() & 0o111, 0);
     std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(std::fs::metadata(source).unwrap().mode(), original.mode());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executable_fixture_bytes_preserve_exact_content_and_existing_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("script with spaces and 'quotes'");
+    let bytes = b"#!/bin/sh\n# literal $HOME and `id`\nexit 0\n";
+    create_executable_fixture(&destination, ExecutableFixture::Bytes(bytes, 0o700));
+    assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert!(Command::new(&destination).status().unwrap().success());
+    create_executable_fixture(&destination, ExecutableFixture::Bytes(b"", 0o644));
+    assert!(std::fs::read(&destination).unwrap().is_empty());
+    assert_eq!(
+        std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -56,7 +115,17 @@ fn executable_fixtures_run_during_parallel_forks() {
                 for iteration in 0..32 {
                     if worker < 6 {
                         let destination = root.join(format!("fixture {worker} {iteration}"));
-                        copy_executable_fixture(Path::new("/bin/true"), &destination);
+                        if worker < 3 {
+                            create_executable_fixture(
+                                &destination,
+                                ExecutableFixture::Copy(Path::new("/bin/true")),
+                            );
+                        } else {
+                            create_executable_fixture(
+                                &destination,
+                                ExecutableFixture::Bytes(b"#!/bin/sh\nexit 0\n", 0o700),
+                            );
+                        }
                         let status = Command::new(&destination).status().unwrap();
                         assert!(status.success());
                     } else {
@@ -205,14 +274,17 @@ fn debian_purge_dispatches_after_completed_removal() {
     std::fs::write(root.join("package-removal-receipt-v1.json"), b"{}").unwrap();
     let invoked = temporary.path().join("invoked");
     let controller = root.join("package-controller-test");
-    std::fs::write(
+    create_executable_fixture(
         &controller,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            invoked.display()
+        ExecutableFixture::Bytes(
+            (format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                invoked.display()
+            ))
+            .as_ref(),
+            0o700,
         ),
-    )
-    .unwrap();
+    );
     std::fs::set_permissions(&controller, std::fs::Permissions::from_mode(0o700)).unwrap();
     let hook = include_str!("../linux/debian/postrm")
         .replace("/var/lib/document-summarizer", root.to_str().unwrap())
@@ -221,7 +293,7 @@ fn debian_purge_dispatches_after_completed_removal() {
             &format!("-user {}", unsafe { libc::geteuid() }),
         );
     let script = temporary.path().join("postrm");
-    std::fs::write(&script, hook).unwrap();
+    create_executable_fixture(&script, ExecutableFixture::Bytes((hook).as_ref(), 0o644));
     assert!(Command::new("sh")
         .arg(&script)
         .arg("remove")
@@ -302,7 +374,7 @@ fn debian_purge_retry_ignores_untrusted_inbox_but_validates_root_state() {
                 &format!("-user {}", unsafe { libc::geteuid() }),
             );
         let script = temporary.path().join("postrm");
-        std::fs::write(&script, hook).unwrap();
+        create_executable_fixture(&script, ExecutableFixture::Bytes((hook).as_ref(), 0o644));
         for _ in 0..2 {
             assert_eq!(
                 Command::new("sh")
@@ -331,16 +403,21 @@ fn first_upgrade_bootstrap_never_executes_the_legacy_binary() {
     let package_root = temporary.path().join("package-root");
     let legacy_marker = temporary.path().join("legacy-invoked");
     let legacy = temporary.path().join("legacy-document-summarizer");
-    std::fs::write(
+    create_executable_fixture(
         &legacy,
-        format!("#!/bin/sh\ntouch '{}'\nexit 99\n", legacy_marker.display()),
-    )
-    .unwrap();
+        ExecutableFixture::Bytes(
+            (format!("#!/bin/sh\ntouch '{}'\nexit 99\n", legacy_marker.display())).as_ref(),
+            0o755,
+        ),
+    );
     std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755)).unwrap();
     let runtime = temporary.path().join("run-user");
     let script = preinst_for_test(&package_root, &legacy, &runtime);
     let script_path = temporary.path().join("preinst");
-    std::fs::write(&script_path, script).unwrap();
+    create_executable_fixture(
+        &script_path,
+        ExecutableFixture::Bytes((script).as_ref(), 0o644),
+    );
     std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let status = Command::new("sh")
@@ -408,16 +485,18 @@ fn preinst_rejects_unsafe_existing_bootstrap_before_success() {
     std::fs::create_dir(&package_root).unwrap();
     std::fs::set_permissions(&package_root, std::fs::Permissions::from_mode(0o755)).unwrap();
     let installed = temporary.path().join("document-summarizer");
-    copy_executable_fixture(Path::new("/bin/true"), &installed);
+    create_executable_fixture(&installed, ExecutableFixture::Copy(Path::new("/bin/true")));
     std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
     let runtime = temporary.path().join("run-user");
     std::fs::create_dir(&runtime).unwrap();
     let script = temporary.path().join("preinst");
-    std::fs::write(
+    create_executable_fixture(
         &script,
-        preinst_for_test(&package_root, &installed, &runtime),
-    )
-    .unwrap();
+        ExecutableFixture::Bytes(
+            (preinst_for_test(&package_root, &installed, &runtime)).as_ref(),
+            0o644,
+        ),
+    );
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(
         package_root.join("package-quiesce-v1.record"),
@@ -522,14 +601,17 @@ fn preinst_crash_boundaries_resume_the_exact_generation() {
         let temporary = tempfile::tempdir().unwrap();
         let package_root = temporary.path().join("package-root");
         let installed = temporary.path().join("document-summarizer");
-        copy_executable_fixture(Path::new("/bin/true"), &installed);
+        create_executable_fixture(&installed, ExecutableFixture::Copy(Path::new("/bin/true")));
         std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
         let runtime = temporary.path().join("run-user");
         let normal = preinst_for_test(&package_root, &installed, &runtime);
         assert_eq!(normal.matches(boundary).count(), 1, "boundary {index}");
         let crashing = normal.replacen(boundary, &format!("{boundary}      exit 86\n"), 1);
         let script = temporary.path().join("preinst");
-        std::fs::write(&script, crashing).unwrap();
+        create_executable_fixture(
+            &script,
+            ExecutableFixture::Bytes((crashing).as_ref(), 0o644),
+        );
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
             Command::new("sh")
@@ -541,7 +623,7 @@ fn preinst_crash_boundaries_resume_the_exact_generation() {
             Some(86),
             "boundary {index}"
         );
-        std::fs::write(&script, normal).unwrap();
+        create_executable_fixture(&script, ExecutableFixture::Bytes((normal).as_ref(), 0o644));
         assert!(Command::new("sh")
             .arg(&script)
             .args(["upgrade", "0.0.9"])
@@ -578,7 +660,7 @@ fn preinst_quiesces_live_legacy_owner_without_executing_it() {
     let temporary = tempfile::tempdir().unwrap();
     let package_root = temporary.path().join("package-root");
     let installed = temporary.path().join("document-summarizer");
-    copy_executable_fixture(Path::new("/bin/sleep"), &installed);
+    create_executable_fixture(&installed, ExecutableFixture::Copy(Path::new("/bin/sleep")));
     std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut legacy = Command::new(&installed).arg("30").spawn().unwrap();
     let runtime_base = temporary.path().join("run-user");
@@ -602,7 +684,10 @@ fn preinst_quiesces_live_legacy_owner_without_executing_it() {
     let boundary = "      # bootstrap-crash-boundary-after-terminate\n";
     assert_eq!(normal.matches(boundary).count(), 1);
     let crashing = normal.replacen(boundary, &format!("{boundary}      exit 86\n"), 1);
-    std::fs::write(&script, crashing).unwrap();
+    create_executable_fixture(
+        &script,
+        ExecutableFixture::Bytes((crashing).as_ref(), 0o644),
+    );
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let crashed = Command::new("sh")
@@ -611,7 +696,7 @@ fn preinst_quiesces_live_legacy_owner_without_executing_it() {
         .status()
         .unwrap();
     assert_eq!(crashed.code(), Some(86));
-    std::fs::write(&script, normal).unwrap();
+    create_executable_fixture(&script, ExecutableFixture::Bytes((normal).as_ref(), 0o644));
     let status = Command::new("sh")
         .arg(&script)
         .args(["upgrade", "0.0.9"])
@@ -650,7 +735,7 @@ fn preinst_signals_pinned_process_instead_of_recycled_numeric_identity() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     let installed = root.path().join("document-summarizer");
-    copy_executable_fixture(Path::new("/bin/sleep"), &installed);
+    create_executable_fixture(&installed, ExecutableFixture::Copy(Path::new("/bin/sleep")));
     std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut legacy = Command::new(&installed).arg("30").spawn().unwrap();
     let mut unrelated = Command::new("/bin/sleep").arg("30").spawn().unwrap();
@@ -677,14 +762,17 @@ fn preinst_signals_pinned_process_instead_of_recycled_numeric_identity() {
         unrelated.id()
     );
     let script = root.path().join("preinst");
-    std::fs::write(
+    create_executable_fixture(
         &script,
-        normal.replace(
-            "  terminate_legacy_processes() {",
-            &format!("{numeric_signal_lookup}  terminate_legacy_processes() {{"),
+        ExecutableFixture::Bytes(
+            (normal.replace(
+                "  terminate_legacy_processes() {",
+                &format!("{numeric_signal_lookup}  terminate_legacy_processes() {{"),
+            ))
+            .as_ref(),
+            0o644,
         ),
-    )
-    .unwrap();
+    );
     let status = Command::new("sh")
         .arg(&script)
         .args(["upgrade", "0.0.9"])
@@ -710,7 +798,7 @@ fn preinst_handles_exit_after_capture_and_escalates_on_the_same_process_handle()
     for exited_after_capture in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let installed = root.path().join("document-summarizer");
-        copy_executable_fixture(Path::new("/bin/sleep"), &installed);
+        create_executable_fixture(&installed, ExecutableFixture::Copy(Path::new("/bin/sleep")));
         std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut command = Command::new(&installed);
         command.arg("30");
@@ -735,7 +823,7 @@ fn preinst_handles_exit_after_capture_and_escalates_on_the_same_process_handle()
             );
         }
         let script = root.path().join("preinst");
-        std::fs::write(&script, normal).unwrap();
+        create_executable_fixture(&script, ExecutableFixture::Bytes((normal).as_ref(), 0o644));
         let status = Command::new("sh")
             .arg(&script)
             .args(["upgrade", "0.0.9"])
@@ -765,11 +853,13 @@ fn preinst_rejects_unavailable_process_handles_before_package_mutation() {
     );
     let probe = "my $machine = (uname())[4];";
     assert_eq!(normal.matches(probe).count(), 1);
-    std::fs::write(
+    create_executable_fixture(
         &script,
-        normal.replace(probe, "my $machine = 'unsupported';"),
-    )
-    .unwrap();
+        ExecutableFixture::Bytes(
+            (normal.replace(probe, "my $machine = 'unsupported';")).as_ref(),
+            0o644,
+        ),
+    );
     let output = Command::new("sh")
         .arg(script)
         .args(["upgrade", "0.0.9"])
@@ -938,17 +1028,19 @@ fn abort_upgrade_restores_bootstrap_at_every_preinstall_boundary() {
         let package = root.path().join("package");
         let installed = root.path().join("document-summarizer");
         let runtime = root.path().join("run-user");
-        copy_executable_fixture(Path::new("/bin/true"), &installed);
+        create_executable_fixture(&installed, ExecutableFixture::Copy(Path::new("/bin/true")));
         std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
         let original = std::fs::read(&installed).unwrap();
         let normal = preinst_for_test(&package, &installed, &runtime);
         assert_eq!(normal.matches(boundary).count(), 1);
         let preinst = root.path().join("preinst");
-        std::fs::write(
+        create_executable_fixture(
             &preinst,
-            normal.replacen(boundary, &format!("{boundary}      exit 86\n"), 1),
-        )
-        .unwrap();
+            ExecutableFixture::Bytes(
+                (normal.replacen(boundary, &format!("{boundary}      exit 86\n"), 1)).as_ref(),
+                0o644,
+            ),
+        );
         assert_eq!(
             std::process::Command::new("sh")
                 .arg(&preinst)
@@ -966,7 +1058,7 @@ fn abort_upgrade_restores_bootstrap_at_every_preinstall_boundary() {
                 "expected_root_uid=0",
                 &format!("expected_root_uid={}", unsafe { libc::geteuid() }),
             );
-        std::fs::write(&postrm, script).unwrap();
+        create_executable_fixture(&postrm, ExecutableFixture::Bytes((script).as_ref(), 0o644));
         for _ in 0..2 {
             assert!(std::process::Command::new("sh")
                 .arg(&postrm)
@@ -997,22 +1089,28 @@ fn abort_remove_dispatches_to_the_installed_transaction_controller() {
     let root = tempfile::tempdir().unwrap();
     let calls = root.path().join("calls");
     let installed = root.path().join("document-summarizer");
-    std::fs::write(
+    create_executable_fixture(
         &installed,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
-            calls.display()
+        ExecutableFixture::Bytes(
+            (format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                calls.display()
+            ))
+            .as_ref(),
+            0o755,
         ),
-    )
-    .unwrap();
+    );
     std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
     let postinst = root.path().join("postinst");
-    std::fs::write(
+    create_executable_fixture(
         &postinst,
-        include_str!("../linux/debian/postinst")
-            .replace("/usr/bin/document-summarizer", installed.to_str().unwrap()),
-    )
-    .unwrap();
+        ExecutableFixture::Bytes(
+            (include_str!("../linux/debian/postinst")
+                .replace("/usr/bin/document-summarizer", installed.to_str().unwrap()))
+            .as_ref(),
+            0o644,
+        ),
+    );
     assert!(std::process::Command::new("sh")
         .arg(&postinst)
         .arg("abort-remove")
@@ -1045,11 +1143,17 @@ fn abort_upgrade_replays_rollback_crashes_and_rejects_tampered_state() {
         let package = root.path().join("package");
         let installed = root.path().join("document-summarizer");
         let runtime = root.path().join("run-user");
-        copy_executable_fixture(Path::new("/bin/true"), &installed);
+        create_executable_fixture(&installed, ExecutableFixture::Copy(Path::new("/bin/true")));
         std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
         let original = std::fs::read(&installed).unwrap();
         let preinst = root.path().join("preinst");
-        std::fs::write(&preinst, preinst_for_test(&package, &installed, &runtime)).unwrap();
+        create_executable_fixture(
+            &preinst,
+            ExecutableFixture::Bytes(
+                (preinst_for_test(&package, &installed, &runtime)).as_ref(),
+                0o644,
+            ),
+        );
         assert!(std::process::Command::new("sh")
             .arg(&preinst)
             .args(["upgrade", "0.0.9"])
@@ -1100,7 +1204,7 @@ fn abort_upgrade_replays_rollback_crashes_and_rejects_tampered_state() {
             ),
             _ => normal.clone(),
         };
-        std::fs::write(&postrm, script).unwrap();
+        create_executable_fixture(&postrm, ExecutableFixture::Bytes((script).as_ref(), 0o644));
         let before = std::fs::read(&receipt).unwrap();
         let launcher_before = std::fs::read(&installed).unwrap();
         let source = if case == "source-version" {
@@ -1118,7 +1222,7 @@ fn abort_upgrade_replays_rollback_crashes_and_rejects_tampered_state() {
         if matches!(case, "after-restore" | "before-clear") {
             assert_eq!(status.code(), Some(87));
             assert!(std::fs::read(&installed).unwrap() == original);
-            std::fs::write(&postrm, normal).unwrap();
+            create_executable_fixture(&postrm, ExecutableFixture::Bytes((normal).as_ref(), 0o644));
             assert!(std::process::Command::new("sh")
                 .arg(&postrm)
                 .args(["abort-upgrade", "0.0.9", "0.1.0"])
