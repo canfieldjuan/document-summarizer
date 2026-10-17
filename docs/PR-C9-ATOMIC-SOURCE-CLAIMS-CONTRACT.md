@@ -872,3 +872,83 @@ The accepted ordinary-build and PR116 holds remain.
 coverage pass, consolidation, section-progress storage, typed Verify/delivery,
 full gate run or final exact-head review is claimed. Approval of the earlier
 source-dependency rule or count seam does not accept this amendment.
+
+
+## PROPOSED consolidation-owner amendment after measured STOP
+
+**NOT ACCEPTED. No behavior change is authorized by this proposal.**
+The dependent offline build stopped under section 4's explicit consolidation
+capacity rule. This is a measured request limit, not a model-fidelity result.
+
+### Evidence and origin
+
+The same public over-context control used for draft admission produces two
+admitted section requests. Forty authored public atomic candidates were frozen
+with their exact request/source bindings before consolidation admission. These
+are synthetic size controls, not generated responses or benchmark labels.
+
+The actual `SourceInput::consolidation` request, admitted through `budget::admit`
+and the accepted native-count seam, has **48,634 input tokens** against the
+unchanged **32,768-token** profile. Input alone exceeds the context by 15,866,
+before any output. It returned `WHOLE_DOCUMENT_CONSOLIDATION_TOO_LARGE`. No live
+model calls or server starts occurred. No candidates or governing source were
+removed to obtain a pass.
+
+Durable public aliases under `whole-document-build-20261016`:
+
+- Consolidation boundary measurement: SHA256
+  `f196a2e4081f278781b9d50a395dc62aa917c4d82c2b0722f1515819411c9f6c`.
+- Frozen public section responses: SHA256
+  `71e6cdc9ea6c8284e4ca2f422db9df930eac25695f6958ccc8ce1db7a81c6c1a`.
+- Executed source receipt: SHA256
+  `52677a7d63535ed7b7ea1ed10a6b48e9944f31d28f327ab95ce9e40fb12d555b`.
+- Stop receipt: SHA256
+  `0a74e3788ccbf4f060d856536871cffaf381ae9cfa6136c0ba5ae35594c26c91`.
+
+The origin is the single consolidation request's source projection: it brings
+all selected candidates' complete governing sources together again. Separately,
+the candidate implementation deliberately establishes lineage only by exact
+text and original citation identities; its parser rejects rewrites, missing
+candidates and additions. This avoids guessing which rewritten claim descends
+from which section candidate. The model step therefore only copies an already
+known canonical candidate inventory. This is a conservative implementation
+choice, not a previously qualified consolidation model behavior.
+
+### Proposed required change surface
+
+Replace that model-copy step with deterministic assembly at the same owner:
+validate every completed section against its frozen request/catalog; retain all
+candidates in section order; deduplicate only exact text, identical excerpt IDs
+and identical complete governing-source sets; retain every candidate's lineage;
+materialize final claims from the original global source registry. Keep wording
+variants and different bindings separate. If the distinct final inventory
+exceeds the accepted claim ceiling, stop without selecting a subset.
+
+Remove the unpublished consolidation-only model request, its admission branch
+and response parser when this amendment is accepted. Preserve their failed
+measurement and frozen bytes as evidence; do not keep a redundant model call,
+source truncation, recursive merge or a new fallback alongside the assembler.
+
+Every final claim still receives its original complete governing context at
+C9. Section progress must still be persisted/reloaded with request/source and
+completion bindings. Missing, failed, stale or cancelled sections prevent
+completion. Typed per-claim admission, partial-excerpt labels, complete supported
+result delivery, and the independent whole-draft fidelity gate remain required.
+
+### Non-scope, proof and authority
+
+This explicitly changes section 4's one-model-consolidation requirement to zero
+consolidation model calls; it needs oversight review and operator acceptance
+before code. Section writer and C9 prompts, decoder protocols, runtime, model,
+framing, thinking, context and limits do not change. All-fit behavior, historical
+artifacts, frozen facts/labels, live budgets and all production/merge/ready holds
+remain unchanged. No safe page ceiling or new fidelity claim follows.
+
+After acceptance, replay the frozen public candidate packet through the actual
+assembler with zero generation. Prove complete lineage, exact bytes/bindings,
+no consolidation dispatch, missing/stale/mixed invalid section rejection,
+0/1/8/9/63/64/65 candidate boundaries, exact duplicates versus wording/source
+variants, and real DB reload. Reuse the original rejected request as the capacity
+regression; do not reframe it as an admitted model request. Finish the remaining
+accepted offline build and its original C9/SAME60/full verification gates before
+the round's single code push and exact-head review. Until acceptance: STOP.
