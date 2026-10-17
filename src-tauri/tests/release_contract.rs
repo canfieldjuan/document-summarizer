@@ -3,6 +3,87 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+fn copy_executable_fixture(source: &Path, destination: &Path) {
+    // Keep the writable descriptor out of this parallel test process. CLOEXEC
+    // alone cannot prevent another thread's fork from retaining it before exec.
+    assert!(Command::new("cp")
+        .arg("--")
+        .arg(source)
+        .arg(destination)
+        .status()
+        .unwrap()
+        .success());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executable_fixture_copy_preserves_bytes_and_has_independent_ownership() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("fixture with spaces");
+    let source = Path::new("/bin/true");
+    copy_executable_fixture(source, &destination);
+    assert_eq!(
+        std::fs::read(source).unwrap(),
+        std::fs::read(&destination).unwrap()
+    );
+    let original = std::fs::metadata(source).unwrap();
+    let copied = std::fs::metadata(&destination).unwrap();
+    assert_ne!(
+        (original.dev(), original.ino()),
+        (copied.dev(), copied.ino())
+    );
+    assert_ne!(copied.mode() & 0o111, 0);
+    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(std::fs::metadata(source).unwrap().mode(), original.mode());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executable_fixtures_run_during_parallel_forks() {
+    use std::os::unix::process::CommandExt;
+    use std::sync::{Arc, Barrier};
+
+    let root = tempfile::tempdir().unwrap();
+    let barrier = Arc::new(Barrier::new(12));
+    std::thread::scope(|scope| {
+        for worker in 0..12 {
+            let barrier = Arc::clone(&barrier);
+            let root = root.path();
+            scope.spawn(move || {
+                barrier.wait();
+                for iteration in 0..32 {
+                    if worker < 6 {
+                        let destination = root.join(format!("fixture {worker} {iteration}"));
+                        copy_executable_fixture(Path::new("/bin/true"), &destination);
+                        let status = Command::new(&destination).status().unwrap();
+                        assert!(status.success());
+                    } else {
+                        let mut command = Command::new("/bin/true");
+                        unsafe {
+                            command.pre_exec(|| {
+                                let delay = libc::timespec {
+                                    tv_sec: 0,
+                                    tv_nsec: 5_000_000,
+                                };
+                                // A parked fork retains any inherited writable descriptors.
+                                libc::syscall(
+                                    libc::SYS_nanosleep,
+                                    &delay,
+                                    std::ptr::null_mut::<libc::timespec>(),
+                                );
+                                Ok(())
+                            });
+                        }
+                        assert!(command.status().unwrap().success());
+                    }
+                }
+            });
+        }
+    });
+}
+
 fn contains_rust_source(path: &Path) -> bool {
     if path.is_file() {
         return path.extension().is_some_and(|extension| extension == "rs");
@@ -327,7 +408,7 @@ fn preinst_rejects_unsafe_existing_bootstrap_before_success() {
     std::fs::create_dir(&package_root).unwrap();
     std::fs::set_permissions(&package_root, std::fs::Permissions::from_mode(0o755)).unwrap();
     let installed = temporary.path().join("document-summarizer");
-    std::fs::copy("/bin/true", &installed).unwrap();
+    copy_executable_fixture(Path::new("/bin/true"), &installed);
     std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
     let runtime = temporary.path().join("run-user");
     std::fs::create_dir(&runtime).unwrap();
@@ -441,7 +522,7 @@ fn preinst_crash_boundaries_resume_the_exact_generation() {
         let temporary = tempfile::tempdir().unwrap();
         let package_root = temporary.path().join("package-root");
         let installed = temporary.path().join("document-summarizer");
-        std::fs::copy("/bin/true", &installed).unwrap();
+        copy_executable_fixture(Path::new("/bin/true"), &installed);
         std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
         let runtime = temporary.path().join("run-user");
         let normal = preinst_for_test(&package_root, &installed, &runtime);
@@ -497,7 +578,7 @@ fn preinst_quiesces_live_legacy_owner_without_executing_it() {
     let temporary = tempfile::tempdir().unwrap();
     let package_root = temporary.path().join("package-root");
     let installed = temporary.path().join("document-summarizer");
-    std::fs::copy("/bin/sleep", &installed).unwrap();
+    copy_executable_fixture(Path::new("/bin/sleep"), &installed);
     std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut legacy = Command::new(&installed).arg("30").spawn().unwrap();
     let runtime_base = temporary.path().join("run-user");
@@ -569,7 +650,7 @@ fn preinst_signals_pinned_process_instead_of_recycled_numeric_identity() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     let installed = root.path().join("document-summarizer");
-    std::fs::copy("/bin/sleep", &installed).unwrap();
+    copy_executable_fixture(Path::new("/bin/sleep"), &installed);
     std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut legacy = Command::new(&installed).arg("30").spawn().unwrap();
     let mut unrelated = Command::new("/bin/sleep").arg("30").spawn().unwrap();
@@ -629,7 +710,7 @@ fn preinst_handles_exit_after_capture_and_escalates_on_the_same_process_handle()
     for exited_after_capture in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let installed = root.path().join("document-summarizer");
-        std::fs::copy("/bin/sleep", &installed).unwrap();
+        copy_executable_fixture(Path::new("/bin/sleep"), &installed);
         std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut command = Command::new(&installed);
         command.arg("30");
@@ -857,7 +938,7 @@ fn abort_upgrade_restores_bootstrap_at_every_preinstall_boundary() {
         let package = root.path().join("package");
         let installed = root.path().join("document-summarizer");
         let runtime = root.path().join("run-user");
-        std::fs::copy("/bin/true", &installed).unwrap();
+        copy_executable_fixture(Path::new("/bin/true"), &installed);
         std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
         let original = std::fs::read(&installed).unwrap();
         let normal = preinst_for_test(&package, &installed, &runtime);
@@ -964,7 +1045,7 @@ fn abort_upgrade_replays_rollback_crashes_and_rejects_tampered_state() {
         let package = root.path().join("package");
         let installed = root.path().join("document-summarizer");
         let runtime = root.path().join("run-user");
-        std::fs::copy("/bin/true", &installed).unwrap();
+        copy_executable_fixture(Path::new("/bin/true"), &installed);
         std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
         let original = std::fs::read(&installed).unwrap();
         let preinst = root.path().join("preinst");
