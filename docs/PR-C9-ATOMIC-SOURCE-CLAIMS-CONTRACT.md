@@ -573,6 +573,58 @@ the actual owner, zero generation. Any unresolved reference or boundary still
 blocks dependent work; report reasons without tuning the count toward zero.
 All freeze, private-evidence, live-budget, production, merge and ready holds stay.
 
+### Accepted foreign-numbering amendment — contract before code
+
+Oversight relayed the operator's decision verbatim on R4: “Accept (Recommended)”.
+The selected option was: “Doc Sum adds the foreign-numbering rule at the same
+resolver, with tests, offline; then the reference gate clears and it moves on to
+the summary-planning work. All other holds stay.” This replaces the proposed
+exact-token inheritance rule; no inheritance rule is accepted or implemented.
+Record this in a contract-only local commit and mail its hash before code.
+
+The source heading owner supplies the numbering shapes of the document's own
+resolved heading identities. At the same existing resolver, a section number
+whose numbering grammar is absent from that owned set is typed `external` with
+reason `foreign_numbering`: keep the exact reference with its governing unit,
+disclose “text not in this document”, and do not assert the absent text's content.
+Do not guess a law's name or use a statute/abbreviation lexicon. A reference that
+is compatible with the owned heading grammar but lacks its exact target stays
+`unresolved` with reason `missing_target` and blocks.
+
+Extend the shared number/heading identity owner for the new version to expose
+dashed as well as dotted heading identities; the resolver and heading reader
+consume the same parse and owned shape metadata. This is not another independent
+number parser or a later source re-scan. Preserve the historical General and
+Contract grammars and outputs. Treat deeper dotted descendants conservatively
+as compatible, rather than declaring a missing internal depth foreign. Derive
+dash placement from actual owned identities; formatting glyphs do not identify
+a statute. Do not make every failed lookup external.
+
+Explicit preposed/suffix document qualifiers take precedence and preserve their
+namespace. A complete owned dashed identity resolves internally. A supported
+hyphen/en-dash range of owned heading identities remains an internal range;
+explicit plural/range syntax with a missing endpoint stays blocking. Where a
+singular dash form could still refer to an owned range endpoint, retain an
+explicit unresolved ambiguity instead of guessing foreign scope. Only the
+foreign-numbering case authorized above becomes non-blocking. Duplicate targets
+and genuinely uncertain boundaries remain blocking.
+
+Public synthetic twins: dashed foreign citation in a dotted-numbered document;
+missing dotted `Section 9.4` in a dotted-numbered document; present and missing
+dashed numbers in a dashed-numbered document; valid internal ranges and missing
+range endpoints; and exact reference/content-absence ownership controls. The
+new foreign-numbering exception supersedes the earlier unqualified dashed
+citation's unconditional missing-target expectation only when its numbering
+grammar is foreign. Other unsupported internal forms stay unsupported.
+
+Prove a mutant that classifies every missing target as external fails the dotted
+missing-target twin. Re-measure both original source inputs with zero generation,
+without benchmark/DV labels. Continue dependent planner/writer/Verify work only
+if both actual source plans have zero blocking unresolved references; otherwise
+STOP and report. This acceptance does not promise a measured zero in advance or
+release any live, production, merge, ready or freeze hold. One round push and
+exact-head review remain required after the complete accepted offline build.
+
 ### Proof, compatibility and measurement gates
 
 Keep the current public failing fixture and exercise the new versioned owner
