@@ -711,3 +711,149 @@ all recorded real-server counts exactly through the real owner. An unattributed
 request, absent receipt or count mismatch stops this proof; retain the failure
 and report it without guessing or tuning. All benchmark-label, live-generation,
 production, readiness, merge and PR116 holds remain unchanged.
+
+
+## PROPOSED quote-owner amendment: contextual citation anchors
+
+**NOT ACCEPTED. No behavior implementation is authorized by this proposal.**
+The dependent build is stopped at the citation-coverage gate pending independent
+review and an explicit operator decision. This does not change any live budget
+or release a hold.
+
+### Root cause and reproduced evidence
+
+The new, uncommitted `coherent/whole_document.rs::SourceInput::new` reused
+`quote_segments::segment_spans`, the current standalone analysis-quotation
+policy, as its full-document citation inventory. This was my porting assumption.
+The existing quote owner groups sentences, qualifications and form fields, then
+omits incomplete or over-limit units. That remains intentional for standalone
+quotation evidence. Full source bytes in the writer input do not repair the
+missing citation identities.
+
+The public `whole_writer_keeps_uncitable_text_and_reports_existing_quote_omission`
+control reproduces this policy on a long sentence between citable siblings.
+Code controls the omission in `quote_segments.rs::segment_spans` at its
+`!unit.complete || ... > MAX_ANALYSIS_QUOTE_CHARACTERS` packing branch.
+The separate substring-offset defect in my adapter has already been reproduced,
+repaired by exposing the quote owner's ranges, and caught under mutation; it
+must not be reintroduced as part of this amendment.
+
+Oversight's count-only review `aee2d213` found, on corrected capacity v2:
+
+| Input alias | Required facts without any citable quote | Partly citable facts | Governing units with zero citations |
+| --- | --- | --- | --- |
+| preproduction-1 | 6 of 37 | 4 | 6 of 191 |
+| preproduction-2 | 10 of 30 | 3 | 7 of 65 |
+
+These are independently reported counts; this implementation session has not
+opened the frozen benchmark fact text or labels. The review used a lenient
+any-overlap rule, so the blocker counts are lower bounds. All normalized source
+bytes were present. The current adapter's 26/15 counters are **omitted quote
+segments**, not whole governing units; reporting must distinguish them.
+
+Evidence: corrected private draft-capacity report alias `source-writer-capacity-v2`,
+SHA256 `3c582e82476e641dec07a9eabce27e391e554a5d53765747e7c7c92328a06dfc`.
+The exact executed source receipt is
+`1aa395dac001894c35d26b167fe446a1fc7953170ff15299f3c94b71d91ab4b3`.
+Original native-count inventory remains
+`4acafb6e49cc954d9f586f1020e44f7c4b35210ff69f29e780d8a6a6b8c9b9d2`;
+all original recorded counts match. This is a source-representation gap, with
+no new generation or evidence against the proven 9B C9 behavior.
+
+### Proposed required change surface
+
+1. Add an explicit contextual-anchor policy at the **existing quote owner**,
+   selected only by the new General writer revision. Keep the current standalone
+   policy and every historical caller unchanged. Do not call the standalone
+   policy first and patch its omissions in the writer.
+2. Share the existing bounded range-building implementation and its preferred
+   boundary helper (`analysis_quote_segments_v12` /
+   `preferred_analysis_quote_boundary_v12`) through the quote owner. Expose exact
+   ranges at creation; preserve historical string outputs. This is reuse of an
+   existing implementation, **not** prior qualification of the proposed role.
+   Do not copy a second cutting loop into `whole_document.rs` or infer positions
+   by searching text.
+3. Contextual anchors cover every non-whitespace scalar of each owned primary
+   source span, in order. Each anchor stays inside its normalized block and
+   owning governing unit, uses the existing 600-scalar quotation ceiling, and
+   retains original UTF-8 byte boundaries and bytes. Prefer the existing bounded
+   punctuation/whitespace cuts; where none exists, the scalar boundary is an
+   explicit citation cut. No source normalization, semantic claim splitting or
+   source omission is permitted.
+4. Eligibility requires the app-owned complete governing unit, parents and
+   resolved dependency closure. Bind each anchor's exact range and evidence ID
+   to that owner. Uncertain/unresolved ownership still blocks at its source.
+   Generated IDs, guesses, neighbouring clauses and external text cannot supply
+   missing context. The writer consumes these owned ranges directly.
+5. A contextual anchor may be a sentence fragment, split a long word, or end
+   inside a qualification. **It is never standalone evidence.** The new Verify
+   and saved-evidence owners must reconstruct and validate the same complete
+   governing source for every selected anchor. Missing or mismatched context is
+   an error, with no quote-only fallback. Keep source order, complete conditions
+   and exclusions, existing scalar/schema/enum limits and typed size withholding.
+   An anchor cut does not authorize shortening a claim or its Verify context.
+6. Keep diagnostics separate: omitted standalone quote segments; contextual
+   anchor coverage gaps; governing units with zero anchors; and independently
+   reviewed required-fact citation coverage. Never describe any of these as a
+   fidelity pass or an atomic-claim count.
+
+Remove the new writer's direct reuse of standalone quote admission and its
+substring-recovery workaround (already removed); do not stack an omission-filling
+scanner or per-layout exception on top. The standalone qualification/form rules
+remain necessary for their historical evidence role and are retained there.
+
+### Departures, trade-off and explicit non-scope
+
+This is new, unqualified citation behavior. Original C9 already interprets exact
+excerpts within complete governing source; it does not prove this new writer or
+anchor inventory. The deliberate trade-off is that the visible quote may be
+incomplete, while its full app-owned governing source remains mandatory for
+verification. This proposal explicitly supersedes the new writer's current
+standalone-quotation restriction only for contextual anchors.
+
+Request differences are the anchor IDs/ranges, schema ID vocabulary and any
+resulting draft packing/output allowance; the new writer's input description
+must identify the contextual-anchor role. That description change is limited
+to this representation. Record actual differences and remeasure the final
+requests. No C9 prompt/decoder protocol, old writer prompt, native framing,
+thinking, sampler, model/profile/context, quotation length cap, heading/reference
+reader, comparison limits, source text, benchmark labels or production gate
+changes. No scan/OCR, migration, public DTO, fallback weakening or new live call.
+The accepted ordinary-build and PR116 holds remain.
+
+### Verification plan and stop rules
+
+- Before implementation: oversight review and explicit operator acceptance of
+  this amendment. Then public fail-first source-owner controls: an over-limit
+  sentence, a long qualification group, a multi-field form, an unterminated tail,
+  repeated text after an omitted unit, and mixed citable/uncitable text. Show
+  failure under the current contextual inventory, not a renamed passing test.
+- Probe ceiling-minus-one, ceiling and ceiling-plus-one; whitespace/empty input;
+  unbroken words; decomposed Unicode; source-unit/block boundaries and repeated
+  identical text with different owners. Range union must cover every original
+  non-whitespace scalar exactly once without inventing or changing bytes.
+- At the actual new source/Verify/saved validators, prove complete context is
+  retained for a valid fragment, and reject absent context, an unrelated owner,
+  changed bytes/IDs, unresolved dependencies and tampered/reloaded bindings.
+  Do not claim these syntactic tests prove semantic fidelity.
+- Mutations must catch restoring standalone omission in the contextual path,
+  skipping an anchor, substring position recovery, changing a governing owner,
+  or permitting quote-only fallback. Restore and verify candidate hashes.
+- Reuse the accepted offline native-count seam, actual budget/planner, both
+  frozen source inputs and the genuinely over-context public control. Freeze
+  new receipts. Report every draft's exact token/schema/output bounds and source
+  coverage; stop on a genuine indivisible-unit or consolidation capacity limit.
+- Oversight independently rechecks all required source quotes and qualifications
+  against the owned anchor/context inventory without exposing frozen labels to
+  this session. Any remaining missing/mismatched ownership blocks; do not tune
+  toward a count. The full-draft/fidelity gate is still separate.
+- Preserve historical quote outputs, C9 and SAME60 complete verdict lists and
+  validations unchanged. Run the already-required final gates once the complete
+  accepted implementation exists. No generation is authorized by this proposal.
+
+### Gap audit
+
+**NOT DONE:** proposal only. No contextual-anchor implementation, benchmark
+coverage pass, consolidation, section-progress storage, typed Verify/delivery,
+full gate run or final exact-head review is claimed. Approval of the earlier
+source-dependency rule or count seam does not accept this amendment.
