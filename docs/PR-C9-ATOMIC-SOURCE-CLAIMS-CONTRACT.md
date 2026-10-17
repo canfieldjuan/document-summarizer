@@ -684,3 +684,30 @@ substitute a parser, weaken a probe or describe a planned test as passed.
 The previously accepted benchmark and live-run freezes, all production/merge
 holds, and the source-owner amendment requirement remain binding. This contract
 match is not an exact-head PASS or permission to start any live run.
+
+
+## Accepted offline native-preflight test seam (2026-10-17)
+
+Oversight relayed the operator decision verbatim: **"Accept (Recommended)"**.
+The accepted option was:
+
+> Doc Sum's contract says a missing test seam needs your acceptance before code. It wants to prove, offline, that each planned section of a whole document fits the 9B's 32,768-token window, using the app's real admission code (PromptFraming::load and LlamaCppRuntime::preflight_request). That code asks the model server to count tokens, and the server can't run under the current holds (no GPU, no startup). Proposal: a test-only stand-in for the server's token counter inside the existing framing tests. It uses the pinned tokenizer for document text, and recorded real-server answers for the fixed prompt framing. Accept it with these conditions?
+> (1) Test code only, with no production runtime or setting change.
+> (2) The context comes from the qualified 9B profile, not a typed number.
+> (3) Before any capacity claim, the stand-in must reproduce every recorded real-server token count exactly, and any mismatch stops the work.
+> (4) It refuses any count request it can't attribute, rather than guessing.
+> (5) The results are labelled offline capacity evidence, not native qualification; the later accepted live run is still required.
+
+The source owner for context is the qualified `qwen35-9b-q4km-v1` profile in
+`pipeline/model_settings.rs`. The test adapter must read that profile, including
+its tokenizer family and thinking setting. It may exercise the existing native
+framing loader and admission method with a loopback fixture transport; it must
+never start a model server, generate text, use the GPU, duplicate framing logic,
+or treat synthetic character-count routing tests as native token proof.
+
+Before a section-capacity assertion, freeze the tokenizer metadata and the
+complete recorded token-count inventory used to validate the adapter. Match
+all recorded real-server counts exactly through the real owner. An unattributed
+request, absent receipt or count mismatch stops this proof; retain the failure
+and report it without guessing or tuning. All benchmark-label, live-generation,
+production, readiness, merge and PR116 holds remain unchanged.
