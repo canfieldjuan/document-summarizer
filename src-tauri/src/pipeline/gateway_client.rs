@@ -1468,6 +1468,7 @@ mod tests {
             )
             .unwrap();
             drop(conn);
+            let store = db::Store::initialize(&context.database).unwrap();
             let submitted = Arc::new(Mutex::new(Vec::new()));
             let mut owners = Vec::new();
             for profile in [first, first, second, second, first, changed_context, v2] {
@@ -1479,7 +1480,7 @@ mod tests {
                 let mut runtime = GatewayRuntime::with_client(context.database.clone(), client);
                 let owner = crate::bind_profile_suggestion_request_owner(
                     &mut runtime,
-                    &context.database,
+                    &store,
                     &document.content_hash,
                 )
                 .unwrap();

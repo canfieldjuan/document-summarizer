@@ -7,7 +7,7 @@ use document_summarizer_lib::pipeline::{
         ModelRuntime, ModelRuntimeFailure, ParsedDocument, ParsedPage, PipelineFailure,
         PipelineStage, SourceType, SummaryPresentationMode,
     },
-    db::{get_citation_artifact, get_summary_artifact, get_verified_document, init_db},
+    db::{get_citation_artifact, get_summary_artifact, get_verified_document, Store},
     ingest::ingest_pdf,
     normalize::{normalize_document, CanonicalNormalizer},
     parser::parse_document,
@@ -21,7 +21,6 @@ use document_summarizer_lib::pipeline::{
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Mutex};
-use uuid::Uuid;
 
 const SOURCE: &str = "The safety officer inspects each pump every Monday. A missing guard requires the affected pump to stay off until a technician signs a repair record.";
 
@@ -108,20 +107,23 @@ impl ModelRuntime for Runtime {
     }
 }
 
-struct Database(PathBuf);
+struct Database {
+    store: Store,
+    _directory: tempfile::TempDir,
+}
 impl Database {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("docsum-gate-{}.db", Uuid::new_v4())))
-    }
-}
-impl Drop for Database {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::initialize(&directory.path().join("summarizer.db")).unwrap();
+        Self {
+            store,
+            _directory: directory,
+        }
     }
 }
 
 fn analyzed(db: &Database, runtime: &Runtime) -> (Connection, String) {
-    let mut conn = init_db(&db.0).unwrap();
+    let mut conn = db.store.writer().unwrap();
     let pdf =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
     let (_, run) = ingest_pdf(&mut conn, pdf.to_str().unwrap()).unwrap();
@@ -164,7 +166,7 @@ fn ordinary_library_withholds_unqualified_prose_before_drafting() {
     let completed = complete_verified_document(&mut conn, &id).unwrap();
     let view = get_persisted_summary(&conn, &id).unwrap();
     drop(conn);
-    let conn = init_db(&db.0).unwrap();
+    let conn = db.store.reader().unwrap();
     assert_eq!(get_persisted_summary(&conn, &id).unwrap(), view);
     assert_eq!(
         get_summary_artifact(&conn, &id).unwrap().unwrap(),
@@ -198,7 +200,7 @@ fn fallback_still_withholds_unsupported_source_claims() {
 // Recorded through the public pipeline before the activation fix, with the
 // public text above and scripted responses. No model qualification is implied.
 fn recorded_checkpoint(db: &Database, state: &str) -> (Connection, String) {
-    let mut conn = init_db(&db.0).unwrap();
+    let mut conn = db.store.writer().unwrap();
     let mut fixture: Value =
         serde_json::from_str(include_str!("fixtures/c9-public-checkpoint.json")).unwrap();
     if state == "verified" {
@@ -304,7 +306,7 @@ fn completed_coherent_artifacts_remain_readable() {
         summary.integrity_hash
     );
     drop(conn);
-    let conn = init_db(&db.0).unwrap();
+    let conn = db.store.reader().unwrap();
     assert_eq!(get_persisted_summary(&conn, &id).unwrap(), view);
     assert_eq!(get_summary_artifact(&conn, &id).unwrap().unwrap(), summary);
     assert_eq!(

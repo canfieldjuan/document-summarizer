@@ -1191,7 +1191,7 @@ mod tests {
         let save = |name: &str, value: &Value| {
             fs::write(output.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
         };
-        db::init_db(&database).unwrap();
+        let store = db::Store::initialize(&database).unwrap();
         let runtime = runtime_from_settings(&settings, &database).unwrap();
         let health = runtime.health();
         save(
@@ -1201,7 +1201,7 @@ mod tests {
         );
         health.unwrap();
         drop(runtime);
-        let manager = DesktopJobManager::new(database.clone(), settings);
+        let manager = DesktopJobManager::new(store, settings);
         let mut results = Vec::new();
         for input in inputs {
             let alias = input["alias"].as_str().unwrap();
