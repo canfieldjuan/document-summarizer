@@ -668,13 +668,7 @@ mod tests {
     use std::sync::Mutex;
     use uuid::Uuid;
 
-    struct TestDatabase(PathBuf);
-
-    impl TestDatabase {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("doc-sum-live-citation-{}.db", Uuid::new_v4())))
-        }
-    }
+    use crate::test_store::DatabaseFixture as TestDatabase;
 
     struct TestSource(PathBuf);
 
@@ -693,12 +687,6 @@ mod tests {
     }
 
     impl Drop for TestSource {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
-
-    impl Drop for TestDatabase {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
         }

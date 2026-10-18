@@ -1010,7 +1010,21 @@ pub enum MigrationError {
     Invariant(String),
 }
 
+#[cfg(test)]
+thread_local! {
+    static SETUP_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+#[cfg(test)]
+pub(crate) fn setup_counts() -> (usize, usize) {
+    SETUP_COUNTS.with(|c| c.get())
+}
+
 pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
+    #[cfg(test)]
+    SETUP_COUNTS.with(|c| {
+        let (m, v) = c.get();
+        c.set((m + 1, v));
+    });
     let mut current_version = version(conn)?;
     if current_version > CURRENT_SCHEMA_VERSION {
         return Err(MigrationError::UnsupportedVersion {
@@ -1303,6 +1317,11 @@ fn migrate_additive(
 }
 
 fn validate(conn: &Connection) -> Result<(), MigrationError> {
+    #[cfg(test)]
+    SETUP_COUNTS.with(|c| {
+        let (m, v) = c.get();
+        c.set((m, v + 1));
+    });
     let quick_check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if quick_check != "ok" {
         return Err(MigrationError::Invariant(format!(
@@ -1805,23 +1824,8 @@ mod tests {
     use super::*;
     use rusqlite::params;
     use sha2::{Digest, Sha256};
-    use std::fs;
-    use std::path::PathBuf;
-    use uuid::Uuid;
 
-    struct TestDatabase(PathBuf);
-
-    impl TestDatabase {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("doc-sum-schema-{}.db", Uuid::new_v4())))
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
+    use crate::test_store::DatabaseFixture as TestDatabase;
 
     #[test]
     fn schema_v13_backfills_primary_summary_attempts_and_makes_them_immutable() {

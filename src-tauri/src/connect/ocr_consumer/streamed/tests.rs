@@ -656,8 +656,10 @@ fn startup_recovery_cancellation_interrupts_stalled_body_and_releases_roots() {
         paths
     });
     let database = dir.path().join("summarizer.db");
-    let manager =
-        crate::desktop::DesktopJobManager::new(database.clone(), dir.path().join("settings.json"));
+    let manager = crate::desktop::DesktopJobManager::new(
+        db::Store::initialize(&database).unwrap(),
+        dir.path().join("settings.json"),
+    );
     manager
         .start_ocr_recovery(dir.path().to_path_buf())
         .unwrap();

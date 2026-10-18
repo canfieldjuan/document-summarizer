@@ -296,7 +296,7 @@ impl ProviderWorkerOwner {
 
 #[derive(Clone)]
 struct ProviderState {
-    db_path: PathBuf,
+    store: db::Store,
     imports_dir: PathBuf,
     instance_id_v1: String,
     instance_id_v2: String,
@@ -538,6 +538,7 @@ pub enum ProviderStartError {
 }
 
 pub struct ConnectProvider {
+    store: db::Store,
     #[cfg(unix)]
     _provider_owner_lock: RegistrationLifecycleLock,
     #[cfg(unix)]
@@ -761,24 +762,8 @@ impl ConnectProvider {
             windows_storage::ensure_private_directory(directory, &runtime_root)?;
         }
 
-        #[cfg(unix)]
-        let mut conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
-        #[cfg(not(unix))]
-        let mut conn = db::init_db(&db_path).map_err(ConnectStoreError::from)?;
-        #[cfg(unix)]
-        let recovered_runs =
-            reconcile_interrupted_runs(&mut conn).map_err(ConnectStoreError::from)?;
-        #[cfg(unix)]
-        if !recovered_runs.is_empty() {
-            eprintln!(
-                "Reconciled {} interrupted pipeline run(s) before Connect publication",
-                recovered_runs.len()
-            );
-        }
-        let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
-        let instance_id_v2 =
-            load_or_create_v2_instance_id(&app_data_dir, active_v2_instance_id.as_deref())?;
-
+        #[cfg(windows)]
+        let instance_id_v2 = standalone_v2_instance_id_without_writes(&db_path, &app_data_dir)?;
         #[cfg(windows)]
         let registration_lock_v1 = acquire_registration_lock(
             &locks_dir_v1.join(format!(".local-connect-v1-{APP_ID}.lock")),
@@ -793,6 +778,33 @@ impl ConnectProvider {
             None,
         )
         .map_err(map_windows_registration_lock_error)?;
+
+        let prepared_store = db::Store::initialize(&db_path).map_err(ConnectStoreError::from)?;
+        let mut conn = prepared_store.writer().map_err(ConnectStoreError::from)?;
+        #[cfg(unix)]
+        let recovered_runs =
+            reconcile_interrupted_runs(&mut conn).map_err(ConnectStoreError::from)?;
+        #[cfg(unix)]
+        if !recovered_runs.is_empty() {
+            eprintln!(
+                "Reconciled {} interrupted pipeline run(s) before Connect publication",
+                recovered_runs.len()
+            );
+        }
+        let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
+        #[cfg(unix)]
+        let instance_id_v2 =
+            load_or_create_v2_instance_id(&app_data_dir, active_v2_instance_id.as_deref())?;
+        #[cfg(windows)]
+        let instance_id_v2 = {
+            if active_v2_instance_id
+                .as_deref()
+                .is_some_and(|active| active != instance_id_v2)
+            {
+                return Err(ProviderStartError::InvalidInstanceIdentity);
+            }
+            load_or_create_v2_instance_id(&app_data_dir, Some(&instance_id_v2))?
+        };
 
         #[cfg(windows)]
         let recovered_runs =
@@ -833,7 +845,7 @@ impl ConnectProvider {
         #[cfg(not(target_os = "linux"))]
         let admission_authority = Arc::new(ProviderAdmissionAuthority::default());
         let state = ProviderState {
-            db_path,
+            store: prepared_store.clone(),
             imports_dir,
             instance_id_v1: instance_id_v1.clone(),
             instance_id_v2: instance_id_v2.clone(),
@@ -1066,6 +1078,7 @@ impl ConnectProvider {
         drop(publication_authority);
 
         Ok(Self {
+            store: prepared_store,
             #[cfg(unix)]
             _provider_owner_lock: provider_owner_lock,
             #[cfg(unix)]
@@ -1092,6 +1105,10 @@ impl ConnectProvider {
             server_thread: Some(server_thread),
             stopped: false,
         })
+    }
+
+    pub(crate) fn store(&self) -> db::Store {
+        self.store.clone()
     }
 
     pub fn base_url(&self) -> &str {
@@ -1240,7 +1257,7 @@ impl ConnectProvider {
 pub(crate) fn reconcile_standalone_state_if_unowned(
     db_path: &Path,
     app_data_dir: &Path,
-) -> Result<Option<usize>, ProviderStartError> {
+) -> Result<Option<(usize, db::Store)>, ProviderStartError> {
     ensure_private_directory(app_data_dir)?;
     let _owner =
         match acquire_provider_ownership_lock(&app_data_dir.join(".connect-provider-owner.lock")) {
@@ -1248,19 +1265,19 @@ pub(crate) fn reconcile_standalone_state_if_unowned(
             Err(ProviderStartError::ProviderAlreadyRunning) => return Ok(None),
             Err(error) => return Err(error),
         };
-    let mut conn = db::init_db(db_path).map_err(ConnectStoreError::from)?;
-    Ok(Some(
-        reconcile_interrupted_runs(&mut conn)
-            .map_err(ConnectStoreError::from)?
-            .len(),
-    ))
+    let store = db::Store::initialize(db_path).map_err(ConnectStoreError::from)?;
+    let mut conn = store.writer().map_err(ConnectStoreError::from)?;
+    let count = reconcile_interrupted_runs(&mut conn)
+        .map_err(ConnectStoreError::from)?
+        .len();
+    Ok(Some((count, store)))
 }
 
 #[cfg(windows)]
 pub(crate) fn reconcile_standalone_state_if_unowned(
     db_path: &Path,
     app_data_dir: &Path,
-) -> Result<Option<usize>, ProviderStartError> {
+) -> Result<Option<(usize, db::Store)>, ProviderStartError> {
     let runtime_root = windows_storage::local_app_data_root(env::var_os("LOCALAPPDATA"))
         .map_err(|_| ProviderStartError::RuntimeDirectoryUnavailable)?;
     reconcile_standalone_state_if_unowned_at(db_path, app_data_dir, &runtime_root)
@@ -1305,7 +1322,7 @@ fn reconcile_standalone_state_if_unowned_at(
     db_path: &Path,
     app_data_dir: &Path,
     runtime_root: &Path,
-) -> Result<Option<usize>, ProviderStartError> {
+) -> Result<Option<(usize, db::Store)>, ProviderStartError> {
     ensure_private_directory(app_data_dir)?;
     let private_connect_root = windows_storage::prepare_local_connect_root(runtime_root)?;
     let locks_dir_v1 = private_connect_root.join("runtime/v1/locks");
@@ -1334,7 +1351,8 @@ fn reconcile_standalone_state_if_unowned_at(
         Err(error) => return Err(map_windows_registration_lock_error(error)),
     };
 
-    let mut conn = db::init_db(db_path).map_err(ConnectStoreError::from)?;
+    let store = db::Store::initialize(db_path).map_err(ConnectStoreError::from)?;
+    let mut conn = store.writer().map_err(ConnectStoreError::from)?;
     let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
     if active_v2_instance_id
         .as_deref()
@@ -1346,11 +1364,10 @@ fn reconcile_standalone_state_if_unowned_at(
     if instance_id != candidate_instance_id {
         return Err(ProviderStartError::InvalidInstanceIdentity);
     }
-    Ok(Some(
-        reconcile_interrupted_runs(&mut conn)
-            .map_err(ConnectStoreError::from)?
-            .len(),
-    ))
+    let count = reconcile_interrupted_runs(&mut conn)
+        .map_err(ConnectStoreError::from)?
+        .len();
+    Ok(Some((count, store)))
 }
 
 #[cfg(target_os = "linux")]
@@ -1520,7 +1537,7 @@ async fn get_job_status(
             "The job identifier is invalid.",
         ));
     }
-    let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+    let conn = state.store.reader().map_err(ProviderHttpError::store)?;
     let job = store::get_job(&conn, &job_id)
         .map_err(ProviderHttpError::store)?
         .filter(|job| job.protocol_version == PROTOCOL_VERSION)
@@ -1550,7 +1567,7 @@ async fn get_job_status_v2(
                 "The job identifier is invalid.",
             ));
         }
-        let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+        let conn = state.store.reader().map_err(ProviderHttpError::store)?;
         let job = store::get_job(&conn, &job_id)
             .map_err(ProviderHttpError::store)?
             .filter(|job| job.protocol_version == v2::PROTOCOL_VERSION)
@@ -1692,7 +1709,10 @@ async fn create_job_for(
     let lookup_state = state.clone();
     let job_id = request.job_id.clone();
     let existing = admission_work(&state, deadline, move |_| {
-        let conn = db::init_db(&lookup_state.db_path).map_err(ProviderHttpError::store)?;
+        let conn = lookup_state
+            .store
+            .reader()
+            .map_err(ProviderHttpError::store)?;
         store::get_job(&conn, &job_id).map_err(ProviderHttpError::store)
     })
     .await?;
@@ -1797,7 +1817,7 @@ fn admit_received_job(
     let mut runtime = match (state.runtime_factory)() {
         Ok(runtime) => runtime,
         Err(error) => {
-            let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+            let conn = state.store.reader().map_err(ProviderHttpError::store)?;
             if let Some(response) = idempotent_response_after_admission_race(
                 store::get_job(&conn, &request.job_id),
                 &request_hash,
@@ -1812,7 +1832,7 @@ fn admit_received_job(
     let profile_snapshot = match runtime.profile_snapshot() {
         Some(snapshot) => snapshot,
         None => {
-            let conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+            let conn = state.store.reader().map_err(ProviderHttpError::store)?;
             if let Some(response) = idempotent_response_after_admission_race(
                 store::get_job(&conn, &request.job_id),
                 &request_hash,
@@ -1887,7 +1907,7 @@ fn admit_received_job(
         )
     })?;
     document.local_source_path = import_path_text.to_string();
-    let mut conn = db::init_db(&state.db_path).map_err(ProviderHttpError::store)?;
+    let mut conn = state.store.writer().map_err(ProviderHttpError::store)?;
     if let Some(existing) =
         store::get_job(&conn, &request.job_id).map_err(ProviderHttpError::store)?
     {
@@ -1977,9 +1997,9 @@ fn process_job(
     cancellation: CancellationToken,
 ) {
     let result = (|| -> Result<(), ProcessJobError> {
-        let conn = db::init_db(&state.db_path)?;
+        let conn = state.store.writer()?;
         let job = store::mark_processing(&conn, &job_id)?;
-        let mut pipeline_conn = db::init_db(&state.db_path)?;
+        let mut pipeline_conn = state.store.writer()?;
         let run = db::get_pipeline_run(&pipeline_conn, &job.pipeline_run_id)?
             .ok_or_else(|| db::StoreError::RunNotFound(job.pipeline_run_id.clone()))?;
         let document = db::get_document(&pipeline_conn, &run.document_id)?
@@ -2021,7 +2041,9 @@ fn process_job(
 
     if let Err(error) = result {
         let public_error = error.public_error();
-        match db::init_db(&state.db_path)
+        match state
+            .store
+            .writer()
             .map_err(ConnectStoreError::from)
             .and_then(|conn| store::mark_failed(&conn, &job_id, &public_error).map(|_| ()))
         {
@@ -2077,6 +2099,13 @@ enum ProcessJobError {
 
 impl ProcessJobError {
     fn public_error(&self) -> JobError {
+        if db::is_contention(self) {
+            return job_error(
+                "PROVIDER_STORE_BUSY",
+                "The provider store is busy; try again.",
+                true,
+            );
+        }
         match self {
             Self::Service(crate::pipeline::service::DocumentServiceError::Summary(
                 SummaryPipelineError::StageFailed(failure),
@@ -2465,8 +2494,16 @@ impl ProviderHttpError {
         }
     }
 
-    fn store(error: impl std::fmt::Display) -> Self {
+    fn store(error: impl std::error::Error + 'static) -> Self {
         eprintln!("Connect provider store error: {error}");
+        if db::is_contention(&error) {
+            return Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "PROVIDER_STORE_BUSY",
+                "The provider store is busy; try again.",
+                true,
+            );
+        }
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "PROVIDER_INTERNAL_ERROR",
@@ -5155,6 +5192,123 @@ mod tests {
         }
     }
 
+    fn assert_status_reader_under_contention(version: u32) {
+        eprintln!(
+            "BUNDLED_SQLITE runtime={} number={}",
+            rusqlite::version(),
+            rusqlite::version_number()
+        );
+        let root = TestDirectory::new("doc-sum-status-store-regression");
+        let app_data = root.0.join("app-data");
+        let path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            path.clone(),
+            app_data,
+            root.0.join("runtime"),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let mut request = fixture_request(&fs::read(&source).unwrap());
+        request.protocol_version = version;
+        let (document, run) = prepare_pdf_ingestion(source.to_str().unwrap(), None).unwrap();
+        let mut conn = db::init_db(&path).unwrap();
+        let instance = if version == 1 {
+            &provider.instance_id_v1
+        } else {
+            &provider.instance_id_v2
+        };
+        let (_, before) = store::accept_job_with_ingestion(
+            &mut conn,
+            &request,
+            &request.canonical_hash().unwrap(),
+            source.to_str().unwrap(),
+            instance,
+            &document,
+            &run,
+        )
+        .unwrap();
+        conn.execute_batch("CREATE TABLE status_lock_probe (value INTEGER); INSERT INTO status_lock_probe VALUES(0);").unwrap();
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let url = format!("{}v{version}/jobs/{}", provider.base_url(), request.job_id);
+        let send = || {
+            client
+                .get(&url)
+                .bearer_auth(&registration.auth.token)
+                .send()
+                .unwrap()
+        };
+        assert_eq!(send().status(), StatusCode::OK);
+        conn.pragma_update(None, "cache_spill", false).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE; UPDATE status_lock_probe SET value = 1;")
+            .unwrap();
+        assert_eq!(
+            send().status(),
+            StatusCode::OK,
+            "reserved/normal WAL writer must permit status reads"
+        );
+        conn.execute_batch("ROLLBACK").unwrap();
+        // A retained exclusive transaction is the original public diagnostic bound.
+        // In WAL it may allow a snapshot; exceptional locks may instead return busy.
+        conn.execute_batch("BEGIN EXCLUSIVE; UPDATE status_lock_probe SET value = 2;")
+            .unwrap();
+        let started = Instant::now();
+        let response = send();
+        let elapsed = started.elapsed();
+        let status = response.status();
+        let body: serde_json::Value = response.json().unwrap();
+        conn.execute_batch("ROLLBACK").unwrap();
+        assert!(matches!(status, StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE),
+            "status reader must return a snapshot or retryable busy, got {status}; elapsed={elapsed:?}; body={body}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "status waited behind writer: {elapsed:?}"
+        );
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(body["error"]["code"], "PROVIDER_STORE_BUSY");
+            assert_eq!(body["error"]["retryable"], true);
+        } else {
+            assert_eq!(body["status"], "accepted");
+        }
+        assert_eq!(
+            store::get_job(&conn, &request.job_id).unwrap().unwrap(),
+            before
+        );
+        drop(conn);
+        provider.store.with_synthetic_exclusive_lock(|| {
+            let started = Instant::now();
+            let response = send();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body: serde_json::Value = response.json().unwrap();
+            assert_eq!(body["error"]["code"], "PROVIDER_STORE_BUSY");
+            assert_eq!(body["error"]["retryable"], true);
+            assert!(started.elapsed() < Duration::from_secs(2));
+        });
+        assert_eq!(send().status(), StatusCode::OK);
+        eprintln!(
+            "STORE_STATUS_REGRESSION version={version} status={status} elapsed_ms={}",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+
+    #[test]
+    fn v2_status_reader_does_not_wait_for_writer() {
+        assert_status_reader_under_contention(2);
+    }
+
+    #[test]
+    fn v1_status_reader_does_not_wait_for_writer() {
+        assert_status_reader_under_contention(1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn provider_start_scavenges_stale_owned_registrations_and_preserves_foreign_files() {
@@ -6164,7 +6318,9 @@ int kill(pid_t pid, int sig) {
             Err(ProviderStartError::ProviderAlreadyRunning)
         ));
         assert_eq!(
-            reconcile_standalone_state_if_unowned(&db_path, &app_data).unwrap(),
+            reconcile_standalone_state_if_unowned(&db_path, &app_data)
+                .unwrap()
+                .map(|(count, _)| count),
             None
         );
         let conn = db::init_db(&db_path).unwrap();
@@ -6190,7 +6346,9 @@ int kill(pid_t pid, int sig) {
         assert!(!registration_v1.exists());
         assert!(!registration_v2.exists());
         assert_eq!(
-            reconcile_standalone_state_if_unowned(&db_path, &app_data).unwrap(),
+            reconcile_standalone_state_if_unowned(&db_path, &app_data)
+                .unwrap()
+                .map(|(count, _)| count),
             Some(1)
         );
         assert_eq!(
@@ -6227,7 +6385,9 @@ int kill(pid_t pid, int sig) {
         drop(conn);
 
         assert_eq!(
-            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root).unwrap(),
+            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root)
+                .unwrap()
+                .map(|(count, _)| count),
             None
         );
         assert_eq!(
@@ -6240,7 +6400,9 @@ int kill(pid_t pid, int sig) {
 
         provider.shutdown();
         assert_eq!(
-            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root).unwrap(),
+            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root)
+                .unwrap()
+                .map(|(count, _)| count),
             Some(1)
         );
         assert_eq!(
@@ -6271,7 +6433,9 @@ int kill(pid_t pid, int sig) {
         assert!(!app_data.join(V2_INSTANCE_ID_FILE).exists());
 
         assert_eq!(
-            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root).unwrap(),
+            reconcile_standalone_state_if_unowned_at(&db_path, &app_data, &runtime_root)
+                .unwrap()
+                .map(|(count, _)| count),
             Some(1)
         );
         assert!(app_data.join(V2_INSTANCE_ID_FILE).is_file());
@@ -6486,6 +6650,72 @@ int kill(pid_t pid, int sig) {
             .unwrap()
             .next()
             .is_none());
+    }
+
+    #[test]
+    fn store_failures_preserve_http_and_worker_contention_identity() {
+        for (code, expected_code, expected_status) in [
+            (
+                rusqlite::ffi::SQLITE_BUSY,
+                "PROVIDER_STORE_BUSY",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                rusqlite::ffi::SQLITE_LOCKED,
+                "PROVIDER_STORE_BUSY",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
+                "PROVIDER_STORE_BUSY",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                rusqlite::ffi::SQLITE_CORRUPT,
+                "PROVIDER_INTERNAL_ERROR",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                rusqlite::ffi::SQLITE_IOERR,
+                "PROVIDER_INTERNAL_ERROR",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                rusqlite::ffi::SQLITE_READONLY,
+                "PROVIDER_INTERNAL_ERROR",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let sql = || rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+            let http = ProviderHttpError::store(ConnectStoreError::PipelineStore(
+                db::StoreError::Sqlite(sql()),
+            ));
+            assert_eq!(http.status, expected_status);
+            assert_eq!(http.error.code, expected_code);
+            assert!(http.error.retryable);
+            for worker in [
+                ProcessJobError::PipelineStore(db::StoreError::Sqlite(sql())),
+                ProcessJobError::ConnectStore(ConnectStoreError::PipelineStore(
+                    db::StoreError::Sqlite(sql()),
+                )),
+                ProcessJobError::Service(crate::pipeline::service::DocumentServiceError::Summary(
+                    SummaryPipelineError::Store(db::StoreError::Sqlite(sql())),
+                )),
+            ] {
+                let worker = worker.public_error();
+                if expected_status == StatusCode::SERVICE_UNAVAILABLE {
+                    assert_eq!(worker.code, expected_code);
+                    assert!(worker.retryable, "worker lost retryable contention");
+                } else {
+                    assert_ne!(worker.code, "PROVIDER_STORE_BUSY");
+                }
+            }
+        }
+        let misleading_text =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "database is locked");
+        let http = ProviderHttpError::store(misleading_text);
+        assert_eq!(http.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(http.error.code, "PROVIDER_INTERNAL_ERROR");
     }
 
     #[test]

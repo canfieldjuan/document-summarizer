@@ -14,7 +14,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 const SNAPSHOT_VERSION: u32 = 3;
@@ -64,6 +64,7 @@ impl GatewayExecutor for GatewayClient {
 
 pub(crate) struct GatewayRuntime {
     db_path: PathBuf,
+    store: OnceLock<db::Store>,
     executor: Arc<dyn GatewayExecutor>,
     bound_owner_id: Option<String>,
     snapshot: ModelProfileSnapshot,
@@ -90,6 +91,7 @@ impl GatewayRuntime {
     fn with_executor(db_path: PathBuf, executor: Arc<dyn GatewayExecutor>) -> Self {
         Self {
             db_path,
+            store: OnceLock::new(),
             executor,
             bound_owner_id: None,
             snapshot: canonical_snapshot(),
@@ -112,7 +114,25 @@ impl ModelRuntime for GatewayRuntime {
             )
         })?;
         let started = Instant::now();
-        let mut conn = db::init_db(&self.db_path).map_err(|_| {
+        let store = (|| -> Result<&db::Store, db::StoreError> {
+            if self.store.get().is_none() {
+                let prepared = db::Store::attach(&self.db_path)?;
+                let _ = self.store.set(prepared);
+            }
+            Ok(self
+                .store
+                .get()
+                .expect("store attached or concurrent attachment won"))
+        })()
+        .map_err(|_| {
+            failure(
+                "MODEL_GATEWAY_STORE_FAILED",
+                "Inference gateway store is not prepared",
+                false,
+                vec![diagnostic(request, started, false)],
+            )
+        })?;
+        let mut conn = store.writer().map_err(|_| {
             failure(
                 "MODEL_GATEWAY_STORE_FAILED",
                 "Inference gateway request state is unavailable",
@@ -441,6 +461,7 @@ mod tests {
         let root = TestDirectory::new();
         let state = Arc::new(Mutex::new(ExecutorState::default()));
         let mut runtime = runtime(&root, Arc::clone(&state), false, true);
+        let _store = db::Store::initialize(&runtime.db_path).unwrap();
         runtime.bind_run("durable-run");
 
         let response = runtime.generate(&request()).unwrap();
@@ -465,6 +486,7 @@ mod tests {
         let root = TestDirectory::new();
         let state = Arc::new(Mutex::new(ExecutorState::default()));
         let mut runtime = runtime(&root, Arc::clone(&state), false, true);
+        let _store = db::Store::initialize(&runtime.db_path).unwrap();
         runtime.bind_request_owner("profile-suggestion-owner");
         let mut primary = request();
         primary.ordinal = 0;
@@ -496,6 +518,7 @@ mod tests {
         let root = TestDirectory::new();
         let state = Arc::new(Mutex::new(ExecutorState::default()));
         let mut runtime = runtime(&root, state, true, true);
+        let _store = db::Store::initialize(&runtime.db_path).unwrap();
         runtime.bind_run("durable-run");
 
         let error = runtime.generate(&request()).unwrap_err();

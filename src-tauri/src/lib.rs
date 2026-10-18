@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../tests/support/store.rs"]
+mod test_store;
+
 pub mod connect;
 mod desktop;
 pub mod pipeline;
@@ -16,7 +20,7 @@ use pipeline::contracts::{
     StructureInterpreter, StructuredDocument, SummaryProfile,
 };
 use pipeline::corrections::{self, CorrectionError, OcrReview, SaveCorrection};
-use pipeline::db::{get_or_create_profile_suggestion_owner, init_db, StoreError};
+use pipeline::db::{get_or_create_profile_suggestion_owner, StoreError};
 use pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion, IngestError};
 use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
 use pipeline::model_settings::{
@@ -193,7 +197,7 @@ impl From<EntitlementInstallError> for CommandError {
 }
 
 fn open_database(state: &AppState) -> Result<Connection, CommandError> {
-    init_db(state.jobs.db_path()).map_err(CommandError::from)
+    state.jobs.store().writer().map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -258,10 +262,10 @@ fn chunk_document(
 
 fn bind_profile_suggestion_request_owner(
     runtime: &mut dyn ModelRuntime,
-    db_path: &Path,
+    store: &pipeline::db::Store,
     source_content_hash: &str,
 ) -> Result<String, CommandError> {
-    let mut conn = init_db(db_path).map_err(CommandError::from)?;
+    let mut conn = store.writer().map_err(CommandError::from)?;
     let owner_id = get_or_create_profile_suggestion_owner(
         &mut conn,
         source_content_hash,
@@ -278,7 +282,8 @@ async fn suggest_summary_profile(
     file_path: String,
 ) -> Result<SummaryProfileSuggestion, CommandError> {
     let settings_path = state.model_settings_path.clone();
-    let db_path = state.jobs.db_path().to_path_buf();
+    let store = state.jobs.store();
+    let db_path = store.path().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
         let (document, _) = prepare_pdf_ingestion(&file_path, None).map_err(CommandError::from)?;
         let parsed = PdfExtractParser::new()
@@ -292,7 +297,7 @@ async fn suggest_summary_profile(
             .map_err(CommandError::from)?;
         let mut runtime =
             runtime_from_settings(&settings_path, &db_path).map_err(CommandError::from)?;
-        bind_profile_suggestion_request_owner(runtime.as_mut(), &db_path, &document.content_hash)?;
+        bind_profile_suggestion_request_owner(runtime.as_mut(), &store, &document.content_hash)?;
         runtime.health().map_err(CommandError::from)?;
         suggest_profile_from_document(
             runtime.as_ref(),
@@ -616,7 +621,25 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     None
                 }
             };
-            let jobs = DesktopJobManager::new(db_path.clone(), settings_path.clone());
+            let (provider, store) = match ConnectProvider::start(db_path.clone(), app_data_dir.clone()) {
+                Ok(provider) => {
+                    let store = provider.store();
+                    (Some(provider), store)
+                }
+                Err(error) => {
+                    eprintln!("Connect provider unavailable; standalone mode continues: {error}");
+                    #[cfg(any(unix, windows))]
+                    let store = match connect::provider::reconcile_standalone_state_if_unowned(&db_path, &app_data_dir)? {
+                        Some((count, store)) => {
+                            if count > 0 { eprintln!("Reconciled {count} interrupted pipeline run(s) in standalone mode"); }
+                            store
+                        }
+                        None => pipeline::db::Store::attach(&db_path)?,
+                    };
+                    (None, store)
+                }
+            };
+            let jobs = DesktopJobManager::new(store, settings_path.clone());
             if let Err(error) = jobs.start_ocr_recovery(app_data_dir.clone()) {
                 eprintln!("OCR restart recovery worker could not start: {error}");
             }
@@ -625,29 +648,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 model_settings_path: settings_path,
                 entitlement,
             });
-            match ConnectProvider::start(db_path.clone(), app_data_dir.clone()) {
-                Ok(provider) => {
-                    app.manage(Mutex::new(Some(provider)));
-                }
-                Err(error) => {
-                    eprintln!("Connect provider unavailable; standalone mode continues: {error}");
-                    #[cfg(any(unix, windows))]
-                    match connect::provider::reconcile_standalone_state_if_unowned(
-                        &db_path,
-                        &app_data_dir,
-                    ) {
-                        Ok(Some(count)) if count > 0 => {
-                            eprintln!(
-                                "Reconciled {count} interrupted pipeline run(s) in standalone mode"
-                            );
-                        }
-                        Ok(Some(_) | None) => {}
-                        Err(recovery_error) => {
-                            eprintln!("Standalone recovery unavailable: {recovery_error}");
-                        }
-                    }
-                }
-            }
+            app.manage(Mutex::new(provider));
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -805,15 +806,16 @@ mod capability_tests {
     fn automatic_profile_owner_is_stable_and_bound_before_inference() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("summarizer.db");
+        let store = super::pipeline::db::Store::initialize(&database).unwrap();
         let hash = "a".repeat(64);
         let mut first = OwnerRecordingRuntime::default();
         let first_owner =
-            super::bind_profile_suggestion_request_owner(&mut first, &database, &hash).unwrap();
+            super::bind_profile_suggestion_request_owner(&mut first, &store, &hash).unwrap();
         assert_eq!(first.owner_id.as_deref(), Some(first_owner.as_str()));
 
         let mut reopened = OwnerRecordingRuntime::default();
         let reopened_owner =
-            super::bind_profile_suggestion_request_owner(&mut reopened, &database, &hash).unwrap();
+            super::bind_profile_suggestion_request_owner(&mut reopened, &store, &hash).unwrap();
         assert_eq!(reopened_owner, first_owner);
         assert_eq!(reopened.owner_id.as_deref(), Some(first_owner.as_str()));
     }

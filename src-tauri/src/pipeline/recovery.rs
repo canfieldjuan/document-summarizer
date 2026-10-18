@@ -80,10 +80,6 @@ mod tests {
             fs::write(&path, contents).expect("test path should be writable");
             Self(path)
         }
-
-        fn empty(extension: &str) -> Self {
-            Self::new(extension, b"")
-        }
     }
 
     impl Drop for TestPath {
@@ -242,7 +238,7 @@ mod tests {
     #[test]
     fn interrupted_run_is_failed_once_and_survives_independent_reopen() {
         let source = TestPath::new("pdf", b"%PDF-1.4\nRECOVERY_SOURCE_BYTES");
-        let database = TestPath::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let (stable, parsing, document, events_before) = {
             let mut conn = init_db(&database.0).expect("database should initialize");
             let (document, stable) = ingest_pdf(
@@ -331,7 +327,7 @@ mod tests {
     #[test]
     fn interrupted_cancellation_completes_once_after_independent_reopen() {
         let source = TestPath::new("pdf", b"%PDF-1.4\nCANCELLATION_RECOVERY_BYTES");
-        let database = TestPath::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let cancelling = {
             let mut conn = init_db(&database.0).expect("database should initialize");
             let parsing = start_parsing_run(&mut conn, &source);
@@ -372,7 +368,7 @@ mod tests {
     #[test]
     fn recovery_rejects_cancelling_state_without_durable_request_flag() {
         let source = TestPath::new("pdf", b"%PDF-1.4\nINVALID_CANCELLATION_RECOVERY");
-        let database = TestPath::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let cancelling = {
             let mut conn = init_db(&database.0).expect("database should initialize");
             let parsing = start_parsing_run(&mut conn, &source);
@@ -544,7 +540,7 @@ mod tests {
     #[test]
     fn stale_recovery_snapshot_cannot_overwrite_a_newer_failure() {
         let source = TestPath::new("pdf", b"%PDF-1.4\nRECOVERY_CAS_BYTES");
-        let database = TestPath::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let mut caller_a = init_db(&database.0).expect("database should initialize");
         let parsing = start_parsing_run(&mut caller_a, &source);
         let mut caller_b = init_db(&database.0).expect("second connection should open");
