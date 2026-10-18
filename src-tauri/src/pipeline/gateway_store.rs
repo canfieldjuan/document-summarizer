@@ -509,21 +509,16 @@ mod tests {
     use super::*;
     use crate::pipeline::db;
     use chrono::TimeZone;
-    use std::fs;
-    use std::path::PathBuf;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    struct TestDatabase(PathBuf);
+    use crate::test_store::DatabaseFixture as TestDatabase;
 
-    impl TestDatabase {
-        fn new() -> (Self, Connection) {
-            let database = Self(
-                std::env::temp_dir().join(format!("doc-sum-gateway-store-{}.db", Uuid::new_v4())),
-            );
-            let conn = db::init_db(&database.0).unwrap();
-            conn.execute_batch(
-                r#"
+    fn fixture_database() -> (TestDatabase, Connection) {
+        let database = TestDatabase::new();
+        let conn = db::init_db(&database.0).unwrap();
+        conn.execute_batch(
+            r#"
                 INSERT INTO documents (
                     document_id, original_filename, file_type, byte_size, content_hash,
                     local_source_path, created_at
@@ -541,16 +536,9 @@ mod tests {
                     'run-1', '"general"', '2026-09-11T18:00:00Z'
                 );
                 "#,
-            )
-            .unwrap();
-            (database, conn)
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
+        )
+        .unwrap();
+        (database, conn)
     }
 
     fn key() -> GatewayRequestKey {
@@ -573,7 +561,7 @@ mod tests {
 
     #[test]
     fn reservations_converge_survive_reopen_and_reject_semantic_collisions() {
-        let (database, conn) = TestDatabase::new();
+        let (database, conn) = fixture_database();
         drop(conn);
         let barrier = Arc::new(Barrier::new(2));
         let handles: Vec<_> = (0..2)
@@ -625,7 +613,7 @@ mod tests {
 
     #[test]
     fn lifecycle_is_monotonic_idempotent_and_integrity_checked() {
-        let (_database, mut conn) = TestDatabase::new();
+        let (_database, mut conn) = fixture_database();
         reserve_request(
             &mut conn,
             &key(),
@@ -687,7 +675,7 @@ mod tests {
 
     #[test]
     fn input_boundaries_fail_closed() {
-        let (_database, mut conn) = TestDatabase::new();
+        let (_database, mut conn) = fixture_database();
         let mut deterministic_key = key();
         deterministic_key.stage = PipelineStage::Chunk;
         assert!(matches!(
@@ -743,7 +731,7 @@ mod tests {
 
     #[test]
     fn first_submission_obeys_expiry_while_reconciliation_remains_reusable() {
-        let (_database, mut conn) = TestDatabase::new();
+        let (_database, mut conn) = fixture_database();
         let expires_at = now() + chrono::Duration::minutes(5);
         reserve_request(&mut conn, &key(), &digest('a'), expires_at, now()).unwrap();
         assert!(matches!(

@@ -241,11 +241,25 @@ pub(crate) fn validate_private_directory(path: &Path, private_root: &Path) -> io
 }
 
 pub(crate) fn validate_private_regular_file(path: &Path, private_root: &Path) -> io::Result<()> {
+    validate_regular_file(path, private_root, true)
+}
+
+// SQLite-created files inherit a trusted parent ACL; they need not set the
+// protected-DACL bit used by our explicit registration-file creation owner.
+pub(crate) fn validate_inherited_regular_file(path: &Path, private_root: &Path) -> io::Result<()> {
+    validate_regular_file(path, private_root, false)
+}
+
+fn validate_regular_file(
+    path: &Path,
+    private_root: &Path,
+    require_protected: bool,
+) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Windows file has no parent"))?;
     validate_private_directory(parent, private_root)?;
-    validate_existing_path(path, false, true)
+    validate_existing_path(path, false, require_protected)
 }
 
 pub(crate) fn read_bounded_regular_file(

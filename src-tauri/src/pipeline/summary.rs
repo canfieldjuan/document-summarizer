@@ -6225,28 +6225,14 @@ mod tests {
     use crate::pipeline::structure::{structure_document, DeterministicStructureInterpreter};
     use rusqlite::params;
     use sha2::{Digest, Sha256};
-    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use uuid::Uuid;
 
     const TEST_GENERATION_SEED: u64 = 9_876_543;
     const OVERSIZED_SYNTHESIS_EVIDENCE_COUNT: usize = 48;
 
-    struct TestDatabase(PathBuf);
-
-    impl TestDatabase {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("doc-sum-summary-{}.db", Uuid::new_v4())))
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
+    use crate::test_store::DatabaseFixture as TestDatabase;
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FailurePoint {

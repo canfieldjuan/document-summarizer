@@ -533,6 +533,50 @@ mod tests {
     }
 
     #[test]
+    fn admission_revoked_inside_transaction_rolls_back_every_record() {
+        let source = TestFile::pdf();
+        let bytes = fs::read(&source.0).unwrap();
+        let file = crate::test_store::DatabaseFixture::new();
+        let store = db::Store::initialize(&file.0).unwrap();
+        let mut conn = store.writer().unwrap();
+        let request = request(&bytes);
+        let (document, run) = prepare_pdf_ingestion(source.0.to_str().unwrap(), None).unwrap();
+        let mut checks = 0;
+        let accepted = accept_job_with_ingestion_guarded(
+            &mut conn,
+            &request,
+            &request.canonical_hash().unwrap(),
+            source.0.to_str().unwrap(),
+            &Uuid::new_v4().to_string(),
+            &document,
+            &run,
+            SummaryProfile::General,
+            Some(&profile_snapshot()),
+            || {
+                checks += 1;
+                checks == 1
+            },
+        )
+        .unwrap();
+        assert!(accepted.is_none(), "late-revoked admission committed");
+        assert_eq!(checks, 2);
+        let reader = store.reader().unwrap();
+        assert!(get_job(&reader, &request.job_id).unwrap().is_none());
+        assert!(db::get_document(&reader, &document.document_id)
+            .unwrap()
+            .is_none());
+        assert!(db::get_pipeline_run(&reader, &run.run_id)
+            .unwrap()
+            .is_none());
+        assert!(db::get_run_model_profile(&reader, &run.run_id)
+            .unwrap()
+            .is_none());
+        assert!(db::list_pipeline_events(&reader, &run.run_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn connect_job_state_updates_are_compare_and_set() {
         let file = TestFile::pdf();
         let bytes = fs::read(&file.0).unwrap();

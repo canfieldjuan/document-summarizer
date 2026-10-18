@@ -550,23 +550,10 @@ mod tests {
     use crate::pipeline::structure::DeterministicStructureInterpreter;
     use rusqlite::params;
     use sha2::{Digest, Sha256};
-    use std::fs;
     use std::path::PathBuf;
     use uuid::Uuid;
 
-    struct TestDatabase(PathBuf);
-
-    impl TestDatabase {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("doc-sum-workspace-{}.db", Uuid::new_v4())))
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
+    use crate::test_store::DatabaseFixture as TestDatabase;
 
     struct FixtureRuntime;
 

@@ -614,23 +614,9 @@ mod tests {
     use crate::pipeline::normalize::{normalize_document, CanonicalNormalizer};
     use crate::pipeline::parser::{parse_document, PdfExtractParser};
     use crate::pipeline::structure::{structure_document, DeterministicStructureInterpreter};
-    use std::fs;
     use std::path::PathBuf;
-    use uuid::Uuid;
 
-    struct TestDatabase(PathBuf);
-
-    impl TestDatabase {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("doc-sum-chunk-{}.db", Uuid::new_v4())))
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
+    use crate::test_store::DatabaseFixture as TestDatabase;
 
     fn structured_run(database: &TestDatabase) -> (Connection, String) {
         let mut conn = init_db(&database.0).expect("test database should initialize");

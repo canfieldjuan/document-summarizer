@@ -99,6 +99,8 @@ impl DesktopJobError {
 #[derive(Clone)]
 pub struct DesktopJobManager {
     db_path: PathBuf,
+    store: db::StoreAccess,
+    recovery_generation: Arc<Mutex<Option<String>>>,
     active: Arc<Mutex<HashMap<String, CancellationToken>>>,
     runtime_factory: RuntimeFactory,
 }
@@ -136,10 +138,15 @@ impl Drop for ActiveRecoveryReservations {
 }
 
 impl DesktopJobManager {
-    pub fn new(db_path: PathBuf, settings_path: PathBuf) -> Self {
-        let runtime_db_path = db_path.clone();
-        Self::with_runtime_factory(
-            db_path,
+    #[cfg(all(test, unix))]
+    pub fn new(store: db::Store, settings_path: PathBuf) -> Self {
+        Self::with_store_access(db::StoreAccess::prepared(store), settings_path)
+    }
+
+    pub(crate) fn with_store_access(store: db::StoreAccess, settings_path: PathBuf) -> Self {
+        let runtime_db_path = store.path().to_path_buf();
+        Self::from_access(
+            store,
             Arc::new(move |snapshot| match snapshot {
                 Some(snapshot) => runtime_from_snapshot(snapshot, &settings_path, &runtime_db_path),
                 None => runtime_from_settings(&settings_path, &runtime_db_path),
@@ -147,12 +154,47 @@ impl DesktopJobManager {
         )
     }
 
-    fn with_runtime_factory(db_path: PathBuf, runtime_factory: RuntimeFactory) -> Self {
+    #[cfg(test)]
+    fn from_store(store: db::Store, runtime_factory: RuntimeFactory) -> Self {
+        Self::from_access(db::StoreAccess::prepared(store), runtime_factory)
+    }
+
+    fn from_access(store: db::StoreAccess, runtime_factory: RuntimeFactory) -> Self {
         Self {
-            db_path,
+            db_path: store.path().to_path_buf(),
+            store,
+            recovery_generation: Arc::new(Mutex::new(None)),
             active: Arc::new(Mutex::new(HashMap::new())),
             runtime_factory,
         }
+    }
+
+    #[cfg(test)]
+    fn with_runtime_factory(db_path: PathBuf, runtime_factory: RuntimeFactory) -> Self {
+        Self::from_store(db::Store::initialize(&db_path).unwrap(), runtime_factory)
+    }
+
+    pub(crate) fn store(&self) -> Result<db::Store, StoreError> {
+        self.store.get()
+    }
+
+    pub(crate) fn retry_store(&self, app_data_dir: PathBuf) -> Result<(), DesktopJobError> {
+        self.store.retry()?;
+        self.ensure_ocr_recovery(app_data_dir)
+    }
+
+    pub(crate) fn ensure_ocr_recovery(&self, app_data_dir: PathBuf) -> Result<(), DesktopJobError> {
+        let store = self.store()?;
+        let mut recovered = self
+            .recovery_generation
+            .lock()
+            .map_err(|_| DesktopJobError::RegistryUnavailable)?;
+        if recovered.as_deref() == Some(store.generation()) {
+            return Ok(());
+        }
+        self.start_ocr_recovery(app_data_dir)?;
+        *recovered = Some(store.generation().to_string());
+        Ok(())
     }
 
     pub fn db_path(&self) -> &Path {
@@ -174,7 +216,7 @@ impl DesktopJobManager {
                 recoverable: false,
                 request_attempts: Vec::new(),
             })?;
-        let mut conn = db::init_db(&self.db_path)?;
+        let mut conn = self.store()?.writer()?;
         let (document, run) = admit_pdf_for_background(
             &mut conn,
             file_path,
@@ -193,7 +235,7 @@ impl DesktopJobManager {
         source_run_id: &str,
         expected_source_version: u32,
     ) -> Result<BackgroundRunAccepted, DesktopJobError> {
-        let mut conn = db::init_db(&self.db_path)?;
+        let mut conn = self.store()?.writer()?;
         validate_retry_for_background(&conn, source_run_id, expected_source_version)?;
         let snapshot = db::get_run_model_profile(&conn, source_run_id)?.ok_or_else(|| {
             StoreError::InvalidRetrySource {
@@ -224,7 +266,7 @@ impl DesktopJobManager {
         run_id: &str,
         expected_state_version: u32,
     ) -> Result<BackgroundRunAccepted, DesktopJobError> {
-        let conn = db::init_db(&self.db_path)?;
+        let conn = self.store()?.writer()?;
         let plan = continuation_plan(&conn, run_id, expected_state_version)
             .map_err(DocumentServiceError::from)?;
         let run = db::get_pipeline_run(&conn, run_id)?
@@ -269,7 +311,7 @@ impl DesktopJobManager {
             .get(run_id)
             .cloned()
             .ok_or_else(|| DesktopJobError::NotRunning(run_id.to_string()))?;
-        let mut conn = db::init_db(&self.db_path)?;
+        let mut conn = self.store()?.writer()?;
         let cancelling = db::request_cancellation(&mut conn, run_id, expected_state_version)?;
         token.request();
         Ok(cancelling)
@@ -301,7 +343,7 @@ impl DesktopJobManager {
 
     pub(crate) fn resume_ocr_child(&self, run_id: &str) -> Result<(), DesktopJobError> {
         let mut claim = self.claim_run(run_id)?;
-        let mut conn = db::init_db(&self.db_path)?;
+        let mut conn = self.store()?.writer()?;
         let run = db::rewind_interrupted_ocr_child(&mut conn, run_id)?;
         if matches!(
             run.state,
@@ -342,7 +384,7 @@ impl DesktopJobManager {
     }
 
     pub(crate) fn start_ocr_recovery(&self, app_data_dir: PathBuf) -> Result<(), DesktopJobError> {
-        let conn = db::init_db(&self.db_path)?;
+        let conn = self.store()?.writer()?;
         let root_run_ids = db::list_recoverable_ocr_handoffs(&conn)?
             .into_iter()
             .filter(|handoff| handoff.phase != "child_admitted")
@@ -350,9 +392,8 @@ impl DesktopJobManager {
             .collect();
         drop(conn);
         let manager = self.clone();
-        let db_path = self.db_path.clone();
         self.start_ocr_recovery_task(root_run_ids, move |controls| {
-            let mut conn = match db::init_db(&db_path) {
+            let mut conn = match manager.store().and_then(|store| store.writer()) {
                 Ok(conn) => conn,
                 Err(error) => {
                     eprintln!("OCR restart recovery could not open its database: {error}");
@@ -534,7 +575,9 @@ impl DesktopJobManager {
         runtime: Option<Box<dyn ModelRuntime>>,
         token: &CancellationToken,
     ) -> Result<CompletedSummary, DocumentServiceError> {
-        let mut conn = db::init_db(&self.db_path)
+        let mut conn = self
+            .store()
+            .and_then(|store| store.writer())
             .map_err(crate::pipeline::parser::ParsePipelineError::from)?;
         let run = db::get_pipeline_run(&conn, run_id)?
             .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
@@ -631,7 +674,7 @@ impl DesktopJobManager {
             Box<dyn std::any::Any + Send>,
         >,
     ) -> Result<(), StoreError> {
-        let mut conn = db::init_db(&self.db_path)?;
+        let mut conn = self.store()?.writer()?;
         let run = db::get_pipeline_run(&conn, run_id)?
             .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
         if run.state == PipelineState::Cancelling {
@@ -690,7 +733,7 @@ impl DesktopJobManager {
     }
 
     fn persist_worker_start_failure(&self, run_id: &str) -> Result<(), DesktopJobError> {
-        let mut conn = db::init_db(&self.db_path)?;
+        let mut conn = self.store()?.writer()?;
         let run = db::get_pipeline_run(&conn, run_id)?
             .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
         let stage = stage_for_run(&run);
@@ -798,18 +841,18 @@ mod tests {
     use std::time::{Duration, Instant};
     use uuid::Uuid;
 
-    struct TestDatabase(PathBuf);
+    use crate::test_store::DatabaseFixture as TestDatabase;
 
-    impl TestDatabase {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("doc-sum-background-{}.db", Uuid::new_v4())))
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
+    #[test]
+    fn database_fixture_cleanup_includes_owned_sidecars() {
+        let database = TestDatabase::new();
+        let wal = database.0.with_extension("db-wal");
+        let shm = database.0.with_extension("db-shm");
+        fs::write(&wal, b"interrupted test sidecar").unwrap();
+        fs::write(&shm, b"interrupted test sidecar").unwrap();
+        drop(database);
+        assert!(!wal.exists(), "database fixture leaked its WAL sidecar");
+        assert!(!shm.exists(), "database fixture leaked its SHM sidecar");
     }
 
     struct FixtureRuntime;
@@ -1741,7 +1784,15 @@ mod tests {
             .expect_err("a product desktop start must require an immutable snapshot");
 
         assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
-        assert!(!database.0.exists());
+        let conn = manager.store().unwrap().reader().unwrap();
+        let persisted: (u32, u32) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM documents), (SELECT count(*) FROM pipeline_runs)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted, (0, 0), "rejected runtime persisted ingestion");
     }
 
     #[test]

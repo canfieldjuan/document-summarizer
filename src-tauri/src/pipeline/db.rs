@@ -1,3 +1,10 @@
+mod access;
+mod lifecycle;
+#[cfg(test)]
+pub(crate) use super::schema::setup_counts;
+pub(crate) use access::{StoreAccess, StoreRetry};
+pub use lifecycle::{is_contention, Store};
+
 #[cfg(all(test, unix))]
 pub(crate) use super::schema::create_v21_fixture;
 use crate::pipeline::contracts::{
@@ -16,8 +23,8 @@ use rusqlite::{
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::path::Path;
-use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -27,6 +34,14 @@ pub enum StoreError {
         "Whole-document synthesis progress is invalid, stale or already finalized for run {run_id}"
     )]
     WholeDocumentProgressConflict { run_id: String },
+    #[error("Store file access failed: {0}")]
+    FileAccess(#[from] std::io::Error),
+    #[error("Store is not initialized: {0}")]
+    NotInitialized(String),
+    #[error("Document storage is unavailable. Choose Retry to reconnect.")]
+    Unavailable,
+    #[error("Store filesystem is not admitted for local WAL: {0}")]
+    UnsupportedFilesystem(String),
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("JSON persistence error: {0}")]
@@ -240,12 +255,10 @@ pub(crate) struct OcrOutput<'a> {
     pub text_bytes: &'a [u8],
 }
 
+/// Explicit initialization for startup and isolated fixtures, not request handling.
+#[cfg(test)]
 pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, StoreError> {
-    let mut conn = Connection::open(path)?;
-    conn.busy_timeout(Duration::from_secs(5))?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    schema::migrate(&mut conn)?;
-    Ok(conn)
+    lifecycle::initialize_connection(path.as_ref())
 }
 
 pub fn schema_version(conn: &Connection) -> Result<u32, StoreError> {
@@ -3615,10 +3628,6 @@ mod tests {
             fs::write(&path, contents).expect("test fixture should be writable");
             Self(path)
         }
-
-        fn empty(extension: &str) -> Self {
-            Self::new(extension, b"")
-        }
     }
 
     impl Drop for TestFile {
@@ -3671,7 +3680,7 @@ mod tests {
 
     #[test]
     fn profile_suggestion_request_owners_converge_across_reopen_and_concurrency() {
-        let database = TestFile::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let conn = init_db(&database.0).expect("schema should initialize");
         drop(conn);
         let barrier = Arc::new(Barrier::new(2));
@@ -4182,7 +4191,7 @@ mod tests {
     #[test]
     fn two_connections_reject_a_stale_persisted_transition() {
         let source = TestFile::new("pdf", b"%PDF-1.4\nCONCURRENT_CALLERS");
-        let database = TestFile::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let mut caller_a = init_db(&database.0).expect("schema should initialize");
         let (_, run) = ingest_pdf(&mut caller_a, source.0.to_str().expect("UTF-8 path"))
             .expect("candidate should ingest");
@@ -4225,7 +4234,7 @@ mod tests {
 
     #[test]
     fn legacy_schema_migrates_once_and_reopens_deterministically() {
-        let database = TestFile::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         {
             let legacy = Connection::open(&database.0).expect("legacy DB should open");
             legacy

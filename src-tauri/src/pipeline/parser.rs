@@ -1873,7 +1873,7 @@ mod tests {
             FixturePage::Text(b"PERSIST_ONE".to_vec()),
             FixturePage::Empty,
         ]));
-        let database = TestPath::new("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let run_id;
         let expected_artifact;
         let expected_events;
