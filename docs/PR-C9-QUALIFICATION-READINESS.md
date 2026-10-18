@@ -547,3 +547,118 @@ limits to the operator before selecting a design. Smaller claims alone cannot
 solve an indispensable oversized source or guarantee enum/schema admission.
 No behavioral repair, unseen generation, profile retirement, ready transition,
 merge or hold release is authorized. **STOP after reporting A2/A3 and review.**
+
+
+## Whole-document writer: accepted offline implementation refreshed on main
+
+This supersedes the earlier pending-implementation status for the accepted
+writer slice only. It does **not** grant qualification, activation, ready or
+merge clearance. PR132 remains draft and stacked on PR128.
+
+### Contract and actual implementation
+
+The accepted contract and its recorded amendments are in
+`PR-C9-ATOMIC-SOURCE-CLAIMS-CONTRACT.md`. The candidate was preserved as
+`0e8ce54` before forward-merging main `8df9799` at `8e48679`; the tested code
+head is `3500499475a9372aca9cdb93cb21644915d8c976`. No existing writer implementation was
+rewritten during the refresh.
+
+- `coherent/whole_clauses/dependencies.rs` owns explicit reference resolution
+  and transitive governing-source closure. Unresolved internal references block;
+  external references remain disclosed, without invented content.
+- `coherent/whole_document.rs` plans whole-source or bounded section requests,
+  seals their ownership, persists progress before dispatch, and assembles exact
+  completed candidates in document order without a consolidation model call.
+  Only identical text/excerpt/governing-source bindings deduplicate; all lineage
+  survives. Exceeding the distinct-claim ceiling holds rather than selecting a
+  subset.
+- The quote origin retains exact UTF-8 ranges and partial-excerpt metadata.
+  Contextual anchors retain complete owning context for Verify; they are not a
+  quote-only fallback.
+- Shared comparison owners produce typed per-claim admission decisions, consumed
+  by Verify, saved-result validation and delivery. Held claims cannot dispatch
+  or reappear through contribution trimming. Ordinary builds still cannot
+  activate this unqualified writer.
+
+### Main integration: reproduce, isolate, explain, fix, prove, prevent
+
+The forward merge exposed stale test callers of the old path-based database
+API: two unit-test helpers passed paths where `Store` is now required, and the
+ordinary-library C9 integration fixture imported the now unit-test-only
+`init_db`. Compiler logs retain E0308 and E0432 reproductions. These are our merge
+integration omissions, not a model or writer-fidelity failure.
+
+The fixes use the merged owner: retain a `Store`, use writer/read connections
+for their existing roles, and retain the integration fixture's entire private
+temporary directory. No compatibility initializer or storage bypass was added.
+The profile suggestion binder keeps both main's `Store::writer` and this
+branch's runtime-scoped request-owner contract. OCR conflict hunks preserve
+main's reviewed timing repair; that test has no remaining diff against main.
+The C9 integration assertions are unchanged and all five pass, guarding against
+unqualified dispatch and broken reload. All-target compilation and the complete
+suite cover the other adapted callers.
+
+### Fresh verification
+
+- Locked all-target/all-feature Rust: library **1031 passed, 0 failed,
+  40 ignored**; C9 ordinary-library **5 passed**; office **20 passed, 3 ignored**;
+  release **26 passed**. Both former external gate failures now pass.
+- Strict locked all-target/all-feature Clippy, formatting, frontend build,
+  **7 frontend tests**, and **20 receipt tests** pass. An initial receipt-test
+  invocation inherited the evidence writer's restrictive umask and failed its
+  fixture-mode assumption; the normal-environment run passes without edits.
+- The existing offline counter first reproduced all **30** recorded native
+  counts exactly at the registered **32768** context. No generation/startup.
+- Source-only dependency report: complete JSON unchanged; inputs have
+  **34 resolved / 30 external / 0 unresolved** and
+  **20 resolved / 10 external / 0 unresolved**, with zero blocked units.
+- Actual writer capacity/anchor report: complete JSON unchanged. Input1 needs
+  three requests (**24514, 21431, 9224** input tokens), input2 one (**18896**),
+  public size control two (**25590, 22000**). All are admitted by the unchanged
+  budget owner. Zero anchor coverage gaps or units without anchors. The exact
+  report match preserves the inventory previously independently cleared in
+  source gate `72831dea`; this is not a new semantic fidelity review.
+- Frozen public assembly replay: **2 drafts, 40 claims, 40 lineage entries**,
+  complete JSON unchanged. The original **48634**-input-token consolidation
+  request still rejects against **32768** context.
+- Historical C9 manifest/projection/prompt/verdict/guard regressions pass in the
+  full suite. Fresh SAME60 replay: **60 rows, 825 ordered verdicts, 31 valid**;
+  complete JSON unchanged, not only the totals.
+- The earlier **16/16** killed owner mutants remain evidence for the original
+  frozen source; they were not rerun or claimed as new results. All 25 writer
+  source hashes matched before preservation; 21 remain identical after main,
+  and the four overlapping files retain main's storage/test-lifecycle changes.
+
+### Evidence and cold diff audit
+
+Durable namespace: `writer-main-refresh-20261018`. Private source-bearing reports
+remain in heldout with private permissions; public references use aliases and
+SHA256 only.
+
+| Alias | SHA256 |
+|---|---|
+| offline-refresh-proof.json | `8a882cad9902b3d0a4971a1d8e60f6406dd1c420299a17098448227cb3637a93` |
+| full-rust-final.log | `a0e9eb81531f728c9a672632cf021582911a37ceb4a444fa4b2c27a82ed4bd96` |
+| offline-replays.log | `1d32f8ff292c6f849121ff48d791f925e9324e1f21fdc40ee1c9597a2bdf37ad` |
+| dependencies.json (private) | `37076896e2f8348945fa1d204696060c0a1e63b875b833c1b2b8210e9c39678e` |
+| capacity.json (private) | `8c5cc92d6fbd8b1dd45dec69268ba399f59250db79ed369ea7feb99bad97f765` |
+| assembly.json | `2dfdd42ecbd1dc469b682c99988e0fdd6367f7b83efa0ba9d1a3476e110bcfd0` |
+| same60.json (private) | `ceee845cb539968ed40b87185484496e08f455057040665352559cf96b2e5b53` |
+| integration-audit.json | `0c06d240f92a84f37e4956b292323787c68b246201bc32a4ebe438431d8f7521` |
+
+The existing 25-file cold audit is retained in `writer-offline-progress-final.json`
+(SHA256 `db54e8d97d78305cd38eb5bf3cdb465fe448f9c4f76df4f31e7096a78691e0fc`).
+The integration audit records each conflict/caller, its actual change, owner,
+and proof. Core writer/planner/anchor/dependency/comparison bodies and frozen
+runtime/count inputs did not change during integration. The final proof-doc
+commit changes prose only; code tests are attributed to the tested code head
+above and are not rerun for that prose commit.
+
+### Gap audit
+
+**NOT DONE for qualification.** Accepted offline implementation and refresh gates
+are complete. Exact-head CI, operator/oversight review and any separately
+accepted live qualification remain. Zero model generation, model-server starts
+or GPU use occurred. No private benchmark labels were inspected. PR116/126/128,
+production, live, ready and merge holds remain unchanged. One writer push, then
+stop for independent review; no automatic ready transition or merge.
