@@ -1,5 +1,10 @@
+#[cfg(test)]
+#[path = "../tests/support/store.rs"]
+mod test_store;
+
 pub mod connect;
 mod desktop;
+mod desktop_startup;
 pub mod pipeline;
 
 use connect::entitlement::{
@@ -16,7 +21,7 @@ use pipeline::contracts::{
     StructureInterpreter, StructuredDocument, SummaryProfile,
 };
 use pipeline::corrections::{self, CorrectionError, OcrReview, SaveCorrection};
-use pipeline::db::{get_or_create_profile_suggestion_owner, init_db, StoreError};
+use pipeline::db::{get_or_create_profile_suggestion_owner, StoreError};
 use pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion, IngestError};
 use pipeline::llama_cpp::{prune_idle_managed_runtimes, shutdown_managed_runtimes};
 use pipeline::model_settings::{
@@ -41,7 +46,7 @@ use pipeline::structure::{
     StructurePipelineError,
 };
 use pipeline::workspace::{
-    get_persisted_summary as load_persisted_summary, get_run as load_run, inference_runtime_status,
+    get_persisted_summary as load_persisted_summary, get_run as load_run,
     list_recent_runs as load_recent_runs, PersistedSummary, RunHistoryItem, RuntimeStatus,
     WorkspaceError,
 };
@@ -104,6 +109,18 @@ impl CommandError {
         Self {
             code: code.into(),
             message: message.into(),
+        }
+    }
+
+    // Preserve the availability owner's signal in every IPC error projection.
+    // Other storage errors retain their operation-specific categories.
+    fn store_state_code(error: &StoreError) -> Option<&'static str> {
+        if pipeline::db::is_contention(error) {
+            Some("PROVIDER_STORE_BUSY")
+        } else if matches!(error, StoreError::Unavailable) {
+            Some("DOCUMENT_STORE_UNAVAILABLE")
+        } else {
+            None
         }
     }
 }
@@ -175,13 +192,22 @@ impl From<CorrectionError> for CommandError {
 
 impl From<StoreError> for CommandError {
     fn from(error: StoreError) -> Self {
-        Self::new("PIPELINE_STORE_ERROR", error.to_string())
+        Self::new(
+            Self::store_state_code(&error).unwrap_or("PIPELINE_STORE_ERROR"),
+            error.to_string(),
+        )
     }
 }
 
 impl From<DesktopJobError> for CommandError {
     fn from(error: DesktopJobError) -> Self {
-        let code = error.code().to_string();
+        let code = match &error {
+            DesktopJobError::Store(store) => {
+                Self::store_state_code(store).unwrap_or_else(|| error.code())
+            }
+            _ => error.code(),
+        }
+        .to_string();
         Self::new(code, error.to_string())
     }
 }
@@ -193,7 +219,7 @@ impl From<EntitlementInstallError> for CommandError {
 }
 
 fn open_database(state: &AppState) -> Result<Connection, CommandError> {
-    init_db(state.jobs.db_path()).map_err(CommandError::from)
+    state.jobs.store()?.writer().map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -258,10 +284,10 @@ fn chunk_document(
 
 fn bind_profile_suggestion_request_owner(
     runtime: &mut dyn ModelRuntime,
-    db_path: &Path,
+    store: &pipeline::db::Store,
     source_content_hash: &str,
 ) -> Result<String, CommandError> {
-    let mut conn = init_db(db_path).map_err(CommandError::from)?;
+    let mut conn = store.writer().map_err(CommandError::from)?;
     let owner_id = get_or_create_profile_suggestion_owner(
         &mut conn,
         source_content_hash,
@@ -278,7 +304,8 @@ async fn suggest_summary_profile(
     file_path: String,
 ) -> Result<SummaryProfileSuggestion, CommandError> {
     let settings_path = state.model_settings_path.clone();
-    let db_path = state.jobs.db_path().to_path_buf();
+    let store = state.jobs.store()?;
+    let db_path = store.path().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
         let (document, _) = prepare_pdf_ingestion(&file_path, None).map_err(CommandError::from)?;
         let parsed = PdfExtractParser::new()
@@ -292,7 +319,7 @@ async fn suggest_summary_profile(
             .map_err(CommandError::from)?;
         let mut runtime =
             runtime_from_settings(&settings_path, &db_path).map_err(CommandError::from)?;
-        bind_profile_suggestion_request_owner(runtime.as_mut(), &db_path, &document.content_hash)?;
+        bind_profile_suggestion_request_owner(runtime.as_mut(), &store, &document.content_hash)?;
         runtime.health().map_err(CommandError::from)?;
         suggest_profile_from_document(
             runtime.as_ref(),
@@ -367,10 +394,12 @@ fn cancel_document(
 #[tauri::command]
 async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, CommandError> {
     let settings_path = state.model_settings_path.clone();
-    let db_path = state.jobs.db_path().to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || inference_runtime_status(&settings_path, &db_path))
-        .await
-        .map_err(|_| CommandError::new("MODEL_RUNTIME_STATUS_FAILED", "Runtime check stopped"))
+    let jobs = state.jobs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        desktop_startup::runtime_status(&jobs, &settings_path)
+    })
+    .await
+    .map_err(|_| CommandError::new("MODEL_RUNTIME_STATUS_FAILED", "Runtime check stopped"))
 }
 
 #[tauri::command]
@@ -419,6 +448,26 @@ async fn select_inference_gateway(
             "Gateway selection stopped",
         )
     })?
+}
+
+#[tauri::command]
+async fn retry_document_store(state: State<'_, AppState>) -> Result<(), CommandError> {
+    let jobs = state.jobs.clone();
+    let app_data = jobs
+        .db_path()
+        .parent()
+        .ok_or_else(|| {
+            CommandError::new(
+                "DOCUMENT_STORE_UNAVAILABLE",
+                "Document storage path is unavailable",
+            )
+        })?
+        .to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs.retry_store(app_data).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| CommandError::new("DOCUMENT_STORE_UNAVAILABLE", "Storage retry stopped"))?
 }
 
 #[tauri::command]
@@ -604,8 +653,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let app = builder
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&app_data_dir)?;
-            ensure_private_app_data_directory(&app_data_dir)?;
             let db_path = app_data_dir.join("summarizer.db");
             let settings_path = model_settings_path(&app_data_dir);
 
@@ -616,38 +663,23 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     None
                 }
             };
-            let jobs = DesktopJobManager::new(db_path.clone(), settings_path.clone());
-            if let Err(error) = jobs.start_ocr_recovery(app_data_dir.clone()) {
-                eprintln!("OCR restart recovery worker could not start: {error}");
-            }
+            let retry_db_path = db_path.clone();
+            let retry_app_data = app_data_dir.clone();
+            let services = desktop_startup::prepare(
+                &app_data_dir,
+                settings_path.clone(),
+                |path| ConnectProvider::start(path.to_path_buf(), app_data_dir.clone()),
+                std::sync::Arc::new(move || {
+                    connect::provider::prepare_standalone_store(&retry_db_path, &retry_app_data)
+                }),
+            )?;
+            let desktop_startup::Services { provider, jobs } = services;
             app.manage(AppState {
                 jobs,
                 model_settings_path: settings_path,
                 entitlement,
             });
-            match ConnectProvider::start(db_path.clone(), app_data_dir.clone()) {
-                Ok(provider) => {
-                    app.manage(Mutex::new(Some(provider)));
-                }
-                Err(error) => {
-                    eprintln!("Connect provider unavailable; standalone mode continues: {error}");
-                    #[cfg(any(unix, windows))]
-                    match connect::provider::reconcile_standalone_state_if_unowned(
-                        &db_path,
-                        &app_data_dir,
-                    ) {
-                        Ok(Some(count)) if count > 0 => {
-                            eprintln!(
-                                "Reconciled {count} interrupted pipeline run(s) in standalone mode"
-                            );
-                        }
-                        Ok(Some(_) | None) => {}
-                        Err(recovery_error) => {
-                            eprintln!("Standalone recovery unavailable: {recovery_error}");
-                        }
-                    }
-                }
-            }
+            app.manage(Mutex::new(provider));
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -664,6 +696,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             continue_document,
             cancel_document,
             get_runtime_status,
+            retry_document_store,
             get_model_catalog,
             configure_inference_gateway,
             select_inference_gateway,
@@ -754,6 +787,95 @@ pub fn run_package_user_stop(app_data: &str, runtime_root: &str) -> Result<(), B
 }
 
 #[cfg(test)]
+mod storage_error_tests {
+    use super::*;
+    use crate::pipeline::db;
+    use std::sync::Arc;
+
+    #[test]
+    fn departed_primary_reaches_both_command_projections_as_unavailable() {
+        let file = crate::test_store::DatabaseFixture::new();
+        let primary = db::Store::initialize(&file.0).unwrap();
+        let access = db::StoreAccess::prepared(db::Store::attach(&file.0).unwrap());
+        assert!(access.get().is_ok());
+        drop(primary);
+        let direct = CommandError::from(access.get().unwrap_err());
+        let background = CommandError::from(DesktopJobError::from(access.get().unwrap_err()));
+        assert_eq!(direct.code, "DOCUMENT_STORE_UNAVAILABLE");
+        assert_eq!(background.code, direct.code);
+        let jobs = DesktopJobManager::with_store_access(access, file.0.with_extension("settings"));
+        let status = desktop_startup::runtime_status(&jobs, &file.0.with_extension("settings"));
+        assert_eq!(status.code.as_deref(), Some(direct.code.as_str()));
+        assert!(!status.ready);
+        assert!(status.recoverable);
+    }
+
+    #[test]
+    fn primary_exit_between_cached_get_and_connection_open_keeps_unavailable_signal() {
+        let file = crate::test_store::DatabaseFixture::new();
+        let primary = db::Store::initialize(&file.0).unwrap();
+        let access = db::StoreAccess::prepared(db::Store::attach(&file.0).unwrap());
+        let command_store = access.get().unwrap();
+        drop(primary);
+        // The command already passed the cache check. Exercise the actual
+        // connection owner, not another call to StoreAccess::get.
+        let direct = CommandError::from(command_store.writer().unwrap_err());
+        let background =
+            CommandError::from(DesktopJobError::from(command_store.writer().unwrap_err()));
+        assert_eq!(direct.code, "DOCUMENT_STORE_UNAVAILABLE");
+        assert_eq!(background.code, direct.code);
+    }
+
+    #[test]
+    fn busy_command_projections_preserve_the_cache_and_other_error_categories() {
+        let file = crate::test_store::DatabaseFixture::new();
+        let primary = db::Store::initialize(&file.0).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&calls);
+        let path = file.0.clone();
+        let access = db::StoreAccess::new(
+            path.clone(),
+            Some(db::Store::attach(&path).unwrap()),
+            Arc::new(move || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                db::Store::attach_wait(&path)
+            }),
+        );
+        let mut name = file.0.as_os_str().to_os_string();
+        name.push(".initialize.lock");
+        let gate = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(std::path::PathBuf::from(name))
+            .unwrap();
+        gate.try_lock().unwrap();
+        let direct = CommandError::from(access.get().unwrap_err());
+        let background = CommandError::from(DesktopJobError::from(access.get().unwrap_err()));
+        assert_eq!(direct.code, "PROVIDER_STORE_BUSY");
+        assert_eq!(background.code, direct.code);
+        let jobs =
+            DesktopJobManager::with_store_access(access.clone(), file.0.with_extension("settings"));
+        let status = desktop_startup::runtime_status(&jobs, &file.0.with_extension("settings"));
+        assert_eq!(status.code.as_deref(), Some(direct.code.as_str()));
+        drop(gate);
+        assert!(access.retry().unwrap().reader().is_ok());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            CommandError::from(StoreError::RunNotFound("public-run".into())).code,
+            "PIPELINE_STORE_ERROR"
+        );
+        assert_eq!(
+            CommandError::from(DesktopJobError::from(StoreError::RunNotFound(
+                "public-run".into()
+            )))
+            .code,
+            "BACKGROUND_RUN_NOT_FOUND"
+        );
+        assert!(primary.reader().is_ok());
+    }
+}
+
+#[cfg(test)]
 mod capability_tests {
     use crate::pipeline::contracts::{
         ModelRequest, ModelResponse, ModelRuntime, ModelRuntimeFailure,
@@ -805,15 +927,16 @@ mod capability_tests {
     fn automatic_profile_owner_is_stable_and_bound_before_inference() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("summarizer.db");
+        let store = super::pipeline::db::Store::initialize(&database).unwrap();
         let hash = "a".repeat(64);
         let mut first = OwnerRecordingRuntime::default();
         let first_owner =
-            super::bind_profile_suggestion_request_owner(&mut first, &database, &hash).unwrap();
+            super::bind_profile_suggestion_request_owner(&mut first, &store, &hash).unwrap();
         assert_eq!(first.owner_id.as_deref(), Some(first_owner.as_str()));
 
         let mut reopened = OwnerRecordingRuntime::default();
         let reopened_owner =
-            super::bind_profile_suggestion_request_owner(&mut reopened, &database, &hash).unwrap();
+            super::bind_profile_suggestion_request_owner(&mut reopened, &store, &hash).unwrap();
         assert_eq!(reopened_owner, first_owner);
         assert_eq!(reopened.owner_id.as_deref(), Some(first_owner.as_str()));
     }

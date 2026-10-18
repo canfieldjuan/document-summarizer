@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
 type PipelineState =
@@ -470,7 +470,23 @@ function syncPrimaryAction(): void {
   }
 }
 
+// Every command uses this rejection boundary, including history, document,
+// background and OCR actions. Keep local error presentation with the caller.
+async function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+  try {
+    return await tauriInvoke<T>(command, args, options);
+  } catch (error) {
+    if (command !== "get_runtime_status" && normalizeCommandError(error).code === "DOCUMENT_STORE_UNAVAILABLE") {
+      await refreshRuntimeStatus();
+    }
+    throw error;
+  }
+}
+
+let runtimeStatusSequence = 0;
+
 async function refreshRuntimeStatus(): Promise<void> {
+  const sequence = ++runtimeStatusSequence;
   runtimeReady = false;
   runtimeDot.className = "runtime-dot is-checking";
   runtimeTitle.textContent = "Checking inference";
@@ -480,6 +496,7 @@ async function refreshRuntimeStatus(): Promise<void> {
 
   try {
     const status = await invoke<RuntimeStatus>("get_runtime_status");
+    if (sequence !== runtimeStatusSequence) return;
     runtimeReady = status.ready;
     runtimeDot.className = status.ready
       ? "runtime-dot is-ready"
@@ -494,13 +511,14 @@ async function refreshRuntimeStatus(): Promise<void> {
       : status.message;
     runtimeRetry.hidden = status.ready;
   } catch (error) {
+    if (sequence !== runtimeStatusSequence) return;
     const commandError = normalizeCommandError(error);
     runtimeDot.className = "runtime-dot is-unavailable";
     runtimeTitle.textContent = "Runtime check failed";
     runtimeDetail.textContent = commandError.message;
     runtimeRetry.hidden = false;
   } finally {
-    syncPrimaryAction();
+    if (sequence === runtimeStatusSequence) syncPrimaryAction();
   }
 }
 
@@ -1663,7 +1681,19 @@ function historyStateLabel(run: RunHistoryItem): string {
 async function initialize(): Promise<void> {
   selectButton.addEventListener("click", () => void selectAndSummarize());
   runtimeRetry.addEventListener("click", () => {
-    void refreshModelCatalog().then(refreshRuntimeStatus);
+    void (async () => {
+      runtimeRetry.disabled = true;
+      try {
+        await invoke("retry_document_store");
+        await refreshHistory();
+      } catch (error) {
+        runtimeDetail.textContent = normalizeCommandError(error).message;
+      } finally {
+        await refreshModelCatalog();
+        await refreshRuntimeStatus();
+        runtimeRetry.disabled = false;
+      }
+    })();
   });
   modelPreset.addEventListener("change", () => void selectInferenceSource());
   registerGguf.addEventListener("click", () => void selectAndRegisterGguf());

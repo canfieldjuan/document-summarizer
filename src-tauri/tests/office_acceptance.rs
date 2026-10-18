@@ -7,7 +7,7 @@ use document_summarizer_lib::pipeline::contracts::{
 use document_summarizer_lib::pipeline::db::{
     get_analyzed_document, get_chunked_document, get_citation_artifact, get_normalized_document,
     get_parsed_document, get_pipeline_run, get_structured_document, get_summary_artifact,
-    get_synthesis_attempt, get_verified_document, init_db, list_pipeline_events,
+    get_synthesis_attempt, get_verified_document, list_pipeline_events,
 };
 use document_summarizer_lib::pipeline::ingest::ingest_pdf;
 use document_summarizer_lib::pipeline::model::OllamaRuntime;
@@ -31,9 +31,10 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use uuid::Uuid;
 
-struct TestDatabase(PathBuf);
+#[path = "support/store.rs"]
+mod store_fixture;
+use store_fixture::DatabaseFixture as TestDatabase;
 
 fn configured_live_runtime(db_path: &Path) -> Box<dyn ModelRuntime> {
     if let Some(settings_path) = env::var_os("DOC_SUM_MODEL_SETTINGS_PATH") {
@@ -146,18 +147,6 @@ fn coverage_gate_separates_synthesized_and_supported_evidence() {
     assert!(!omission_reduces_adjusted_denominator(
         &AnalysisOmissionReason::QuoteBoundaryUnusable
     ));
-}
-
-impl TestDatabase {
-    fn new(label: &str) -> Self {
-        Self(env::temp_dir().join(format!("doc-sum-office-{label}-{}.db", Uuid::new_v4())))
-    }
-}
-
-impl Drop for TestDatabase {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
 }
 
 struct RecordingRuntime<'a> {
@@ -557,14 +546,15 @@ fn office_pdf_deterministic_checkpoints_survive_reopen() {
     let mut reports = Vec::new();
 
     for source in configured_paths("DOC_SUM_OFFICE_PDFS") {
-        let database = TestDatabase::new("deterministic");
+        let database = TestDatabase::named("deterministic");
         let (source_bytes, source_hash, source_size) = file_identity(&source);
         let parser = PdfExtractParser::new();
         let normalizer = CanonicalNormalizer::new();
         let interpreter = DeterministicStructureInterpreter::new();
         let chunker = DeterministicDocumentChunker::new();
 
-        let mut conn = init_db(&database.0).expect("acceptance database should initialize");
+        let store = document_summarizer_lib::pipeline::db::Store::initialize(&database.0).unwrap();
+        let mut conn = store.writer().expect("acceptance database should open");
         let (document, ingested_run) = ingest_pdf(
             &mut conn,
             source
@@ -641,8 +631,9 @@ fn office_pdf_deterministic_checkpoints_survive_reopen() {
         let chunked_hash = artifact_hash(&chunked);
         drop(conn);
 
-        let reopened =
-            init_db(&database.0).expect("acceptance database should independently reopen");
+        let reopened = store
+            .writer()
+            .expect("acceptance database should independently reopen");
         assert_eq!(
             get_parsed_document(&reopened, &ingested_run.run_id)
                 .expect("parsed artifact should reload")
@@ -749,13 +740,14 @@ fn office_pdf_live_ollama_analysis_satisfies_evidence_contract() {
     let paths = configured_paths("DOC_SUM_OFFICE_PDF");
     assert_eq!(paths.len(), 1, "DOC_SUM_OFFICE_PDF must contain one path");
     let source = &paths[0];
-    let database = TestDatabase::new("analysis");
+    let database = TestDatabase::named("analysis");
+    let store = document_summarizer_lib::pipeline::db::Store::initialize(&database.0).unwrap();
     let ollama = configured_live_runtime(&database.0);
     ollama
         .health()
         .expect("selected Ollama model should be available");
     let runtime = RecordingRuntime::new(ollama.as_ref());
-    let mut conn = init_db(&database.0).expect("analysis database should initialize");
+    let mut conn = store.writer().expect("analysis database should open");
     let (_, run) = ingest_pdf(
         &mut conn,
         source
@@ -809,8 +801,9 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let paths = configured_paths("DOC_SUM_OFFICE_PDF");
     assert_eq!(paths.len(), 1, "DOC_SUM_OFFICE_PDF must contain one path");
     let source = &paths[0];
-    let database = TestDatabase::new("live");
+    let database = TestDatabase::named("live");
     let (source_bytes, source_hash, source_size) = file_identity(source);
+    let store = document_summarizer_lib::pipeline::db::Store::initialize(&database.0).unwrap();
     let ollama = configured_live_runtime(&database.0);
     ollama
         .health()
@@ -821,7 +814,9 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let interpreter = DeterministicStructureInterpreter::new();
     let chunker = DeterministicDocumentChunker::new();
 
-    let mut conn = init_db(&database.0).expect("live acceptance database should initialize");
+    let mut conn = store
+        .writer()
+        .expect("live acceptance database should open");
     let result = process_pdf_to_summary(
         &mut conn,
         source
@@ -1139,7 +1134,9 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let expected_citations = result.citations.clone();
     drop(conn);
 
-    let reopened = init_db(&database.0).expect("live acceptance database should reopen");
+    let reopened = store
+        .writer()
+        .expect("live acceptance database should reopen");
     assert_eq!(
         get_summary_artifact(&reopened, &run_id)
             .expect("summary should reload")

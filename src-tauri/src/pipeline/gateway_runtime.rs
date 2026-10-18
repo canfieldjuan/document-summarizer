@@ -14,7 +14,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 const SNAPSHOT_VERSION: u32 = 3;
@@ -64,6 +64,7 @@ impl GatewayExecutor for GatewayClient {
 
 pub(crate) struct GatewayRuntime {
     db_path: PathBuf,
+    store: OnceLock<db::Store>,
     executor: Arc<dyn GatewayExecutor>,
     bound_owner_id: Option<String>,
     snapshot: ModelProfileSnapshot,
@@ -90,11 +91,26 @@ impl GatewayRuntime {
     fn with_executor(db_path: PathBuf, executor: Arc<dyn GatewayExecutor>) -> Self {
         Self {
             db_path,
+            store: OnceLock::new(),
             executor,
             bound_owner_id: None,
             snapshot: canonical_snapshot(),
         }
     }
+}
+
+fn store_failure(
+    error: db::StoreError,
+    request: &ModelRequest,
+    started: Instant,
+    message: &str,
+) -> ModelRuntimeFailure {
+    failure(
+        "MODEL_GATEWAY_STORE_FAILED",
+        message,
+        db::is_contention(&error),
+        vec![diagnostic(request, started, false)],
+    )
 }
 
 impl ModelRuntime for GatewayRuntime {
@@ -112,12 +128,30 @@ impl ModelRuntime for GatewayRuntime {
             )
         })?;
         let started = Instant::now();
-        let mut conn = db::init_db(&self.db_path).map_err(|_| {
-            failure(
-                "MODEL_GATEWAY_STORE_FAILED",
+        let store = (|| -> Result<&db::Store, db::StoreError> {
+            if self.store.get().is_none() {
+                let prepared = db::Store::attach(&self.db_path)?;
+                let _ = self.store.set(prepared);
+            }
+            Ok(self
+                .store
+                .get()
+                .expect("store attached or concurrent attachment won"))
+        })()
+        .map_err(|error| {
+            store_failure(
+                error,
+                request,
+                started,
+                "Inference gateway store is not prepared",
+            )
+        })?;
+        let mut conn = store.writer().map_err(|error| {
+            store_failure(
+                error,
+                request,
+                started,
                 "Inference gateway request state is unavailable",
-                false,
-                vec![diagnostic(request, started, false)],
             )
         })?;
         let key = GatewayRequestKey {
@@ -437,10 +471,51 @@ mod tests {
     }
 
     #[test]
+    fn store_busy_attach_and_writer_failures_remain_retryable() {
+        for writer in [false, true] {
+            let root = TestDirectory::new();
+            let state = Arc::new(Mutex::new(ExecutorState::default()));
+            let mut runtime = runtime(&root, Arc::clone(&state), false, true);
+            runtime.bind_run("durable-run");
+            let store = db::Store::initialize(&runtime.db_path).unwrap();
+            let error = if writer {
+                runtime.store.set(store.clone()).unwrap();
+                store.with_synthetic_exclusive_lock(|| runtime.generate(&request()).unwrap_err())
+            } else {
+                let mut signal = runtime.db_path.as_os_str().to_os_string();
+                signal.push(".initialize.lock");
+                let gate = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(PathBuf::from(signal))
+                    .unwrap();
+                gate.try_lock().unwrap();
+                runtime.generate(&request()).unwrap_err()
+            };
+            assert_eq!(error.code, "MODEL_GATEWAY_STORE_FAILED");
+            assert!(
+                error.recoverable,
+                "gateway discarded typed store contention: writer={writer}"
+            );
+            assert!(state.lock().unwrap().keys.is_empty());
+        }
+        let root = TestDirectory::new();
+        let state = Arc::new(Mutex::new(ExecutorState::default()));
+        let mut runtime = runtime(&root, Arc::clone(&state), false, true);
+        runtime.bind_run("durable-run");
+        assert!(
+            !runtime.generate(&request()).unwrap_err().recoverable,
+            "missing store became retryable busy"
+        );
+        assert!(state.lock().unwrap().keys.is_empty());
+    }
+
+    #[test]
     fn bound_generation_projects_exact_key_and_stable_task_identity() {
         let root = TestDirectory::new();
         let state = Arc::new(Mutex::new(ExecutorState::default()));
         let mut runtime = runtime(&root, Arc::clone(&state), false, true);
+        let _store = db::Store::initialize(&runtime.db_path).unwrap();
         runtime.bind_run("durable-run");
 
         let response = runtime.generate(&request()).unwrap();
@@ -465,6 +540,7 @@ mod tests {
         let root = TestDirectory::new();
         let state = Arc::new(Mutex::new(ExecutorState::default()));
         let mut runtime = runtime(&root, Arc::clone(&state), false, true);
+        let _store = db::Store::initialize(&runtime.db_path).unwrap();
         runtime.bind_request_owner("profile-suggestion-owner");
         let mut primary = request();
         primary.ordinal = 0;
@@ -496,6 +572,7 @@ mod tests {
         let root = TestDirectory::new();
         let state = Arc::new(Mutex::new(ExecutorState::default()));
         let mut runtime = runtime(&root, state, true, true);
+        let _store = db::Store::initialize(&runtime.db_path).unwrap();
         runtime.bind_run("durable-run");
 
         let error = runtime.generate(&request()).unwrap_err();

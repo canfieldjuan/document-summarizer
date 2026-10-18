@@ -1284,7 +1284,7 @@ mod tests {
 
     #[test]
     fn structured_artifact_and_hash_survive_independent_reopen() {
-        let database = TestPath::new("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let run_id;
         let expected_artifact;
         let expected_hash;
@@ -1405,7 +1405,7 @@ mod tests {
 
     #[test]
     fn two_connections_reject_stale_structuring_transition() {
-        let database = TestPath::new("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let mut caller_a = db::init_db(&database.0).expect("schema should initialize");
         let (run_id, _) = create_normalized_run(&mut caller_a, vec![parsed_page(1, "one winner")]);
         let mut caller_b = db::init_db(&database.0).expect("second connection should open");
