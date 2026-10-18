@@ -37,10 +37,7 @@ impl StoreAccess {
     }
 
     pub(crate) fn get(&self) -> Result<Store, StoreError> {
-        let mut cached = self
-            .cached
-            .lock()
-            .map_err(|_| StoreError::NotInitialized("Store availability is unavailable".into()))?;
+        let mut cached = self.cached.lock().map_err(|_| StoreError::Unavailable)?;
         if let Some(store) = cached.as_ref() {
             match store.check_ready() {
                 Ok(()) => return Ok(store.clone()),
@@ -50,9 +47,7 @@ impl StoreAccess {
                 }
             }
         }
-        Err(StoreError::NotInitialized(
-            "Document storage is unavailable. Use Retry to reconnect.".into(),
-        ))
+        Err(StoreError::Unavailable)
     }
 
     /// Only the explicit startup/user Retry path may call the preparer.
@@ -62,10 +57,7 @@ impl StoreAccess {
             Err(error) if super::is_contention(&error) => return Err(error),
             Err(_) => {}
         }
-        let mut cached = self
-            .cached
-            .lock()
-            .map_err(|_| StoreError::NotInitialized("Store availability is unavailable".into()))?;
+        let mut cached = self.cached.lock().map_err(|_| StoreError::Unavailable)?;
         if let Some(store) = cached.as_ref() {
             store.check_ready()?;
             return Ok(store.clone());

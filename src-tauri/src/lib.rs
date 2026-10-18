@@ -111,6 +111,18 @@ impl CommandError {
             message: message.into(),
         }
     }
+
+    // Preserve the availability owner's signal in every IPC error projection.
+    // Other storage errors retain their operation-specific categories.
+    fn store_state_code(error: &StoreError) -> Option<&'static str> {
+        if pipeline::db::is_contention(error) {
+            Some("PROVIDER_STORE_BUSY")
+        } else if matches!(error, StoreError::Unavailable) {
+            Some("DOCUMENT_STORE_UNAVAILABLE")
+        } else {
+            None
+        }
+    }
 }
 
 impl From<IngestError> for CommandError {
@@ -180,13 +192,22 @@ impl From<CorrectionError> for CommandError {
 
 impl From<StoreError> for CommandError {
     fn from(error: StoreError) -> Self {
-        Self::new("PIPELINE_STORE_ERROR", error.to_string())
+        Self::new(
+            Self::store_state_code(&error).unwrap_or("PIPELINE_STORE_ERROR"),
+            error.to_string(),
+        )
     }
 }
 
 impl From<DesktopJobError> for CommandError {
     fn from(error: DesktopJobError) -> Self {
-        let code = error.code().to_string();
+        let code = match &error {
+            DesktopJobError::Store(store) => {
+                Self::store_state_code(store).unwrap_or_else(|| error.code())
+            }
+            _ => error.code(),
+        }
+        .to_string();
         Self::new(code, error.to_string())
     }
 }
@@ -763,6 +784,95 @@ pub fn run_package_user_stop(app_data: &str, runtime_root: &str) -> Result<(), B
         std::time::Instant::now() + std::time::Duration::from_secs(45),
     )
     .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod storage_error_tests {
+    use super::*;
+    use crate::pipeline::db;
+    use std::sync::Arc;
+
+    #[test]
+    fn departed_primary_reaches_both_command_projections_as_unavailable() {
+        let file = crate::test_store::DatabaseFixture::new();
+        let primary = db::Store::initialize(&file.0).unwrap();
+        let access = db::StoreAccess::prepared(db::Store::attach(&file.0).unwrap());
+        assert!(access.get().is_ok());
+        drop(primary);
+        let direct = CommandError::from(access.get().unwrap_err());
+        let background = CommandError::from(DesktopJobError::from(access.get().unwrap_err()));
+        assert_eq!(direct.code, "DOCUMENT_STORE_UNAVAILABLE");
+        assert_eq!(background.code, direct.code);
+        let jobs = DesktopJobManager::with_store_access(access, file.0.with_extension("settings"));
+        let status = desktop_startup::runtime_status(&jobs, &file.0.with_extension("settings"));
+        assert_eq!(status.code.as_deref(), Some(direct.code.as_str()));
+        assert!(!status.ready);
+        assert!(status.recoverable);
+    }
+
+    #[test]
+    fn primary_exit_between_cached_get_and_connection_open_keeps_unavailable_signal() {
+        let file = crate::test_store::DatabaseFixture::new();
+        let primary = db::Store::initialize(&file.0).unwrap();
+        let access = db::StoreAccess::prepared(db::Store::attach(&file.0).unwrap());
+        let command_store = access.get().unwrap();
+        drop(primary);
+        // The command already passed the cache check. Exercise the actual
+        // connection owner, not another call to StoreAccess::get.
+        let direct = CommandError::from(command_store.writer().unwrap_err());
+        let background =
+            CommandError::from(DesktopJobError::from(command_store.writer().unwrap_err()));
+        assert_eq!(direct.code, "DOCUMENT_STORE_UNAVAILABLE");
+        assert_eq!(background.code, direct.code);
+    }
+
+    #[test]
+    fn busy_command_projections_preserve_the_cache_and_other_error_categories() {
+        let file = crate::test_store::DatabaseFixture::new();
+        let primary = db::Store::initialize(&file.0).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&calls);
+        let path = file.0.clone();
+        let access = db::StoreAccess::new(
+            path.clone(),
+            Some(db::Store::attach(&path).unwrap()),
+            Arc::new(move || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                db::Store::attach_wait(&path)
+            }),
+        );
+        let mut name = file.0.as_os_str().to_os_string();
+        name.push(".initialize.lock");
+        let gate = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(std::path::PathBuf::from(name))
+            .unwrap();
+        gate.try_lock().unwrap();
+        let direct = CommandError::from(access.get().unwrap_err());
+        let background = CommandError::from(DesktopJobError::from(access.get().unwrap_err()));
+        assert_eq!(direct.code, "PROVIDER_STORE_BUSY");
+        assert_eq!(background.code, direct.code);
+        let jobs =
+            DesktopJobManager::with_store_access(access.clone(), file.0.with_extension("settings"));
+        let status = desktop_startup::runtime_status(&jobs, &file.0.with_extension("settings"));
+        assert_eq!(status.code.as_deref(), Some(direct.code.as_str()));
+        drop(gate);
+        assert!(access.retry().unwrap().reader().is_ok());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            CommandError::from(StoreError::RunNotFound("public-run".into())).code,
+            "PIPELINE_STORE_ERROR"
+        );
+        assert_eq!(
+            CommandError::from(DesktopJobError::from(StoreError::RunNotFound(
+                "public-run".into()
+            )))
+            .code,
+            "BACKGROUND_RUN_NOT_FOUND"
+        );
+        assert!(primary.reader().is_ok());
+    }
 }
 
 #[cfg(test)]

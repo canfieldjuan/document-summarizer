@@ -33,6 +33,8 @@ pub enum StoreError {
     FileAccess(#[from] std::io::Error),
     #[error("Store is not initialized: {0}")]
     NotInitialized(String),
+    #[error("Document storage is unavailable. Choose Retry to reconnect.")]
+    Unavailable,
     #[error("Store filesystem is not admitted for local WAL: {0}")]
     UnsupportedFilesystem(String),
     #[error("SQLite error: {0}")]

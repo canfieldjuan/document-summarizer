@@ -49,14 +49,20 @@ pub(crate) fn runtime_status(
     jobs: &DesktopJobManager,
     settings: &Path,
 ) -> crate::pipeline::workspace::RuntimeStatus {
-    if jobs.store().is_err() {
+    if let Err(error) = jobs.store() {
+        let error = crate::CommandError::from(error);
+        let busy = error.code == "PROVIDER_STORE_BUSY";
         return crate::pipeline::workspace::RuntimeStatus {
             provider_name: "Document storage".into(),
             ready: false,
             runtime_id: None,
             model_id: None,
-            code: Some("DOCUMENT_STORE_UNAVAILABLE".into()),
-            message: "Document storage is unavailable. Choose Retry to reconnect.".into(),
+            code: Some(error.code),
+            message: if busy {
+                "Document storage is busy. Try again.".into()
+            } else {
+                error.message
+            },
             recoverable: true,
         };
     }

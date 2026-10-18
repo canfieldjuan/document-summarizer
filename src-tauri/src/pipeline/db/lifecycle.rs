@@ -252,9 +252,7 @@ fn read_readiness(file: &mut File, identity: (u64, u64)) -> Result<String, Store
 fn require_primary(path: &Path) -> Result<(), StoreError> {
     let primary = lock_file(&sidecar(path, ".owner.lock"), false)?;
     match primary.try_lock() {
-        Ok(()) => Err(StoreError::NotInitialized(
-            "No active primary store owner".into(),
-        )),
+        Ok(()) => Err(StoreError::Unavailable),
         Err(TryLockError::WouldBlock) => Ok(()),
         Err(TryLockError::Error(error)) => Err(error.into()),
     }
