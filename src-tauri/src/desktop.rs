@@ -138,7 +138,7 @@ impl Drop for ActiveRecoveryReservations {
 }
 
 impl DesktopJobManager {
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub fn new(store: db::Store, settings_path: PathBuf) -> Self {
         Self::with_store_access(db::StoreAccess::prepared(store), settings_path)
     }
@@ -842,6 +842,21 @@ mod tests {
     use uuid::Uuid;
 
     use crate::test_store::DatabaseFixture as TestDatabase;
+
+    #[test]
+    fn test_constructor_retains_prepared_store_without_loading_settings() {
+        let database = TestDatabase::new();
+        let settings = database.0.with_extension("missing-settings.json");
+        let store = db::Store::initialize(&database.0).unwrap();
+        let generation = store.generation().to_owned();
+
+        let manager = DesktopJobManager::new(store, settings.clone());
+
+        assert_eq!(manager.db_path(), database.0.as_path());
+        assert_eq!(manager.store().unwrap().generation(), generation);
+        assert!(manager.active.lock().unwrap().is_empty());
+        assert!(!settings.exists());
+    }
 
     #[test]
     fn database_fixture_cleanup_includes_owned_sidecars() {

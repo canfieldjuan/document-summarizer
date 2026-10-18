@@ -662,3 +662,33 @@ accepted live qualification remain. Zero model generation, model-server starts
 or GPU use occurred. No private benchmark labels were inspected. PR116/126/128,
 production, live, ready and merge holds remain unchanged. One writer push, then
 stop for independent review; no automatic ready transition or merge.
+
+
+## Windows test-constructor repair after writer integration
+
+The first writer push fails native Windows compilation at `0082404`:
+`DesktopJobManager::new` is excluded by the Unix-only test gate in
+`desktop.rs:141`, while the portable ignored live proof calls it. Native run
+`39176443849` reports E0599. The original restriction came from `aa4373b`;
+our merge `8e48679` and integration `3500499` added the portable consumer
+without widening the helper. This is our integration omission.
+
+The fix changes that one owner to `cfg(test)`, retaining all consumers and
+excluding the helper from non-test builds. It adds a portable real-constructor
+regression that retains the prepared Store path/generation and confirms that
+construction creates no settings file or active worker. No Windows test is
+hidden; no constructor or storage compatibility shim is duplicated.
+
+Fresh Windows GNU target checking reproduced E0599 before the fix. With the new
+regression but old gate it reports both missing constructor calls; after the
+owner fix the complete lib/test target check passes. The focused regression
+passes, the adjacent desktop suite has **21 passed, 2 live tests ignored**, and
+strict Linux all-target/all-feature Clippy, strict Windows-target lib/test
+Clippy and formatting pass. No live proof ran. Native Windows CI at the grouped
+repair head remains **NOT DONE**; a cross-target check does not replace it.
+
+Durable namespace `writer-review-repair-20261018`,
+`windows-repair-proof.json` SHA256 `f28bc49ae94c30b1a46b9805db9659cc6ed3130a5b9e8c2710ce64537af1237d` records all six repair steps,
+before/after logs, source freeze and per-hunk cold diff audit. The remaining
+independent writer-review findings are grouped with this repair before one
+push. All live, production, ready and merge holds remain unchanged.
