@@ -1,4 +1,8 @@
+mod access;
 mod lifecycle;
+#[cfg(test)]
+pub(crate) use super::schema::setup_counts;
+pub(crate) use access::{StoreAccess, StoreRetry};
 pub use lifecycle::{is_contention, Store};
 
 #[cfg(all(test, unix))]
@@ -18,6 +22,7 @@ use rusqlite::{
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::path::Path;
 use thiserror::Error;
 use uuid::Uuid;
@@ -28,6 +33,8 @@ pub enum StoreError {
     FileAccess(#[from] std::io::Error),
     #[error("Store is not initialized: {0}")]
     NotInitialized(String),
+    #[error("Store filesystem is not admitted for local WAL: {0}")]
+    UnsupportedFilesystem(String),
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("JSON persistence error: {0}")]
@@ -242,6 +249,7 @@ pub(crate) struct OcrOutput<'a> {
 }
 
 /// Explicit initialization for startup and isolated fixtures, not request handling.
+#[cfg(test)]
 pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, StoreError> {
     lifecycle::initialize_connection(path.as_ref())
 }

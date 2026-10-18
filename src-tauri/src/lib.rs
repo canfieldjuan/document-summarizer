@@ -4,6 +4,7 @@ mod test_store;
 
 pub mod connect;
 mod desktop;
+mod desktop_startup;
 pub mod pipeline;
 
 use connect::entitlement::{
@@ -45,7 +46,7 @@ use pipeline::structure::{
     StructurePipelineError,
 };
 use pipeline::workspace::{
-    get_persisted_summary as load_persisted_summary, get_run as load_run, inference_runtime_status,
+    get_persisted_summary as load_persisted_summary, get_run as load_run,
     list_recent_runs as load_recent_runs, PersistedSummary, RunHistoryItem, RuntimeStatus,
     WorkspaceError,
 };
@@ -197,7 +198,7 @@ impl From<EntitlementInstallError> for CommandError {
 }
 
 fn open_database(state: &AppState) -> Result<Connection, CommandError> {
-    state.jobs.store().writer().map_err(CommandError::from)
+    state.jobs.store()?.writer().map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -282,7 +283,7 @@ async fn suggest_summary_profile(
     file_path: String,
 ) -> Result<SummaryProfileSuggestion, CommandError> {
     let settings_path = state.model_settings_path.clone();
-    let store = state.jobs.store();
+    let store = state.jobs.store()?;
     let db_path = store.path().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
         let (document, _) = prepare_pdf_ingestion(&file_path, None).map_err(CommandError::from)?;
@@ -372,10 +373,12 @@ fn cancel_document(
 #[tauri::command]
 async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, CommandError> {
     let settings_path = state.model_settings_path.clone();
-    let db_path = state.jobs.db_path().to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || inference_runtime_status(&settings_path, &db_path))
-        .await
-        .map_err(|_| CommandError::new("MODEL_RUNTIME_STATUS_FAILED", "Runtime check stopped"))
+    let jobs = state.jobs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        desktop_startup::runtime_status(&jobs, &settings_path)
+    })
+    .await
+    .map_err(|_| CommandError::new("MODEL_RUNTIME_STATUS_FAILED", "Runtime check stopped"))
 }
 
 #[tauri::command]
@@ -424,6 +427,26 @@ async fn select_inference_gateway(
             "Gateway selection stopped",
         )
     })?
+}
+
+#[tauri::command]
+async fn retry_document_store(state: State<'_, AppState>) -> Result<(), CommandError> {
+    let jobs = state.jobs.clone();
+    let app_data = jobs
+        .db_path()
+        .parent()
+        .ok_or_else(|| {
+            CommandError::new(
+                "DOCUMENT_STORE_UNAVAILABLE",
+                "Document storage path is unavailable",
+            )
+        })?
+        .to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs.retry_store(app_data).map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| CommandError::new("DOCUMENT_STORE_UNAVAILABLE", "Storage retry stopped"))?
 }
 
 #[tauri::command]
@@ -609,8 +632,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let app = builder
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&app_data_dir)?;
-            ensure_private_app_data_directory(&app_data_dir)?;
             let db_path = app_data_dir.join("summarizer.db");
             let settings_path = model_settings_path(&app_data_dir);
 
@@ -621,28 +642,17 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     None
                 }
             };
-            let (provider, store) = match ConnectProvider::start(db_path.clone(), app_data_dir.clone()) {
-                Ok(provider) => {
-                    let store = provider.store();
-                    (Some(provider), store)
-                }
-                Err(error) => {
-                    eprintln!("Connect provider unavailable; standalone mode continues: {error}");
-                    #[cfg(any(unix, windows))]
-                    let store = match connect::provider::reconcile_standalone_state_if_unowned(&db_path, &app_data_dir)? {
-                        Some((count, store)) => {
-                            if count > 0 { eprintln!("Reconciled {count} interrupted pipeline run(s) in standalone mode"); }
-                            store
-                        }
-                        None => pipeline::db::Store::attach(&db_path)?,
-                    };
-                    (None, store)
-                }
-            };
-            let jobs = DesktopJobManager::new(store, settings_path.clone());
-            if let Err(error) = jobs.start_ocr_recovery(app_data_dir.clone()) {
-                eprintln!("OCR restart recovery worker could not start: {error}");
-            }
+            let retry_db_path = db_path.clone();
+            let retry_app_data = app_data_dir.clone();
+            let services = desktop_startup::prepare(
+                &app_data_dir,
+                settings_path.clone(),
+                |path| ConnectProvider::start(path.to_path_buf(), app_data_dir.clone()),
+                std::sync::Arc::new(move || {
+                    connect::provider::prepare_standalone_store(&retry_db_path, &retry_app_data)
+                }),
+            )?;
+            let desktop_startup::Services { provider, jobs } = services;
             app.manage(AppState {
                 jobs,
                 model_settings_path: settings_path,
@@ -665,6 +675,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             continue_document,
             cancel_document,
             get_runtime_status,
+            retry_document_store,
             get_model_catalog,
             configure_inference_gateway,
             select_inference_gateway,

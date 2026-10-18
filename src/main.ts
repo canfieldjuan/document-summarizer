@@ -1663,7 +1663,19 @@ function historyStateLabel(run: RunHistoryItem): string {
 async function initialize(): Promise<void> {
   selectButton.addEventListener("click", () => void selectAndSummarize());
   runtimeRetry.addEventListener("click", () => {
-    void refreshModelCatalog().then(refreshRuntimeStatus);
+    void (async () => {
+      runtimeRetry.disabled = true;
+      try {
+        await invoke("retry_document_store");
+        await refreshHistory();
+      } catch (error) {
+        runtimeDetail.textContent = normalizeCommandError(error).message;
+      } finally {
+        await refreshModelCatalog();
+        await refreshRuntimeStatus();
+        runtimeRetry.disabled = false;
+      }
+    })();
   });
   modelPreset.addEventListener("change", () => void selectInferenceSource());
   registerGguf.addEventListener("click", () => void selectAndRegisterGguf());

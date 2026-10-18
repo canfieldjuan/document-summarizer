@@ -55,6 +55,9 @@ fn stage_label(stage: &PipelineStage) -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) use tests::seed_admitted_ocr_child;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::contracts::{ContinuationCheckpoint, PipelineEvent, PipelineState};
@@ -134,31 +137,37 @@ mod tests {
         .expect("admitted OCR ownership should persist");
     }
 
+    pub(crate) fn seed_admitted_ocr_child(
+        conn: &mut Connection,
+        source: &str,
+    ) -> (PipelineRun, PipelineRun) {
+        let (_, root) = ingest_pdf(conn, source).expect("root should ingest");
+        let (_, child) = ingest_pdf(conn, source).expect("child should ingest");
+        let (parsing, document) =
+            db::start_parsing(conn, &child.run_id, child.state_version).unwrap();
+        parse_started_document(
+            conn,
+            &PdfExtractParser::new(),
+            &child.run_id,
+            parsing.state_version,
+            &document,
+        )
+        .unwrap();
+        let parsed = get_pipeline_run(conn, &child.run_id).unwrap().unwrap();
+        let normalizing = db::start_normalizing(conn, &child.run_id, parsed.state_version)
+            .unwrap()
+            .0;
+        insert_admitted_ocr_handoff(conn, &root, &normalizing);
+        (root, normalizing)
+    }
+
     #[test]
     fn ocr_review_regression_active_child_keeps_restart_ownership() {
         let mut conn = init_db(":memory:").expect("database should initialize");
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
         let source = source.to_str().expect("fixture path should be UTF-8");
-        let (_, root) = ingest_pdf(&mut conn, source).expect("root should ingest");
-        let (_, child) = ingest_pdf(&mut conn, source).expect("child should ingest");
-        let (parsing, document) = db::start_parsing(&mut conn, &child.run_id, child.state_version)
-            .expect("child parsing should start");
-        parse_started_document(
-            &mut conn,
-            &PdfExtractParser::new(),
-            &child.run_id,
-            parsing.state_version,
-            &document,
-        )
-        .expect("child parsing should complete");
-        let parsed = get_pipeline_run(&conn, &child.run_id)
-            .expect("child should reload")
-            .expect("child should exist");
-        let normalizing = db::start_normalizing(&mut conn, &child.run_id, parsed.state_version)
-            .expect("child normalization should start")
-            .0;
-        insert_admitted_ocr_handoff(&conn, &root, &normalizing);
+        let (_, normalizing) = seed_admitted_ocr_child(&mut conn, source);
 
         let ordinary = {
             let (_, ingested) = ingest_pdf(&mut conn, source).expect("ordinary run should ingest");

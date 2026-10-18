@@ -540,13 +540,13 @@ pub enum ProviderStartError {
 pub struct ConnectProvider {
     store: db::Store,
     #[cfg(unix)]
-    _provider_owner_lock: RegistrationLifecycleLock,
+    _provider_owner_lock: Arc<RegistrationLifecycleLock>,
     #[cfg(unix)]
     registration_lock_path: PathBuf,
     #[cfg(windows)]
-    _registration_lock_v1: RegistrationLifecycleLock,
+    _registration_lock_v1: Arc<RegistrationLifecycleLock>,
     #[cfg(windows)]
-    _registration_lock_v2: RegistrationLifecycleLock,
+    _registration_lock_v2: Arc<RegistrationLifecycleLock>,
     #[cfg(windows)]
     private_storage_root: PathBuf,
     registration_path_v1: PathBuf,
@@ -700,9 +700,11 @@ impl ConnectProvider {
         {
             return Err(ProviderStartError::LifecycleTransitionActive);
         }
+        let store_bootstrap = db::Store::begin(&db_path).map_err(ConnectStoreError::from)?;
         #[cfg(unix)]
-        let provider_owner_lock =
-            acquire_provider_ownership_lock(&app_data_dir.join(".connect-provider-owner.lock"))?;
+        let provider_owner_lock = Arc::new(acquire_provider_ownership_lock(
+            &app_data_dir.join(".connect-provider-owner.lock"),
+        )?);
         #[cfg(target_os = "linux")]
         if (startup.stop_requested)() {
             return Err(ProviderStartError::StartupCancelled);
@@ -765,21 +767,35 @@ impl ConnectProvider {
         #[cfg(windows)]
         let instance_id_v2 = standalone_v2_instance_id_without_writes(&db_path, &app_data_dir)?;
         #[cfg(windows)]
-        let registration_lock_v1 = acquire_registration_lock(
-            &locks_dir_v1.join(format!(".local-connect-v1-{APP_ID}.lock")),
-            Some(&runtime_root),
-            None,
-        )
-        .map_err(map_windows_registration_lock_error)?;
+        let registration_lock_v1 = Arc::new(
+            acquire_registration_lock(
+                &locks_dir_v1.join(format!(".local-connect-v1-{APP_ID}.lock")),
+                Some(&runtime_root),
+                None,
+            )
+            .map_err(map_windows_registration_lock_error)?,
+        );
         #[cfg(windows)]
-        let registration_lock_v2 = acquire_registration_lock(
-            &locks_dir_v2.join(format!(".local-connect-v2-{instance_id_v2}.lock")),
-            Some(&runtime_root),
-            None,
-        )
-        .map_err(map_windows_registration_lock_error)?;
+        let registration_lock_v2 = Arc::new(
+            acquire_registration_lock(
+                &locks_dir_v2.join(format!(".local-connect-v2-{instance_id_v2}.lock")),
+                Some(&runtime_root),
+                None,
+            )
+            .map_err(map_windows_registration_lock_error)?,
+        );
 
-        let prepared_store = db::Store::initialize(&db_path).map_err(ConnectStoreError::from)?;
+        #[cfg(unix)]
+        let prepared_store = store_bootstrap
+            .initialize_with_authority(Arc::clone(&provider_owner_lock))
+            .map_err(ConnectStoreError::from)?;
+        #[cfg(windows)]
+        let prepared_store = store_bootstrap
+            .initialize_with_authority((
+                Arc::clone(&registration_lock_v1),
+                Arc::clone(&registration_lock_v2),
+            ))
+            .map_err(ConnectStoreError::from)?;
         let mut conn = prepared_store.writer().map_err(ConnectStoreError::from)?;
         #[cfg(unix)]
         let recovered_runs =
@@ -1259,13 +1275,16 @@ pub(crate) fn reconcile_standalone_state_if_unowned(
     app_data_dir: &Path,
 ) -> Result<Option<(usize, db::Store)>, ProviderStartError> {
     ensure_private_directory(app_data_dir)?;
+    let bootstrap = db::Store::begin(db_path).map_err(ConnectStoreError::from)?;
     let _owner =
         match acquire_provider_ownership_lock(&app_data_dir.join(".connect-provider-owner.lock")) {
             Ok(owner) => owner,
             Err(ProviderStartError::ProviderAlreadyRunning) => return Ok(None),
             Err(error) => return Err(error),
         };
-    let store = db::Store::initialize(db_path).map_err(ConnectStoreError::from)?;
+    let store = bootstrap
+        .initialize_with_authority(_owner)
+        .map_err(ConnectStoreError::from)?;
     let mut conn = store.writer().map_err(ConnectStoreError::from)?;
     let count = reconcile_interrupted_runs(&mut conn)
         .map_err(ConnectStoreError::from)?
@@ -1281,6 +1300,33 @@ pub(crate) fn reconcile_standalone_state_if_unowned(
     let runtime_root = windows_storage::local_app_data_root(env::var_os("LOCALAPPDATA"))
         .map_err(|_| ProviderStartError::RuntimeDirectoryUnavailable)?;
     reconcile_standalone_state_if_unowned_at(db_path, app_data_dir, &runtime_root)
+}
+
+/// Explicit desktop startup/user Retry entry point, never an ordinary opener.
+#[cfg(any(unix, windows))]
+pub(crate) fn prepare_standalone_store(
+    db_path: &Path,
+    app_data_dir: &Path,
+) -> Result<db::Store, db::StoreError> {
+    match reconcile_standalone_state_if_unowned(db_path, app_data_dir) {
+        Ok(Some((count, store))) => {
+            if count > 0 {
+                eprintln!("Reconciled {count} interrupted pipeline run(s) in standalone mode");
+            }
+            Ok(store)
+        }
+        Ok(None) => db::Store::attach_wait(db_path),
+        Err(error) => {
+            eprintln!("Standalone recovery unavailable: {error}");
+            match db::Store::attach_wait(db_path) {
+                Ok(store) => Ok(store),
+                Err(attach) if db::is_contention(&attach) => Err(attach),
+                Err(_) => Err(db::StoreError::NotInitialized(format!(
+                    "Document storage unavailable: {error}"
+                ))),
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -1324,6 +1370,7 @@ fn reconcile_standalone_state_if_unowned_at(
     runtime_root: &Path,
 ) -> Result<Option<(usize, db::Store)>, ProviderStartError> {
     ensure_private_directory(app_data_dir)?;
+    let bootstrap = db::Store::begin(db_path).map_err(ConnectStoreError::from)?;
     let private_connect_root = windows_storage::prepare_local_connect_root(runtime_root)?;
     let locks_dir_v1 = private_connect_root.join("runtime/v1/locks");
     let locks_dir_v2 = private_connect_root.join("runtime/v2/locks");
@@ -1351,7 +1398,9 @@ fn reconcile_standalone_state_if_unowned_at(
         Err(error) => return Err(map_windows_registration_lock_error(error)),
     };
 
-    let store = db::Store::initialize(db_path).map_err(ConnectStoreError::from)?;
+    let store = bootstrap
+        .initialize_with_authority((_registration_lock_v1, _registration_lock_v2))
+        .map_err(ConnectStoreError::from)?;
     let mut conn = store.writer().map_err(ConnectStoreError::from)?;
     let active_v2_instance_id = store::active_v2_provider_instance_id(&conn)?;
     if active_v2_instance_id
@@ -5246,7 +5295,13 @@ mod tests {
                 .send()
                 .unwrap()
         };
+        let setup = db::setup_counts(&path);
         assert_eq!(send().status(), StatusCode::OK);
+        assert_eq!(
+            db::setup_counts(&path),
+            setup,
+            "status route ran migration or quick_check"
+        );
         conn.pragma_update(None, "cache_spill", false).unwrap();
         conn.execute_batch("BEGIN IMMEDIATE; UPDATE status_lock_probe SET value = 1;")
             .unwrap();
@@ -5293,6 +5348,11 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(2));
         });
         assert_eq!(send().status(), StatusCode::OK);
+        assert_eq!(
+            db::setup_counts(&path),
+            setup,
+            "status route ran migration or quick_check"
+        );
         eprintln!(
             "STORE_STATUS_REGRESSION version={version} status={status} elapsed_ms={}",
             elapsed.as_secs_f64() * 1000.0
@@ -5307,6 +5367,127 @@ mod tests {
     #[test]
     fn v1_status_reader_does_not_wait_for_writer() {
         assert_status_reader_under_contention(1);
+    }
+
+    fn assert_status_store_failures_are_not_busy(version: u32) {
+        for kind in ["missing", "corrupt", "denied"] {
+            let root = TestDirectory::new("doc-sum-status-unavailable");
+            let app_data = root.0.join("app-data");
+            let path = app_data.join("summarizer.db");
+            let provider = ConnectProvider::start_at(
+                path.clone(),
+                app_data,
+                root.0.join("runtime"),
+                DEFAULT_MAX_INPUT_BYTES,
+                Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+            )
+            .unwrap();
+            let registration: RuntimeRegistration =
+                serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+            let url = format!("{}v{version}/jobs/{}", provider.base_url(), Uuid::new_v4());
+            let http = client();
+            let send = || {
+                http.get(&url)
+                    .bearer_auth(&registration.auth.token)
+                    .send()
+                    .unwrap()
+            };
+            assert_eq!(send().status(), StatusCode::NOT_FOUND);
+            let held = root.0.join("closed-main.db");
+            match kind {
+                "missing" => {
+                    provider.store.close_fixture_sqlite_handles();
+                    fs::rename(&path, &held).unwrap();
+                }
+                "corrupt" => {
+                    let conn = provider.store.writer().unwrap();
+                    let cookie: u32 = conn
+                        .pragma_query_value(None, "schema_version", |r| r.get(0))
+                        .unwrap();
+                    conn.pragma_update(None, "writable_schema", true).unwrap();
+                    conn.execute(
+                        "UPDATE sqlite_schema SET sql='not valid SQL' WHERE name='connect_jobs'",
+                        [],
+                    )
+                    .unwrap();
+                    conn.pragma_update(None, "schema_version", cookie + 1)
+                        .unwrap();
+                }
+                "denied" => {
+                    // SQLite may reuse established main-file descriptors. Close
+                    // the checkpointed fixture handles before denying a fresh open.
+                    provider.store.close_fixture_sqlite_handles();
+                    #[cfg(unix)]
+                    {
+                        assert_ne!(
+                            unsafe { libc::geteuid() },
+                            0,
+                            "denied-route proof requires an unprivileged runner"
+                        );
+                        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+                    }
+                    #[cfg(windows)]
+                    {
+                        let output = std::process::Command::new("icacls")
+                            .arg(&path)
+                            .args(["/deny", "*S-1-1-0:(RD)"])
+                            .output()
+                            .unwrap();
+                        assert!(
+                            output.status.success(),
+                            "failed to deny fixture read access"
+                        );
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let setup = db::setup_counts(&path);
+            let response = send();
+            let status = response.status();
+            let body: serde_json::Value = response.json().unwrap();
+            // Restore only closed/checkpointed main files and test permissions.
+            if kind == "missing" {
+                fs::rename(&held, &path).unwrap();
+            }
+            if kind == "denied" {
+                #[cfg(unix)]
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                #[cfg(windows)]
+                {
+                    let output = std::process::Command::new("icacls")
+                        .arg(&path)
+                        .args(["/remove:d", "*S-1-1-0"])
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "failed to restore fixture read access"
+                    );
+                }
+            }
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "version={version} kind={kind} body={body}"
+            );
+            assert_eq!(body["error"]["code"], "PROVIDER_INTERNAL_ERROR");
+            assert_eq!(
+                db::setup_counts(&path),
+                setup,
+                "failed status route ran setup"
+            );
+            eprintln!("STORE_ROUTE_FAILURE version={version} kind={kind} status={status}");
+        }
+    }
+
+    #[test]
+    fn v1_status_missing_corrupt_and_denied_stores_preserve_error_identity() {
+        assert_status_store_failures_are_not_busy(1);
+    }
+
+    #[test]
+    fn v2_status_missing_corrupt_and_denied_stores_preserve_error_identity() {
+        assert_status_store_failures_are_not_busy(2);
     }
 
     #[cfg(unix)]
@@ -6446,6 +6627,136 @@ int kill(pid_t pid, int sig) {
                 .state,
             PipelineState::Failed
         );
+    }
+
+    #[test]
+    fn provider_startup_reconciliation_preserves_ocr_ownership_before_handoff_recovery() {
+        let root = TestDirectory::new("doc-sum-startup-ocr-order");
+        let app_data = root.0.join("app-data");
+        ensure_private_directory(&app_data).unwrap();
+        let path = app_data.join("summarizer.db");
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
+        let source = source.to_str().unwrap();
+        let mut conn = db::init_db(&path).unwrap();
+        let (parent, child) = crate::pipeline::recovery::seed_admitted_ocr_child(&mut conn, source);
+        let (_, ordinary) = ingest_pdf(&mut conn, source).unwrap();
+        let ordinary = db::start_parsing(&mut conn, &ordinary.run_id, ordinary.state_version)
+            .unwrap()
+            .0;
+        let before = db::list_pipeline_events(&conn, &child.run_id).unwrap();
+        drop(conn);
+        // This is the actual production ordering: provider reconciliation runs
+        // before the desktop recovery owner can rewind/resume its OCR child.
+        let provider = ConnectProvider::start_at(
+            path,
+            app_data,
+            root.0.join("runtime"),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let mut conn = provider.store.writer().unwrap();
+        assert_eq!(
+            db::get_pipeline_run(&conn, &child.run_id).unwrap().unwrap(),
+            child
+        );
+        assert_eq!(
+            db::list_pipeline_events(&conn, &child.run_id).unwrap(),
+            before
+        );
+        assert_eq!(
+            db::get_pipeline_run(&conn, &parent.run_id)
+                .unwrap()
+                .unwrap(),
+            parent
+        );
+        assert_eq!(
+            db::get_pipeline_run(&conn, &ordinary.run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Failed
+        );
+        let rewound = db::rewind_interrupted_ocr_child(&mut conn, &child.run_id).unwrap();
+        assert_eq!(rewound.state, PipelineState::Parsed);
+        assert_eq!(rewound.state_version, child.state_version + 1);
+        assert!(db::get_parsed_document(&conn, &child.run_id)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn standalone_reconciliation_retains_application_authority_through_store_clones() {
+        let root = TestDirectory::new("doc-sum-standalone-store-authority");
+        let app_data = root.0.join("app-data");
+        let path = app_data.join("summarizer.db");
+        let runtime = root.0.join("runtime");
+        #[cfg(unix)]
+        let (_, store) = reconcile_standalone_state_if_unowned(&path, &app_data)
+            .unwrap()
+            .unwrap();
+        #[cfg(windows)]
+        let (_, store) = {
+            fs::create_dir(&runtime).unwrap();
+            crate::connect::windows_storage::protect_path_for_test(&runtime, true).unwrap();
+            reconcile_standalone_state_if_unowned_at(&path, &app_data, &runtime)
+                .unwrap()
+                .unwrap()
+        };
+        let clone = store.clone();
+        drop(store);
+        let attempt = ConnectProvider::start_at(
+            path.clone(),
+            app_data.clone(),
+            runtime.clone(),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        );
+        assert!(
+            matches!(attempt, Err(ProviderStartError::ProviderAlreadyRunning)),
+            "standalone authority ended while store remained ready"
+        );
+        assert!(clone.reader().is_ok());
+        drop(clone);
+        let replacement = ConnectProvider::start_at(
+            path,
+            app_data,
+            runtime,
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        assert!(replacement.store.reader().is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn desktop_stays_open_after_actual_windows_reconcile_path_error() {
+        let root = TestDirectory::new("doc-sum-windows-desktop-reconcile-error");
+        let app_data = root.0.join("app-data");
+        let bad_runtime = root.0.join("not-a-directory");
+        fs::write(&bad_runtime, b"private fixture").unwrap();
+        let retry_data = app_data.clone();
+        let services = crate::desktop_startup::prepare(
+            &app_data,
+            app_data.join("settings.json"),
+            |_| Err(ProviderStartError::RuntimeDirectoryUnavailable),
+            Arc::new(move || {
+                let error = match reconcile_standalone_state_if_unowned_at(
+                    &retry_data.join("summarizer.db"),
+                    &retry_data,
+                    &bad_runtime,
+                ) {
+                    Err(error) => error,
+                    Ok(_) => panic!("invalid runtime directory was admitted"),
+                };
+                Err(db::StoreError::NotInitialized(error.to_string()))
+            }),
+        )
+        .unwrap();
+        assert!(services.provider.is_none());
+        assert!(services.jobs.store().is_err());
     }
 
     #[test]

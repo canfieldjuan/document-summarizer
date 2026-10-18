@@ -1011,20 +1011,52 @@ pub enum MigrationError {
 }
 
 #[cfg(test)]
-thread_local! {
-    static SETUP_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
-}
+type SetupObservations =
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (usize, usize)>>;
 #[cfg(test)]
-pub(crate) fn setup_counts() -> (usize, usize) {
-    SETUP_COUNTS.with(|c| c.get())
+static SETUP_COUNTS: std::sync::OnceLock<SetupObservations> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn setup_key(path: &std::path::Path) -> std::path::PathBuf {
+    path.parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+#[cfg(test)]
+pub(crate) fn setup_counts(path: &std::path::Path) -> (usize, usize) {
+    SETUP_COUNTS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("setup counter poisoned")
+        .get(&setup_key(path))
+        .copied()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn record_setup(conn: &Connection, migration: bool) {
+    let Some(path) = conn.path().filter(|path| !path.is_empty()) else {
+        return;
+    };
+    let mut counts = SETUP_COUNTS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("setup counter poisoned");
+    let count = counts
+        .entry(setup_key(std::path::Path::new(path)))
+        .or_default();
+    if migration {
+        count.0 += 1;
+    } else {
+        count.1 += 1;
+    }
 }
 
 pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
     #[cfg(test)]
-    SETUP_COUNTS.with(|c| {
-        let (m, v) = c.get();
-        c.set((m + 1, v));
-    });
+    record_setup(conn, true);
     let mut current_version = version(conn)?;
     if current_version > CURRENT_SCHEMA_VERSION {
         return Err(MigrationError::UnsupportedVersion {
@@ -1318,10 +1350,7 @@ fn migrate_additive(
 
 fn validate(conn: &Connection) -> Result<(), MigrationError> {
     #[cfg(test)]
-    SETUP_COUNTS.with(|c| {
-        let (m, v) = c.get();
-        c.set((m, v + 1));
-    });
+    record_setup(conn, false);
     let quick_check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if quick_check != "ok" {
         return Err(MigrationError::Invariant(format!(

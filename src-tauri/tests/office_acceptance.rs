@@ -7,7 +7,7 @@ use document_summarizer_lib::pipeline::contracts::{
 use document_summarizer_lib::pipeline::db::{
     get_analyzed_document, get_chunked_document, get_citation_artifact, get_normalized_document,
     get_parsed_document, get_pipeline_run, get_structured_document, get_summary_artifact,
-    get_synthesis_attempt, get_verified_document, init_db, list_pipeline_events,
+    get_synthesis_attempt, get_verified_document, list_pipeline_events,
 };
 use document_summarizer_lib::pipeline::ingest::ingest_pdf;
 use document_summarizer_lib::pipeline::model::OllamaRuntime;
@@ -553,7 +553,8 @@ fn office_pdf_deterministic_checkpoints_survive_reopen() {
         let interpreter = DeterministicStructureInterpreter::new();
         let chunker = DeterministicDocumentChunker::new();
 
-        let mut conn = init_db(&database.0).expect("acceptance database should initialize");
+        let store = document_summarizer_lib::pipeline::db::Store::initialize(&database.0).unwrap();
+        let mut conn = store.writer().expect("acceptance database should open");
         let (document, ingested_run) = ingest_pdf(
             &mut conn,
             source
@@ -630,8 +631,9 @@ fn office_pdf_deterministic_checkpoints_survive_reopen() {
         let chunked_hash = artifact_hash(&chunked);
         drop(conn);
 
-        let reopened =
-            init_db(&database.0).expect("acceptance database should independently reopen");
+        let reopened = store
+            .writer()
+            .expect("acceptance database should independently reopen");
         assert_eq!(
             get_parsed_document(&reopened, &ingested_run.run_id)
                 .expect("parsed artifact should reload")
@@ -1132,7 +1134,9 @@ fn office_pdf_live_ollama_summary_has_exact_durable_evidence() {
     let expected_citations = result.citations.clone();
     drop(conn);
 
-    let reopened = init_db(&database.0).expect("live acceptance database should reopen");
+    let reopened = store
+        .writer()
+        .expect("live acceptance database should reopen");
     assert_eq!(
         get_summary_artifact(&reopened, &run_id)
             .expect("summary should reload")

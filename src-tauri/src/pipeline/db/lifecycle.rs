@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct Store(Arc<PreparedStore>);
@@ -19,6 +19,25 @@ struct PreparedStore {
     _anchor: Mutex<Connection>,
     // Dropped after the anchor. File presence alone never proves readiness.
     _lease: File,
+    // Primary liveness is distinct from consumer usage leases. Drop it before
+    // the application's authority guards, even when consumers are still alive.
+    _primary: Option<File>,
+    _authority: Option<Authority>,
+    generation: String,
+}
+
+struct Authority {
+    _guard: Box<dyn Send + Sync>,
+}
+impl std::fmt::Debug for Authority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StoreAuthority")
+    }
+}
+
+pub(crate) struct StoreBootstrap {
+    path: PathBuf,
+    _gate: File,
 }
 
 fn busy() -> StoreError {
@@ -99,7 +118,15 @@ fn local_filesystem_magic(value: impl Into<i64>) -> bool {
     // for multi-connection WAL; do not silently run them in rollback mode.
     matches!(
         value.into() as u64 & 0xffff_ffff,
+        // Linux magic.h: ext, xfs, btrfs, tmpfs, ramfs, overlayfs, f2fs,
+        // ecryptfs, bcachefs, reiserfs, nilfs2.
+        // https://github.com/torvalds/linux/blob/a0ff06b3a7bd3aa0cd99d0294e60b3ed28c9bfac/include/uapi/linux/magic.h
         0xef53 | 0x5846_5342 | 0x9123_683e | 0x0102_1994 | 0x8584_58f6 | 0x794c_7630 | 0xf2f5_2010
+        | 0xf15f | 0xca45_1a4e | 0x5265_4973 | 0x3434
+        // JFS: https://github.com/torvalds/linux/blob/a0ff06b3a7bd3aa0cd99d0294e60b3ed28c9bfac/fs/jfs/jfs_incore.h
+        | 0x3153_464a
+        // ZFS: https://github.com/openzfs/zfs/blob/7c3d85aaf1670d7386b0d4a157ef4ce96e17cba2/include/sys/fs/zfs.h
+        | 0x2fc1_2fc1
     )
 }
 
@@ -118,8 +145,8 @@ fn require_local_filesystem(path: &Path) -> Result<(), StoreError> {
     #[cfg(target_os = "macos")]
     let local = information.f_flags & libc::MNT_LOCAL as u32 != 0;
     if !local {
-        return Err(StoreError::NotInitialized(
-            "Store filesystem is not admitted for local WAL".into(),
+        return Err(StoreError::UnsupportedFilesystem(
+            "remote, FUSE, or unrecognized local filesystem".into(),
         ));
     }
     Ok(())
@@ -143,8 +170,8 @@ fn require_local_filesystem(path: &Path) -> Result<(), StoreError> {
         return Err(std::io::Error::last_os_error().into());
     }
     if !local_drive_type(unsafe { GetDriveTypeW(volume.as_ptr()) }) {
-        return Err(StoreError::NotInitialized(
-            "Store volume is not admitted for local WAL".into(),
+        return Err(StoreError::UnsupportedFilesystem(
+            "remote or unrecognized Windows volume".into(),
         ));
     }
     Ok(())
@@ -188,14 +215,15 @@ fn shared(file: &File) -> Result<(), StoreError> {
 
 fn readiness_record(identity: (u64, u64)) -> String {
     format!(
-        "docsum-store-v1:{}:{}:{}",
+        "docsum-store-v2:{}:{}:{}:{}",
         identity.0,
         identity.1,
-        schema::CURRENT_SCHEMA_VERSION
+        schema::CURRENT_SCHEMA_VERSION,
+        uuid::Uuid::new_v4()
     )
 }
 
-fn verify_readiness(file: &mut File, identity: (u64, u64)) -> Result<(), StoreError> {
+fn read_readiness(file: &mut File, identity: (u64, u64)) -> Result<String, StoreError> {
     if file.metadata()?.len() > 128 {
         return Err(StoreError::NotInitialized(
             "Invalid store readiness record".into(),
@@ -204,73 +232,136 @@ fn verify_readiness(file: &mut File, identity: (u64, u64)) -> Result<(), StoreEr
     file.seek(SeekFrom::Start(0))?;
     let mut text = String::new();
     file.take(129).read_to_string(&mut text)?;
-    if text != readiness_record(identity) {
+    let prefix = format!(
+        "docsum-store-v2:{}:{}:{}:",
+        identity.0,
+        identity.1,
+        schema::CURRENT_SCHEMA_VERSION
+    );
+    let valid = text
+        .strip_prefix(&prefix)
+        .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value));
+    if !valid {
         return Err(StoreError::NotInitialized(
             "Prepared store identity does not match".into(),
         ));
     }
-    Ok(())
+    Ok(text)
 }
 
-impl Store {
-    /// Bootstrap only while the application's existing lifecycle authority is held.
-    /// Competing initializers are excluded; operations use attach/open below.
-    pub fn initialize(path: &Path) -> Result<Self, StoreError> {
-        let path = canonical_store_path(path)?;
-        let guard = lock_file(&sidecar(&path, ".initialize.lock"), true)?;
-        exclusive(&guard)?;
+fn require_primary(path: &Path) -> Result<(), StoreError> {
+    let primary = lock_file(&sidecar(path, ".owner.lock"), false)?;
+    match primary.try_lock() {
+        Ok(()) => Err(StoreError::NotInitialized(
+            "No active primary store owner".into(),
+        )),
+        Err(TryLockError::WouldBlock) => Ok(()),
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+impl StoreBootstrap {
+    pub(crate) fn initialize_with_authority<A: Send + Sync + 'static>(
+        self,
+        authority: A,
+    ) -> Result<Store, StoreError> {
+        self.prepare(Some(Authority {
+            _guard: Box::new(authority),
+        }))
+    }
+
+    fn prepare(self, authority: Option<Authority>) -> Result<Store, StoreError> {
+        let path = self.path;
+        let primary = lock_file(&sidecar(&path, ".owner.lock"), true)?;
         let mut lease = lock_file(&sidecar(&path, ".ready.lock"), true)?;
-        match lease.try_lock() {
+        let (conn, generation, primary) = match primary.try_lock() {
             Ok(()) => {
-                // No active owner: validate once and publish while the init gate
-                // excludes attaches, including the exclusive-to-shared handoff.
+                // Consumers of a departed primary may still have open work.
+                // Do not migrate underneath them or treat them as a live owner.
+                exclusive(&lease)?;
                 let bootstrap = initialize_connection(&path)?;
-                // Setup's connection may not have entered the WAL read path.
-                // Publish an operational anchor, not the journal-mode switcher.
                 drop(bootstrap);
                 let conn = operational_connection(&path, false)?;
-                let identity = file_identity(&path)?;
+                let generation = readiness_record(file_identity(&path)?);
                 lease.set_len(0)?;
-                lease.write_all(readiness_record(identity).as_bytes())?;
+                lease.write_all(generation.as_bytes())?;
                 lease.sync_data()?;
                 lease.unlock()?;
                 shared(&lease)?;
-                Self::bind(path, identity, conn, lease)
+                (conn, generation, Some(primary))
             }
             Err(TryLockError::WouldBlock) => {
-                // An active owner exists. Join its compatible prepared lifetime;
-                // never migrate underneath it, even for a newer schema binary.
+                // An actual primary exists: no setup or migration here.
+                if authority.is_some() {
+                    return Err(busy());
+                }
                 shared(&lease)?;
                 let conn = operational_connection(&path, false)?;
-                let identity = file_identity(&path)?;
-                verify_readiness(&mut lease, identity)?;
-                Self::bind(path, identity, conn, lease)
+                let generation = read_readiness(&mut lease, file_identity(&path)?)?;
+                (conn, generation, None)
             }
-            Err(TryLockError::Error(error)) => Err(error.into()),
-        }
+            Err(TryLockError::Error(error)) => return Err(error.into()),
+        };
+        let identity = file_identity(&path)?;
+        Store::bind(path, identity, conn, lease, primary, authority, generation)
+    }
+}
+
+impl Store {
+    /// Acquire initialization intent before application authority. An attaching
+    /// GUI can then wait on this real OS gate, including the pre-bootstrap gap.
+    pub(crate) fn begin(path: &Path) -> Result<StoreBootstrap, StoreError> {
+        let path = canonical_store_path(path)?;
+        let gate = lock_file(&sidecar(&path, ".initialize.lock"), true)?;
+        exclusive(&gate)?;
+        Ok(StoreBootstrap { path, _gate: gate })
     }
 
-    /// Attach only to an active, already validated owner. Never initialize or
-    /// trust a stale marker left after process exit.
+    pub fn initialize(path: &Path) -> Result<Self, StoreError> {
+        Self::begin(path)?.prepare(None)
+    }
+
+    /// Attach only to active primary readiness; consumers cannot prolong it.
     pub fn attach(path: &Path) -> Result<Self, StoreError> {
-        let path = fs::canonicalize(path)?;
-        require_local_filesystem(path.parent().expect("canonical store parent"))?;
+        let path = canonical_store_path(path)?;
         let guard = lock_file(&sidecar(&path, ".initialize.lock"), false)?;
         shared(&guard)?;
+        Self::attach_under_gate(path)
+    }
+
+    fn attach_under_gate(path: PathBuf) -> Result<Self, StoreError> {
+        require_primary(&path)?;
         let mut lease = lock_file(&sidecar(&path, ".ready.lock"), false)?;
-        match lease.try_lock() {
-            Ok(()) => {
-                return Err(StoreError::NotInitialized(
-                    "No active prepared store owner".into(),
-                ))
-            }
-            Err(TryLockError::WouldBlock) => shared(&lease)?,
-            Err(TryLockError::Error(error)) => return Err(error.into()),
-        }
-        let conn = operational_connection(&path, false)?;
+        shared(&lease)?;
         let identity = file_identity(&path)?;
-        verify_readiness(&mut lease, identity)?;
-        Self::bind(path, identity, conn, lease)
+        let generation = read_readiness(&mut lease, identity)?;
+        let conn = operational_connection(&path, true)?;
+        require_primary(&path)?;
+        Self::bind(path, identity, conn, lease, None, None, generation)
+    }
+
+    /// Startup only. Wait at most two seconds for the already-held init gate;
+    /// never poll filenames or infer readiness from their presence.
+    pub(crate) fn attach_wait(path: &Path) -> Result<Self, StoreError> {
+        Self::attach_with_deadline(path, Duration::from_secs(2))
+    }
+
+    fn attach_with_deadline(path: &Path, budget: Duration) -> Result<Self, StoreError> {
+        let path = canonical_store_path(path)?;
+        let gate = lock_file(&sidecar(&path, ".initialize.lock"), false)?;
+        let deadline = Instant::now() + budget;
+        loop {
+            match shared(&gate) {
+                Ok(()) => return Self::attach_under_gate(path),
+                Err(error) if is_contention(&error) && Instant::now() < deadline => {
+                    std::thread::park_timeout(
+                        Duration::from_millis(5)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn bind(
@@ -278,6 +369,9 @@ impl Store {
         identity: (u64, u64),
         conn: Connection,
         lease: File,
+        primary: Option<File>,
+        authority: Option<Authority>,
+        generation: String,
     ) -> Result<Self, StoreError> {
         #[cfg(windows)]
         {
@@ -288,6 +382,7 @@ impl Store {
                 sidecar(&path, "-shm"),
                 sidecar(&path, ".initialize.lock"),
                 sidecar(&path, ".ready.lock"),
+                sidecar(&path, ".owner.lock"),
             ] {
                 if file.exists() {
                     crate::connect::windows_storage::validate_inherited_regular_file(
@@ -306,6 +401,9 @@ impl Store {
             identity,
             _anchor: Mutex::new(conn),
             _lease: lease,
+            _primary: primary,
+            _authority: authority,
+            generation,
         })))
     }
 
@@ -313,7 +411,20 @@ impl Store {
         &self.0.path
     }
 
-    fn check_identity(&self) -> Result<(), StoreError> {
+    pub(crate) fn generation(&self) -> &str {
+        &self.0.generation
+    }
+
+    pub(crate) fn check_ready(&self) -> Result<(), StoreError> {
+        let gate = lock_file(&sidecar(self.path(), ".initialize.lock"), false)?;
+        shared(&gate)?;
+        require_primary(self.path())?;
+        let mut record = lock_file(&sidecar(self.path(), ".ready.lock"), false)?;
+        if read_readiness(&mut record, self.0.identity)? != self.0.generation {
+            return Err(StoreError::NotInitialized(
+                "Store owner generation changed".into(),
+            ));
+        }
         if file_identity(self.path())? != self.0.identity {
             return Err(StoreError::NotInitialized(
                 "Prepared store file was replaced".into(),
@@ -323,10 +434,24 @@ impl Store {
     }
 
     fn open(&self, read_only: bool) -> Result<Connection, StoreError> {
-        self.check_identity()?;
+        self.check_ready()?;
         let conn = operational_connection(self.path(), read_only)?;
-        self.check_identity()?;
+        self.check_ready()?;
         Ok(conn)
+    }
+
+    /// Private-fixture fault injection only: checkpoint main and close all
+    /// SQLite anchor handles before a test moves its main database file.
+    #[cfg(test)]
+    pub(crate) fn close_fixture_sqlite_handles(&self) {
+        let mut slot = self.0._anchor.lock().unwrap();
+        let conn = std::mem::replace(&mut *slot, Connection::open_in_memory().unwrap());
+        assert!(conn.is_autocommit());
+        let busy: u32 = conn
+            .query_row("PRAGMA main.wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy, 0);
+        conn.close().unwrap();
     }
 
     #[cfg(test)]
@@ -375,6 +500,14 @@ fn operational_connection(path: &Path, read_only: bool) -> Result<Connection, St
     conn.pragma_update(None, "foreign_keys", "ON")?;
     if !read_only {
         conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.pragma_update(None, "locking_mode", "NORMAL")?;
+        let sync: u32 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
+        let mode: String = conn.pragma_query_value(None, "locking_mode", |r| r.get(0))?;
+        if sync != 2 || mode != "normal" {
+            return Err(StoreError::NotInitialized(
+                "Store writer requires FULL sync and NORMAL locking".into(),
+            ));
+        }
     }
     let version = schema::version(&conn)?;
     if version != schema::CURRENT_SCHEMA_VERSION {
@@ -451,9 +584,9 @@ mod tests {
     #[test]
     fn readers_are_read_only_and_ordinary_opens_do_not_initialize() {
         let file = DatabaseFixture::new();
-        let before = schema::setup_counts();
+        let before = schema::setup_counts(&file.0);
         let store = Store::initialize(&file.0).unwrap();
-        let initialized = schema::setup_counts();
+        let initialized = schema::setup_counts(&file.0);
         assert_eq!(initialized, (before.0 + 1, before.1 + 1));
         let writer = store.writer().unwrap();
         writer
@@ -503,7 +636,7 @@ mod tests {
         drop(joined.reader().unwrap());
         drop(attached.writer().unwrap());
         assert_eq!(
-            schema::setup_counts(),
+            schema::setup_counts(&file.0),
             initialized,
             "ordinary opens reran setup/integrity validation"
         );
@@ -514,6 +647,24 @@ mod tests {
             "STORE_RUNTIME version={} number={} source_id={source}",
             rusqlite::version(),
             rusqlite::version_number()
+        );
+    }
+
+    #[test]
+    fn setup_observations_follow_store_across_request_threads() {
+        let file = DatabaseFixture::new();
+        let store = Store::initialize(&file.0).unwrap();
+        let before = schema::setup_counts(&file.0);
+        std::thread::spawn(move || {
+            let mut conn = store.writer().unwrap();
+            schema::migrate(&mut conn).unwrap();
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            schema::setup_counts(&file.0),
+            (before.0 + 1, before.1 + 1),
+            "request thread setup was invisible to the store observer"
         );
     }
 
@@ -534,6 +685,91 @@ mod tests {
     }
 
     #[test]
+    fn primary_authority_outlives_ready_clones_and_observes_readiness_teardown() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Probe {
+            path: PathBuf,
+            released: Arc<AtomicBool>,
+        }
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                assert!(
+                    Store::attach(&self.path).is_err(),
+                    "application authority released while primary readiness remained"
+                );
+                self.released.store(true, Ordering::SeqCst);
+            }
+        }
+        let file = DatabaseFixture::new();
+        let released = Arc::new(AtomicBool::new(false));
+        let primary = Store::begin(&file.0)
+            .unwrap()
+            .initialize_with_authority(Probe {
+                path: file.0.clone(),
+                released: Arc::clone(&released),
+            })
+            .unwrap();
+        let consumer = Store::attach(&file.0).unwrap();
+        let clone = primary.clone();
+        drop(primary);
+        assert!(!released.load(Ordering::SeqCst));
+        assert!(consumer.reader().is_ok());
+        drop(clone);
+        assert!(released.load(Ordering::SeqCst));
+        assert!(consumer.reader().is_err());
+        assert!(
+            is_contention(&Store::initialize(&file.0).unwrap_err()),
+            "migration admitted beneath stale consumer usage"
+        );
+        drop(consumer);
+        assert!(Store::initialize(&file.0).unwrap().reader().is_ok());
+    }
+
+    #[test]
+    fn attach_wait_observes_bootstrap_gate_and_failed_initialization() {
+        let file = DatabaseFixture::new();
+        let ticket = Store::begin(&file.0).unwrap();
+        let path = file.0.clone();
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            waiting_tx.send(()).unwrap();
+            Store::attach_wait(&path)
+        });
+        waiting_rx.recv().unwrap();
+        let primary = ticket.initialize_with_authority(()).unwrap();
+        assert!(waiter.join().unwrap().unwrap().reader().is_ok());
+        drop(primary);
+        let failed = DatabaseFixture::new();
+        let ticket = Store::begin(&failed.0).unwrap();
+        let now = Instant::now();
+        assert!(is_contention(
+            &Store::attach_with_deadline(&failed.0, Duration::from_millis(20)).unwrap_err()
+        ));
+        assert!(now.elapsed() < Duration::from_secs(1));
+        drop(ticket);
+        assert!(
+            Store::attach_wait(&failed.0).is_err(),
+            "failed bootstrap made a ready store"
+        );
+    }
+
+    #[test]
+    fn attached_consumer_cannot_extend_primary_readiness() {
+        let file = DatabaseFixture::new();
+        let primary = Store::initialize(&file.0).unwrap();
+        let consumer = Store::attach(&file.0).unwrap();
+        drop(primary);
+        assert!(
+            consumer.reader().is_err(),
+            "attached consumer manufactured primary readiness"
+        );
+        assert!(
+            Store::attach(&file.0).is_err(),
+            "stale consumer admitted another consumer"
+        );
+    }
+
+    #[test]
     fn readiness_requires_an_active_owner_and_survives_clone_only() {
         let file = DatabaseFixture::new();
         assert!(Store::attach(&file.0).is_err());
@@ -542,8 +778,9 @@ mod tests {
         let clone = store.clone();
         drop(store);
         let attached = Store::attach(&file.0).unwrap();
-        drop(clone);
         assert!(attached.reader().is_ok());
+        drop(clone);
+        assert!(attached.reader().is_err());
         drop(attached);
         assert!(
             Store::attach(&file.0).is_err(),
@@ -561,13 +798,7 @@ mod tests {
         // Checkpoint and close every real SQLite handle before this test-only
         // identity fault injection. Never move a live main file away from WAL.
         for store in [&first, &second] {
-            let mut slot = store.0._anchor.lock().unwrap();
-            let conn = std::mem::replace(&mut *slot, Connection::open_in_memory().unwrap());
-            let busy: u32 = conn
-                .query_row("PRAGMA main.wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(busy, 0);
-            conn.close().unwrap();
+            store.close_fixture_sqlite_handles();
         }
         fs::rename(&file.0, file.directory().join("held-original.db")).unwrap();
         fs::rename(&other.0, &file.0).unwrap();
@@ -823,7 +1054,7 @@ mod tests {
             let start = Instant::now();
             let store = Store::initialize(&file.0).unwrap();
             let bootstrap_ms = start.elapsed().as_secs_f64() * 1000.0;
-            let counts = schema::setup_counts();
+            let counts = schema::setup_counts(&file.0);
             let start = Instant::now();
             let reader = store.reader().unwrap();
             let count: u32 = reader
@@ -831,10 +1062,28 @@ mod tests {
                 .unwrap();
             let read_ms = start.elapsed().as_secs_f64() * 1000.0;
             assert_eq!(count, rows);
-            assert_eq!(schema::setup_counts(), counts);
+            assert_eq!(schema::setup_counts(&file.0), counts);
             eprintln!(
                 "STORE_COST bytes={} bootstrap_ms={bootstrap_ms} operational_read_ms={read_ms}",
                 fs::metadata(&file.0).unwrap().len()
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn standard_local_filesystems_are_admitted() {
+        for (name, magic) in [
+            ("zfs", 0x2fc1_2fc1_i64),
+            ("ecryptfs", 0xf15f),
+            ("bcachefs", 0xca45_1a4e),
+            ("jfs", 0x3153_464a),
+            ("reiserfs", 0x5265_4973),
+            ("nilfs2", 0x3434),
+        ] {
+            assert!(
+                local_filesystem_magic(magic),
+                "local filesystem rejected: {name}"
             );
         }
     }
@@ -848,7 +1097,15 @@ mod tests {
             0x6969,
             0xff53_4d42,
             0xfe53_4d42,
-            0x6573_5546,
+            0x6573_5546, // FUSE
+            0x0102_1997, // 9p
+            0x00c3_6400, // ceph
+            0x5346_414f,
+            0x6b41_4653, // AFS
+            0x7375_7245,
+            0x517b,
+            0x564c,      // coda, SMB, NCP
+            0x1234_5678, // unknown
             i64::MAX,
         ] {
             assert!(!local_filesystem_magic(value));

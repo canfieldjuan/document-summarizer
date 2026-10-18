@@ -99,6 +99,20 @@ impl GatewayRuntime {
     }
 }
 
+fn store_failure(
+    error: db::StoreError,
+    request: &ModelRequest,
+    started: Instant,
+    message: &str,
+) -> ModelRuntimeFailure {
+    failure(
+        "MODEL_GATEWAY_STORE_FAILED",
+        message,
+        db::is_contention(&error),
+        vec![diagnostic(request, started, false)],
+    )
+}
+
 impl ModelRuntime for GatewayRuntime {
     fn bind_request_owner(&mut self, owner_id: &str) {
         self.bound_owner_id = Some(owner_id.to_string());
@@ -124,20 +138,20 @@ impl ModelRuntime for GatewayRuntime {
                 .get()
                 .expect("store attached or concurrent attachment won"))
         })()
-        .map_err(|_| {
-            failure(
-                "MODEL_GATEWAY_STORE_FAILED",
+        .map_err(|error| {
+            store_failure(
+                error,
+                request,
+                started,
                 "Inference gateway store is not prepared",
-                false,
-                vec![diagnostic(request, started, false)],
             )
         })?;
-        let mut conn = store.writer().map_err(|_| {
-            failure(
-                "MODEL_GATEWAY_STORE_FAILED",
+        let mut conn = store.writer().map_err(|error| {
+            store_failure(
+                error,
+                request,
+                started,
                 "Inference gateway request state is unavailable",
-                false,
-                vec![diagnostic(request, started, false)],
             )
         })?;
         let key = GatewayRequestKey {
@@ -454,6 +468,46 @@ mod tests {
         assert!(error.request_attempts.is_empty());
         assert!(state.lock().unwrap().keys.is_empty());
         assert!(!root.0.join("summarizer.db").exists());
+    }
+
+    #[test]
+    fn store_busy_attach_and_writer_failures_remain_retryable() {
+        for writer in [false, true] {
+            let root = TestDirectory::new();
+            let state = Arc::new(Mutex::new(ExecutorState::default()));
+            let mut runtime = runtime(&root, Arc::clone(&state), false, true);
+            runtime.bind_run("durable-run");
+            let store = db::Store::initialize(&runtime.db_path).unwrap();
+            let error = if writer {
+                runtime.store.set(store.clone()).unwrap();
+                store.with_synthetic_exclusive_lock(|| runtime.generate(&request()).unwrap_err())
+            } else {
+                let mut signal = runtime.db_path.as_os_str().to_os_string();
+                signal.push(".initialize.lock");
+                let gate = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(PathBuf::from(signal))
+                    .unwrap();
+                gate.try_lock().unwrap();
+                runtime.generate(&request()).unwrap_err()
+            };
+            assert_eq!(error.code, "MODEL_GATEWAY_STORE_FAILED");
+            assert!(
+                error.recoverable,
+                "gateway discarded typed store contention: writer={writer}"
+            );
+            assert!(state.lock().unwrap().keys.is_empty());
+        }
+        let root = TestDirectory::new();
+        let state = Arc::new(Mutex::new(ExecutorState::default()));
+        let mut runtime = runtime(&root, Arc::clone(&state), false, true);
+        runtime.bind_run("durable-run");
+        assert!(
+            !runtime.generate(&request()).unwrap_err().recoverable,
+            "missing store became retryable busy"
+        );
+        assert!(state.lock().unwrap().keys.is_empty());
     }
 
     #[test]

@@ -134,6 +134,12 @@ jobs:
       - name: Run native Windows store lifecycle tests
         working-directory: src-tauri
         run: 'cargo test --locked --lib pipeline::db::lifecycle::tests:: -- --nocapture'
+      - name: Run native Windows desktop storage startup tests
+        working-directory: src-tauri
+        run: 'cargo test --locked --lib desktop_startup::tests:: -- --nocapture'
+      - name: Run native Windows explicit storage retry tests
+        working-directory: src-tauri
+        run: 'cargo test --locked --lib pipeline::db::access::tests:: -- --nocapture'
       - name: Deny native Windows warnings
         working-directory: src-tauri
         run: 'cargo clippy --locked --lib --tests -- -D warnings'
