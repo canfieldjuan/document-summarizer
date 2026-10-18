@@ -138,7 +138,7 @@ impl Drop for ActiveRecoveryReservations {
 }
 
 impl DesktopJobManager {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn new(store: db::Store, settings_path: PathBuf) -> Self {
         Self::with_store_access(db::StoreAccess::prepared(store), settings_path)
     }
