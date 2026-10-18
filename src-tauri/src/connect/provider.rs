@@ -5032,6 +5032,7 @@ mod tests {
             provider.base_url(),
             &registration.auth.token,
             &request.job_id,
+            &db_path,
         );
         assert_eq!(terminal.status, JobState::Completed, "{:?}", terminal.error);
 
@@ -5127,32 +5128,224 @@ mod tests {
         }
     }
 
+    // Diagnostic-only observer for issue #113. This never migrates or writes.
+    struct V2PollDiagnostics<'a> {
+        started: Instant,
+        job_id: &'a str,
+        reader: Result<rusqlite::Connection, String>,
+        reader_open_elapsed: Duration,
+        budget: Duration,
+        polls: Vec<serde_json::Value>,
+    }
+
+    impl<'a> V2PollDiagnostics<'a> {
+        fn new(started: Instant, job_id: &'a str, db_path: &Path, budget: Duration) -> Self {
+            let reader_open_started = Instant::now();
+            let reader = rusqlite::Connection::open_with_flags(
+                db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .and_then(|conn| {
+                conn.busy_timeout(Duration::ZERO)?;
+                Ok(conn)
+            })
+            .map_err(|error| error.to_string());
+            Self {
+                started,
+                job_id,
+                reader,
+                reader_open_elapsed: reader_open_started.elapsed(),
+                budget,
+                polls: Vec::new(),
+            }
+        }
+
+        fn stage_snapshot(&self) -> serde_json::Value {
+            let sampled_at_ms = self.started.elapsed().as_secs_f64() * 1000.0;
+            let read_started = Instant::now();
+            let snapshot = (|| -> Result<serde_json::Value, String> {
+                let conn = self.reader.as_ref().map_err(Clone::clone)?;
+                let run_id: String = conn
+                    .query_row(
+                        "SELECT pipeline_run_id FROM connect_jobs WHERE job_id = ?1",
+                        [self.job_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let run = db::get_pipeline_run(conn, &run_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "pipeline run missing".to_string())?;
+                Ok(serde_json::json!({
+                    "run_state": run.state, "current_stage": run.current_stage,
+                    "state_version": run.state_version,
+                }))
+            })();
+            serde_json::json!({
+                "sampled_at_ms": sampled_at_ms,
+                "read_elapsed_ms": read_started.elapsed().as_secs_f64() * 1000.0,
+                "source": "test_owned_read_only_db_snapshot_not_http_stage",
+                "state": snapshot.as_ref().ok(), "error": snapshot.as_ref().err(),
+            })
+        }
+
+        fn record(&mut self, request_started: Instant, status: &JobState) {
+            let response_at_ms = self.started.elapsed().as_secs_f64() * 1000.0;
+            let request_latency_ms = request_started.elapsed().as_secs_f64() * 1000.0;
+            let stage_snapshot = self.stage_snapshot();
+            self.polls.push(serde_json::json!({
+                "poll_started_at_ms": request_started.duration_since(self.started).as_secs_f64() * 1000.0,
+                "response_at_ms": response_at_ms,
+                "request_and_decode_latency_ms": request_latency_ms,
+                "decoded_status": status, "stage_snapshot": stage_snapshot,
+            }));
+        }
+
+        fn report(&self, phase: &str, request_started: Instant) -> String {
+            serde_json::json!({
+                "diagnostic": "connect_v2_poll_v1", "phase": phase,
+                "poll_budget_ms": self.budget.as_millis(),
+                "observer_connection_open_ms": self.reader_open_elapsed.as_secs_f64() * 1000.0,
+                "total_elapsed_ms": self.started.elapsed().as_secs_f64() * 1000.0,
+                "current_request_elapsed_ms": request_started.elapsed().as_secs_f64() * 1000.0,
+                "last_decoded_status": self.polls.last().map(|row| &row["decoded_status"]),
+                "polls": self.polls, "final_stage_snapshot": self.stage_snapshot(),
+            })
+            .to_string()
+        }
+    }
+
     fn wait_for_terminal_v2(
         client: &Client,
         base_url: &str,
         token: &str,
         job_id: &str,
+        db_path: &Path,
     ) -> v2::JobStatus {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let started = Instant::now();
+        let budget = Duration::from_secs(5);
+        let deadline = started + budget;
+        let mut diagnostics = V2PollDiagnostics::new(started, job_id, db_path, budget);
         loop {
-            let status = client
+            let request_started = Instant::now();
+            let response = client
                 .get(format!("{base_url}v2/jobs/{job_id}"))
                 .bearer_auth(token)
                 .send()
-                .expect("v2 status request should succeed")
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "v2 status request should succeed: {error}; diagnostic={}",
+                        diagnostics.report("request_error", request_started),
+                    )
+                })
                 .error_for_status()
-                .expect("v2 status request should be successful")
-                .json::<v2::JobStatus>()
-                .expect("v2 status should decode");
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "v2 status request should be successful: {error}; diagnostic={}",
+                        diagnostics.report("http_status_error", request_started),
+                    )
+                });
+            let status = response.json::<v2::JobStatus>().unwrap_or_else(|error| {
+                panic!(
+                    "v2 status should decode: {error}; diagnostic={}",
+                    diagnostics.report("decode_error", request_started),
+                )
+            });
+            diagnostics.record(request_started, &status.status);
             if matches!(status.status, JobState::Completed | JobState::Failed) {
+                use std::io::Write;
+                // Raw stderr also preserves successful measurements in native CI;
+                // libtest otherwise hides successful tests' captured output.
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "WINDOWS_CONNECT_POLL_DIAGNOSTIC {}",
+                    diagnostics.report("terminal", request_started)
+                );
                 return status;
             }
             assert!(
                 Instant::now() < deadline,
-                "v2 job did not finish before timeout"
+                "v2 job did not finish before timeout; diagnostic={}",
+                diagnostics.report("overall_deadline", request_started),
             );
             thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn v2_poll_diagnostic_preserves_nonterminal_deadline_and_stored_state() {
+        let root = TestDirectory::new("doc-sum-poll-diagnostic-negative");
+        let app_data = root.0.join("app-data");
+        let db_path = app_data.join("summarizer.db");
+        let provider = ConnectProvider::start_at(
+            db_path.clone(),
+            app_data,
+            root.0.join("runtime"),
+            DEFAULT_MAX_INPUT_BYTES,
+            Arc::new(|| Ok(Box::new(FixtureRuntime) as Box<dyn ModelRuntime>)),
+        )
+        .unwrap();
+        let registration: RuntimeRegistration =
+            serde_json::from_slice(&fs::read(provider.registration_path()).unwrap()).unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+        let bytes = fs::read(&source).unwrap();
+        let mut request = fixture_request(&bytes);
+        request.protocol_version = v2::PROTOCOL_VERSION;
+        let (document, run) = prepare_pdf_ingestion(source.to_str().unwrap(), None).unwrap();
+        let mut conn = db::init_db(&db_path).unwrap();
+        // Deliberately admit a fixture without dispatching a worker. It must never
+        // become terminal merely because diagnostics were added to the poller.
+        let (run, job) = store::accept_job_with_ingestion(
+            &mut conn,
+            &request,
+            &request.canonical_hash().unwrap(),
+            source.to_str().unwrap(),
+            provider.instance_id_v2(),
+            &document,
+            &run,
+        )
+        .unwrap();
+        drop(conn);
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_terminal_v2(
+                &client(),
+                provider.base_url(),
+                &registration.auth.token,
+                &request.job_id,
+                &db_path,
+            )
+        }))
+        .unwrap_err();
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("diagnostic panic text");
+        assert!(message.starts_with("v2 job did not finish before timeout; diagnostic="));
+        let report: serde_json::Value =
+            serde_json::from_str(message.split_once("diagnostic=").unwrap().1).unwrap();
+        assert_eq!(report["phase"], "overall_deadline");
+        assert_eq!(report["poll_budget_ms"], 5000);
+        assert!(report["total_elapsed_ms"].as_f64().unwrap() >= 5000.0);
+        assert_eq!(report["last_decoded_status"], "accepted");
+        assert_eq!(
+            report["final_stage_snapshot"]["state"]["run_state"],
+            serde_json::to_value(&run.state).unwrap()
+        );
+        let polls = report["polls"].as_array().unwrap();
+        assert!(polls.len() > 1);
+        assert!(polls
+            .iter()
+            .all(|poll| poll["request_and_decode_latency_ms"].is_number()
+                && poll["response_at_ms"].is_number()
+                && poll["stage_snapshot"]["error"].is_null()));
+        let conn = db::init_db(&db_path).unwrap();
+        assert_eq!(
+            store::get_job(&conn, &request.job_id).unwrap().unwrap(),
+            job
+        );
+        let after = db::get_pipeline_run(&conn, &run.run_id).unwrap().unwrap();
+        assert_eq!(after.state, run.state);
+        assert_eq!(after.state_version, run.state_version);
     }
 
     #[cfg(unix)]
@@ -6894,6 +7087,7 @@ int kill(pid_t pid, int sig) {
             provider.base_url(),
             &registration_v2.auth.token,
             &request_v2.job_id,
+            &db_path,
         );
         assert_eq!(
             terminal_v2.status,
