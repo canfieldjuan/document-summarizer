@@ -97,6 +97,7 @@ pub(super) fn synthesize(
     validate_analyzed_document(analyzed, chunked, normalized, runtime)?;
     let claims = source_ordered_claims(analyzed)?;
     let result = SynthesizedDocument {
+        whole_document_progress: None,
         contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.into(),

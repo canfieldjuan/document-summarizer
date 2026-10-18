@@ -5,6 +5,7 @@ use crate::pipeline::contracts::{
     NormalizedDocument, ParsedDocument, PipelineEvent, PipelineFailure, PipelineRun, PipelineStage,
     PipelineState, PipelineWarning, RetryCheckpoint, RetryLineage, SourceType, StructuredDocument,
     SummaryArtifact, SummaryProfile, SynthesizedDocument, VerifiedDocument,
+    WholeDocumentSectionState, WHOLE_DOCUMENT_SYNTHESIS_VERSION,
 };
 use crate::pipeline::schema::{self, MigrationError};
 use crate::pipeline::state::{StateMachine, TransitionError};
@@ -22,6 +23,10 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error(
+        "Whole-document synthesis progress is invalid, stale or already finalized for run {run_id}"
+    )]
+    WholeDocumentProgressConflict { run_id: String },
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("JSON persistence error: {0}")]
@@ -1597,7 +1602,47 @@ pub fn get_synthesized_document(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Option<SynthesizedDocument>, StoreError> {
-    get_downstream_artifact(conn, run_id, SYNTHESIZED_ARTIFACT_TABLE, "synthesized")
+    let artifact: Option<SynthesizedDocument> =
+        get_downstream_artifact(conn, run_id, SYNTHESIZED_ARTIFACT_TABLE, "synthesized")?;
+    if let Some(value) = &artifact {
+        if value.synthesis_version == WHOLE_DOCUMENT_SYNTHESIS_VERSION
+            || value.whole_document_progress.is_some()
+        {
+            let complete = value
+                .whole_document_progress
+                .as_ref()
+                .is_some_and(|p| p.assembly_lineage.is_some());
+            if !whole_progress_shape(value, complete) {
+                return Err(progress_conflict(run_id));
+            }
+            if !complete {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(artifact)
+}
+
+pub(crate) fn get_whole_synthesis_progress(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<SynthesizedDocument>, StoreError> {
+    let artifact: Option<SynthesizedDocument> =
+        get_downstream_artifact(conn, run_id, SYNTHESIZED_ARTIFACT_TABLE, "synthesized")?;
+    match artifact {
+        Some(value) if value.synthesis_version == WHOLE_DOCUMENT_SYNTHESIS_VERSION => {
+            let complete = value
+                .whole_document_progress
+                .as_ref()
+                .is_some_and(|p| p.assembly_lineage.is_some());
+            if !whole_progress_shape(&value, complete) {
+                return Err(progress_conflict(run_id));
+            }
+            Ok(Some(value))
+        }
+        Some(value) if value.whole_document_progress.is_some() => Err(progress_conflict(run_id)),
+        _ => Ok(None),
+    }
 }
 
 pub fn get_synthesis_attempt(
@@ -2527,6 +2572,147 @@ pub(super) fn start_synthesis(
     Ok((synthesizing_run, analyzed))
 }
 
+fn progress_conflict(run_id: &str) -> StoreError {
+    StoreError::WholeDocumentProgressConflict {
+        run_id: run_id.into(),
+    }
+}
+
+fn whole_progress_shape(value: &SynthesizedDocument, complete: bool) -> bool {
+    let Some(progress) = &value.whole_document_progress else {
+        return false;
+    };
+    if !value.has_consistent_progress_role()
+        || progress.runtime_id.trim().is_empty()
+        || progress.model_id.trim().is_empty()
+        || progress.context_tokens == 0
+        || progress.source_sha256.len() != 64
+        || !progress
+            .source_sha256
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+        || !progress.has_canonical_status_order()
+        || progress.sections.iter().any(|section| {
+            section.request.integrity_sha256().ok() != Some(section.request_sha256.clone())
+        })
+    {
+        return false;
+    }
+    if complete {
+        progress.assembly_lineage.as_ref().is_some_and(|lineage|!lineage.is_empty() && lineage.len()>=value.summary_claims.len()
+            && lineage.iter().all(|(section,_,target)|*section<progress.sections.len() && *target<value.summary_claims.len()))
+            && progress.sections.iter().all(|s|matches!(&s.state,WholeDocumentSectionState::Completed {response} if response.response_sha256==sha256_hex(response.text.as_bytes()) && response.runtime_id==progress.runtime_id && response.model_id==progress.model_id))
+            && !value.summary_text.is_empty() && !value.summary_claims.is_empty() && !value.synthesis_evidence.is_empty()
+    } else {
+        progress.assembly_lineage.is_none()
+            && value.summary_text.is_empty()
+            && value.summary_claims.is_empty()
+            && value.synthesis_evidence.is_empty()
+    }
+}
+
+// The immediate transaction compares the previous record and permits one
+// forward-only section transition. A reservation is durable before dispatch.
+pub(crate) fn save_whole_synthesis_progress(
+    conn: &mut Connection,
+    run_id: &str,
+    expected_version: u32,
+    previous: Option<&SynthesizedDocument>,
+    next: &SynthesizedDocument,
+) -> Result<(), StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_state_version(&tx, run_id, PipelineState::Synthesizing, expected_version)?;
+    ensure_run_document_matches(&tx, run_id, "synthesized", &next.document_id)?;
+    if !whole_progress_shape(next, false)
+        || get_run_summary_profile(&tx, run_id)? != Some(SummaryProfile::General)
+    {
+        return Err(progress_conflict(run_id));
+    }
+    let actual: Option<SynthesizedDocument> =
+        get_downstream_artifact(&tx, run_id, SYNTHESIZED_ARTIFACT_TABLE, "synthesized")?;
+    if actual.as_ref() != previous {
+        return Err(progress_conflict(run_id));
+    }
+    let q = next
+        .whole_document_progress
+        .as_ref()
+        .ok_or_else(|| progress_conflict(run_id))?;
+    if let Some(prior) = &actual {
+        if !whole_progress_shape(prior, false) {
+            return Err(progress_conflict(run_id));
+        }
+        let p = prior
+            .whole_document_progress
+            .as_ref()
+            .ok_or_else(|| progress_conflict(run_id))?;
+        if p.sections.len() != q.sections.len() {
+            return Err(progress_conflict(run_id));
+        }
+        let mut expected_header = prior.clone();
+        expected_header.whole_document_progress = next.whole_document_progress.clone();
+        let mut expected_progress = p.clone();
+        expected_progress.sections = q.sections.clone();
+        if expected_header != *next || expected_progress != *q {
+            return Err(progress_conflict(run_id));
+        }
+        let mut changes = 0;
+        for (a, b) in p.sections.iter().zip(&q.sections) {
+            if a.primary != b.primary
+                || a.request != b.request
+                || a.request_sha256 != b.request_sha256
+            {
+                return Err(progress_conflict(run_id));
+            }
+            if a.state != b.state {
+                if !matches!(
+                    (&a.state, &b.state),
+                    (
+                        WholeDocumentSectionState::Pending,
+                        WholeDocumentSectionState::Dispatched
+                    ) | (
+                        WholeDocumentSectionState::Dispatched,
+                        WholeDocumentSectionState::Completed { .. }
+                    ) | (
+                        WholeDocumentSectionState::Dispatched,
+                        WholeDocumentSectionState::Failed { .. }
+                    )
+                ) {
+                    return Err(progress_conflict(run_id));
+                }
+                changes += 1;
+            }
+        }
+        if changes != 1 {
+            return Err(progress_conflict(run_id));
+        }
+        update_synthesis_progress(&tx, run_id, next)?;
+    } else {
+        if q.sections
+            .iter()
+            .any(|s| !matches!(s.state, WholeDocumentSectionState::Pending))
+        {
+            return Err(progress_conflict(run_id));
+        }
+        insert_synthesized_document(&tx, run_id, next)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn update_synthesis_progress(
+    conn: &Connection,
+    run_id: &str,
+    value: &SynthesizedDocument,
+) -> Result<(), StoreError> {
+    let json = to_json(value)?;
+    let hash = sha256_hex(json.as_bytes());
+    let changed=conn.execute("UPDATE synthesized_documents SET synthesis_version=?1,artifact_hash=?2,synthesized_artifact=?3 WHERE run_id=?4 AND document_id=?5",params![value.synthesis_version,hash,json,run_id,value.document_id])?;
+    if changed != 1 {
+        return Err(progress_conflict(run_id));
+    }
+    Ok(())
+}
+
 pub(super) fn complete_synthesis(
     conn: &mut Connection,
     run_id: &str,
@@ -2535,8 +2721,41 @@ pub(super) fn complete_synthesis(
     warnings: Vec<PipelineWarning>,
 ) -> Result<PipelineRun, StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_state_version(&tx, run_id, PipelineState::Synthesizing, expected_version)?;
     ensure_run_document_matches(&tx, run_id, "synthesized", &synthesized.document_id)?;
-    insert_synthesized_document(&tx, run_id, synthesized)?;
+    if synthesized.synthesis_version == WHOLE_DOCUMENT_SYNTHESIS_VERSION
+        || synthesized.whole_document_progress.is_some()
+    {
+        if !whole_progress_shape(synthesized, true)
+            || get_run_summary_profile(&tx, run_id)? != Some(SummaryProfile::General)
+        {
+            return Err(progress_conflict(run_id));
+        }
+        let existing: Option<SynthesizedDocument> =
+            get_downstream_artifact(&tx, run_id, SYNTHESIZED_ARTIFACT_TABLE, "synthesized")?;
+        if let Some(previous) = existing {
+            if !whole_progress_shape(&previous, false) {
+                return Err(progress_conflict(run_id));
+            }
+            let mut expected = previous
+                .whole_document_progress
+                .clone()
+                .ok_or_else(|| progress_conflict(run_id))?;
+            let next = synthesized
+                .whole_document_progress
+                .as_ref()
+                .ok_or_else(|| progress_conflict(run_id))?;
+            expected.assembly_lineage = next.assembly_lineage.clone();
+            if expected != *next {
+                return Err(progress_conflict(run_id));
+            }
+            update_synthesis_progress(&tx, run_id, synthesized)?;
+        } else {
+            insert_synthesized_document(&tx, run_id, synthesized)?;
+        }
+    } else {
+        insert_synthesized_document(&tx, run_id, synthesized)?;
+    }
     insert_synthesis_attempt(&tx, run_id, 0, synthesized)?;
     let synthesized_run = transition_in_tx(
         &tx,

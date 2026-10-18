@@ -22,13 +22,17 @@ fn invalid_budget() -> PipelineFailure {
 /// Bound structural overhead with canonical bytes, including the longest
 /// permitted distinct IDs. Text is calibrated separately, not multiplied by
 /// a worst-case escape expansion.
-fn response_structure(schema: &Value, characters: usize) -> Option<(usize, usize)> {
+fn response_structure(
+    schema: &Value,
+    characters: usize,
+    claim_limit: usize,
+) -> Option<(usize, usize)> {
     let units = &schema["properties"]["units"];
     let count = usize::try_from(units["maxItems"].as_u64()?).ok()?;
     let sources = &units["items"]["properties"]["source_ids"];
     let source_count = usize::try_from(sources["maxItems"].as_u64()?).ok()?;
     if count == 0
-        || count > MAX_SUMMARY_CLAIMS
+        || count > claim_limit
         || source_count == 0
         || source_count > MAX_SOURCES_PER_UNIT
         || characters == 0
@@ -54,8 +58,12 @@ fn response_structure(schema: &Value, characters: usize) -> Option<(usize, usize
     Some((count, serde_json::to_vec(&empty).ok()?.len()))
 }
 
-fn response_tokens(schema: &Value, characters: usize) -> Option<u32> {
-    let (count, overhead) = response_structure(schema, characters)?;
+fn response_tokens_for_protocol(
+    schema: &Value,
+    characters: usize,
+    claim_limit: usize,
+) -> Option<u32> {
+    let (count, overhead) = response_structure(schema, characters, claim_limit)?;
     let text_tokens = count
         .checked_mul(characters)?
         .checked_mul(TEXT_TOKENS_NUMERATOR)?
@@ -67,12 +75,18 @@ fn response_tokens(schema: &Value, characters: usize) -> Option<u32> {
         .map(|n| n.max(OUTPUT_TOKENS))
 }
 
+#[cfg(test)]
+fn response_tokens(schema: &Value, characters: usize) -> Option<u32> {
+    response_tokens_for_protocol(schema, characters, maximum_claims_for_schema(SCHEMA_NAME))
+}
+
 /// Diagnostic only: pathological serialization is intentionally not a decoder
 /// ceiling selector. Such output can exceed the estimate and must fail closed
 /// at the runtime stop boundary.
 #[cfg(test)]
 fn canonical_response_byte_bound(schema: &Value, characters: usize) -> Option<usize> {
-    let (count, overhead) = response_structure(schema, characters)?;
+    let (count, overhead) =
+        response_structure(schema, characters, maximum_claims_for_schema(SCHEMA_NAME))?;
     overhead.checked_add(count.checked_mul(characters)?.checked_mul(6)?)
 }
 
@@ -116,11 +130,13 @@ pub(super) fn admit(
     request: &ModelRequest,
     resize: bool,
 ) -> Result<Option<ModelRequest>, PipelineFailure> {
-    let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
+    let ModelOutputFormat::JsonSchema { name, schema } = &request.output_format else {
         return Err(invalid_budget());
     };
     let maximum = maximum_characters(request)?;
-    let estimate = response_tokens(schema, maximum).ok_or_else(invalid_budget)?;
+    let claim_limit = maximum_claims_for_schema(name);
+    let estimate =
+        response_tokens_for_protocol(schema, maximum, claim_limit).ok_or_else(invalid_budget)?;
     let Some(capacity) = available_output(runtime, request, resize)? else {
         return Ok(None);
     };
@@ -134,7 +150,10 @@ pub(super) fn admit(
         let mut ceiling = None;
         while low <= high {
             let characters = low + (high - low) / 2;
-            if response_tokens(schema, characters).ok_or_else(invalid_budget)? <= capacity {
+            if response_tokens_for_protocol(schema, characters, claim_limit)
+                .ok_or_else(invalid_budget)?
+                <= capacity
+            {
                 ceiling = Some(characters);
                 low = characters + 1;
             } else {
@@ -157,7 +176,10 @@ pub(super) fn admit(
         let ModelOutputFormat::JsonSchema { schema, .. } = &candidate.output_format else {
             unreachable!("the request shape was checked above");
         };
-        if response_tokens(schema, characters).ok_or_else(invalid_budget)? > final_capacity {
+        if response_tokens_for_protocol(schema, characters, claim_limit)
+            .ok_or_else(invalid_budget)?
+            > final_capacity
+        {
             return Ok(None);
         }
         candidate.max_output_tokens = final_capacity;
@@ -260,6 +282,44 @@ mod tests {
         match &request.output_format {
             ModelOutputFormat::JsonSchema { schema, .. } => schema,
             _ => panic!("schema required"),
+        }
+    }
+
+    #[test]
+    fn whole_document_protocol_budget_accepts_64_and_rejects_65() {
+        let runtime = CapacityRuntime {
+            context: 32_768,
+            input: 500,
+            failure: None,
+        };
+        let mut candidate = request();
+        if let ModelOutputFormat::JsonSchema { name, schema } = &mut candidate.output_format {
+            *name = WHOLE_DOCUMENT_SCHEMA_NAME.into();
+            schema["properties"]["units"]["maxItems"] = json!(MAX_VERIFICATION_BATCHES);
+        }
+        let admitted = admit(&runtime, &candidate, true)
+            .expect("the new protocol must budget the existing 64-claim bound")
+            .expect("the small request must fit the context");
+        assert_eq!(schema(&admitted)["properties"]["units"]["maxItems"], 64);
+        for (name, count) in [
+            (WHOLE_DOCUMENT_SCHEMA_NAME, 0),
+            (WHOLE_DOCUMENT_SCHEMA_NAME, MAX_VERIFICATION_BATCHES + 1),
+            (SCHEMA_NAME, 9),
+            (STORY_SCHEMA_NAME, 9),
+        ] {
+            let mut invalid = candidate.clone();
+            if let ModelOutputFormat::JsonSchema {
+                name: protocol,
+                schema,
+            } = &mut invalid.output_format
+            {
+                *protocol = name.into();
+                schema["properties"]["units"]["maxItems"] = json!(count);
+            }
+            assert_eq!(
+                admit(&runtime, &invalid, true).unwrap_err().code,
+                "INVALID_SYNTHESIS_BUDGET"
+            );
         }
     }
 

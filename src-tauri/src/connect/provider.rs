@@ -38,8 +38,9 @@ use crate::pipeline::service::{
 };
 use crate::pipeline::structure::DeterministicStructureInterpreter;
 use crate::pipeline::summary::{
-    delivery_claim_prefix_coverage_satisfied, render_citation_claim_lines, SummaryDeliveryPolicy,
-    SummaryPipelineError,
+    delivery_claim_prefix_with_admission, render_citation_claim_lines,
+    validated_delivery_admission, SummaryDeliveryPolicy, SummaryPipelineError,
+    WholeDocumentDeliveryCoverage,
 };
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -2015,7 +2016,16 @@ fn process_job(
                     job.pipeline_run_id.clone(),
                 )
             })?;
-        persist_completed_summary(&conn, &job, &summary, &analyzed.omissions, &normalized)?;
+        let admission = validated_delivery_admission(&conn, &job.pipeline_run_id, &summary)
+            .map_err(crate::pipeline::service::DocumentServiceError::Summary)?;
+        persist_completed_summary(
+            &conn,
+            &job,
+            &summary,
+            &analyzed.omissions,
+            &normalized,
+            admission.as_ref(),
+        )?;
         Ok(())
     })();
 
@@ -2039,18 +2049,20 @@ fn persist_completed_summary(
     summary: &SummaryArtifacts,
     omissions: &[AnalysisPageOmission],
     normalized: &NormalizedDocument,
+    admission: Option<&WholeDocumentDeliveryCoverage>,
 ) -> Result<(), ProcessJobError> {
     let claim_lines = render_citation_claim_lines(&summary.citations)
         .map_err(crate::pipeline::summary::SummaryPipelineError::StageFailed)
         .map_err(crate::pipeline::service::DocumentServiceError::Summary)?;
     let (result, delivered_claim_count) =
         JobResult::from_summary_claim_lines(&job.input, &summary.summary, &claim_lines)?;
-    if !delivery_claim_prefix_coverage_satisfied(
+    if !delivery_claim_prefix_with_admission(
         &summary.citations,
         delivered_claim_count,
         omissions,
         normalized,
         &summary.summary.warnings,
+        admission,
     ) {
         return Err(
             crate::connect::contracts::ContractBuildError::InvalidSummary(
@@ -4401,9 +4413,15 @@ mod tests {
                     artifacts.summary.text.len()
                         > crate::connect::contracts::MAX_SUMMARY_TEXT_BYTES
                 );
-                let error =
-                    persist_completed_summary(&conn, &processing, &artifacts, &[], &normalized)
-                        .unwrap_err();
+                let error = persist_completed_summary(
+                    &conn,
+                    &processing,
+                    &artifacts,
+                    &[],
+                    &normalized,
+                    None,
+                )
+                .unwrap_err();
                 assert!(matches!(error, ProcessJobError::Contract(_)));
                 let stored = store::get_job(&conn, &job.job_id).unwrap().unwrap();
                 assert_eq!(stored.state, JobState::Processing);
@@ -4415,7 +4433,8 @@ mod tests {
                 assert_eq!(view.summary.text, artifacts.summary.text);
                 continue;
             }
-            persist_completed_summary(&conn, &processing, &artifacts, &[], &normalized).unwrap();
+            persist_completed_summary(&conn, &processing, &artifacts, &[], &normalized, None)
+                .unwrap();
             let persisted = store::get_job(&conn, &job.job_id).unwrap().unwrap();
             assert_eq!(persisted.state, JobState::Completed);
             let content = &persisted.result.unwrap().outputs[0].content;
@@ -4438,6 +4457,218 @@ mod tests {
                 .unwrap();
             assert_eq!(term.selections, termination.selections);
             assert_eq!(term.selections.len(), 1);
+        }
+    }
+
+    #[test]
+    fn whole_document_provider_and_desktop_keep_supported_claims_and_capacity_notices() {
+        use crate::pipeline::{
+            contracts::{IngestedDocument, ParsedDocument, ParsedPage},
+            summary,
+        };
+        struct PublicSections {
+            limited: bool,
+        }
+        impl DocumentParser for PublicSections {
+            fn id(&self) -> &'static str {
+                "public-section-control"
+            }
+            fn version(&self) -> &'static str {
+                "1"
+            }
+            fn parse(
+                &self,
+                document: &IngestedDocument,
+            ) -> Result<ParsedDocument, PipelineFailure> {
+                let mut parsed = PdfExtractParser::new().parse(document)?;
+                parsed.parser_id = self.id().into();
+                parsed.parser_version = self.version().into();
+                parsed.pages = (1..=4)
+                    .map(|n| ParsedPage {
+                        page_number: n,
+                        text: format!(
+                            "Section {n} Inspections\n{}",
+                            format!("The operator records inspection number {n}. ")
+                                .repeat(if self.limited && n % 2 == 0 { 110 } else { 25 })
+                        ),
+                        warnings: vec![],
+                        requires_visual_processing: false,
+                    })
+                    .collect();
+                Ok(parsed)
+            }
+        }
+        #[derive(Default)]
+        struct CandidateRuntime(Mutex<Vec<ModelRequest>>);
+        impl ModelRuntime for CandidateRuntime {
+            fn runtime_id(&self) -> &str {
+                FixtureRuntime.runtime_id()
+            }
+            fn model_id(&self) -> &str {
+                FixtureRuntime.model_id()
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                Ok(())
+            }
+            fn context_tokens(&self, _: PipelineStage) -> u32 {
+                32768
+            }
+            fn generate(
+                &self,
+                request: &ModelRequest,
+            ) -> Result<ModelResponse, ModelRuntimeFailure> {
+                self.0.lock().unwrap().push(request.clone());
+                if request.stage != PipelineStage::Synthesize {
+                    return FixtureRuntime.generate(request);
+                }
+                let prompt: serde_json::Value = serde_json::from_str(&request.user_prompt).unwrap();
+                let units=prompt["units"].as_array().unwrap().iter().filter(|u|u["primary"]==true).map(|u| {
+                    let index=u["index"].as_u64().unwrap();
+                    let source=prompt["sources"].as_array().unwrap().iter().find(|s|s[4]==index).unwrap();
+                    serde_json::json!({"text":format!("The operator records inspection number {}.",index+1),"source_ids":[source[0]]})
+                }).collect::<Vec<_>>();
+                Ok(ModelResponse {
+                    text: serde_json::json!({"units":units}).to_string(),
+                    runtime_id: self.runtime_id().into(),
+                    model_id: self.model_id().into(),
+                    request_attempts: vec![],
+                })
+            }
+        }
+        for limited in [false, true] {
+            let source =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+            let bytes = fs::read(&source).unwrap();
+            let request = fixture_request(&bytes);
+            let (document, run) =
+                prepare_pdf_ingestion(source.to_str().unwrap(), Some("public-sections.pdf"))
+                    .unwrap();
+            let mut conn = db::init_db(":memory:").unwrap();
+            let (_, job) = store::accept_job_with_ingestion_guarded(
+                &mut conn,
+                &request,
+                &request.canonical_hash().unwrap(),
+                source.to_str().unwrap(),
+                &Uuid::new_v4().to_string(),
+                &document,
+                &run,
+                SummaryProfile::General,
+                None,
+                || true,
+            )
+            .unwrap()
+            .unwrap();
+            let processing = store::mark_processing(&conn, &job.job_id).unwrap();
+            parse_document(&mut conn, &PublicSections { limited }, &run.run_id).unwrap();
+            normalize_document(&mut conn, &CanonicalNormalizer::new(), &run.run_id).unwrap();
+            crate::pipeline::structure::structure_document(
+                &mut conn,
+                &DeterministicStructureInterpreter::new(),
+                &run.run_id,
+            )
+            .unwrap();
+            crate::pipeline::chunk::chunk_document(
+                &mut conn,
+                &DeterministicDocumentChunker::new(),
+                &run.run_id,
+            )
+            .unwrap();
+            let runtime = CandidateRuntime::default();
+            let control = &crate::pipeline::control::UNCONTROLLED_EXECUTION;
+            summary::analyze_chunked_document_controlled(&mut conn, &runtime, &run.run_id, control)
+                .unwrap();
+            summary::synthesize_analyzed_document_for_policy(
+                &mut conn,
+                &runtime,
+                &run.run_id,
+                control,
+                None,
+                crate::pipeline::contracts::WHOLE_DOCUMENT_SYNTHESIS_VERSION,
+            )
+            .unwrap();
+            let verified = summary::verify_synthesized_document_controlled(
+                &mut conn,
+                &runtime,
+                &run.run_id,
+                control,
+            )
+            .unwrap();
+            let artifacts = summary::complete_verified_document(&mut conn, &run.run_id).unwrap();
+            let normalized = db::get_normalized_document(&conn, &run.run_id)
+                .unwrap()
+                .unwrap();
+            let admission = validated_delivery_admission(&conn, &run.run_id, &artifacts).unwrap();
+            assert!(admission.is_some());
+            let supported = if limited { 2 } else { 4 };
+            let held = if limited { 2 } else { 0 };
+            assert_eq!(artifacts.citations.summary_claims.len(), supported);
+            assert_eq!(
+                verified
+                    .summary_claim_verifications
+                    .iter()
+                    .filter(|v| v.admission_withhold.is_some())
+                    .count(),
+                held
+            );
+            assert_eq!(
+                artifacts
+                    .summary
+                    .warnings
+                    .iter()
+                    .filter(|w| w.code == "SEMANTIC_VERIFICATION_CAPACITY_WITHHELD")
+                    .count(),
+                held
+            );
+            if limited {
+                assert!(!summary::delivery_claim_prefix_coverage_satisfied(
+                    &artifacts.citations,
+                    supported,
+                    &[],
+                    &normalized,
+                    &artifacts.summary.warnings
+                ));
+            }
+            assert!(delivery_claim_prefix_with_admission(
+                &artifacts.citations,
+                supported,
+                &[],
+                &normalized,
+                &artifacts.summary.warnings,
+                admission.as_ref()
+            ));
+            assert!(!delivery_claim_prefix_with_admission(
+                &artifacts.citations,
+                supported - 1,
+                &[],
+                &normalized,
+                &artifacts.summary.warnings,
+                admission.as_ref()
+            ));
+            let view =
+                crate::pipeline::workspace::get_persisted_summary(&conn, &run.run_id).unwrap();
+            assert_eq!(view.summary.text, artifacts.summary.text);
+            persist_completed_summary(
+                &conn,
+                &processing,
+                &artifacts,
+                &[],
+                &normalized,
+                admission.as_ref(),
+            )
+            .unwrap();
+            let saved = store::get_job(&conn, &processing.job_id).unwrap().unwrap();
+            assert_eq!(saved.state, JobState::Completed);
+            let content = &saved.result.unwrap().outputs[0].content;
+            assert_eq!(content.text, artifacts.summary.text);
+            assert_eq!(
+                content
+                    .warnings
+                    .iter()
+                    .filter(|w| w.code == "SEMANTIC_VERIFICATION_CAPACITY_WITHHELD")
+                    .count(),
+                held
+            );
+            assert_eq!(runtime.0.lock().unwrap().iter().filter(|r|matches!(&r.output_format,crate::pipeline::contracts::ModelOutputFormat::JsonSchema{name,..} if name==crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME)).count(),supported);
         }
     }
 
@@ -4530,7 +4761,7 @@ mod tests {
             },
         };
 
-        persist_completed_summary(&conn, &processing, &summary, &[], &normalized).unwrap();
+        persist_completed_summary(&conn, &processing, &summary, &[], &normalized, None).unwrap();
 
         let persisted = store::get_job(&conn, &processing.job_id).unwrap().unwrap();
         assert_eq!(persisted.state, JobState::Completed);
@@ -4664,7 +4895,7 @@ mod tests {
                 .unwrap();
         assert_eq!(delivered_claim_count, 2);
 
-        let error = persist_completed_summary(&conn, &processing, &summary, &[], &normalized)
+        let error = persist_completed_summary(&conn, &processing, &summary, &[], &normalized, None)
             .expect_err("a JSON-bounded prefix below coverage must not complete");
         assert!(matches!(error, ProcessJobError::Contract(_)));
         assert_eq!(

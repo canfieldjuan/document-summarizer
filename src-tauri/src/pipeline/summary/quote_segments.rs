@@ -5,6 +5,86 @@ use super::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+// Shared historical bounded cutter: retain offsets at the moment of cutting.
+pub(super) fn bounded_spans(source: &str) -> Vec<(usize, usize)> {
+    let mut segments = Vec::new();
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return segments;
+    }
+    let mut cursor = source.len() - source.trim_start().len();
+    let source_end = cursor + trimmed.len();
+    while cursor < source_end {
+        while cursor < source_end {
+            let character = source[cursor..]
+                .chars()
+                .next()
+                .expect("cursor must remain on a character boundary");
+            if !character.is_whitespace() {
+                break;
+            }
+            cursor += character.len_utf8();
+        }
+        if cursor >= source_end {
+            break;
+        }
+        let remaining = &source[cursor..source_end];
+        let hard_end = remaining
+            .char_indices()
+            .nth(MAX_ANALYSIS_QUOTE_CHARACTERS)
+            .map_or(source_end, |(offset, _)| cursor + offset);
+        let split_end = if hard_end == source_end {
+            source_end
+        } else {
+            super::preferred_analysis_quote_boundary_v12(source, cursor, hard_end)
+                .unwrap_or(hard_end)
+        };
+        let exact_quote = source[cursor..split_end].trim();
+        if !exact_quote.is_empty() {
+            segments.push((
+                cursor + source[cursor..split_end].len()
+                    - source[cursor..split_end].trim_start().len(),
+                cursor + source[cursor..split_end].trim_end().len(),
+            ));
+        }
+        cursor = split_end;
+    }
+    segments
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ContextualAnchor {
+    pub start: usize,
+    pub end: usize,
+    pub partial_excerpt: bool,
+}
+
+// The caller supplies an owned range in the complete original block. Sentence
+// completeness is measured against that block, not against a sliced fragment.
+pub(super) fn contextual_spans(source: &str, start: usize, end: usize) -> Vec<ContextualAnchor> {
+    let (mut sentences, tail) = super::analysis_sentence_ranges(source, false);
+    let tail_end = source.trim_end().len();
+    if tail < tail_end {
+        let tail_start =
+            tail + source[tail..tail_end].len() - source[tail..tail_end].trim_start().len();
+        sentences.push((tail_start, tail_end));
+    }
+    bounded_spans(&source[start..end])
+        .into_iter()
+        .map(|(begin, finish)| {
+            let begin = start + begin;
+            let finish = start + finish;
+            ContextualAnchor {
+                start: begin,
+                end: finish,
+                partial_excerpt: sentences
+                    .iter()
+                    .any(|&(s, e)| s < finish && begin < e && (begin > s || finish < e)),
+            }
+        })
+        .collect()
+}
+
 // These are source ranges, never rewritten text. An unavailable range is retained
 // until packing so nothing on either side can silently absorb or hide its loss.
 struct Unit {
@@ -13,12 +93,36 @@ struct Unit {
     complete: bool,
 }
 
+pub(super) struct OwnedQuoteSegmentation {
+    pub spans: Vec<(usize, usize)>,
+    pub omitted_source_units: usize,
+}
+
 pub(super) fn segment(source: &str) -> AnalysisQuoteSegmentation {
+    let owned = segment_spans(source);
+    AnalysisQuoteSegmentation {
+        segments: owned
+            .spans
+            .into_iter()
+            .map(|(start, end)| source[start..end].to_string())
+            .collect(),
+        omitted_source_units: owned.omitted_source_units,
+    }
+}
+
+// Keep positions when this owner decides what is citable. A consumer must not
+// search strings to reconstruct a range after omitted units have been removed.
+pub(super) fn segment_spans(source: &str) -> OwnedQuoteSegmentation {
     let trimmed = source.trim();
     if trimmed.chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS {
-        return AnalysisQuoteSegmentation {
-            segments: (!trimmed.is_empty())
-                .then(|| trimmed.to_string())
+        return OwnedQuoteSegmentation {
+            spans: (!trimmed.is_empty())
+                .then(|| {
+                    (
+                        source.len() - source.trim_start().len(),
+                        source.trim_end().len(),
+                    )
+                })
                 .into_iter()
                 .collect(),
             omitted_source_units: 0,
@@ -100,8 +204,8 @@ pub(super) fn segment(source: &str) -> AnalysisQuoteSegmentation {
         units.extend(group_units);
     }
 
-    let mut result = AnalysisQuoteSegmentation {
-        segments: Vec::new(),
+    let mut result = OwnedQuoteSegmentation {
+        spans: Vec::new(),
         omitted_source_units: 0,
     };
     let mut packed: Option<Unit> = None;
@@ -109,20 +213,20 @@ pub(super) fn segment(source: &str) -> AnalysisQuoteSegmentation {
         if !unit.complete
             || source[unit.start..unit.end].chars().count() > MAX_ANALYSIS_QUOTE_CHARACTERS
         {
-            flush(source, &mut packed, &mut result.segments);
+            flush(&mut packed, &mut result.spans);
             result.omitted_source_units += 1;
         } else if let Some(previous) = packed.as_mut() {
             if source[previous.start..unit.end].chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS {
                 previous.end = unit.end;
             } else {
-                flush(source, &mut packed, &mut result.segments);
+                flush(&mut packed, &mut result.spans);
                 packed = Some(unit);
             }
         } else {
             packed = Some(unit);
         }
     }
-    flush(source, &mut packed, &mut result.segments);
+    flush(&mut packed, &mut result.spans);
     result
 }
 
@@ -145,9 +249,9 @@ fn trimmed_unit(source: &str, start: usize, end: usize, complete: bool) -> Unit 
     }
 }
 
-fn flush(source: &str, packed: &mut Option<Unit>, segments: &mut Vec<String>) {
+fn flush(packed: &mut Option<Unit>, spans: &mut Vec<(usize, usize)>) {
     if let Some(unit) = packed.take() {
-        segments.push(source[unit.start..unit.end].to_string());
+        spans.push((unit.start, unit.end));
     }
 }
 
@@ -269,6 +373,70 @@ pub(super) fn qualification(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contextual_anchor_boundaries_preserve_all_original_scalars() {
+        for text in [
+            String::new(),
+            " \r\n ".into(),
+            "x".repeat(599),
+            "x".repeat(600),
+            "x".repeat(601),
+            "é🦀e\u{301} ".repeat(401),
+            format!(
+                "{} Dr. A. Smith recorded 3.14 units. Unfinished tail",
+                "word ".repeat(130)
+            ),
+        ] {
+            let anchors = contextual_spans(&text, 0, text.len());
+            for a in &anchors {
+                assert!(
+                    a.start < a.end
+                        && text.is_char_boundary(a.start)
+                        && text.is_char_boundary(a.end)
+                );
+                assert!(text[a.start..a.end].chars().count() <= MAX_ANALYSIS_QUOTE_CHARACTERS);
+            }
+            for (byte, _) in text.char_indices().filter(|(_, c)| !c.is_whitespace()) {
+                assert_eq!(
+                    anchors
+                        .iter()
+                        .filter(|a| a.start <= byte && byte < a.end)
+                        .count(),
+                    1
+                );
+            }
+            assert!(anchors.windows(2).all(|p| p[0].end <= p[1].start));
+            assert_eq!(
+                bounded_spans(&text)
+                    .iter()
+                    .map(|&(s, e)| text[s..e].to_string())
+                    .collect::<Vec<_>>(),
+                super::super::analysis_quote_segments_v12(&text)
+            );
+        }
+    }
+
+    #[test]
+    fn contextual_metadata_distinguishes_partial_and_whole_sentences_at_origin() {
+        let whole = "Dr. A. Smith recorded 3.14 units. The operator retained records.";
+        assert!(contextual_spans(whole, 0, whole.len())
+            .iter()
+            .all(|a| !a.partial_excerpt));
+        let long = format!(
+            "The operator {} retains records.",
+            "explicitly ".repeat(100)
+        );
+        assert!(contextual_spans(&long, 0, long.len())
+            .iter()
+            .all(|a| a.partial_excerpt));
+        let text = "The operator retained records. The operator retained records.";
+        let boundary = "The operator retained records.".len();
+        assert!(!contextual_spans(text, 0, boundary)[0].partial_excerpt);
+        assert!(!contextual_spans(text, boundary + 1, text.len())[0].partial_excerpt);
+        assert!(contextual_spans(text, 4, boundary)[0].partial_excerpt);
+        assert!(contextual_spans(text, 0, boundary - 2)[0].partial_excerpt);
+    }
 
     #[test]
     fn bounded_whole_blocks_and_unusable_units_keep_the_existing_limits() {

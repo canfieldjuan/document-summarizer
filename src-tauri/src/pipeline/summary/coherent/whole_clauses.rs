@@ -2,6 +2,9 @@
 //! Citation quotes stay within one original block; context may span blocks.
 use super::*;
 
+mod dependencies;
+pub(in crate::pipeline::summary) use dependencies::{DependencyProjection, ReferenceStatus};
+
 struct Fragment {
     text: String,
 }
@@ -189,10 +192,12 @@ pub(in crate::pipeline::summary) struct SourceFragment {
 #[derive(Clone, Debug)]
 pub(in crate::pipeline::summary) struct SourceClause {
     pub headings: Vec<String>,
+    pub heading_spans: Vec<SourceFragment>,
     pub fragments: Vec<SourceFragment>,
     pub parent: Option<usize>,
     pub number: Option<Vec<String>>,
     pub article: Option<u32>,
+    pub annex: Option<(String, String)>,
     pub opening: bool,
     pub heading_only: bool,
     pub boundary_uncertain: bool,
@@ -211,32 +216,93 @@ impl SourceClause {
     }
 }
 
-fn decimal_marker(marker: &str) -> Option<Vec<String>> {
+// Shared numeric-identity owner. Historical grammars admit dots only; the
+// whole-document grammar additionally admits dashed base identifiers.
+fn number_marker(marker: &str, dashed: bool) -> Option<Vec<String>> {
     let marker = marker.trim();
     let marker = marker.strip_suffix(['.', ')']).unwrap_or(marker);
+    let marker = if dashed {
+        marker.replace('–', "-")
+    } else {
+        marker.into()
+    };
     let parts = marker.split('.').collect::<Vec<_>>();
-    if parts
-        .iter()
-        .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
-    {
-        return None;
-    }
-    Some(parts.into_iter().map(str::to_string).collect())
+    let valid = parts.iter().all(|part| {
+        !part.is_empty()
+            && if dashed {
+                part.split('-')
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            } else {
+                part.bytes().all(|b| b.is_ascii_digit())
+            }
+    });
+    valid.then(|| parts.into_iter().map(str::to_string).collect())
 }
 
+fn marker_width(parts: &[String]) -> bool {
+    parts
+        .iter()
+        .flat_map(|part| part.split('-'))
+        .all(|part| part.len() <= 3)
+}
+fn decimal_marker(marker: &str) -> Option<Vec<String>> {
+    number_marker(marker, false)
+}
 fn contract_marker(marker: &str) -> Option<Vec<String>> {
-    decimal_marker(marker).filter(|parts| parts.iter().all(|part| part.len() <= 3))
+    decimal_marker(marker).filter(|parts| marker_width(parts))
+}
+fn whole_document_marker(marker: &str) -> Option<Vec<String>> {
+    number_marker(marker, true).filter(|parts| marker_width(parts))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::pipeline::summary) enum HeadingGrammar {
     Original,
     SectionAndSplitArticle,
+    WholeDocument,
+}
+
+fn annex_kind(kind: &str) -> Option<String> {
+    let kind = kind.to_ascii_lowercase();
+    matches!(
+        kind.as_str(),
+        "attachment" | "appendix" | "exhibit" | "schedule"
+    )
+    .then_some(kind)
+}
+
+fn annex_label(label: &str) -> Option<&str> {
+    let label = label.trim_end_matches(['.', ':']);
+    (!label.is_empty()
+        && label
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '.' | '-')))
+    .then_some(label)
+}
+
+fn annex_heading(text: &str) -> Option<(String, String, &str)> {
+    let mut words = text.splitn(3, char::is_whitespace);
+    let kind = annex_kind(words.next()?)?;
+    let label = annex_label(words.next()?)?;
+    let title = words.next().unwrap_or("").trim();
+    let title = title.trim_start_matches(['-', '–', '—', ':']).trim();
+    if !title.is_empty() && !leading_title(title) {
+        return None;
+    }
+    Some((kind, label.into(), title))
+}
+
+fn transcript_page_annotation(text: &str) -> bool {
+    text.trim()
+        .strip_prefix("[PAGE ")
+        .and_then(|s| s.strip_suffix(']'))
+        .and_then(contract_marker)
+        .is_some_and(|parts| parts.len() == 1)
 }
 
 fn decimal_line(line: &str, grammar: HeadingGrammar) -> Option<(Vec<String>, &str)> {
     let line = line.trim();
-    let line = if grammar == HeadingGrammar::SectionAndSplitArticle {
+    let line = if grammar != HeadingGrammar::Original {
         line.split_once(char::is_whitespace)
             .filter(|(prefix, _)| matches!(*prefix, "Section" | "SECTION"))
             .map_or(line, |(_, rest)| rest.trim_start())
@@ -249,7 +315,12 @@ fn decimal_line(line: &str, grammar: HeadingGrammar) -> Option<(Vec<String>, &st
         .unwrap_or(line.trim())
         .trim_start();
     let (marker, rest) = line.split_once(char::is_whitespace)?;
-    Some((decimal_marker(marker)?, rest.trim()))
+    let number = if grammar == HeadingGrammar::WholeDocument {
+        whole_document_marker(marker)?
+    } else {
+        decimal_marker(marker)?
+    };
+    Some((number, rest.trim()))
 }
 
 fn contract_title(text: &str) -> (&str, bool) {
@@ -416,6 +487,9 @@ struct ReadLine<'a> {
     article: Option<(u32, &'a str)>,
     article_marker: Option<u32>,
     article_lines: usize,
+    annex: Option<(String, String, &'a str)>,
+    annotation: bool,
+    annex_marker: bool,
     roman: Option<(u32, &'a str)>,
     title: bool,
     generic_heading_like: bool,
@@ -431,10 +505,20 @@ impl<'a> ReadLine<'a> {
     fn read(text: &'a str, grammar: HeadingGrammar) -> Self {
         let decimal = decimal_line(text, grammar);
         let numbered = decimal.as_ref().is_some_and(|(parts, rest)| {
-            parts.iter().all(|part| part.len() <= 3)
-                && rest.chars().next().is_some_and(char::is_uppercase)
+            marker_width(parts) && rest.chars().next().is_some_and(char::is_uppercase)
         });
         let article = article_title(text);
+        let annex = (grammar == HeadingGrammar::WholeDocument)
+            .then(|| annex_heading(text))
+            .flatten();
+        let annex_marker = grammar == HeadingGrammar::WholeDocument
+            && text
+                .split_whitespace()
+                .next()
+                .and_then(annex_kind)
+                .is_some();
+        let annotation =
+            grammar == HeadingGrammar::WholeDocument && transcript_page_annotation(text);
         let title = leading_title(text);
         let recognition = text.split_whitespace().collect::<Vec<_>>().join(" ");
         let upper = recognition.to_ascii_uppercase();
@@ -451,11 +535,10 @@ impl<'a> ReadLine<'a> {
         let ordinal = marker.trim_end_matches(['.', ')']);
         let roman_number =
             article_ordinal_prefix(&ordinal.to_ascii_uppercase()).map(|(number, _)| number);
-        let article_marker = (grammar == HeadingGrammar::SectionAndSplitArticle
-            && words.len() == 2
-            && words[0] == "ARTICLE")
-            .then(|| article_ordinal(words[1]))
-            .flatten();
+        let article_marker =
+            (grammar != HeadingGrammar::Original && words.len() == 2 && words[0] == "ARTICLE")
+                .then(|| article_ordinal(words[1]))
+                .flatten();
         let roman = roman_number.is_some()
             && (marker.ends_with(['.', ')']) || !remainder.is_empty())
             && plausible_heading;
@@ -491,9 +574,11 @@ impl<'a> ReadLine<'a> {
             "EXHIBIT" | "APPENDIX" | "SCHEDULE" | "ATTACHMENT" | "ANNEX"
         );
         let structural = toc || roman || letter || structural_marker || toc_entry;
-        let kind = if toc || toc_entry {
+        let kind = if annotation {
+            LineKind::Text
+        } else if toc || toc_entry {
             LineKind::HeadingLike
-        } else if article.is_some() || numbered {
+        } else if article.is_some() || numbered || annex.is_some() {
             LineKind::Heading
         } else if structural {
             LineKind::HeadingLike
@@ -511,15 +596,18 @@ impl<'a> ReadLine<'a> {
         Self {
             decimal,
             numbered,
-            explicit_section: grammar == HeadingGrammar::SectionAndSplitArticle
+            explicit_section: grammar != HeadingGrammar::Original
                 && matches!(text.split_whitespace().next(), Some("Section" | "SECTION")),
-            section_marked: grammar == HeadingGrammar::SectionAndSplitArticle
+            section_marked: grammar != HeadingGrammar::Original
                 && (matches!(text.split_whitespace().next(), Some("Section" | "SECTION"))
                     || text.trim_start().starts_with('§')),
             roman_decimal: !text.trim_start().starts_with('§'),
             article,
             article_marker,
             article_lines: 1,
+            annex,
+            annotation,
+            annex_marker,
             roman: bare_roman_title(text, roman_number),
             title,
             generic_heading_like,
@@ -653,8 +741,31 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
         }
     }
     let mut in_opening = true;
+    let mut in_annex = false;
     for index in 0..read.len() {
-        let starts_unit = index == 0 || read[index - 1].ends_unit;
+        in_annex |= read[index].annex.is_some();
+        if grammar == HeadingGrammar::WholeDocument
+            && in_annex
+            && read[index].kind == LineKind::HeadingLike
+            && !read[index].annex_marker
+        {
+            // The enclosing annex ends only at another annex heading or EOF.
+            // Its internal captions/items do not create a candidate annex ending.
+            read[index].kind = LineKind::Text;
+            read[index].generic_heading_like = false;
+        }
+        let starts_unit = index == 0
+            || read[index - 1].ends_unit
+            || grammar == HeadingGrammar::WholeDocument
+                && read[index].numbered
+                && !read[index].explicit_section;
+        if read[index].annotation {
+            // Export annotations carry no heading boundary. Retain their bytes,
+            // and the preceding logical unit's state, rather than inventing a unit.
+            read[index].starts_unit = starts_unit;
+            read[index].ends_unit = starts_unit;
+            continue;
+        }
         read[index].starts_unit = starts_unit;
         // New forms need a complete preceding source unit. Wrapped sentence
         // prose is text; a named-heading shape at that position is uncertain.
@@ -683,7 +794,7 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
             if read[index].kind != LineKind::HeadingLike {
                 read[index].kind = LineKind::Heading;
             }
-            if leading_admitted || read[index].roman.is_some() {
+            if leading_admitted || read[index].roman.is_some() || read[index].annex.is_some() {
                 read[index].ends_unit = true;
             }
             in_opening = false;
@@ -700,6 +811,7 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
             && read[index].generic_heading_like
             && starts_unit
             && !in_opening
+            && !(grammar == HeadingGrammar::WholeDocument && in_annex && !read[index].annex_marker)
         {
             read[index].kind = LineKind::HeadingLike;
         }
@@ -725,20 +837,48 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
                 previous.boundary_uncertain = true;
             }
         }
-        if let Some((article, title)) = read[i].article.or(read[i].roman) {
+        if let Some((kind, label, title)) = &read[i].annex {
             stack.clear();
             let index = clauses.len();
-            let mut clause = SourceClause {
+            clauses.push(SourceClause {
                 headings: vec![title.to_string()],
+                heading_spans: vec![fragment.clone()],
                 fragments: vec![fragment],
                 parent: None,
                 number: None,
+                article: None,
+                annex: Some((kind.clone(), label.clone())),
+                opening: false,
+                heading_only: true,
+                boundary_uncertain: uncertain,
+            });
+            stack.push(index);
+            i += 1;
+            continue;
+        }
+        if let Some((article, title)) = read[i].article.or(read[i].roman) {
+            let annex_parent = (grammar == HeadingGrammar::WholeDocument)
+                .then(|| stack.iter().copied().find(|&n| clauses[n].annex.is_some()))
+                .flatten();
+            stack.clear();
+            if let Some(parent) = annex_parent {
+                stack.push(parent);
+            }
+            let index = clauses.len();
+            let mut clause = SourceClause {
+                headings: vec![title.to_string()],
+                heading_spans: vec![fragment.clone()],
+                fragments: vec![fragment],
+                parent: annex_parent,
+                number: None,
                 article: Some(article),
+                annex: None,
                 opening: false,
                 heading_only: true,
                 boundary_uncertain: uncertain,
             };
             if read[i].article_lines == 2 {
+                clause.heading_spans.push(lines[i + 1].clone());
                 append_source(&mut clause, lines[i + 1].clone(), &blocks);
             }
             clauses.push(clause);
@@ -762,6 +902,7 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
             // Pop ancestors by numeric components, keeping the enclosing article.
             while let Some(&last) = stack.last() {
                 if clauses[last].article.is_some()
+                    || clauses[last].annex.is_some()
                     || clauses[last]
                         .number
                         .as_ref()
@@ -791,10 +932,12 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
                     }
                     clauses.push(SourceClause {
                         headings: vec![heading],
+                        heading_spans: vec![fragment.clone()],
                         fragments: vec![fragment],
                         parent: stack.last().copied(),
                         number: Some(parent_number.to_vec()),
                         article: None,
+                        annex: None,
                         opening: false,
                         heading_only: true,
                         boundary_uncertain: uncertain,
@@ -805,21 +948,33 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
             let (title, has_body) = contract_title(rest);
             let mut clause = SourceClause {
                 headings: vec![],
+                heading_spans: vec![],
                 fragments: vec![],
                 parent: stack.last().copied(),
                 number: Some(number),
                 article: None,
+                annex: None,
                 opening: false,
                 heading_only: !has_body && leading.is_none(),
                 boundary_uncertain: uncertain,
             };
             if let Some((fragment, title)) = leading {
                 clause.headings.push(title);
+                clause.heading_spans.push(fragment.clone());
                 append_source(&mut clause, fragment, &blocks);
             }
             if !title.is_empty() {
                 clause.headings.push(title.to_string());
             }
+            let mut heading = lines[i].clone();
+            if has_body {
+                // `title` is a slice of this original line. Only the structural
+                // prefix/title is a heading; same-line body references stay readable.
+                heading.end = heading.start + title.as_ptr() as usize
+                    - line_text(&lines[i]).as_ptr() as usize
+                    + title.len();
+            }
+            clause.heading_spans.push(heading);
             append_source(&mut clause, lines[i].clone(), &blocks);
             if read[i].section_marked {
                 section_markers.insert(clauses.len());
@@ -833,10 +988,12 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
         } else {
             clauses.push(SourceClause {
                 headings: vec![],
+                heading_spans: vec![],
                 fragments: vec![fragment],
                 parent: None,
                 number: None,
                 article: None,
+                annex: None,
                 opening: true,
                 heading_only: false,
                 boundary_uncertain: uncertain,

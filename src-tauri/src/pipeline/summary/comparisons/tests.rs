@@ -689,6 +689,315 @@ fn excerpt_enum_boundaries_admit_exact_max_and_reject_next_value() {
 }
 
 #[test]
+fn admission_empty_excerpt_catalog_is_a_capacity_outcome() {
+    for length in [240, 241] {
+        let source = "x".repeat(length);
+        let input = PromptVerificationClaim {
+            claim_id: "code-claim".into(),
+            text: "The code is recorded.".into(),
+            source_framing: None,
+            evidence: vec![PromptVerificationEvidence {
+                evidence_id: "code-source".into(),
+                exact_quote: source.clone(),
+                full_clause: Some(source),
+            }],
+        };
+        let prepared = Prepared::prepare(
+            &input,
+            crate::pipeline::contracts::MAX_CLAIM_COMPARISON_SCHEMA_BYTES,
+        );
+        if length == 240 {
+            assert!(prepared.is_ok());
+        } else {
+            assert!(
+                matches!(prepared, Err(PreparationFailure::Capacity(_))),
+                "an unselectable over-limit source token must produce a typed capacity outcome"
+            );
+        }
+    }
+}
+
+fn owned_admission_input(text: &str, sources: &[String]) -> (VerificationPrompt, Vec<CitedClaim>) {
+    let evidence = sources
+        .iter()
+        .enumerate()
+        .map(|(i, s)| PromptVerificationEvidence {
+            evidence_id: format!("owned-{i}"),
+            exact_quote: s.clone(),
+            full_clause: Some(s.clone()),
+        })
+        .collect::<Vec<_>>();
+    let claim = CitedClaim {
+        claim_id: "owned-claim".into(),
+        text: text.into(),
+        evidence_ids: evidence.iter().map(|e| e.evidence_id.clone()).collect(),
+    };
+    (
+        VerificationPrompt {
+            claims: vec![PromptVerificationClaim {
+                claim_id: claim.claim_id.clone(),
+                text: claim.text.clone(),
+                source_framing: None,
+                evidence,
+            }],
+        },
+        vec![claim],
+    )
+}
+
+#[test]
+fn admission_scalar_schema_enum_and_request_boundaries_keep_measured_reasons() {
+    let base = AdmissionLimits {
+        context_tokens: 32768,
+        schema_bytes: crate::pipeline::contracts::MAX_CLAIM_COMPARISON_SCHEMA_BYTES,
+    };
+    for character in ['a', 'é'] {
+        for length in [4087, 4088, 4089, 4096, 4097] {
+            let source =
+                format!("{character} ").repeat(length / 2) + if length % 2 == 0 { "" } else { "a" };
+            assert_eq!(source.chars().count(), length);
+            let (prompt, claims) = owned_admission_input("Inspect.", &[source]);
+            let plan = plan_for_limits(&prompt, &claims, 64, &base, false, true).unwrap();
+            match &plan.entries[0] {
+                AdmissionEntry::Admitted(_) => assert!(length <= 4088),
+                AdmissionEntry::Withheld(v) => {
+                    let held = v.admission_withhold.as_ref().unwrap();
+                    assert_eq!(
+                        held.reason,
+                        if length > 4096 {
+                            AdmissionWithholdReason::GoverningClauseScalars
+                        } else {
+                            AdmissionWithholdReason::CombinedScalars
+                        }
+                    );
+                    assert_eq!(
+                        held.observed,
+                        if length > 4096 { length } else { length + 8 }
+                    );
+                    assert_eq!(held.maximum, 4096);
+                }
+            }
+        }
+    }
+    let (prompt, claims) =
+        owned_admission_input("Inspect.", &["The operator records inspections.".into()]);
+    let admitted = plan_for_limits(&prompt, &claims, 64, &base, false, true).unwrap();
+    let AdmissionEntry::Admitted(batch) = &admitted.entries[0] else {
+        panic!("small owned control");
+    };
+    let bytes = serde_json::to_vec(&batch.comparison.as_ref().unwrap().schema)
+        .unwrap()
+        .len();
+    let characters = batch.system_prompt.chars().count() + batch.user_prompt.chars().count();
+    for limit in [0, bytes - 1, bytes, bytes + 1] {
+        let plan = plan_for_limits(
+            &prompt,
+            &claims,
+            64,
+            &AdmissionLimits {
+                schema_bytes: limit,
+                ..base.clone()
+            },
+            false,
+            true,
+        )
+        .unwrap();
+        match &plan.entries[0] {
+            AdmissionEntry::Admitted(_) => assert!(limit >= bytes),
+            AdmissionEntry::Withheld(v) => {
+                let held = v.admission_withhold.as_ref().unwrap();
+                assert_eq!(held.reason, AdmissionWithholdReason::SchemaBytes);
+                assert_eq!((held.observed, held.maximum), (bytes, limit));
+            }
+        }
+    }
+    let minimum = VERIFICATION_OUTPUT_TOKENS
+        + VERIFICATION_CONTEXT_RESERVE_TOKENS
+        + u32::try_from(characters.div_ceil(3)).unwrap();
+    for context in [minimum - 1, minimum, minimum + 1] {
+        let plan = plan_for_limits(
+            &prompt,
+            &claims,
+            64,
+            &AdmissionLimits {
+                context_tokens: context,
+                ..base.clone()
+            },
+            false,
+            true,
+        )
+        .unwrap();
+        match &plan.entries[0] {
+            AdmissionEntry::Admitted(_) => assert!(context >= minimum),
+            AdmissionEntry::Withheld(v) => {
+                let held = v.admission_withhold.as_ref().unwrap();
+                assert_eq!(held.reason, AdmissionWithholdReason::RequestCharacters);
+                assert_eq!(held.observed, characters);
+                assert_eq!(
+                    held.maximum,
+                    usize::try_from(
+                        context - VERIFICATION_OUTPUT_TOKENS - VERIFICATION_CONTEXT_RESERVE_TOKENS
+                    )
+                    .unwrap()
+                        * 3
+                );
+            }
+        }
+    }
+    let symbols = (0..128)
+        .map(|i| char::from_u32(0x2600 + i).unwrap())
+        .collect::<String>();
+    assert!(symbols
+        .chars()
+        .all(|c| !word_character(c) && !whitespace(c)));
+    for source_side in [true, false] {
+        let (prompt, claims) = if source_side {
+            owned_admission_input("Inspect.", std::slice::from_ref(&symbols))
+        } else {
+            owned_admission_input(&symbols, &["Inspect.".into()])
+        };
+        let plan = plan_for_limits(&prompt, &claims, 64, &base, false, true).unwrap();
+        let AdmissionEntry::Withheld(v) = &plan.entries[0] else {
+            panic!("enum overflow must be withheld");
+        };
+        let held = v.admission_withhold.as_ref().unwrap();
+        assert_eq!(
+            held.reason,
+            if source_side {
+                AdmissionWithholdReason::SourceEnumValues
+            } else {
+                AdmissionWithholdReason::ClaimEnumValues
+            }
+        );
+        assert_eq!((held.observed, held.maximum), (8193, 8192));
+    }
+    for context in [0, 4096, 4608] {
+        assert!(plan_for_limits(
+            &prompt,
+            &claims,
+            64,
+            &AdmissionLimits {
+                context_tokens: context,
+                ..base.clone()
+            },
+            false,
+            true
+        )
+        .is_err());
+    }
+    assert!(plan_for_limits(
+        &prompt,
+        &claims,
+        64,
+        &AdmissionLimits {
+            schema_bytes: base.schema_bytes + 1,
+            ..base.clone()
+        },
+        false,
+        true
+    )
+    .is_err());
+    for invalid in [
+        json!({"context_tokens":false,"schema_bytes":1}),
+        json!({"context_tokens":"","schema_bytes":1}),
+        json!({"context_tokens":4294967296u64,"schema_bytes":1}),
+    ] {
+        assert!(serde_json::from_value::<AdmissionLimits>(invalid).is_err());
+    }
+}
+
+#[test]
+fn admission_mixed_invalid_ownership_and_missing_context_remain_errors() {
+    let (mut prompt, mut claims) = owned_admission_input("Inspect.", &["Inspect.".into()]);
+    let mut bad = prompt.claims[0].clone();
+    bad.claim_id = "bad".into();
+    bad.evidence[0].exact_quote = "Foreign quote.".into();
+    let mut claim = claims[0].clone();
+    claim.claim_id = bad.claim_id.clone();
+    prompt.claims.push(bad);
+    claims.push(claim);
+    let limits = limits_for_runtime(&Runtime::default());
+    assert!(plan_for_limits(&prompt, &claims, 64, &limits, false, true).is_err());
+    prompt.claims[1].evidence[0].exact_quote = "Inspect.".into();
+    prompt.claims[1].evidence[0].full_clause = None;
+    assert!(plan_for_limits(&prompt, &claims, 64, &limits, false, true).is_err());
+    assert!(plan_for_limits(&prompt, &claims, 64, &limits, true, true)
+        .unwrap()
+        .require_all_admitted()
+        .is_ok());
+    assert_eq!(
+        plan_for_limits(&prompt, &claims, 64, &limits, false, false)
+            .unwrap_err()
+            .code,
+        "VERIFICATION_PROTOCOL_UNSUPPORTED"
+    );
+}
+
+#[test]
+fn historical_admission_preserves_the_first_capacity_error() {
+    let (mut prompt, mut claims) = owned_admission_input("Inspect.", &["a ".repeat(2500)]);
+    let (second, mut next) = owned_admission_input("Record.", &["Record.".into()]);
+    let mut second = second.claims.into_iter().next().unwrap();
+    second.claim_id = "second".into();
+    next[0].claim_id = second.claim_id.clone();
+    second.evidence[0].exact_quote = "Foreign quote.".into();
+    prompt.claims.push(second);
+    claims.push(next.remove(0));
+    assert_eq!(
+        plan(&Runtime::default(), &prompt, &claims, 8)
+            .unwrap_err()
+            .code,
+        "VERIFICATION_INPUT_TOO_LARGE"
+    );
+    assert_eq!(
+        plan_admissions(&Runtime::default(), &prompt, &claims, 64)
+            .unwrap_err()
+            .code,
+        "MODEL_REQUEST_INVALID"
+    );
+}
+
+#[test]
+fn admission_runtime_preflight_failure_is_never_a_capacity_hold() {
+    struct Reject;
+    impl ModelRuntime for Reject {
+        fn runtime_id(&self) -> &str {
+            "fixture"
+        }
+        fn model_id(&self) -> &str {
+            "fixture"
+        }
+        fn context_tokens(&self, _: PipelineStage) -> u32 {
+            32768
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            panic!("preflight must not start a runtime")
+        }
+        fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            panic!("preflight failure must prevent generation")
+        }
+        fn preflight_request(&self, _: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            Err(ModelRuntimeFailure {
+                code: "MODEL_CONTEXT_EXCEEDED".into(),
+                message: "controlled post-plan disagreement".into(),
+                recoverable: false,
+                request_attempts: vec![],
+            })
+        }
+    }
+    let (prompt, claims) = owned_admission_input("Inspect.", &["Inspect.".into()]);
+    let plan = plan_admissions(&Runtime::default(), &prompt, &claims, 64).unwrap();
+    assert!(matches!(plan.entries[0], AdmissionEntry::Admitted(_)));
+    assert_eq!(
+        plan.preflight(&Reject, 7, 0, &UNCONTROLLED_EXECUTION)
+            .unwrap_err()
+            .code,
+        "MODEL_CONTEXT_EXCEEDED"
+    );
+    assert!(matches!(plan.entries[0], AdmissionEntry::Admitted(_)));
+}
+
+#[test]
 fn joint_executor_rejects_empty_mixed_duplicate_and_rebound_claim_plans() {
     let (prompt, claims) = repeated_claims(2);
     for change in 0..5 {

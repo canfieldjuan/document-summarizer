@@ -8,7 +8,7 @@ use crate::pipeline::model_settings::{load_settings, runtime_from_settings};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 pub const RECENT_RUN_LIMIT: u32 = 30;
@@ -177,9 +177,9 @@ pub fn get_persisted_summary(
         .ok_or_else(|| WorkspaceError::SummaryNotFound(resolved_run_id.clone()))?;
     let citations = db::get_citation_artifact(conn, &resolved_run_id)?;
     validate_summary_state(&run, true)?;
-    let key_point_claim_ids =
+    let presentation =
         validate_citations_against_sources(conn, &resolved_run_id, &summary, citations.as_ref())?;
-    let summary = summary_view(summary, citations, key_point_claim_ids)?;
+    let summary = summary_view(summary, citations, presentation)?;
 
     Ok(PersistedSummary {
         run: run_history_item(conn, run, document, true)?,
@@ -245,15 +245,21 @@ fn run_history_item_from_run(
     run_history_item(conn, run, document, has_summary)
 }
 
+#[derive(Default)]
+struct ValidatedCitationPresentation {
+    key_point_claim_ids: Vec<String>,
+    partial_excerpt_ids: HashSet<String>,
+}
+
 fn validate_citations_against_sources(
     conn: &Connection,
     run_id: &str,
     summary: &SummaryArtifact,
     citations: Option<&CitationArtifact>,
-) -> Result<Vec<String>, WorkspaceError> {
+) -> Result<ValidatedCitationPresentation, WorkspaceError> {
     let Some(citations) = citations else {
         return if summary.summary_version == "1.0.0" {
-            Ok(Vec::new())
+            Ok(ValidatedCitationPresentation::default())
         } else {
             Err(WorkspaceError::CitationMismatch(
                 summary.document_id.clone(),
@@ -280,14 +286,24 @@ fn validate_citations_against_sources(
         &normalized,
     )
     .map_err(|_| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
-    Ok(verified.key_point_claim_ids)
+    let partial_excerpt_ids =
+        crate::pipeline::summary::partial_excerpt_evidence_ids(&synthesized, &chunked, &normalized)
+            .map_err(|_| WorkspaceError::CitationMismatch(summary.document_id.clone()))?;
+    Ok(ValidatedCitationPresentation {
+        key_point_claim_ids: verified.key_point_claim_ids,
+        partial_excerpt_ids,
+    })
 }
 
 fn summary_view(
     summary: SummaryArtifact,
     citations: Option<CitationArtifact>,
-    key_point_claim_ids: Vec<String>,
+    presentation: ValidatedCitationPresentation,
 ) -> Result<SummaryView, WorkspaceError> {
+    let ValidatedCitationPresentation {
+        key_point_claim_ids,
+        partial_excerpt_ids,
+    } = presentation;
     if summary.calculate_integrity_hash().ok().as_deref() != Some(summary.integrity_hash.as_str()) {
         return Err(WorkspaceError::CitationMismatch(summary.document_id));
     }
@@ -344,6 +360,7 @@ fn summary_view(
                 &summary.document_id,
                 &mut claim_ids,
                 &mut referenced_evidence,
+                &partial_excerpt_ids,
             )?;
             let claims = cited_claim_views(
                 citations.claims,
@@ -351,6 +368,7 @@ fn summary_view(
                 &summary.document_id,
                 &mut claim_ids,
                 &mut referenced_evidence,
+                &partial_excerpt_ids,
             )?;
             if referenced_evidence != evidence.keys().cloned().collect() {
                 return Err(WorkspaceError::CitationMismatch(summary.document_id));
@@ -399,6 +417,7 @@ fn cited_claim_views(
     document_id: &str,
     claim_ids: &mut std::collections::HashSet<String>,
     referenced_evidence: &mut std::collections::HashSet<String>,
+    partial_excerpt_ids: &HashSet<String>,
 ) -> Result<Vec<CitedClaimView>, WorkspaceError> {
     claims
         .into_iter()
@@ -424,7 +443,17 @@ fn cited_claim_views(
                         .ok_or_else(|| WorkspaceError::CitationMismatch(document_id.to_string()))?;
                     Ok(CitationView {
                         evidence_id: item.evidence_id.clone(),
-                        label: source_label(item.source_span.page_start, item.source_span.page_end),
+                        label: {
+                            let label = source_label(
+                                item.source_span.page_start,
+                                item.source_span.page_end,
+                            );
+                            if partial_excerpt_ids.contains(evidence_id) {
+                                format!("{label} · partial excerpt")
+                            } else {
+                                label
+                            }
+                        },
                         page_start: item.source_span.page_start,
                         page_end: item.source_span.page_end,
                         exact_quote: item.exact_quote.clone(),
@@ -1023,5 +1052,53 @@ mod tests {
         let error = get_persisted_summary(&conn, &completed.run_id)
             .expect_err("altered quote must fail authoritative validation");
         assert_eq!(error.code(), "CITATION_ARTIFACT_MISMATCH");
+    }
+}
+
+#[cfg(test)]
+mod contextual_excerpt_tests {
+    use super::*;
+    use crate::pipeline::contracts::SourceSpan;
+
+    #[test]
+    fn citation_delivery_labels_fragments_without_modifying_source_bytes() {
+        let fragment = EvidenceItem {
+            evidence_id: "fragment-evidence".into(),
+            chunk_id: "chunk".into(),
+            block_id: "block".into(),
+            claim_text: "original fragment".into(),
+            exact_quote: "original fragment".into(),
+            source_span: SourceSpan {
+                page_start: 1,
+                page_end: 1,
+                section_id: None,
+                source_type: crate::pipeline::contracts::SourceType::NativeText,
+            },
+        };
+        let mut complete = fragment.clone();
+        complete.evidence_id = "complete-evidence".into();
+        complete.exact_quote = "A complete original sentence.".into();
+        let evidence = HashMap::from([
+            (fragment.evidence_id.clone(), fragment.clone()),
+            (complete.evidence_id.clone(), complete.clone()),
+        ]);
+        let claim = CitedClaim {
+            claim_id: "claim".into(),
+            text: "The source records a fact.".into(),
+            evidence_ids: vec![fragment.evidence_id.clone(), complete.evidence_id.clone()],
+        };
+        let views = cited_claim_views(
+            vec![claim],
+            &evidence,
+            "document",
+            &mut Default::default(),
+            &mut Default::default(),
+            &HashSet::from([fragment.evidence_id.clone()]),
+        )
+        .unwrap();
+        assert_eq!(views[0].citations[0].label, "p. 1 · partial excerpt");
+        assert_eq!(views[0].citations[1].label, "p. 1");
+        assert_eq!(views[0].citations[0].exact_quote, fragment.exact_quote);
+        assert_eq!(views[0].citations[1].exact_quote, complete.exact_quote);
     }
 }

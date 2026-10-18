@@ -129,6 +129,20 @@ const QUALIFIED_PROFILES: &[QualifiedProfile] = &[
     },
 ];
 
+#[cfg(test)]
+pub(super) fn offline_native_count_profile(
+    profile_id: &str,
+) -> Option<(u32, QwenTokenizerFamily, bool)> {
+    let profile = QUALIFIED_PROFILES
+        .iter()
+        .find(|p| p.profile_id == profile_id)?;
+    (profile.runtime_kind == ModelRuntimeKind::LlamaCppGguf).then_some((
+        profile.safe_context_tokens,
+        profile.tokenizer_family,
+        profile.disable_thinking,
+    ))
+}
+
 pub(super) const JACK_LLAMA_CPP_LIBRARIES: &[QualifiedRuntimeFile] = &[
     QualifiedRuntimeFile {
         file_name: "libllama-server-impl.so",

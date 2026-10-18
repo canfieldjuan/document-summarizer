@@ -222,6 +222,7 @@ pub(super) fn synthesize(
     .collect::<Vec<_>>()
     .join("\n\n");
     Ok(SynthesizedDocument {
+        whole_document_progress: None,
         contract_extraction: Some(extraction),
         document_id: analyzed.document_id.clone(),
         synthesis_version: analyzed.analysis_version.clone(),
@@ -263,6 +264,7 @@ pub(super) fn verify(
         .claims
         .iter()
         .map(|c| ClaimVerification {
+            admission_withhold: None,
             claim_id: c.claim_id.clone(),
             evidence_ids: c.evidence_ids.clone(),
             verdict: ClaimVerdict::Supported,
