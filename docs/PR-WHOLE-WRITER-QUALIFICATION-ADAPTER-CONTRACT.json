@@ -139,5 +139,15 @@
     "message": "I accept",
     "scope": "Published contract-only PR145 at3adae01933d64978fd1719836e5c173f7d8ec066; offline adapter only, zero live authority",
     "at": "2026-10-19T15:12:08.456784+00:00"
+  },
+  "implementation_surface_clarification": {
+    "evidence": "SourceInput and its planner are private to coherent. The accepted summary.rs preparation entry needs a narrow test-only delegation to reach the actual owner.",
+    "additional_path": "src-tauri/src/pipeline/summary/coherent/whole_document.rs",
+    "change": "One cfg(test) accessor delegates to SourceInput::new/plan and returns request metadata; no shipped API, algorithm, prompt, schema or capacity change.",
+    "scope": "Routine implementation surface within accepted offline preparation, not new product behavior or live authority.",
+    "additional_test_only_accessor": {
+      "path": "src-tauri/src/pipeline/model_settings.rs",
+      "change": "cfg(test) delegation to existing admitted_snapshot_profile and validate_admitted_snapshot_preset before any runtime/lease construction. This avoids a copied profile validator. The preparation remains limited to the frozen native 9B protocol."
+    }
   }
 }

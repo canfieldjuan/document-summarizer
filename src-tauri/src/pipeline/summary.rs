@@ -6229,6 +6229,238 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
+    // Offline qualification entry: use the accepted counter and actual planner,
+    // never configured_live_runtime. Supplied archives are validated, not invented.
+    fn writer_preparation_row(
+        normalized: &NormalizedDocument,
+        chunked: &ChunkedDocument,
+        runtime: &dyn ModelRuntime,
+        run_id: &str,
+        analyzed: Option<&AnalyzedDocument>,
+    ) -> Result<Value, PipelineFailure> {
+        let mut row =
+            coherent::whole_document::qualification_plan(normalized, chunked, runtime, run_id)?;
+        row["stage_entry"] = match analyzed {
+            None => json!({"status":"blocked","reason":"analyzed_artifact_not_provided"}),
+            Some(analyzed) => {
+                match validate_analyzed_document(analyzed, chunked, normalized, runtime) {
+                    Ok(()) => {
+                        json!({"status":"archive_validated","native_factory_requalified":false})
+                    }
+                    Err(e) => json!({"status":"blocked","reason":e.code}),
+                }
+            }
+        };
+        Ok(row)
+    }
+
+    #[test]
+    fn writer_preparation_keeps_owner_seed_and_reports_missing_analysis() {
+        let (normalized, chunked) = materiality_fixture(&[
+            "The operator must retain inspection records for seven years.".into(),
+        ]);
+        let runtime = materiality_runtime(true, 0, false);
+        let row =
+            writer_preparation_row(&normalized, &chunked, &runtime, "writer-public-run", None)
+                .unwrap();
+        assert_eq!(row["seed"], generation_seed_for_run("writer-public-run"));
+        assert_eq!(row["stage_entry"]["status"], "blocked");
+        assert_eq!(row["wire_bodies_approved"], false);
+        for draft in row["requests"].as_array().unwrap() {
+            let bytes = draft["request_json"].as_str().unwrap();
+            let r: ModelRequest = serde_json::from_str(bytes).unwrap();
+            assert_eq!(draft["request_sha256"], r.integrity_sha256().unwrap());
+            assert_eq!(r.seed, generation_seed_for_run("writer-public-run"));
+        }
+        assert!(runtime.requests.lock().unwrap().is_empty());
+        // Arrange a public archive using the existing fake backend, then prove
+        // preparation itself makes no generation calls for either twin.
+        let mut archived =
+            analyze(&runtime, &chunked, &normalized, 7, &UNCONTROLLED_EXECUTION).unwrap();
+        runtime.requests.lock().unwrap().clear();
+        let good = writer_preparation_row(
+            &normalized,
+            &chunked,
+            &runtime,
+            "writer-public-run",
+            Some(&archived),
+        )
+        .unwrap();
+        assert_eq!(good["stage_entry"]["status"], "archive_validated");
+        archived.runtime_id.push_str("-stale");
+        let bad = writer_preparation_row(
+            &normalized,
+            &chunked,
+            &runtime,
+            "writer-public-run",
+            Some(&archived),
+        )
+        .unwrap();
+        assert_eq!(bad["stage_entry"]["status"], "blocked");
+        assert_eq!(bad["stage_entry"]["reason"], "INVALID_ANALYZED_DOCUMENT");
+        assert!(runtime.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    #[ignore = "offline preparation only; explicit frozen source/count/case packet required"]
+    fn whole_writer_prepare_frozen_requests() {
+        use crate::pipeline::contracts::{
+            DocumentChunker, DocumentNormalizer, ParsedDocument, ParsedPage, SourceType,
+            StructureInterpreter,
+        };
+        use crate::pipeline::llama_cpp::framing_tests::OfflineNativeCountRuntime;
+        use std::io::Write;
+        let read = |path: &std::path::Path| -> Value {
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        };
+        let packet = read(&PathBuf::from(
+            std::env::var_os("DOC_SUM_WRITER_PREPARATION_INPUT").unwrap(),
+        ));
+        let source = read(&PathBuf::from(
+            std::env::var_os("DOC_SUM_DEPENDENCIES_INPUT").unwrap(),
+        ));
+        let counter = OfflineNativeCountRuntime::from_frozen_inventory(
+            &PathBuf::from(std::env::var_os("DOC_SUM_OFFLINE_COUNT_INVENTORY").unwrap()),
+            &std::env::var("DOC_SUM_OFFLINE_COUNT_INVENTORY_SHA256").unwrap(),
+        );
+        // Metadata overrides only describe a supplied archive. They do not admit
+        // a model profile or construct a live runtime; that gate remains later.
+        struct Metadata<'a> {
+            counter: &'a OfflineNativeCountRuntime,
+            runtime: &'a str,
+            model: &'a str,
+            probes: Mutex<std::collections::BTreeSet<String>>,
+        }
+        impl ModelRuntime for Metadata<'_> {
+            fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+                panic!("WRITER_PREPARATION_GENERATION_FORBIDDEN")
+            }
+            fn health(&self) -> Result<(), ModelRuntimeFailure> {
+                panic!("WRITER_PREPARATION_STARTUP_FORBIDDEN")
+            }
+            fn preflight_request(&self, r: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+                self.probes
+                    .lock()
+                    .unwrap()
+                    .insert(r.integrity_sha256().unwrap());
+                self.counter.preflight_request(r)
+            }
+            fn runtime_id(&self) -> &str {
+                self.runtime
+            }
+            fn model_id(&self) -> &str {
+                self.model
+            }
+            fn context_tokens(&self, s: PipelineStage) -> u32 {
+                self.counter.context_tokens(s)
+            }
+        }
+        let mut rows = Vec::new();
+        for spec in source["inputs"].as_array().unwrap() {
+            let alias = spec["alias"].as_str().unwrap();
+            let case = packet["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["alias"] == alias)
+                .unwrap();
+            let bytes = std::fs::read(spec["path"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&bytes)),
+                spec["sha256"].as_str().unwrap()
+            );
+            let parsed = ParsedDocument {
+                document_id: alias.into(),
+                parser_id: "frozen-preproduction-text".into(),
+                parser_version: "1.0.0".into(),
+                source_type: SourceType::NativeText,
+                pages: vec![ParsedPage {
+                    page_number: 1,
+                    text: String::from_utf8(bytes).unwrap(),
+                    warnings: vec![],
+                    requires_visual_processing: false,
+                }],
+                warnings: vec![],
+            };
+            let normalized = CanonicalNormalizer::new().normalize(&parsed).unwrap();
+            let structured = DeterministicStructureInterpreter::new()
+                .interpret(&normalized)
+                .unwrap();
+            let chunked = DeterministicDocumentChunker::new()
+                .chunk(&normalized, &structured)
+                .unwrap();
+            let archived = case.get("analyzed").map(|binding| {
+                let bytes = std::fs::read(binding["path"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(&bytes)),
+                    binding["sha256"].as_str().unwrap()
+                );
+                serde_json::from_slice::<AnalyzedDocument>(&bytes).unwrap()
+            });
+            let metadata = case.get("profile").map(|binding| {
+                let bytes = std::fs::read(binding["path"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(&bytes)),
+                    binding["sha256"].as_str().unwrap()
+                );
+                serde_json::from_slice::<crate::pipeline::contracts::ModelProfileSnapshot>(&bytes)
+                    .unwrap()
+            });
+            if let Some(profile) = &metadata {
+                crate::pipeline::model_settings::offline_whole_writer_profile(profile).expect(
+                    "frozen profile must match product admission and the native 9B baseline",
+                );
+            }
+            let view = Metadata {
+                probes: Mutex::new(std::collections::BTreeSet::new()),
+                counter: &counter,
+                runtime: case
+                    .get("runtime_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("offline-unbound"),
+                model: metadata
+                    .as_ref()
+                    .map(|m| m.analysis.model_digest.as_str())
+                    .unwrap_or("offline-unbound"),
+            };
+            let before = counter.preflight_count();
+            let mut row = writer_preparation_row(
+                &normalized,
+                &chunked,
+                &view,
+                case["run_id"].as_str().unwrap(),
+                archived.as_ref(),
+            )
+            .unwrap();
+            let missing = ["analyzed", "profile", "runtime_id"]
+                .into_iter()
+                .filter(|key| case.get(*key).is_none())
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                row["stage_entry"]["status"] = json!("blocked");
+                row["stage_entry"]["missing_prerequisites"] = json!(missing);
+            }
+            row["observed_probe_request_hashes"] =
+                json!(view.probes.lock().unwrap().iter().collect::<Vec<_>>());
+            row["alias"] = json!(alias);
+            row["source_sha256"] = spec["sha256"].clone();
+            row["offline_preflights"] = json!(counter.preflight_count() - before);
+            rows.push(row);
+        }
+        let out = PathBuf::from(std::env::var_os("DOC_SUM_WRITER_PREPARATION_OUTPUT").unwrap());
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(out).unwrap().write_all(&serde_json::to_vec_pretty(&json!({"cases":rows,"generation_calls":0,"runtime_startups":0,"native_qualified":false})).unwrap()).unwrap();
+        println!(
+            "WRITER_PREPARATION_SAVED generation_calls=0 runtime_startups=0 native_qualified=false"
+        );
+    }
+
     const TEST_GENERATION_SEED: u64 = 9_876_543;
     const OVERSIZED_SYNTHESIS_EVIDENCE_COUNT: usize = 48;
 

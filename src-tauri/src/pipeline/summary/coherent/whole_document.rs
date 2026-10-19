@@ -1522,3 +1522,37 @@ fn completed_responses(progress: &WholeDocumentProgress) -> Result<Vec<String>, 
         })
         .collect()
 }
+
+// Qualification exposes the real planner only in test binaries. No live runtime
+// is constructed here, and these requests are not native wire-body approvals.
+#[cfg(test)]
+pub(in crate::pipeline::summary) fn qualification_plan(
+    normalized: &NormalizedDocument,
+    chunked: &ChunkedDocument,
+    runtime: &dyn ModelRuntime,
+    run_id: &str,
+) -> Result<Value, PipelineFailure> {
+    let input = SourceInput::new(normalized, chunked)?;
+    let seed = generation_seed_for_run(run_id);
+    let plan = input.plan(runtime, seed, &UNCONTROLLED_EXECUTION)?;
+    let ceiling = input
+        .units
+        .len()
+        .checked_mul(2)
+        .and_then(|n| n.checked_sub(plan.drafts.len()))
+        .ok_or_else(invalid_source)?;
+    let requests = plan
+        .drafts
+        .iter()
+        .map(|d| {
+            Ok(json!({"primary":d.primary,"request":d.request,
+            "request_json":serde_json::to_string(&d.request).map_err(|_|invalid_source())?,
+            "request_sha256":d.request.integrity_sha256().map_err(|_|invalid_source())?}))
+        })
+        .collect::<Result<Vec<_>, PipelineFailure>>()?;
+    Ok(
+        json!({"run_id":run_id,"seed":seed,"source_units":input.units.len(),
+        "initial_sections":plan.drafts.len(),"writer_completion_planning_ceiling":ceiling,
+        "requests":requests,"wire_bodies_approved":false}),
+    )
+}

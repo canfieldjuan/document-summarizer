@@ -74,6 +74,7 @@ fn isolated_runtime_directory_is_owner_only() {
 // This module is included by test binaries, never by the shipped application.
 use crate::pipeline::contracts::{ModelRequest, ModelResponse, ModelRuntimeFailure, PipelineStage};
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -92,6 +93,7 @@ enum QualificationOperation {
 pub struct QualificationBudget {
     completion_limit: usize,
     synthesis_only: bool,
+    writer_requests: Option<(HashSet<String>, HashSet<String>)>,
     preflight_limit: usize,
     state: Mutex<QualificationState>,
 }
@@ -105,10 +107,48 @@ impl QualificationBudget {
         budget.synthesis_only = true;
         Arc::new(budget)
     }
+    pub fn whole_writer(
+        completions: usize,
+        preflights: usize,
+        requests: &[ModelRequest],
+        probes: &[String],
+    ) -> Result<Arc<Self>, ModelRuntimeFailure> {
+        let hashes = |rows: &[ModelRequest]| -> Result<HashSet<String>, ModelRuntimeFailure> {
+            rows.iter()
+                .map(|r| {
+                    if r.stage != PipelineStage::Synthesize {
+                        return Err(qualification_failure("QUALIFICATION_WRITER_SCOPE"));
+                    }
+                    qualification_request_hash(r)
+                })
+                .collect()
+        };
+        let generations = hashes(requests)?;
+        if probes.iter().any(|h| {
+            h.len() != 64
+                || !h
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        }) {
+            return Err(qualification_failure("QUALIFICATION_REQUEST_INVALID"));
+        }
+        let probes = probes.iter().cloned().collect::<HashSet<_>>();
+        if completions == 0
+            || preflights == 0
+            || completions > generations.len()
+            || probes.is_empty()
+        {
+            return Err(qualification_failure("QUALIFICATION_WRITER_LIMITS"));
+        }
+        let mut budget = Self::with_limits(completions, preflights);
+        budget.writer_requests = Some((generations, probes));
+        Ok(Arc::new(budget))
+    }
     fn with_limits(completion_limit: usize, preflight_limit: usize) -> Self {
         Self {
             completion_limit,
             synthesis_only: false,
+            writer_requests: None,
             preflight_limit,
             state: Mutex::new(QualificationState::default()),
         }
@@ -124,17 +164,51 @@ impl QualificationBudget {
         }
         // Synthesize checks whether its completed draft fits Verify before saving it.
         // Admission is not another generation; both still use the shared ceilings.
-        let allowed = !self.synthesis_only
-            || matches!(
-                (stage, operation),
-                (PipelineStage::Synthesize, _)
-                    | (PipelineStage::Verify, QualificationOperation::Preflight)
-            );
+        let allowed = if self.writer_requests.is_some() {
+            *stage == PipelineStage::Synthesize
+        } else {
+            !self.synthesis_only
+                || matches!(
+                    (stage, operation),
+                    (PipelineStage::Synthesize, _)
+                        | (PipelineStage::Verify, QualificationOperation::Preflight)
+                )
+        };
         if !allowed {
             state.stopped = Some("QUALIFICATION_UNEXPECTED_STAGE".into());
             return Err(qualification_failure("QUALIFICATION_UNEXPECTED_STAGE"));
         }
         Ok(())
+    }
+
+    fn bind_writer_request(
+        &self,
+        state: &mut QualificationState,
+        r: &ModelRequest,
+        generation: bool,
+    ) -> Result<Option<String>, ModelRuntimeFailure> {
+        let Some((requests, probes)) = &self.writer_requests else {
+            return Ok(None);
+        };
+        let hash = qualification_request_hash(r)?;
+        let allowed = if generation { requests } else { probes };
+        let error = if !allowed.contains(&hash) {
+            Some("QUALIFICATION_REQUEST_CHANGED")
+        } else if generation
+            && state
+                .completions
+                .iter()
+                .any(|row| row["request_sha256"] == hash)
+        {
+            Some("QUALIFICATION_REQUEST_REPLAY")
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            state.stopped = Some(error.into());
+            return Err(qualification_failure(error));
+        }
+        Ok(Some(hash))
     }
 
     pub fn wrap(self: &Arc<Self>, inner: Arc<dyn ModelRuntime>) -> QualificationRuntime {
@@ -156,6 +230,16 @@ impl QualificationBudget {
             "reserved_completions":state.completions.len(),"delegated_preflights":state.preflights.len(),
             "completions":state.completions,"preflights":state.preflights,"stopped":state.stopped})
     }
+}
+
+// This support file is also an external integration-test module, where the
+// production crate-private method is unavailable. Hash the canonical serialized
+// ModelRequest bytes; the preparation packet retains those exact bytes too.
+fn qualification_request_hash(request: &ModelRequest) -> Result<String, ModelRuntimeFailure> {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(request)
+        .map_err(|_| qualification_failure("QUALIFICATION_REQUEST_INVALID"))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn qualification_failure(code: &str) -> ModelRuntimeFailure {
@@ -185,6 +269,7 @@ impl ModelRuntime for QualificationRuntime {
         let mut state = self.budget.state.lock().unwrap();
         self.budget
             .admit_operation(&mut state, &r.stage, QualificationOperation::Generation)?;
+        let request_hash = self.budget.bind_writer_request(&mut state, r, true)?;
         // Initial page requests retain the owning run seed. The page owner derives
         // a different seed for a repair. Reject that departure before delegation;
         // no generated text or prompt is re-parsed here.
@@ -198,11 +283,15 @@ impl ModelRuntime for QualificationRuntime {
             state.stopped = Some("QUALIFICATION_ANALYSIS_SEED_CHANGED".into());
             return Err(qualification_failure("QUALIFICATION_ANALYSIS_SEED_CHANGED"));
         }
-        let stage_limit = match r.stage {
-            PipelineStage::Verify => 30,
-            PipelineStage::Analyze => 10,
-            PipelineStage::Synthesize => 1,
-            _ => 0,
+        let stage_limit = if self.budget.writer_requests.is_some() {
+            self.budget.completion_limit
+        } else {
+            match r.stage {
+                PipelineStage::Verify => 30,
+                PipelineStage::Analyze => 10,
+                PipelineStage::Synthesize => 1,
+                _ => 0,
+            }
         };
         let same_stage = state
             .completions
@@ -214,9 +303,11 @@ impl ModelRuntime for QualificationRuntime {
             return Err(qualification_failure("QUALIFICATION_COMPLETION_CEILING"));
         }
         let i = state.completions.len();
-        state
-            .completions
-            .push(serde_json::json!({"stage":r.stage,"ordinal":r.ordinal,"seed":r.seed,"decision":"pending"}));
+        let mut reservation = serde_json::json!({"stage":r.stage,"ordinal":r.ordinal,"seed":r.seed,"decision":"pending"});
+        if let Some(hash) = request_hash {
+            reservation["request_sha256"] = hash.into();
+        }
+        state.completions.push(reservation);
         let result = self.inner.generate_with_control(r, c);
         state.completions[i]["decision"] = serde_json::json!(match &result {
             Ok(_) => "completed",
@@ -231,14 +322,18 @@ impl ModelRuntime for QualificationRuntime {
         let mut state = self.budget.state.lock().unwrap();
         self.budget
             .admit_operation(&mut state, &r.stage, QualificationOperation::Preflight)?;
+        let request_hash = self.budget.bind_writer_request(&mut state, r, false)?;
         if state.preflights.len() >= self.budget.preflight_limit {
             state.stopped = Some("QUALIFICATION_PREFLIGHT_CEILING".into());
             return Err(qualification_failure("QUALIFICATION_PREFLIGHT_CEILING"));
         }
         let i = state.preflights.len();
-        state
-            .preflights
-            .push(serde_json::json!({"stage":r.stage,"ordinal":r.ordinal,"decision":"pending"}));
+        let mut reservation =
+            serde_json::json!({"stage":r.stage,"ordinal":r.ordinal,"decision":"pending"});
+        if let Some(hash) = request_hash {
+            reservation["request_sha256"] = hash.into();
+        }
+        state.preflights.push(reservation);
         let result = self.inner.preflight_request(r);
         state.preflights[i]["decision"] = serde_json::json!(match &result {
             Ok(_) => "accepted",
@@ -340,6 +435,160 @@ mod qualification_budget_tests {
             output_format: ModelOutputFormat::Text,
         }
     }
+    fn probe_hashes(requests: &[ModelRequest]) -> Vec<String> {
+        requests
+            .iter()
+            .map(|r| qualification_request_hash(r).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn writer_explicit_completion_allowance_handles_distinct_sections() {
+        let probe = Probe::new();
+        let requests: Vec<_> = (0..3)
+            .map(|i| request(PipelineStage::Synthesize, i))
+            .collect();
+        let budget =
+            QualificationBudget::whole_writer(3, 6000, &requests, &probe_hashes(&requests))
+                .unwrap();
+        let runtime = budget.wrap(probe.clone());
+        for r in &requests {
+            runtime
+                .generate(r)
+                .expect("explicit writer section allowance must be used");
+        }
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(budget.observation()["reserved_completions"], 3);
+    }
+
+    #[test]
+    fn writer_explicit_probe_allowance_handles_recorded_planning_scale() {
+        let probe = Probe::new();
+        let r = request(PipelineStage::Synthesize, 0);
+        let budget = QualificationBudget::whole_writer(
+            1,
+            5742,
+            std::slice::from_ref(&r),
+            &probe_hashes(std::slice::from_ref(&r)),
+        )
+        .unwrap();
+        let runtime = budget.wrap(probe.clone());
+        for _ in 0..5742 {
+            runtime
+                .preflight_request(&r)
+                .expect("explicit writer probe allowance must be used");
+        }
+        assert_eq!(probe.admissions.load(Ordering::SeqCst), 5742);
+        assert_eq!(
+            runtime.preflight_request(&r).unwrap_err().code,
+            "QUALIFICATION_PREFLIGHT_CEILING"
+        );
+        assert_eq!(probe.admissions.load(Ordering::SeqCst), 5742);
+    }
+
+    #[test]
+    fn writer_limits_and_frozen_request_boundaries_fail_before_delegation() {
+        let r = request(PipelineStage::Synthesize, 0);
+        for (calls, probes) in [(0, 1), (1, 0), (2, 1), (usize::MAX, 1)] {
+            assert!(QualificationBudget::whole_writer(
+                calls,
+                probes,
+                std::slice::from_ref(&r),
+                &probe_hashes(std::slice::from_ref(&r))
+            )
+            .is_err());
+        }
+        assert!(QualificationBudget::whole_writer(
+            1,
+            1,
+            &[],
+            &probe_hashes(std::slice::from_ref(&r))
+        )
+        .is_err());
+        assert!(QualificationBudget::whole_writer(1, 1, std::slice::from_ref(&r), &[]).is_err());
+        let foreign = request(PipelineStage::Verify, 0);
+        assert!(QualificationBudget::whole_writer(
+            1,
+            1,
+            &[foreign],
+            &probe_hashes(std::slice::from_ref(&r))
+        )
+        .is_err());
+        for field in 0..7 {
+            for preflight in [false, true] {
+                let probe = Probe::new();
+                let budget = QualificationBudget::whole_writer(
+                    1,
+                    1,
+                    std::slice::from_ref(&r),
+                    &probe_hashes(std::slice::from_ref(&r)),
+                )
+                .unwrap();
+                let runtime = budget.wrap(probe.clone());
+                let mut changed = r.clone();
+                match field {
+                    0 => changed.stage = PipelineStage::Analyze,
+                    1 => changed.ordinal += 1,
+                    2 => changed.seed += 1,
+                    3 => changed.system_prompt.push('!'),
+                    4 => changed.user_prompt.push('!'),
+                    5 => changed.max_output_tokens += 1,
+                    _ => {
+                        changed.output_format = ModelOutputFormat::JsonSchema {
+                            name: "foreign".into(),
+                            schema: serde_json::json!({}),
+                        }
+                    }
+                }
+                let error = if preflight {
+                    runtime.preflight_request(&changed).unwrap_err()
+                } else {
+                    runtime.generate(&changed).unwrap_err()
+                };
+                assert!(matches!(
+                    error.code.as_str(),
+                    "QUALIFICATION_UNEXPECTED_STAGE" | "QUALIFICATION_REQUEST_CHANGED"
+                ));
+                assert!(
+                    runtime.generate(&r).is_err(),
+                    "a stopped scope must not resume"
+                );
+                assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+                assert_eq!(probe.admissions.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn writer_duplicate_and_concurrent_reservations_are_not_refunded() {
+        let requests: Vec<_> = (0..8)
+            .map(|i| request(PipelineStage::Synthesize, i))
+            .collect();
+        for replay in [false, true] {
+            let probe = Probe::new();
+            let budget =
+                QualificationBudget::whole_writer(2, 2, &requests, &probe_hashes(&requests))
+                    .unwrap();
+            let runtime = budget.wrap(probe.clone());
+            std::thread::scope(|scope| {
+                for r in &requests {
+                    let r = if replay { &requests[0] } else { r };
+                    let runtime = &runtime;
+                    scope.spawn(move || {
+                        let _ = runtime.generate(r);
+                    });
+                }
+            });
+            assert_eq!(
+                probe.calls.load(Ordering::SeqCst),
+                if replay { 1 } else { 2 }
+            );
+            assert!(budget.observation()["stopped"].is_string());
+            assert!(runtime.generate(&requests[7]).is_err());
+            assert!(runtime.preflight_request(&requests[0]).is_err());
+        }
+    }
+
     #[test]
     fn synthesis_only_accepts_required_verification_preflight_after_generation() {
         let probe = Probe::new();
