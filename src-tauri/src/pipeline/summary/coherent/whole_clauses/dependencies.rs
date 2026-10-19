@@ -667,21 +667,16 @@ fn identity_words(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn namespace_is_owned(name: &str, clauses: &[SourceClause], identities: &[SourceIdentity]) -> bool {
+fn owned_namespace_origin(
+    name: &str,
+    clauses: &[SourceClause],
+    identities: &[SourceIdentity],
+) -> Option<Result<usize, &'static str>> {
     let identity = identity_words(name);
     if identity.is_empty() {
-        return true;
+        return Some(Err("ambiguous_document_qualifier"));
     }
-    clauses.iter().any(|clause| {
-        clause.headings.iter().any(|heading| {
-            identity_words(heading)
-                .windows(identity.len())
-                .any(|words| words == identity)
-        }) || clause
-            .annex
-            .as_ref()
-            .is_some_and(|(kind, label)| identity_words(&format!("{kind} {label}")) == identity)
-    }) || identities.iter().any(|entry| match entry {
+    let document_identity = identities.iter().any(|entry| match entry {
         SourceIdentity::Heading(text) | SourceIdentity::Declared(text) => identity_words(text)
             .windows(identity.len())
             .any(|words| words == identity),
@@ -689,11 +684,7 @@ fn namespace_is_owned(name: &str, clauses: &[SourceClause], identities: &[Source
             let words = identity_words(text);
             words.first().is_some_and(|w| w == "this") && words[1..].starts_with(&identity)
         }
-    })
-}
-
-fn owned_namespace_origin(name: &str, clauses: &[SourceClause]) -> Result<usize, &'static str> {
-    let identity = identity_words(name);
+    });
     let mut scopes = clauses
         .iter()
         .enumerate()
@@ -711,19 +702,22 @@ fn owned_namespace_origin(name: &str, clauses: &[SourceClause]) -> Result<usize,
     // A retained document self-name/title with no clause heading owns the main
     // document namespace. A named annex keeps its own numbering namespace.
     if scopes.is_empty() {
+        if !document_identity {
+            return None;
+        }
         scopes.insert(None);
     }
     if scopes.len() != 1 {
-        return Err("ambiguous_document_qualifier");
+        return Some(Err("ambiguous_document_qualifier"));
     }
-    match scopes.into_iter().next().unwrap() {
+    Some(match scopes.into_iter().next().unwrap() {
         Some(index) => Ok(index),
         None => clauses
             .iter()
             .enumerate()
             .find_map(|(index, _)| annex_scope(clauses, index).is_none().then_some(index))
             .ok_or("missing_target"),
-    }
+    })
 }
 
 fn numbered_target_is_owned(target: &Target, clauses: &[SourceClause]) -> bool {
@@ -797,14 +791,14 @@ impl DependencyProjection {
                     ) {
                         if let Some(namespace) = &reference.namespace {
                             let name = namespace.name();
-                            if namespace_is_owned(name, &clauses, &identities) {
+                            if let Some(owner) = owned_namespace_origin(name, &clauses, &identities)
+                            {
                                 if targets.is_empty() {
                                     reference.status =
                                         ReferenceStatus::Unresolved("unsupported_form");
                                     owned.push(reference);
                                     continue;
                                 }
-                                let owner = owned_namespace_origin(name, &clauses);
                                 for target in targets {
                                     let mut item = reference.clone();
                                     item.status = match owner
