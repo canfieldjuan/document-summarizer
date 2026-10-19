@@ -1,5 +1,5 @@
 {
-  "status": "PROPOSED_NOT_ACCEPTED",
+  "status": "ACCEPTED_OFFLINE_PREPARATION_ONLY",
   "title": "Prepare the existing whole-document writer qualification adapter without live dispatch",
   "inventory": {
     "alias": "whole-writer-qualification-preparation-20261019/inventory.json",
@@ -53,7 +53,6 @@
     "status": "NOT DONE",
     "remaining": [
       "Independent mechanical review and CI for integrationPR144.",
-      "Independent review and direct operator acceptance of this adapter preparation contract.",
       "Test-adapter implementation, fail-first and boundary regressions, mandatory frozen lane and exact-head review.",
       "Separate live contract with concrete frozen stage-entry artifacts, requests, approvals and finite spend; independent whole-draft fidelity review before relying on Verify."
     ]
@@ -135,5 +134,10 @@
     "candidate_branch": "codex/whole-writer-qualification-adapter-contract",
     "first_commit": "Contract only; direct operator acceptance before source/test edits.",
     "review": "Review only the adapter delta from the integration head, about1000 changed lines or fewer. Independent mechanical integration review and final adapter exact-head review remain separate. No changes to132/141/143."
+  },
+  "operator_acceptance": {
+    "message": "I accept",
+    "scope": "Published contract-only PR145 at3adae01933d64978fd1719836e5c173f7d8ec066; offline adapter only, zero live authority",
+    "at": "2026-10-19T15:12:08.456784+00:00"
   }
 }
