@@ -108,7 +108,51 @@ new qualification, production adoption, ready claim or merge-hold clearance.
 Unrecognised legal-name forms are not promised general semantic resolution.
 Deferred packing/recovery/diagnostic hardening is not part of this PR.
 
-**NOT DONE:** the contract is accepted; source/tests, fail-first and repaired
-proof, frozen delta, cold diff audit,
-publication and independent exact-head review remain. Acceptance covers only the self-alias grammar above, not general legal-name
-interpretation or runtime qualification.
+## Implementation and cold diff audit
+
+Tested source commit: `d532ee2d40e4230007fae13d6a7436efbae87010`.
+The limited self-declaration reader was introduced in `125837df`; this repair
+corrects that earlier implementation at its source, rather than adding a scan
+in the consumer. The accepted fallback replaces the blanket established-form
+containment blocker from `bbe2405`; opaque partial ownership still blocks.
+
+- `whole_clauses.rs:844` / `declared_source_name:1063`: retain opening titles
+  while consuming the existing line inventory; read the accepted quoted
+  self-alias forms and retain existing opening/body provenance. Clause text,
+  splitting and full-clause-list construction are untouched.
+- `whole_clauses/dependencies.rs:667`: receive the existing typed namespace;
+  exact identities still own scope, weak title/heading containment blocks only
+  opaque names. Reuse the existing noun classifier and identity normaliser.
+  Owned errors do not fall through to External. No second identity parser.
+- `readiness.rs:3902`: public self/foreign, exact/partial/opaque, quote,
+  body-provenance, missing/duplicate/conflicting/uncertain-target twins.
+  Earlier explicit containment expectations now follow operator acceptance;
+  opaque and exact-identity controls remain.
+
+## Proof and remaining gates
+
+Both registered public fail-first probes failed in the intended way before the
+repair. Original hash-bound packets now resolve both self-name forms locally
+and distinguish the separate agreement from the document's own shortened name.
+Readiness: 80 passed, 5 ignored. Four causal mutants were killed (alias removal,
+blanket containment blocking, substring title binding, body declaration promoted
+to whole-document identity), with source restored. Strict all-target Clippy and
+formatting pass. Windows GNU library/test cross-compilation passes; native
+Windows CI execution is still pending. Broad suites are left to required CI.
+
+All seven unchanged frozen owners pass with zero model calls. Full dependency,
+capacity, assembly and SAME60 JSON files are byte-identical to the published
+writer source; complete reference classification delta: zero.
+
+Durable public alias: reference-identity-repair-20261018/repair-proof.json,
+SHA256 `fca6755fc36e873a02370bde032304ab3935e4728fc9f93106995aab7337f520`.
+Private offline receipt SHA256
+`926e73f76158cccf03b8894601d055f4521440575538f3b8323b8a163356c0cd`.
+Source-only audit: no script/workflow, dependency, storage, model, prompt,
+schema, sampler, framing, fidelity or capacity change. No tests rerun for this
+prose-only proof update; receipt binds the unchanged exercised source bytes.
+
+**NOT DONE:** source repair and offline proof are complete; publication,
+independent exact-head review and native CI remain. All qualification, live,
+production, ready, PR116 and merge holds remain. Acceptance covers only the
+self-alias grammar above, not general legal-name interpretation or a model run.
