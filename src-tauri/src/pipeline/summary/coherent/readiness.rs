@@ -3797,36 +3797,55 @@ fn review132_capitalized_titles_do_not_prove_external_document_identity() {
 #[test]
 fn review132_scope_identity_requires_whole_document_or_annex_identity() {
     use whole_clauses::{DependencyProjection, ReferenceStatus};
-    for texts in [
-        vec![
-            "FIRST AMENDMENT TO LEASE AGREEMENT",
-            "Section 1 Scope\nEquipment follows Section 3 of the Lease Agreement.",
-            "Section 3 Local\nThe amendment requires written permission.",
-        ],
-        vec![
-            "Section 1 Scope\nEquipment follows Section 7 of the Supply Agreement.",
-            "Section 7 Supply Agreement Terms\nThe local terms require written permission.",
-        ],
-        vec![
-            "Section 1 Scope\nEquipment follows Section 7 of the Master Lease.",
-            "Section 7 Master Lease\nThe sublease requires written permission.",
-        ],
-        vec![
-            "The name of this agreement is “First Amendment to Lease Agreement”.",
-            "Section 1 Scope\nEquipment follows Section 3 of the Lease Agreement.",
-            "Section 3 Local\nThe amendment requires written permission.",
-        ],
+    for (texts, external) in [
+        (
+            vec![
+                "FIRST AMENDMENT TO LEASE AGREEMENT",
+                "Section 1 Scope\nEquipment follows Section 3 of the Lease Agreement.",
+                "Section 3 Local\nThe amendment requires written permission.",
+            ],
+            true,
+        ),
+        (
+            vec![
+                "Section 1 Scope\nEquipment follows Section 7 of the Supply Agreement.",
+                "Section 7 Supply Agreement Terms\nThe local terms require written permission.",
+            ],
+            true,
+        ),
+        (
+            vec![
+                "Section 1 Scope\nEquipment follows Section 7 of the Master Lease.",
+                "Section 7 Master Lease\nThe sublease requires written permission.",
+            ],
+            false,
+        ),
+        (
+            vec![
+                "The name of this agreement is “First Amendment to Lease Agreement”.",
+                "Section 1 Scope\nEquipment follows Section 3 of the Lease Agreement.",
+                "Section 3 Local\nThe amendment requires written permission.",
+            ],
+            true,
+        ),
     ] {
         let normalized = public_document(&texts.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         let projection = DependencyProjection::new(&normalized);
         let reference = projection.references.iter().flatten().next().unwrap();
         assert!(
-            matches!(reference.status, ReferenceStatus::Unresolved(_)),
+            if external {
+                matches!(reference.status, ReferenceStatus::External(_))
+            } else {
+                matches!(reference.status, ReferenceStatus::Unresolved(_))
+            },
             "a mentioned name cannot own the local numbering scope: {:?}",
             reference.status
         );
         let chunked = whole_writer_chunks(&normalized);
-        assert!(whole_document::SourceInput::new(&normalized, &chunked).is_err());
+        assert_eq!(
+            whole_document::SourceInput::new(&normalized, &chunked).is_ok(),
+            external
+        );
     }
     for title in [
         "LEASE AGREEMENT",
@@ -3876,6 +3895,149 @@ fn review132_current_document_qualifier_keeps_existing_scope_grammar() {
             "current-scope kind {kind}: {:?}",
             projection.references[0][0].status
         );
+    }
+}
+
+#[test]
+fn reference_identity_opening_parenthetical_alias_resolves_before_external_fallback() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for (title, subject) in [
+        ("SERVICE TERMS", "contract"),
+        ("SERVICE TERMS", "document"),
+        ("SERVICE TERMS", "agreement"),
+        (
+            "AMENDED AND RESTATED LEASE AGREEMENT",
+            "Amended and Restated Lease Agreement",
+        ),
+    ] {
+        for (open, close) in [('“', '”'), ('"', '"')] {
+            let normalized = public_document(&[format!(
+                "{title}\n\nThis {subject} (the {open}Service Agreement{close}) governs the services.\n\nSection 1 Scope\nEquipment follows Section 3 of the Service Agreement.\n\nSection 3 Local\nWritten permission is required."
+            )]);
+            let projection = DependencyProjection::new(&normalized);
+            let reference = projection.references.iter().flatten().next().unwrap();
+            let ReferenceStatus::Resolved(targets) = &reference.status else {
+                panic!(
+                    "self-alias must resolve: subject={subject} status={:?}",
+                    reference.status
+                );
+            };
+            assert!(targets
+                .iter()
+                .any(|i| projection.clauses[*i].number == Some(vec!["3".into()])));
+            assert!(projection
+                .closures
+                .iter()
+                .enumerate()
+                .all(|(i, _)| projection.blocking_reasons(i).is_empty()));
+        }
+    }
+}
+
+#[test]
+fn reference_identity_explicit_containment_is_external_but_opaque_containment_blocks() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for (opening, heading, name, external) in [
+        (
+            "FIRST AMENDMENT TO LEASE AGREEMENT",
+            "Local",
+            "Lease Agreement",
+            true,
+        ),
+        (
+            "SERVICE TERMS",
+            "Supply Agreement Terms",
+            "Supply Agreement",
+            true,
+        ),
+        (
+            "The name of this agreement is “First Amendment to Lease Agreement”.",
+            "Local",
+            "Lease Agreement",
+            true,
+        ),
+        ("SUBLEASE", "Master Lease", "Master Lease", false),
+    ] {
+        let normalized = public_document(&[format!(
+            "{opening}\n\nSection 1 Scope\nEquipment follows Section 3 of the {name}.\n\nSection 3 {heading}\nUnrelated local rule applies."
+        )]);
+        let projection = DependencyProjection::new(&normalized);
+        let reference = projection.references.iter().flatten().next().unwrap();
+        if external {
+            let ReferenceStatus::External(detail) = &reference.status else {
+                panic!(
+                    "containment is not ownership: name={name} status={:?}",
+                    reference.status
+                );
+            };
+            assert_eq!(detail.document, name);
+            assert_eq!(detail.disclosure, "text not in this document");
+        } else {
+            assert!(matches!(reference.status, ReferenceStatus::Unresolved(_)));
+        }
+    }
+}
+
+#[test]
+fn reference_identity_alias_requires_opening_self_subject_and_balanced_quotes() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for declaration in [
+        "This contract (the “Service Agreement\") governs services.",
+        "This contract (the \"Service Agreement”) governs services.",
+        "This contract (the “Service Agreement” governs services.",
+        "This contract (the “”Service Agreement) governs services.",
+        "This contract (the “Service Agreement” extra) governs services.",
+        "This amendment modifies a separate contract (the “Service Agreement”).",
+        "This Separate Lease Agreement (the “Service Agreement”) governs services.",
+    ] {
+        let normalized = public_document(&[format!(
+            "SERVICE TERMS\n\n{declaration}\n\nSection 1 Scope\nEquipment follows Section 3 of the Service Agreement.\n\nSection 3 Local\nUnrelated local rule applies."
+        )]);
+        let projection = DependencyProjection::new(&normalized);
+        let reference = projection.references.iter().flatten().next().unwrap();
+        assert!(
+            !matches!(reference.status, ReferenceStatus::Resolved(_)),
+            "non-self or malformed alias must not bind locally: {declaration}: {:?}",
+            reference.status
+        );
+    }
+    for declaration in [
+        "This contract (the “Service Agreement”) governs this section.",
+        "The name of this contract is “Service Agreement”.",
+    ] {
+        let normalized = public_document(&[format!(
+            "SERVICE TERMS\n\nSection 1 Scope\nEquipment follows Section 3 of the Service Agreement.\n\nSection 2 Local Definition\n{declaration}\n\nSection 3 Local\nUnrelated local rule applies."
+        )]);
+        let projection = DependencyProjection::new(&normalized);
+        let reference = projection.references.iter().flatten().next().unwrap();
+        assert!(
+            !matches!(reference.status, ReferenceStatus::Resolved(_)),
+            "body declaration must not supply whole-document scope: {declaration}"
+        );
+    }
+}
+
+#[test]
+fn reference_identity_owned_alias_errors_do_not_fall_through_to_external() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for tail in [
+        "Section 2 Local\nNo third section is supplied.",
+        "Section 3 Local\nWritten permission is required.\n\nSection 3 Duplicate\nAnother rule applies.",
+        "Section 3 Local\nWritten permission is required.\n\nSchedule A Service Agreement\nSection 3 Annex\nAnother rule applies.",
+        "Section 3 Local\nWritten permission is required.\n\nUNRECOGNISED HEADING\nAnother rule applies.",
+    ] {
+        let normalized = public_document(&[format!(
+            "SERVICE TERMS\n\nThis contract (the “Service Agreement”) governs services.\n\nSection 1 Scope\nEquipment follows Section 3 of the Service Agreement.\n\n{tail}"
+        )]);
+        let projection = DependencyProjection::new(&normalized);
+        let reference = projection.references.iter().flatten().next().unwrap();
+        assert!(!matches!(reference.status, ReferenceStatus::External(_)),
+            "an ownership error must not become absence: {tail}: {:?}", reference.status);
+        let origin = projection.references.iter().position(|r| !r.is_empty()).unwrap();
+        assert!(!projection.blocking_reasons(origin).is_empty(),
+            "an owned but unclean target must block: {tail}");
+        let chunked = whole_writer_chunks(&normalized);
+        assert!(whole_document::SourceInput::new(&normalized, &chunked).is_err());
     }
 }
 
@@ -3993,7 +4155,7 @@ fn baseline_repair_unowned_explicit_namespace_is_external_but_partial_ownership_
         (
             "Section 91 of the Lunar Port Agreement",
             "Section 7 Lunar Port Agreement\nWritten permission is required.",
-            false,
+            true,
         ),
         (
             "Section 91 of the Lunar Port Standard",
@@ -4037,8 +4199,13 @@ fn baseline_repair_unowned_explicit_namespace_is_external_but_partial_ownership_
             let ReferenceStatus::External(detail) = status else {
                 unreachable!()
             };
-            assert_eq!(detail.document, "Lunar Port Standard");
-            assert_eq!(detail.reason, "unowned_named_document");
+            let (name, reason) = if reference == "Section 91 of the Lunar Port Agreement" {
+                ("Lunar Port Agreement", "absent_document")
+            } else {
+                ("Lunar Port Standard", "unowned_named_document")
+            };
+            assert_eq!(detail.document, name);
+            assert_eq!(detail.reason, reason);
             assert_eq!(detail.disclosure, "text not in this document");
             let chunked = whole_writer_chunks(&normalized);
             if let Err(error) = whole_document::SourceInput::new(&normalized, &chunked) {
