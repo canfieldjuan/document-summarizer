@@ -1,5 +1,5 @@
 {
-  "status": "ACCEPTED_OFFLINE_PREPARATION_ONLY",
+  "status": "OFFLINE_IMPLEMENTED_EXACT_HEAD_REVIEW_PENDING",
   "title": "Prepare the existing whole-document writer qualification adapter without live dispatch",
   "inventory": {
     "alias": "whole-writer-qualification-preparation-20261019/inventory.json",
@@ -47,14 +47,21 @@
     "authorized_server_startups": 0,
     "later_budget": "Not yet requested. Initial section totals are not a completion ceiling; optional split children and admission searches must be counted from the accepted run mode before operator approval."
   },
-  "implementation_summary": "Contract only. The unchanged combined source passed the frozen seven-owner lane, zero model calls/startups, and86 readiness tests. No qualification-adapter implementation or live request authorization.",
-  "cold_diff_audit": "No authored source changes. The local merge tree combines only the two reviewed follow-up deltas.",
+  "implementation_summary": "Implemented the accepted offline adapter at fbd9e43c3f25b06aa1d8387292d16444af35b647. Shared explicit writer budget and frozen request/probe binding, production-seed planning and pure product-profile admission are test-only. Existing modes, production writer/settings, prompts and schemas remain unchanged. Both frozen inputs have a diagnostic prepared plan; stage entry remains blocked without supplied valid Analyze/profile/runtime artifacts. No live authority.",
+  "cold_diff_audit": {
+    "budget_owner": "src-tauri/tests/support/live_runtime.rs:110,184 \u2014 writer limits, exact canonical request/probe binding and terminal/replay reservations; historical modes retain caps and observation shape.18adjacent tests and4core mutants.",
+    "planner_owner": "whole_document.rs:1529 \u2014 cfg(test) delegation to existing SourceInput::new/plan using generation_seed_for_run; serialized ModelRequest bytes, not approved wire bodies.",
+    "profile_owner": "model_settings.rs:149 \u2014 cfg(test) delegation to admitted_snapshot_profile/validate_admitted_snapshot_preset; no runtime/lease construction or copied policy.",
+    "preparation_entry": "summary.rs:6234,6306 \u2014 existing normalization/structure/chunk/planning and Analyze validator; missing prerequisites retained, no fabricated archives. Public valid/stale twins and actual frozen preparation exercised.",
+    "launcher": "scripts/c9-preproduction-parity.py:285,311 \u2014 mandatory current-source proof, frozen inputs/cases/profiles, shared exclusive durable output, offline selector only, receipt checks.31Python tests including real launcher path and refusal/tamper controls.",
+    "boundaries": "WindowsGNUlib/tests cross-compilation, all-target/all-feature strictClippy and formatting pass. Source counter/dependency/capacity/assembly/consolidation-boundary/C9/SAME60lane passes with zero model calls and complete JSON byte equality."
+  },
   "gap_audit": {
     "status": "NOT DONE",
     "remaining": [
-      "Independent mechanical review and CI for integrationPR144.",
-      "Test-adapter implementation, fail-first and boundary regressions, mandatory frozen lane and exact-head review.",
-      "Separate live contract with concrete frozen stage-entry artifacts, requests, approvals and finite spend; independent whole-draft fidelity review before relying on Verify."
+      "Exact-head review and CI for the implementation update.",
+      "Native stage-entry prerequisites: supplied valid Analyze archives, frozen profile and runtime identity for each input. Named archive scan found no exact matching frozen document IDs; this is not an exhaustive absence claim.",
+      "Separate live contract, finite budget, complete approvals and body gates; native qualification and independent whole-draft fidelity review. All PR116/production/ready/merge holds remain."
     ]
   },
   "data_dependent_request_bound": {
@@ -149,5 +156,15 @@
       "path": "src-tauri/src/pipeline/model_settings.rs",
       "change": "cfg(test) delegation to existing admitted_snapshot_profile and validate_admitted_snapshot_preset before any runtime/lease construction. This avoids a copied profile validator. The preparation remains limited to the frozen native 9B protocol."
     }
+  },
+  "offline_proof": {
+    "tested_source": "fbd9e43c3f25b06aa1d8387292d16444af35b647",
+    "public_alias": "whole-writer-qualification-preparation-20261019/adapter-implementation/implementation-proof.json",
+    "public_sha256": "5339e5a194719637ad8beb3553892061ed9cd36e3f5140747839bd46e7b14141",
+    "private_offline_receipt_sha256": "5d21873da242cfbdbc3e69a0a76184508245f4078766b4e381d4da616a28022f",
+    "private_preparation_receipt_sha256": "090c4c7364f192eba686bb309ba53e9226169413340290e07a36c1931e5fdda3",
+    "model_calls": 0,
+    "runtime_startups": 0,
+    "wire_bodies_approved": false
   }
 }
