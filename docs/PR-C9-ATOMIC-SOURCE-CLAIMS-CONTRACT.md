@@ -1045,6 +1045,19 @@ enablement, production adoption, ready or merge clearance. Existing holds remain
 
 ### Source-owner consolidation clarification from offline evidence
 
+Operator acceptance with condition is recorded in PR132 comment 6257990966
+(2026-10-19), superseding the earlier all-namespace number rule. The local
+candidate already contains the distinction described below; this docs-only
+commit records its acceptance before any further implementation or publication.
+Owned names are checked in every branch and resolve internally or block if
+unclean. Existing accepted explicit-document forms may remain external despite
+an identical local number. New opaque names require both name and number to be
+absent. No new word or role list is allowed: explicit-document recognition must
+come from the existing grammar. Proof includes every changed reference on both
+frozen inputs (public shapes/counts, names redacted), second-side tests and a
+causal mutant for each branch, and fresh measured counts. No live authority or
+production/merge hold is changed.
+
 The new both-unowned rule applies to the newly admitted **opaque-name form**.
 It does not replace the established explicit-document/numeric-namespace grammar
 with a global-number test. That attempted consolidation was a porting regression:
